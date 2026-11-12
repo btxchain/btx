@@ -104,6 +104,11 @@ class ComputeQualificationTest(BitcoinTestFramework):
         assert_code(lambda: node.verifycomputequalification(fresh, bad_profile), "COMPUTE_PROFILE_MISMATCH")
         assert_code(lambda: node.issuecomputequalification(subject, "btx-rc-p1e-toy-v1", 0, 30), "COMPUTE_CHALLENGE_INVALID")
         assert_code(lambda: node.issuecomputequalification(subject, "btx-rc-p1e-toy-v1", 99, 30), "COMPUTE_CHALLENGE_INVALID")
+        # Outside uint32 is refused, not wrapped: 2**32 + 1 used to issue a 1-episode challenge.
+        assert_code(lambda: node.issuecomputequalification(subject, "btx-rc-p1e-toy-v1", 2**32 + 1, 30),
+                    "COMPUTE_CHALLENGE_INVALID: episode_count exceeds uint32 range")
+        assert_code(lambda: node.issuecomputequalification(subject, "btx-rc-p1e-toy-v1", -1, 30),
+                    "COMPUTE_CHALLENGE_INVALID: episode_count cannot be negative")
 
         self.restart_node(1)
         self.nodes[1].setmocktime(1_700_000_200)

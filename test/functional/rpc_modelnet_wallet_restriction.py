@@ -61,6 +61,7 @@ class StubHelper(threading.Thread):
         self.scoped_supported = True
         self.requests = []
         self.read_error = None
+        self.refund_height = None
         self.stop_event = threading.Event()
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(path)
@@ -69,6 +70,8 @@ class StubHelper(threading.Thread):
 
     def card(self, restricted=False):
         card = {"release_id": RELEASE_ID, "output_script": self.output_script, "target_atoms": 100 * 10**8}
+        if self.refund_height is not None:
+            card["refund_height"] = self.refund_height
         if not restricted and self.last_observation:
             card.update(self.last_observation)
             card["wallet_local_state"] = True
@@ -277,6 +280,14 @@ class ModelnetWalletRestrictionTest(BitcoinTestFramework):
             assert_equal(len(calls), 1)
             assert_equal(calls[0][0], "getrestrictedmodelview")
         self.helper.scoped_supported = True
+
+        self.log.info("A refund_height outside uint32 is unknown, not a wrapped height")
+        # 2**32 + 1000000 used to wrap to 1000000 (NOT_MATURE), -1 to 4294967295.
+        for refund_height, status in ((1_000_000, "NOT_MATURE"), (2**32 + 1_000_000, "UNKNOWN"), (-1, "UNKNOWN")):
+            self.helper.refund_height = refund_height
+            card = node.getmodelreleaseeconomics(RELEASE_ID)
+            assert_equal((refund_height, card.get("refund_status")), (refund_height, status))
+        self.helper.refund_height = None
 
 
 

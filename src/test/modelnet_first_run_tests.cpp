@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -679,6 +680,50 @@ BOOST_AUTO_TEST_CASE(retrieve_jobs_persist_reload_without_worker)
     BOOST_CHECK_EQUAL(listed["jobs"][0]["job_id"].get_str(), "persist-job-aa11");
     BOOST_CHECK_EQUAL(listed["jobs"][0]["status"].get_str(), "queued");
     BOOST_CHECK_EQUAL(listed["jobs"][0]["model_id"].get_str(), mid);
+}
+
+BOOST_AUTO_TEST_CASE(retrieve_jobs_reload_progress_index_not_wrapped)
+{
+    const fs::path tmp = m_path_root / "first-run-retrieve-progress-range";
+    fs::create_directories(tmp);
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const int64_t u32_max{std::numeric_limits<uint32_t>::max()};
+    UniValue jobs(UniValue::VARR);
+    auto add_job = [&](const std::string& id, const UniValue& file_index, const UniValue& piece_index) {
+        UniValue job(UniValue::VOBJ);
+        job.pushKV("job_id", id);
+        job.pushKV("model_id", std::string(96, 'd'));
+        job.pushKV("status", "queued");
+        job.pushKV("created_ms", 42);
+        job.pushKV("file_index", file_index);
+        job.pushKV("piece_index", piece_index);
+        jobs.push_back(job);
+    };
+    // Above INT_MAX, getInt<int>() threw while loading, and the loader runs
+    // before every helper RPC. Out of uint32 range now reads as absent (0).
+    add_job("progress-range-high", UniValue(u32_max + 4), UniValue(u32_max));
+    add_job("progress-range-neg", UniValue(int64_t{-1}), UniValue(int64_t{7}));
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("schema_version", 1);
+    root.pushKV("jobs", jobs);
+    {
+        std::ofstream out(tmp / "retrieve_jobs.json");
+        out << root.write() << "\n";
+    }
+    auto job_of = [&](const std::string& id) {
+        UniValue p(UniValue::VARR);
+        p.push_back(id);
+        const UniValue listed = Dispatch(cat, Rpc("getmodeljob", p));
+        BOOST_REQUIRE(listed["jobs"].isArray());
+        BOOST_REQUIRE_EQUAL(listed["jobs"].size(), 1);
+        return listed["jobs"][0];
+    };
+    const UniValue high = job_of("progress-range-high");
+    BOOST_CHECK_EQUAL(high["file_index"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(high["piece_index"].getInt<int64_t>(), u32_max);
+    const UniValue neg = job_of("progress-range-neg");
+    BOOST_CHECK_EQUAL(neg["file_index"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(neg["piece_index"].getInt<int64_t>(), 7);
 }
 
 BOOST_AUTO_TEST_CASE(unix_rpc_timeout_is_short_except_long_methods)

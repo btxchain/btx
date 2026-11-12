@@ -4989,10 +4989,13 @@ static RPCHelpMan offerattestedutxosnapshot()
         AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("path")))};
     const fs::path manifest_path{
         AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("manifest_path")))};
-    const uint32_t chunk_size{
-        request.params.size() > 2 && !request.params[2].isNull()
-            ? static_cast<uint32_t>(request.params[2].getInt<int64_t>())
-            : node::ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE};
+    uint32_t chunk_size{node::ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE};
+    if (request.params.size() > 2 && !request.params[2].isNull()) {
+        std::string chunk_err;
+        if (!ParseUint32Index(request.params[2].getInt<int64_t>(), chunk_size, "chunk_size", chunk_err)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, chunk_err);
+        }
+    }
 
     node::AttestedUTXOSnapshotOffer offer;
     std::string error;

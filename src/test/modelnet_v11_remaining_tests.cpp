@@ -294,6 +294,32 @@ BOOST_AUTO_TEST_CASE(delegate_body_refuses_unknown_scopes)
     BOOST_CHECK(ok["note"].get_str().find("never a money") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(delegate_scopes_not_wrapped)
+{
+    const fs::path tmp = m_args.GetDataDirBase() / "v11-remaining-delegate-wrap";
+    modelnet::ModelCatalog cat{tmp, /*quota_bytes=*/1 << 20};
+    auto delegate = [&](int64_t scopes, std::string& code) {
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("scopes", scopes);
+        UniValue params(UniValue::VARR);
+        params.push_back(body);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "delegatemodelservice");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string err;
+        code.clear();
+        return modelnet::DispatchHelperRpc(cat, req, result, code, err);
+    };
+    std::string code;
+    // 2^32 + 6 was cut to 6, which passes the known-scope mask, and recorded.
+    BOOST_CHECK(!delegate((int64_t{1} << 32) + 6, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!delegate(-1, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(delegate(6, code));
+}
+
 BOOST_AUTO_TEST_CASE(comm_preserve_obeys_pins_and_quota)
 {
     modelnet::PreservationPolicy off;

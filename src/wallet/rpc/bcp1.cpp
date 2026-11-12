@@ -257,20 +257,6 @@ bool LabelMatchesPool(const std::string& label, uint32_t account, uint32_t branc
     return false;
 }
 
-bool ParseUint32Index(int64_t v, uint32_t& out, const char* name, std::string& err)
-{
-    if (v < 0) {
-        err = strprintf("%s cannot be negative", name);
-        return false;
-    }
-    if (v > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
-        err = strprintf("%s exceeds uint32 range", name);
-        return false;
-    }
-    out = static_cast<uint32_t>(v);
-    return true;
-}
-
 std::string P2MRAddressFromWalletTree(Span<const unsigned char> ml, Span<const unsigned char> slh)
 {
     if (!ml.empty() && !slh.empty()) return bcp1::EncodeP2MRFromPubkeys(ml, slh);

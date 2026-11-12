@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <mutex>
@@ -2203,7 +2204,13 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
                 return fail("INVALID_PARAMETER", err.empty() ? "amount_atoms" : err);
         }
         if (a.exists("confirmations")) f.confirmations = a["confirmations"].getInt<int>();
-        if (a.exists("height")) f.height = static_cast<uint32_t>(a["height"].getInt<int64_t>());
+        if (a.exists("height")) {
+            const int64_t height = a["height"].getInt<int64_t>();
+            if (height < 0 || height > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                return fail("INVALID_PARAMETER", "height out of range");
+            }
+            f.height = static_cast<uint32_t>(height);
+        }
         if (a.exists("spent")) f.spent = a["spent"].get_bool();
         if (!f.spent) {
             int64_t confirmed = m_chain.ConfirmedAtoms(f.bounty_id);

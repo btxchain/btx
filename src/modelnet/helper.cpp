@@ -4397,8 +4397,8 @@ void PersistRetrieveJobsLocked()
         o.pushKV("created_ms", created_ms);
         o.pushKV("bytes_committed", kv.second->progress.bytes_committed.load());
         o.pushKV("pieces_committed", kv.second->progress.pieces_committed.load());
-        o.pushKV("file_index", static_cast<int>(kv.second->progress.file_index.load()));
-        o.pushKV("piece_index", static_cast<int>(kv.second->progress.piece_index.load()));
+        o.pushKV("file_index", static_cast<int64_t>(kv.second->progress.file_index.load()));
+        o.pushKV("piece_index", static_cast<int64_t>(kv.second->progress.piece_index.load()));
         arr.push_back(o);
     }
     UniValue root(UniValue::VOBJ);
@@ -4447,11 +4447,13 @@ void LoadRetrieveJobs(ModelCatalog& cat)
         if (j.exists("pieces_committed") && j["pieces_committed"].isNum()) {
             job->progress.pieces_committed.store(j["pieces_committed"].getInt<uint64_t>());
         }
+        // Display-only progress. A value outside uint32 is treated as absent;
+        // ToIntegral does not throw, so one bad entry cannot stop every helper RPC.
         if (j.exists("file_index") && j["file_index"].isNum()) {
-            job->progress.file_index.store(static_cast<uint32_t>(j["file_index"].getInt<int>()));
+            if (const auto v{ToIntegral<uint32_t>(j["file_index"].getValStr())}) job->progress.file_index.store(*v);
         }
         if (j.exists("piece_index") && j["piece_index"].isNum()) {
-            job->progress.piece_index.store(static_cast<uint32_t>(j["piece_index"].getInt<int>()));
+            if (const auto v{ToIntegral<uint32_t>(j["piece_index"].getValStr())}) job->progress.piece_index.store(*v);
         }
         g_retrieve_jobs[id] = job;
     }
@@ -4527,8 +4529,8 @@ UniValue RetrieveJobJson(const RetrieveJob& j)
     if (!err.empty()) o.pushKV("error", err);
     o.pushKV("bytes_committed", bytes);
     o.pushKV("pieces_committed", j.progress.pieces_committed.load());
-    o.pushKV("file_index", static_cast<int>(j.progress.file_index.load()));
-    o.pushKV("piece_index", static_cast<int>(j.progress.piece_index.load()));
+    o.pushKV("file_index", static_cast<int64_t>(j.progress.file_index.load()));
+    o.pushKV("piece_index", static_cast<int64_t>(j.progress.piece_index.load()));
     o.pushKV("inflight", j.progress.inflight.load());
     o.pushKV("peer_retries", j.progress.peer_retries.load());
     o.pushKV("stalled_for_ms", stalled);
@@ -10103,7 +10105,13 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     dhex = body["service_pubkey"].get_str();
                 }
                 if (body.exists("scopes") && body["scopes"].isNum()) {
-                    scopes = static_cast<uint32_t>(body["scopes"].getInt<int64_t>());
+                    const int64_t scopes64 = body["scopes"].getInt<int64_t>();
+                    if (scopes64 < 0 || scopes64 > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                        err_code = "INVALID_PARAMETER";
+                        err = "scopes out of range";
+                        return false;
+                    }
+                    scopes = static_cast<uint32_t>(scopes64);
                 }
                 if (body.exists("ttl") && body["ttl"].isNum()) {
                     ttl = body["ttl"].getInt<int64_t>();
@@ -10358,7 +10366,13 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (o.exists("confirmed_funded_atoms")) f.confirmed_funded_atoms = o["confirmed_funded_atoms"].getInt<int64_t>();
             if (o.exists("pending_funded_atoms")) f.pending_funded_atoms = o["pending_funded_atoms"].getInt<int64_t>();
             if (o.exists("chain_height")) {
-                f.chain_height = static_cast<uint32_t>(o["chain_height"].getInt<int64_t>());
+                const int64_t height64 = o["chain_height"].getInt<int64_t>();
+                if (height64 < 0 || height64 > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                    err_code = "INVALID_PARAMETER";
+                    err = "chain_height out of range";
+                    return false;
+                }
+                f.chain_height = static_cast<uint32_t>(height64);
                 f.chain_height_known = true;
             }
             f.wallet_contributor = o.exists("wallet_contributor") && o["wallet_contributor"].get_bool();

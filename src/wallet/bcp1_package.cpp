@@ -547,6 +547,10 @@ bool Decode(const UniValue& in, Package& pkg, std::string& error)
                 const UniValue* vout_v = FindField(cv, {"vout", "index"});
                 if (vout_v) {
                     const int64_t vout = vout_v->getInt<int64_t>();
+                    if (vout > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                        error = ERR_WRONG_CHANGE;
+                        return false;
+                    }
                     if (vout >= 0) c.vout = static_cast<uint32_t>(vout);
                 }
                 const UniValue* amt = FindField(cv, {"amount_atoms", "amount"});
@@ -568,6 +572,10 @@ bool Decode(const UniValue& in, Package& pkg, std::string& error)
                 const UniValue* vout_v = FindField(ov, {"vout", "index"});
                 if (vout_v) {
                     const int64_t vout = vout_v->getInt<int64_t>();
+                    if (vout > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                        error = ERR_WRONG_CHANGE;
+                        return false;
+                    }
                     if (vout >= 0) c.vout = static_cast<uint32_t>(vout);
                 }
                 const UniValue* amt = FindField(ov, {"amount_atoms", "amount"});

@@ -1478,6 +1478,53 @@ BOOST_AUTO_TEST_CASE(bounty_observe_amount_atoms_fail_closed)
     AssertSpendZeroIfPresent(result);
 }
 
+BOOST_AUTO_TEST_CASE(bounty_observe_height_not_wrapped)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-observe-height-not-wrapped";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+
+    auto observe = [&](const std::string& outpoint, int64_t height) {
+        UniValue params(UniValue::VARR);
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("outpoint", outpoint);
+        o.pushKV("bounty_id", "obs");
+        o.pushKV("lot_id", "lot");
+        o.pushKV("amount_atoms", "100");
+        o.pushKV("confirmations", 1);
+        o.pushKV("height", height);
+        params.push_back(o);
+        result.clear();
+        code.clear();
+        err.clear();
+        return store.Dispatch("observebountychain", params, result, code, err);
+    };
+    auto height_of = [&](const std::string& outpoint) -> int64_t {
+        for (const auto& f : result["facts"].getValues()) {
+            if (f["outpoint"].get_str() == outpoint) return f["height"].getInt<int64_t>();
+        }
+        return -1;
+    };
+    const int64_t u32_max{std::numeric_limits<uint32_t>::max()};
+
+    // 2^32 + 10 was stored as height 10; -1 as 4294967295.
+    BOOST_CHECK(!observe("wrap:0", u32_max + 11));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!observe("neg:0", -1));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+
+    BOOST_REQUIRE(observe("max:0", u32_max));
+    BOOST_CHECK_EQUAL(height_of("max:0"), u32_max);
+    BOOST_REQUIRE(observe("ten:0", 10));
+    BOOST_CHECK_EQUAL(height_of("ten:0"), 10);
+    BOOST_CHECK(!FactsHaveOutpoint(result, "wrap:0"));
+    BOOST_CHECK(!FactsHaveOutpoint(result, "neg:0"));
+}
+
 BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
 {
     using namespace modelnet;
