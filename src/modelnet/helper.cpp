@@ -5269,7 +5269,8 @@ bool ImportAndPublish(ModelCatalog& cat, const std::string& path, bool pin, bool
     return true;
 }
 
-int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const std::string& dir_override = {})
+int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const std::string& dir_override = {},
+                 std::atomic<bool>* stop = nullptr)
 {
     result.setObject();
     result.pushKV("schema_version", 2);
@@ -5370,7 +5371,9 @@ int ScanWatchDir(ModelCatalog& cat, UniValue& result, std::string& err, const st
                         greq.pushKV("params", gp);
                         UniValue retrieve;
                         std::string rcode, rerr;
-                        if (DispatchHelperRpc(cat, greq, retrieve, rcode, rerr, nullptr)) {
+                        // With the stop flag getmodel queues a retrieve job; without
+                        // it, it downloads here and the caller waits for the WAN.
+                        if (DispatchHelperRpc(cat, greq, retrieve, rcode, rerr, stop)) {
                             one.pushKV("retrieve", retrieve);
                             if (retrieve.exists("status") && retrieve["status"].isStr()) {
                                 one.pushKV("status", retrieve["status"].get_str());
@@ -6352,7 +6355,7 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
     return false;
 }
 
-void ExecuteQueuedFreeDownloads(ModelCatalog& cat, UniValue& result)
+void ExecuteQueuedFreeDownloads(ModelCatalog& cat, UniValue& result, std::atomic<bool>* stop)
 {
     static thread_local bool in_drain = false;
     if (in_drain || !result.exists("actions") || !result["actions"].isArray()) return;
@@ -6435,7 +6438,7 @@ void ExecuteQueuedFreeDownloads(ModelCatalog& cat, UniValue& result)
         req.pushKV("params", p);
         UniValue got;
         std::string code, gerr;
-        const bool ok = DispatchHelperRpc(cat, req, got, code, gerr, nullptr);
+        const bool ok = DispatchHelperRpc(cat, req, got, code, gerr, stop);
         a.pushKV("queued_for_coordinator", false);
         a.pushKV("executed", ok);
         a.pushKV("getmodel_mode", "FREE_ONLY");
@@ -6520,7 +6523,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             // A peek must remain read-only, including the helper's post-RPC
             // action dispatcher. Only an actual drain may execute actions.
             const bool drained = result["drained"].isTrue();
-            if (drained) ExecuteQueuedFreeDownloads(cat, result);
+            if (drained) ExecuteQueuedFreeDownloads(cat, result, stop);
             result.pushKV("executed_free_downloads", drained);
         }
         return ok;
@@ -7638,7 +7641,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "scanmodelwatch") {
         std::string werr;
         const std::string override_dir = Arg(0).isStr() ? Arg(0).get_str() : "";
-        ScanWatchDir(cat, result, werr, override_dir);
+        ScanWatchDir(cat, result, werr, override_dir, stop);
         if (!werr.empty() && result.exists("error")) {
             err_code = "INVALID_PARAMETER";
             err = werr;
@@ -12977,7 +12980,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             std::chrono::steady_clock::now() - last_watch >= std::chrono::seconds(5)) {
             UniValue wres;
             std::string werr;
-            ScanWatchDir(cat, wres, werr);
+            ScanWatchDir(cat, wres, werr, {}, stop);
             last_watch = std::chrono::steady_clock::now();
         }
         if (std::chrono::steady_clock::now() - last_records_save >= std::chrono::seconds(RECORDS_SAVE_INTERVAL_S)) {
