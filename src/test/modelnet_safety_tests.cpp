@@ -428,6 +428,67 @@ BOOST_AUTO_TEST_CASE(import_requires_weights_and_cleans_failed_staging)
     BOOST_CHECK_EQUAL(cat.UsedBytes(), 0);
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(unpin_reports_a_failed_save)
+{
+    // removemodelsafetypublisher answered "removed" when the publisher list
+    // could not be written. The file still pinned the publisher, so after the
+    // next start its new advisories blocked models again instead of staying
+    // warnings.
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-unpin-save";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    modelnet::EnsureSafetyBound(tmp);
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string pub = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub, "vendor", err));
+    UniValue result;
+    auto unpin = [&](std::string& code) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "removemodelsafetypublisher");
+        UniValue params(UniValue::VARR);
+        params.push_back(pub);
+        req.pushKV("params", params);
+        result.setNull();
+        std::string rpc_err;
+        code.clear();
+        return modelnet::DispatchHelperRpc(cat, req, result, code, rpc_err, nullptr);
+    };
+    auto reload = [&] {
+        modelnet::GlobalSafety().ResetForTests();
+        modelnet::GlobalSafety().Bind(tmp);
+    };
+    // The temporary file cannot be created where a directory stands.
+    const fs::path blocker = tmp / "safety_publishers.json.tmp";
+    fs::create_directories(blocker);
+    std::string code;
+    BOOST_CHECK(!unpin(code));
+    BOOST_CHECK_EQUAL(code, "SAFETY");
+    // Memory and file agree: the publisher stays pinned in both.
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(pub));
+    reload();
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(pub));
+    fs::remove(blocker);
+
+    // Unpinning does not change the advisories, so a full disk for that file
+    // does not stop it.
+    const fs::path ads_blocker = tmp / "safety_advisories.json.tmp";
+    fs::create_directories(ads_blocker);
+    BOOST_REQUIRE(unpin(code));
+    BOOST_CHECK(result["removed"].isTrue());
+    BOOST_CHECK(!modelnet::GlobalSafety().PublisherPinned(pub));
+    reload();
+    BOOST_CHECK(!modelnet::GlobalSafety().PublisherPinned(pub));
+    fs::remove(ads_blocker);
+
+    // A publisher that is not pinned is not an error.
+    BOOST_REQUIRE(unpin(code));
+    BOOST_CHECK(result["removed"].isFalse());
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(addpeer_cap_is_visible)
 {
     SafetyReset reset;

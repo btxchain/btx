@@ -8870,8 +8870,13 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = "publisher_id";
             return false;
         }
+        const bool removed = GlobalSafety().UnpinPublisher(Arg(0).get_str(), err);
+        if (!err.empty()) {
+            err_code = "SAFETY";
+            return false;
+        }
         result.pushKV("schema_version", 2);
-        result.pushKV("removed", GlobalSafety().UnpinPublisher(Arg(0).get_str()));
+        result.pushKV("removed", removed);
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }
