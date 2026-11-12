@@ -753,6 +753,7 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_0348_ops.py',
     'feature_modeld_seed_alias.py',
     'feature_modelnet_import_close.py',
+    'feature_modelnet_link_sync.py',
     'feature_modelnet_jit_capability.py',
     'feature_capabilityd_file_modes.py',
     'feature_modelnet_btx_model.py',
