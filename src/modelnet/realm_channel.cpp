@@ -7,6 +7,10 @@
 #include <crypto/hex_base.h>
 #include <crypto/sha384.h>
 #include <span.h>
+#include <util/readwritefile.h>
+#ifdef _WIN32
+#include <util/string.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -882,14 +886,11 @@ bool RealmRollout::WriteOfflineBundle(const std::filesystem::path& path, const s
     text += "body=" + body + "\n";
     if (!channel_name.empty()) text += "name=" + channel_name + "\n";
 
-    std::ofstream out(path, std::ios::out | std::ios::trunc);
-    if (!out) {
-        err = "BTX035_BUNDLE";
-        return false;
-    }
-    out << text;
-    out.flush();
-    if (!out) {
+#ifdef _WIN32
+    // Preserve the CRLF bytes previously emitted by the Windows text stream.
+    ReplaceAll(text, "\n", "\r\n");
+#endif
+    if (!WriteBinaryFileAtomically(fs::path{path}, text)) {
         err = "BTX035_BUNDLE";
         return false;
     }
