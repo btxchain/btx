@@ -213,7 +213,7 @@ bool SaveFileStreamJob(const fs::path& modeldir, const FileStreamJobRecord& rec,
         err = "file stream job json must not contain secrets or URLs";
         return false;
     }
-    if (!WriteBinaryFile(FileStreamJobPath(modeldir, j.artifact, j.file_index), raw)) {
+    if (!WriteBinaryFileAtomically(FileStreamJobPath(modeldir, j.artifact, j.file_index), raw)) {
         err = "failed to write file stream job";
         return false;
     }
