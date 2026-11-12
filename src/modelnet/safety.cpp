@@ -8,6 +8,7 @@
 #include <modelnet/types.h>
 #include <util/strencodings.h>
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -121,6 +122,29 @@ bool RelPathLooksUnsafe(const std::string& rel)
     if (EndsUnsafe(lower) || InnerUnsafe(lower)) return true;
     return false;
 }
+
+namespace {
+//! Make room for one more advisory in a bounded list: drop the expired ones,
+//! then, if the list is still full, the oldest one a publisher signed. The
+//! operator's own unexpired reports are never dropped to make room. False
+//! when only those fill the list.
+bool MakeRoomForAdvisory(std::vector<SafetyRegistry::Advisory>& list, size_t cap, int64_t now)
+{
+    if (now > 0) {
+        list.erase(std::remove_if(list.begin(), list.end(), [&](const SafetyRegistry::Advisory& a) {
+                       return a.expires_at && a.expires_at < now;
+                   }),
+                   list.end());
+    }
+    if (list.size() < cap) return true;
+    const auto oldest_signed = std::find_if(list.begin(), list.end(), [](const SafetyRegistry::Advisory& a) {
+        return !a.local;
+    });
+    if (oldest_signed == list.end()) return false;
+    list.erase(oldest_signed);
+    return true;
+}
+} // namespace
 
 void SafetyRegistry::RebuildLocked(int64_t now)
 {
@@ -312,7 +336,7 @@ bool SafetyRegistry::LocalReport(const std::string& target_hex, uint8_t target_k
             return PersistLocked(err);
         }
     }
-    if (m_advisories.size() >= MAX_SAFETY_ADVISORIES) {
+    if (!MakeRoomForAdvisory(m_advisories, MAX_SAFETY_ADVISORIES, now)) {
         err = "advisory cap";
         return false;
     }
@@ -361,7 +385,10 @@ bool SafetyRegistry::IngestSigned(const UniValue& body, const std::string& signe
             return true;
         }
     }
-    if (dest.size() >= cap) dest.erase(dest.begin());
+    if (!MakeRoomForAdvisory(dest, cap, now)) {
+        err = "advisory cap";
+        return false;
+    }
     dest.push_back(std::move(a));
     if (pinned) {
         RebuildLocked(now);
