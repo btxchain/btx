@@ -1623,7 +1623,7 @@ export const OPERATIONS = [
         "kind": "json",
         "required": true,
         "default": {
-          "text": ""
+          "id": ""
         }
       }
     ],

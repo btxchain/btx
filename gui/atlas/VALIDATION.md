@@ -69,7 +69,7 @@ the default client.
 * Those 26 names now have catalog templates (219 total) and Models panels.
   `getbtxcapabilityevents` is not a silent read: the handler drops stored
   events at or below the cursor, so Atlas opens native review instead.
-  The catalog is now 221 templates. This is not Qt retirement.
+  The catalog is now 208 templates. This is not Qt retirement.
 
 ## Controls added after that inventory
 
