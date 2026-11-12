@@ -318,7 +318,7 @@ class Scenario:
         stop_process(self.distractor)
         shutil.rmtree(self.tmp)
 
-    def run_installer(self):
+    def run_installer(self, installer=INSTALLER):
         env = os.environ.copy()
         env.update(
             {
@@ -353,7 +353,7 @@ class Scenario:
         env.update(self.extra_env)
         (self.tmp / "tmp").mkdir(exist_ok=True)
         return subprocess.run(
-            [str(INSTALLER)],
+            [str(installer)],
             cwd=self.tmp,
             env=env,
             text=True,
@@ -559,6 +559,70 @@ def test_unhealthy_restart_triggers_rollback_path():
             assert_failure(result)
             if "health probe" not in (result.stdout + result.stderr):
                 raise AssertionError(f"expected a health-probe failure message; got:\n{result.stderr}")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
+
+def test_failed_activation_restarts_previous_release():
+    with Scenario("activation-swap", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        install = scenario.tmp / "install"
+        previous = install / "releases" / "old"
+        (previous / "bin").mkdir(parents=True)
+        write_executable(previous / "bin" / "btxd", PREBUILT_BTXD)
+        write_executable(previous / "bin" / "btx-cli", PREBUILT_BTXCLI)
+        (previous / "manifest.json").write_text('{"git_commit": "old"}', encoding="utf8")
+        current = install / "current"
+        current.symlink_to(previous)
+        links = scenario.tmp / "links"
+        links.mkdir()
+        for tool in ("btxd", "btx-cli"):
+            (links / tool).symlink_to(current / "bin" / tool)
+        _add_prebuilt_to_manifest(scenario)
+
+        # Replace only the pointer-swap call in a disposable copy of the installer.
+        # The fault remains armed through recovery and leaves the active pointer in place.
+        faulted = scenario.tmp / "installer-swap-fault.sh"
+        source = INSTALLER.read_text(encoding="utf8")
+        swap = "os.replace(tmp, link)"
+        if source.count(swap) != 1:
+            raise AssertionError("cannot locate the updater's current-pointer swap")
+        lines = source.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            if line.strip() == swap:
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i:i] = [
+                    indent + 'if os.path.basename(link) == "current":\n',
+                    indent + '    print("fixture: refused current swap", file=sys.stderr)\n',
+                    indent + '    raise OSError("fixture current swap fault")\n',
+                ]
+                break
+        write_executable(faulted, "".join(lines))
+
+        def assert_rpc():
+            run([str(links / "btx-cli"), f"-datadir={scenario.target_datadir}", "uptime"],
+                timeout=5, capture_output=True)
+
+        try:
+            result = scenario.run_installer(faulted)
+            assert_failure(result)
+            scenario.target.wait(timeout=5)
+            output = result.stdout + result.stderr
+            if output.count("fixture: refused current swap") != 1 or current.resolve() != previous.resolve():
+                raise AssertionError(f"unexpected activation path or current pointer:\n{output}")
+            if not (scenario.target_datadir / "node.ready").exists():
+                raise AssertionError(f"the previous release did not restart after the swap failed:\n{output}")
+            assert_rpc()
+            if list(install.glob("current.tmp.*")):
+                raise AssertionError("failed swap left a temporary current link")
+
+            scenario.extra_env["BTX_AUTOUPDATE_PID"] = (scenario.target_datadir / "pid").read_text().strip()
+            assert_success(scenario.run_installer())
+            if current.resolve() == previous.resolve():
+                raise AssertionError("healthy retry did not activate the new release")
+            assert_rpc()
+            if scenario.distractor.poll() is not None:
+                raise AssertionError("activation touched the distractor process")
         finally:
             _kill_datadir_daemon(scenario.target_datadir)
 
@@ -920,6 +984,7 @@ def main():
         test_manual_mode_refuses_ambiguous_processes,
         test_healthy_restart_passes_health_probe,
         test_unhealthy_restart_triggers_rollback_path,
+        test_failed_activation_restarts_previous_release,
         test_prebuilt_binary_is_used_without_source_build,
         test_cuda13_prebuilt_is_preferred_over_generic_linux,
         test_cuda12_prebuilt_is_preferred_over_generic_linux,
