@@ -968,6 +968,61 @@ BOOST_AUTO_TEST_CASE(structure_rejects_duplicate_noncanonical_p2mr_wrong_change)
 
 }
 
+BOOST_AUTO_TEST_CASE(decode_change_vout_not_wrapped)
+{
+    const auto seed = MasterSeedFromDerivation();
+    const Bcp1Spend spend = MakeSpend(seed);
+    bcp1::Package pkg = PackageFromSpend(spend);
+    pkg.change.clear();
+    bcp1::ChangeOutput change;
+    change.vout = 1;
+    change.amount = spend.change_amount;
+    change.script_pub_key = spend.change_spk;
+    pkg.change.push_back(change);
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(bcp1::ValidateStructure(pkg, err), err);
+    const UniValue encoded = bcp1::Encode(pkg);
+    BOOST_REQUIRE(encoded["change"].isArray());
+    BOOST_REQUIRE_EQUAL(encoded["change"].size(), 1U);
+
+    // Control: the in-range index decodes and validates.
+    bcp1::Package decoded;
+    BOOST_REQUIRE_MESSAGE(bcp1::Decode(encoded, decoded, err), err);
+    BOOST_REQUIRE_EQUAL(decoded.change.size(), 1U);
+    BOOST_CHECK_EQUAL(decoded.change[0].vout, 1U);
+    BOOST_CHECK_MESSAGE(bcp1::ValidateStructure(decoded, err), err);
+
+    // 2^32 + 1 decoded as change output 1, which then validated.
+    const int64_t wrapped{(int64_t{1} << 32) + 1};
+    {
+        UniValue c = encoded["change"][0];
+        c.pushKV("vout", wrapped);
+        UniValue arr(UniValue::VARR);
+        arr.push_back(c);
+        UniValue json = encoded;
+        json.pushKV("change", arr);
+        bcp1::Package out;
+        BOOST_CHECK(!bcp1::Decode(json, out, err));
+        BOOST_CHECK_EQUAL(err, bcp1::ERR_WRONG_CHANGE);
+    }
+    // The same index in "outputs" with role "change", read when "change" is empty.
+    {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("role", "change");
+        o.pushKV("vout", wrapped);
+        o.pushKV("amount_atoms", spend.change_amount);
+        o.pushKV("scriptPubKey", HexStr(spend.change_spk));
+        UniValue outputs(UniValue::VARR);
+        outputs.push_back(o);
+        UniValue json = encoded;
+        json.pushKV("change", UniValue(UniValue::VARR));
+        json.pushKV("outputs", outputs);
+        bcp1::Package out;
+        BOOST_CHECK(!bcp1::Decode(json, out, err));
+        BOOST_CHECK_EQUAL(err, bcp1::ERR_WRONG_CHANGE);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(negative_spent_input_vector)
 {
     const UniValue spent = ReadBcp1Json("negative-spent-input.json");

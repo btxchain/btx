@@ -236,7 +236,9 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
                             kh = (*rel)["key_hash_sha256"].get_str();
                         }
                         if (rel->exists("refund_height") && (*rel)["refund_height"].isNum()) {
-                            rh = static_cast<uint32_t>((*rel)["refund_height"].getInt<int64_t>());
+                            // Out of range stays 0 (refund_status UNKNOWN), never a wrapped height.
+                            std::string rh_err;
+                            if (!ParseUint32Index((*rel)["refund_height"].getInt<int64_t>(), rh, "refund_height", rh_err)) rh = 0;
                         }
                         std::vector<CScript> scripts;
                         auto add_script = [&](const std::string& hex) {

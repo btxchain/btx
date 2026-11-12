@@ -1830,4 +1830,57 @@ BOOST_AUTO_TEST_CASE(p2mr_only_descriptor_rpcs_on_enforcing_chain)
     BOOST_CHECK(!decoded.exists("segwit"));
 }
 
+BOOST_AUTO_TEST_CASE(rpc_parse_uint32_index)
+{
+    const int64_t u32_max{std::numeric_limits<uint32_t>::max()};
+    uint32_t out{7};
+    std::string err;
+    BOOST_CHECK(ParseUint32Index(0, out, "vout", err));
+    BOOST_CHECK_EQUAL(out, 0U);
+    BOOST_CHECK(ParseUint32Index(u32_max, out, "vout", err));
+    BOOST_CHECK_EQUAL(out, std::numeric_limits<uint32_t>::max());
+
+    const auto refused = [](int64_t v, const std::string& want) {
+        uint32_t untouched{42};
+        std::string e;
+        BOOST_CHECK(!ParseUint32Index(v, untouched, "vout", e));
+        BOOST_CHECK_EQUAL(untouched, 42U);
+        BOOST_CHECK_EQUAL(e, want);
+    };
+    refused(-1, "vout cannot be negative");
+    refused(std::numeric_limits<int64_t>::min(), "vout cannot be negative");
+    refused(u32_max + 1, "vout exceeds uint32 range");
+    refused(std::numeric_limits<int64_t>::max(), "vout exceeds uint32 range");
+}
+
+BOOST_AUTO_TEST_CASE(offerattestedutxosnapshot_chunk_size_not_wrapped)
+{
+    // The files do not exist, so a chunk size that passes the range check
+    // fails at the manifest open. 2^32 + 65536 used to wrap to 65536 and get
+    // there; -1 used to wrap to 4294967295 and fail as "Invalid chunk size".
+    // CallRPC sends the default request, which is wallet-restricted ("-"), and
+    // this RPC refuses wallet-restricted users. Send it as an unrestricted user.
+    const auto error_for = [&](int64_t chunk_size) -> std::string {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = "offerattestedutxosnapshot";
+        request.m_wallet_restriction.clear();
+        request.params = UniValue{UniValue::VARR};
+        request.params.push_back("missing-snapshot.dat");
+        request.params.push_back("missing-snapshot.manifest");
+        request.params.push_back(chunk_size);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            tableRPC.execute(request);
+        } catch (const UniValue& e) {
+            return e.find_value("message").get_str();
+        }
+        return "no error";
+    };
+    BOOST_CHECK_EQUAL(error_for(65536), "Couldn't open manifest file");
+    BOOST_CHECK_EQUAL(error_for(4194305), "Invalid chunk size");
+    BOOST_CHECK_EQUAL(error_for(4295032832), "chunk_size exceeds uint32 range");
+    BOOST_CHECK_EQUAL(error_for(-1), "chunk_size cannot be negative");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -280,6 +280,37 @@ BOOST_AUTO_TEST_CASE(econ_ingest_rejects_remote_unsigned)
     BOOST_CHECK(result["accepted"].isFalse());
 }
 
+BOOST_AUTO_TEST_CASE(econ_ingest_chain_height_not_wrapped)
+{
+    using namespace modelnet;
+    const fs::path tmp = m_args.GetDataDirBase() / "ingest-chain-height";
+    ModelCatalog cat{tmp, 1 << 20};
+    auto ingest = [&](int64_t chain_height, std::string& code) {
+        UniValue obs(UniValue::VOBJ);
+        obs.pushKV("confirmed_known", true);
+        obs.pushKV("funding_source", "CHAIN_OBSERVATION");
+        obs.pushKV("confirmed_funded_atoms", 999);
+        obs.pushKV("chain_height", chain_height);
+        obs.pushKV("release_id", std::string(96, 'c'));
+        UniValue params(UniValue::VARR);
+        params.push_back(obs);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "ingestchainfundingobservation");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string err;
+        code.clear();
+        return DispatchHelperRpc(cat, req, result, code, err) && result["accepted"].isTrue();
+    };
+    std::string code;
+    // 2^32 + 5 was stored as chain height 5; -1 as 4294967295.
+    BOOST_CHECK(!ingest((int64_t{1} << 32) + 5, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!ingest(-1, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(ingest(5, code));
+}
+
 BOOST_AUTO_TEST_CASE(econ_ciphertext_needs_provider)
 {
     using namespace modelnet;
