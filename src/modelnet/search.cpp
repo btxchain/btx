@@ -1084,7 +1084,9 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
             }
         }
     }
-    if (m_by_model.size() >= m_cap && it == m_by_model.end()) {
+    // The cap and the publisher quota below limit what peers can add. Local
+    // records come only from this node's own catalog and its own RPCs.
+    if (m_by_model.size() >= m_cap && it == m_by_model.end() && !r.local_catalog) {
         err = "index cap";
         return false;
     }
@@ -1098,6 +1100,10 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
     }
     ModelSearchRecord stored = r;
     stored.signed_ok = verified;
+    // A newer version of a record this node signed (an alias change, for
+    // example) is still its own. A record that only replaces the unsigned
+    // catalog stub is not: any key may sign one for the same model.
+    if (it != m_by_model.end() && it->second.local_catalog && it->second.signed_ok) stored.local_catalog = true;
     if (r.tombstone) stored.tombstone = true;
     m_by_model[key] = std::move(stored);
     ++m_seq;

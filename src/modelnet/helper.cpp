@@ -1310,6 +1310,14 @@ std::string InferFamilyFromLabel(const std::string& label)
     return {};
 }
 
+/** Mark a record this node has signed for its own model or bounty. The search
+ *  index keeps local records out of the cap and the publisher quota it applies
+ *  to records from peers; the mark is kept when the index is saved. */
+void MarkOwnSearchRecord(ModelSearchRecord& rec)
+{
+    if (!rec.sig.empty()) rec.local_catalog = true;
+}
+
 ModelSearchRecord DraftSearchFromCatalog(const CatalogEntry& e)
 {
     ModelSearchRecord rec;
@@ -5235,6 +5243,7 @@ bool ImportAndPublish(ModelCatalog& cat, const std::string& path, bool pin, bool
         }
         std::string serr;
         (void)SignSearchRecordWithDefaultIdentity(HelperDir(cat), rec, serr);
+        MarkOwnSearchRecord(rec);
         bool published = false;
         {
             std::lock_guard<std::mutex> lock(g_search_mu);
@@ -6629,6 +6638,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (LoadOrCreateResearchIdentity(HelperDir(cat), pk, sk, sid, ierr)) {
                 rec.pubkey = pk;
                 SignSearchRecord(rec, Span<const unsigned char>{sk.data(), sk.size()}, ierr);
+                MarkOwnSearchRecord(rec);
             }
             std::lock_guard<std::mutex> lock(g_search_mu);
             g_search_idx.Put(rec, ConnNowMs(), ierr);
@@ -7464,6 +7474,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = serr;
             return false;
         }
+        MarkOwnSearchRecord(rec);
         {
             std::lock_guard<std::mutex> lock(g_search_mu);
             if (!g_search_idx.Put(rec, ConnNowMs(), err)) {
@@ -7607,6 +7618,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = serr;
             return false;
         }
+        MarkOwnSearchRecord(rec);
         {
             std::lock_guard<std::mutex> lock(g_search_mu);
             if (!g_search_idx.Put(rec, ConnNowMs(), err)) {
@@ -7909,6 +7921,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = serr.empty() ? "could not sign search record" : serr;
             return false;
         }
+        MarkOwnSearchRecord(rec);
         std::lock_guard<std::mutex> lock(g_search_mu);
         if (!g_search_idx.Put(rec, ConnNowMs(), err)) {
             err_code = "REJECTED";
@@ -7964,6 +7977,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err_code = "REJECTED";
             return false;
         }
+        MarkOwnSearchRecord(t);
         if (!g_search_idx.Put(t, ConnNowMs(), err)) {
             err_code = "REJECTED";
             return false;
@@ -9205,6 +9219,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (!SignSearchRecordWithDefaultIdentity(HelperDir(cat), rec, serr)) {
                 publish_error = serr.empty() ? "could not sign search record" : serr;
             } else {
+                MarkOwnSearchRecord(rec);
                 std::lock_guard<std::mutex> lock(g_search_mu);
                 std::string perr;
                 if (!g_search_idx.Put(rec, ConnNowMs(), perr)) {
