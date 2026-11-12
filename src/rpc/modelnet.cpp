@@ -1021,9 +1021,11 @@ static RPCHelpMan openbtxuri()
 static RPCHelpMan resolveresource()
 {
     return ProxyOrLocal("resolveresource", "Typed lookup with incomplete coverage. Local catalog first.\n",
-                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "digest48 / text", {
-                            {"digest48", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "96-hex"},
-                            {"text", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "search text"},
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "digest48, id or uri, and kind", {
+                            {"digest48", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "96-hex digest of the object"},
+                            {"id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Same as digest48"},
+                            {"uri", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "btx:// URI; its kind is used"},
+                            {"kind", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Resource kind as a number or a name such as \"MODEL\" (default: MODEL)"},
                         }}});
 }
 

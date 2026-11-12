@@ -1625,7 +1625,7 @@
           "kind": "json",
           "required": true,
           "default": {
-            "text": ""
+            "id": ""
           }
         }
       ],
