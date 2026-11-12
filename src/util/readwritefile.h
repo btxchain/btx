@@ -26,7 +26,7 @@ std::pair<bool,std::string> ReadBinaryFile(const fs::path &filename, size_t maxs
  */
 bool WriteBinaryFile(const fs::path &filename, const std::string &data);
 
-//! Replace a regular file only after the new contents are written and closed.
+//! Sync and close the staged file before replacement, then attempt to sync its parent directory.
 bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data);
 
 #endif // BITCOIN_UTIL_READWRITEFILE_H

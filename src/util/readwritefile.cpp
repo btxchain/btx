@@ -64,14 +64,20 @@ bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data)
     FILE* file = fsbridge::fopen(tmp, "wbx");
     if (!file) return false;
     const bool written = data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size();
+    const bool committed = written && FileCommit(file);
     const bool closed = std::fclose(file) == 0;
     ec.clear();
 #ifndef WIN32
-    if (written && closed && fs::exists(status)) {
+    if (committed && closed && fs::exists(status)) {
         fs::permissions(tmp, status.permissions() & fs::perms::all, fs::perm_options::replace, ec);
     }
 #endif
-    if (written && closed && !ec && RenameOver(tmp, filename)) return true;
+    if (committed && closed && !ec && RenameOver(tmp, filename)) {
+        const auto parent = filename.parent_path();
+        // Replacement has already happened. DirectoryCommit is best-effort.
+        DirectoryCommit(parent.empty() ? fs::PathFromString(".") : parent);
+        return true;
+    }
     fs::remove(tmp, ec);
     return false;
 }
