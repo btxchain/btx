@@ -1734,6 +1734,28 @@ CShieldedWallet::CShieldedWallet(CWallet& parent_wallet)
 
 CShieldedWallet::~CShieldedWallet() = default;
 
+//! Lower the wallet birth time to the current chain tip. Shielded keys are not
+//! in the script/address birthday trackers, so without this the blockConnected
+//! fast-path treats every later block as too old to scan.
+static void SeedBirthTimeFromChainTip(CWallet& wallet)
+{
+    if (!wallet.HaveChain()) return;
+    const auto tip_height = wallet.chain().getHeight();
+    if (tip_height.has_value()) {
+        int64_t tip_max_time{0};
+        const uint256 tip_hash = wallet.chain().getBlockHash(*tip_height);
+        if (wallet.chain().findBlock(tip_hash, interfaces::FoundBlock().maxTime(tip_max_time))) {
+            wallet.MaybeUpdateBirthTime(tip_max_time);
+        } else {
+            // If tip metadata is unavailable, prefer a conservative floor
+            // over wallclock time so future blocks are never skipped.
+            wallet.MaybeUpdateBirthTime(0);
+        }
+    } else {
+        wallet.MaybeUpdateBirthTime(0);
+    }
+}
+
 ShieldedAddress CShieldedWallet::GenerateNewAddress(uint32_t account)
 {
     AssertLockHeld(cs_shielded);
@@ -1819,6 +1841,9 @@ ShieldedAddress CShieldedWallet::GenerateNewAddress(uint32_t account)
     if (!PersistState()) {
         LogPrintf("CShieldedWallet: failed to persist state after GenerateNewAddress\n");
     }
+    // A wallet whose only keys are shielded (a blank wallet) has no other birth
+    // time; without one it never scans a new block for this address.
+    SeedBirthTimeFromChainTip(m_parent_wallet);
     return addr;
 }
 
@@ -1878,22 +1903,7 @@ bool CShieldedWallet::ImportViewingKey(const std::vector<unsigned char>& kem_sk,
     // to scan. Seed the birthday from the current chain tip so newly imported
     // viewing keys can discover subsequent blocks even when no rescan is
     // requested.
-    if (m_parent_wallet.HaveChain()) {
-        const auto tip_height = m_parent_wallet.chain().getHeight();
-        if (tip_height.has_value()) {
-            int64_t tip_max_time{0};
-            const uint256 tip_hash = m_parent_wallet.chain().getBlockHash(*tip_height);
-            if (m_parent_wallet.chain().findBlock(tip_hash, interfaces::FoundBlock().maxTime(tip_max_time))) {
-                m_parent_wallet.MaybeUpdateBirthTime(tip_max_time);
-            } else {
-                // If tip metadata is unavailable, prefer a conservative floor
-                // over wallclock time so future blocks are never skipped.
-                m_parent_wallet.MaybeUpdateBirthTime(0);
-            }
-        } else {
-            m_parent_wallet.MaybeUpdateBirthTime(0);
-        }
-    }
+    SeedBirthTimeFromChainTip(m_parent_wallet);
     return true;
 }
 
