@@ -519,9 +519,15 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     list_cc.UnSelectAll();
     auto coins = AvailableCoinsListUnspent(wallet, &list_cc, fp);
     std::vector<COutput> all = coins.All();
-    const size_t max_inputs = options.exists("max_inputs") ? static_cast<size_t>(options["max_inputs"].getInt<int64_t>()) :
-                              options.exists("batch_size") ? static_cast<size_t>(options["batch_size"].getInt<int64_t>()) :
-                              all.size();
+    // max_inputs (or batch_size) caps the plan. A cast of a negative value to
+    // size_t would lift the cap, and 0 would plan nothing.
+    const char* const max_key{options.exists("max_inputs") ? "max_inputs" : options.exists("batch_size") ? "batch_size" : nullptr};
+    size_t max_inputs = all.size();
+    if (max_key) {
+        const int64_t requested = options[max_key].getInt<int64_t>();
+        if (requested < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be at least 1", max_key));
+        max_inputs = static_cast<size_t>(requested);
+    }
     const int64_t target_utxos = options.exists("target_utxo_count") ? options["target_utxo_count"].getInt<int64_t>() : 1;
     CAmount fee_ceiling = MAX_MONEY;
     if (options.exists("fee_ceiling")) fee_ceiling = AmountFromValue(options["fee_ceiling"]);
