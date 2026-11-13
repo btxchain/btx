@@ -40,6 +40,38 @@ inline bool IsWalletObservationRead(std::string_view method)
            method == "getmodelrelease";
 }
 
+// Methods whose request names a path on the server (read, write, list or run),
+// as a positional argument or as a field of the request object. btxd refuses
+// them for a wallet-restricted RPC user before the helper is called. Keep this
+// list disjoint from IsWalletObservationRead.
+inline bool IsServerPathMethod(std::string_view method)
+{
+    return method == "importmodel" ||
+           method == "hostmodel" ||
+           method == "previewmodelimport" ||
+           method == "exportmodellink" ||
+           method == "qualifymodel" ||
+           method == "scanmodelwatch" ||
+           method == "executemodelimport" ||
+           method == "resumemodelimport" ||
+           method == "createbtxpackage" ||
+           method == "exportbtxbundle" ||
+           method == "exportbtxpackage" ||
+           method == "inspectbtxpackage" ||
+           method == "verifybtxpackage" ||
+           method == "importbtxpackage" ||
+           method == "getbtxpackagedocument" ||
+           method == "planbtxacquisition" ||
+           method == "planbtxclientinstall" ||
+           method == "planbtxruntime" ||
+           method == "executebtxacquisition" ||
+           method == "setcloudstorage" ||
+           method == "addmodelstorage" ||
+           method == "preparebountyevaluation" ||
+           method == "runbountyevaluation" ||
+           method == "ensurebtxcapability";
+}
+
 struct NativeRequest {
     std::string method;
     std::string path;
