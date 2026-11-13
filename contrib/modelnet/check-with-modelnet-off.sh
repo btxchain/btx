@@ -29,7 +29,10 @@ trap cleanup EXIT
 # --- 1. src/modelnet/CMakeLists.txt starts with if(NOT WITH_MODELNET) return()
 cm="$ROOT/src/modelnet/CMakeLists.txt"
 [[ -f "$cm" ]] || fail "src/modelnet/CMakeLists.txt exists"
-mapfile -t cmake_logic < <(awk '
+cmake_logic=()
+while IFS= read -r line; do
+  cmake_logic+=("$line")
+done < <(awk '
   /^[[:space:]]*#/ { next }
   /^[[:space:]]*$/ { next }
   { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print }
