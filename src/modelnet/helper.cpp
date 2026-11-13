@@ -9076,6 +9076,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (params.isArray() && params.size() > 4 && Arg(4).isObject()) options = Arg(4);
             else if (params.isArray() && params.size() > 3 && Arg(3).isObject()) options = Arg(3);
         }
+        // refund_height is a CLTV block height and is stored as uint32. A value
+        // outside uint32 would wrap to another height, and one from 500000000 on
+        // is a Unix time, which the funding path refuses (transfer.cpp). Refuse
+        // both here, before anything is imported or stored.
+        if (refund_height < 0 || refund_height >= int64_t{500'000'000}) {
+            err_code = "INVALID_PARAMETER";
+            err = "refund_height must be a block height below 500000000";
+            return false;
+        }
         Resource r;
         if (!DecodeResource(uri, r, err) || r.kind != ResourceKind::MODEL) {
             err_code = "INVALID_PARAMETER";
