@@ -390,10 +390,12 @@ UniValue FundedPackage(CWallet& wallet, const std::vector<CRecipient>& recipient
             }
         }
     }
-    auto res = CreateTransaction(wallet, recipients, change_pos, coin_control, /*sign=*/false);
+    bool inputs_failed{false};
+    auto res = CreateTransaction(wallet, recipients, change_pos, coin_control, /*sign=*/false, &inputs_failed);
     if (!res) {
-        // As in the RPC FundTransaction(): when the lock hid coins of the wallet's own, ask for the unlock.
-        if (LockedWalletLeftOutOwnCoins(wallet, coin_control)) EnsureWalletIsUnlocked(wallet);
+        // As in the RPC FundTransaction(): ask for the unlock only when the inputs
+        // could not be fetched, selected or sized and the lock hid own coins.
+        if (inputs_failed && LockedWalletLeftOutOwnCoins(wallet, coin_control)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(res).original);
     }
     PartiallySignedTransaction psbtx{CMutableTransaction(*res->tx)};
