@@ -73,6 +73,14 @@ class WalletBcp1PlanInputsTest(BitcoinTestFramework):
         tx = node.decodepsbt(cons["psbt"])["tx"]
         assert_equal(sorted((i["txid"], i["vout"]) for i in tx["vin"]), named)
 
+        self.log.info("createconsolidationtx takes the options next to a plan object")
+        cons = wallet.createconsolidationtx(plan, {"change_address": change})
+        tx = node.decodepsbt(cons["psbt"])["tx"]
+        assert_equal(sorted((i["txid"], i["vout"]) for i in tx["vin"]), named)
+        assert_equal([o["scriptPubKey"]["address"] for o in tx["vout"]], [change])
+        assert_raises_rpc_error(-4, "estimated fee exceeds fee_ceiling", wallet.createconsolidationtx,
+                                plan, {"change_address": change, "fee_ceiling": Decimal("0.00000001")})
+
 
 if __name__ == "__main__":
     WalletBcp1PlanInputsTest(__file__).main()

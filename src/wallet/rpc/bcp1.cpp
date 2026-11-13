@@ -1321,8 +1321,13 @@ RPCHelpMan createconsolidationtx()
             UniValue options{UniValue::VOBJ};
             if (request.params[0].isObject()) {
                 options = request.params[0];
-            } else if (request.params[1].isObject()) {
-                options = request.params[1];
+            }
+            // The options argument also applies next to a plan object in the first
+            // argument (the help names this pair); its keys win, as in createexchangebatch.
+            if (request.params[1].isObject()) {
+                for (const std::string& key : request.params[1].getKeys()) {
+                    options.pushKV(key, request.params[1][key]);
+                }
             }
             if (request.params[0].isStr()) {
                 options.pushKV("change_address", request.params[0].get_str());
