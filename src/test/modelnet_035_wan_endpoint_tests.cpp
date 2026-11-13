@@ -3,6 +3,8 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <modelnet/realm_channel.h>
+#include <modelnet/swarm_evolution.h>
+#include <modelnet/workspace_git.h>
 #include <crypto/hex_base.h>
 #include <crypto/sha384.h>
 #include <span.h>
@@ -18,6 +20,11 @@
 #include <string>
 #include <sys/stat.h>
 #include <vector>
+
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_035_wan_endpoint_tests, BasicTestingSetup)
 
@@ -655,5 +662,76 @@ BOOST_AUTO_TEST_CASE(bandwidth_caps_and_window)
     BOOST_CHECK_EQUAL(err, "BTX035_LIMIT_EXCEEDED");
     BOOST_CHECK_EQUAL(budget.AdmittedGlobal(), static_cast<uint64_t>(100));
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(short_writes_preserve_existing_workspace_and_streamed_files)
+{
+    const fs::path source = m_path_root / "stream-source";
+    const fs::path retained = m_path_root / "stream-retained";
+    const fs::path archive = m_path_root / "stream.tar";
+    BOOST_REQUIRE(fs::create_directory(source));
+    WriteFile(source / "checkpoint.bin", "prior");
+
+    modelnet::RealmRollout rollout;
+    modelnet::WorkspaceGit workspace(m_path_root / "workspace");
+    std::string err;
+    const std::vector<unsigned char> next(24577, 'n');
+    auto save_workspace = [&] { return workspace.Write("alpha", 1, "data", next, err); };
+    auto save_retained = [&] { return modelnet::SwarmRetain(source, retained, err); };
+    auto save_archive = [&] { return rollout.WritePortableArchive(source, archive, err); };
+    BOOST_REQUIRE(workspace.Create("alpha", err));
+    BOOST_REQUIRE(workspace.Write("alpha", 1, "data", {'o', 'l', 'd'}, err));
+    const auto previous_book = workspace.ExportPublic("alpha");
+    const fs::path workspace_file = m_path_root / "workspace" / "alpha" / "data";
+    BOOST_REQUIRE(save_retained());
+    BOOST_REQUIRE(save_archive());
+    const auto previous_archive = FileText(archive);
+    WriteFile(source / "checkpoint.bin", std::string(next.size(), 'n'));
+
+    struct FileLimit {
+        struct rlimit original {};
+        decltype(std::signal(SIGXFSZ, SIG_IGN)) handler{SIG_ERR};
+        ~FileLimit()
+        {
+            if (handler == SIG_ERR) return;
+            ::setrlimit(RLIMIT_FSIZE, &original);
+            std::signal(SIGXFSZ, handler);
+        }
+    };
+    bool workspace_ok, retained_ok, archive_ok;
+    {
+        FileLimit limit;
+        BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &limit.original) == 0);
+        limit.handler = std::signal(SIGXFSZ, SIG_IGN);
+        BOOST_REQUIRE(limit.handler != SIG_ERR);
+        struct rlimit shortened{limit.original};
+        shortened.rlim_cur = 8;
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &shortened) == 0);
+        workspace_ok = save_workspace();
+        retained_ok = save_retained();
+        archive_ok = save_archive();
+    }
+    BOOST_CHECK(!workspace_ok);
+    BOOST_CHECK(!retained_ok);
+    BOOST_CHECK(!archive_ok);
+    BOOST_CHECK_EQUAL(FileText(workspace_file), "old");
+    BOOST_CHECK_EQUAL(workspace.ExportPublic("alpha"), previous_book);
+    BOOST_CHECK_EQUAL(FileText(retained / "checkpoint.bin"), "prior");
+    BOOST_CHECK(FileText(archive) == previous_archive);
+
+    BOOST_REQUIRE(save_workspace());
+    BOOST_REQUIRE(save_retained());
+    BOOST_REQUIRE(save_archive());
+    BOOST_CHECK_EQUAL(FileText(workspace_file), std::string(next.size(), 'n'));
+    BOOST_CHECK_NE(workspace.ExportPublic("alpha"), previous_book);
+    BOOST_CHECK_EQUAL(FileText(retained / "checkpoint.bin"), std::string(next.size(), 'n'));
+    std::vector<std::string> members;
+    BOOST_REQUIRE(rollout.ReadPortableArchive(archive, members, err));
+    BOOST_CHECK(members == std::vector<std::string>{"checkpoint.bin"});
+    for (const auto& entry : fs::recursive_directory_iterator(m_path_root)) {
+        BOOST_CHECK(!entry.path().filename().string().starts_with(".btx-export-"));
+    }
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()
