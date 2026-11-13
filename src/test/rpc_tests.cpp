@@ -1209,6 +1209,61 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_model_search_text_or_object)
     }
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_model_plane_request_objects)
+{
+    // The server types "request" of these RPCs as an object. btx-cli must send
+    // a JSON object as an object (setcloudstorage refuses a string), while a
+    // plain id or other text stays a string for the handlers that take one.
+    const char* const methods[]{
+        "acceptbountyappointment", "approvebountyaward", "cancelbountyevaluation", "commitbountysubmission",
+        "createagentmandate", "createbountychallenge", "createbountydraft", "deletebountydraft",
+        "freezebountyfundinground", "getagentactivity", "getagentmandate", "getbounty", "getbountyaward",
+        "getbountycapabilities", "getbountydraft", "getbountyeconomy", "getbountyevaluationjob",
+        "getbountyevents", "getbountyfunding", "getbountysubmission", "getbountyterms", "getcloudstorageinfo",
+        "getmodelbounties", "getmodelchannel", "getmodelevents", "getmodeleventsequence", "getmodelmirror",
+        "getmodelprofile", "getmodelwatch", "getmodelwatchactions", "listbountychallenges", "listbountydrafts",
+        "listbountyevaluations", "listbountyevaluators", "listbountysubmissions", "listmodelchannels",
+        "listmodelwatches", "modelsecurity", "nominatebountyevaluator", "observemodelchannel", "pledgebounty",
+        "preparebountyevaluation", "proposebountyaward", "publishbounty", "publishbountyevaluation",
+        "reservemandate", "resolvebountychallenge", "revealbountysubmission", "revisebounty",
+        "revokeagentmandate", "runbountyevaluation", "searchbounties", "setcloudstorage", "testcloudstorage",
+        "unwatchbounty", "unwatchmodel", "updatebountydraft", "validatebountyterms", "waitformodelevent",
+        "watchbounty", "watchmodel", "watchmodelcollection", "watchmodelpublisher", "watchmodelquery",
+        "withdrawbountypledge", "withdrawbountysubmission",
+    };
+    const std::string object{R"({"endpoint":"http://127.0.0.1:9","bucket":"b"})"};
+    for (const char* method : methods) {
+        BOOST_TEST_CONTEXT(method) {
+            const UniValue positional = RPCConvertValues(method, {object});
+            const UniValue named = RPCConvertNamedValues(method, {"request=" + object});
+            BOOST_CHECK(positional[0].isObject());
+            BOOST_CHECK(named["request"].isObject());
+            BOOST_CHECK_EQUAL(positional[0].write(), object);
+            for (const std::string text : {"b3f1c0de", "70", R"(["x"])", "{not-json"}) {
+                const UniValue p = RPCConvertValues(method, {text});
+                const UniValue n = RPCConvertNamedValues(method, {"request=" + text});
+                BOOST_CHECK(p[0].isStr() && p[0].get_str() == text);
+                BOOST_CHECK(n["request"].isStr() && n["request"].get_str() == text);
+            }
+        }
+    }
+    const UniValue lab = RPCConvertValues("lab035", {"lab035.git.digest", R"({"kind":"blob"})"});
+    BOOST_CHECK(lab[0].isStr());
+    BOOST_CHECK(lab[1].isObject());
+    BOOST_CHECK(RPCConvertValues("lab035", {"lab035.git.digest", "{not-json"})[1].isStr());
+
+    // These feed queries are read only as an object; the helper ignores a
+    // string query and answers with the defaults. Other text stays text.
+    for (const char* method : {"getmodelfeed", "getreleasefeed", "getfundablemodels", "getrecentlyunlockedmodels"}) {
+        BOOST_TEST_CONTEXT(method) {
+            BOOST_CHECK(RPCConvertValues(method, {R"({"limit":5})"})[0].isObject());
+            BOOST_CHECK(RPCConvertNamedValues(method, {R"(query={"limit":5})"})["query"].isObject());
+            BOOST_CHECK(RPCConvertValues(method, {"NETWORK"})[0].isStr());
+            BOOST_CHECK(RPCConvertNamedValues(method, {"query=NETWORK"})["query"].isStr());
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rpc_getblockstats_calculate_percentiles_by_weight)
 {
     int64_t total_weight = 200;
