@@ -34,17 +34,13 @@ EXCEPTIONS = {
         'std::ofstream out(PathToString(dir / "lab.json"), std::ios::binary);',  # Deliberate corruption fixture.
     ),
     "src/modelnet/package_channel.cpp": (),
-    "src/modelnet/realm_channel.cpp": (
-        "std::ofstream out(destination, std::ios::binary | std::ios::trunc);",  # Test archive writer.
-    ),
+    "src/modelnet/realm_channel.cpp": (),
     "src/modelnet/store.cpp": (
         "std::ofstream out(tmp, std::ios::binary | std::ios::trunc);",  # Existing staging paths.
         "std::ofstream out(tmp, std::ios::trunc);",
         "std::ofstream out(tmp, std::ios::trunc);",
     ),
-    "src/modelnet/swarm_evolution.cpp": (
-        "std::ofstream out(to, std::ios::binary | std::ios::trunc);",  # Current callers are tests.
-    ),
+    "src/modelnet/swarm_evolution.cpp": (),
     "src/modelnet/workspace_git.cpp": (),
     "src/node/attested_utxo_snapshot.cpp": (
         'FILE* coins_file{fsbridge::fopen(coins_tmp, "wb")};',  # Checked scratch serialization, validation scope.

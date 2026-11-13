@@ -7,6 +7,8 @@
 
 #include <util/fs.h>
 
+#include <cstdio>
+#include <functional>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -28,5 +30,8 @@ bool WriteBinaryFile(const fs::path &filename, const std::string &data);
 
 //! Sync and close the staged file before replacement, then attempt to sync its parent directory.
 bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data);
+
+//! Write to a staged binary file. The callback returns false on write failure and must not close it.
+bool WriteBinaryFileAtomically(const fs::path& filename, const std::function<bool(std::FILE*)>& write);
 
 #endif // BITCOIN_UTIL_READWRITEFILE_H

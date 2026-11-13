@@ -54,6 +54,13 @@ bool WriteBinaryFile(const fs::path &filename, const std::string &data)
 
 bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data)
 {
+    return WriteBinaryFileAtomically(filename, [data](std::FILE* file) {
+        return data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size();
+    });
+}
+
+bool WriteBinaryFileAtomically(const fs::path& filename, const std::function<bool(std::FILE*)>& write)
+{
     std::error_code ec;
     const auto status = fs::symlink_status(filename, ec);
     if (ec && ec != std::errc::no_such_file_or_directory) return false;
@@ -63,8 +70,14 @@ bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data)
     const fs::path tmp = filename.parent_path() / fs::PathFromString(".btx-export-" + std::to_string(rng.rand64()) + ".tmp");
     FILE* file = fsbridge::fopen(tmp, "wbx");
     if (!file) return false;
-    const bool written = data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size();
-    const bool committed = written && FileCommit(file);
+    bool committed;
+    try {
+        committed = write(file) && FileCommit(file);
+    } catch (...) {
+        std::fclose(file);
+        fs::remove(tmp, ec);
+        throw;
+    }
     const bool closed = std::fclose(file) == 0;
     ec.clear();
 #ifndef WIN32
