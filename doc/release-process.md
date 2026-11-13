@@ -48,7 +48,9 @@ Release Process
   only `OPENSSL_3.0.0` and its `libcrypto.so.3` up to `OPENSSL_3.0.9`); a Windows
   `.exe`/`.dll` imports a DLL that is neither a Windows system DLL nor next to
   it (`libgomp-1.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` must ship
-  beside `btxd.exe`); a Mach-O has ML-DSA keygen but does not define
+  beside `btxd.exe`); a Mach-O dependency or runpath points outside system
+  libraries and dyld-relative paths (every bundled image and universal slice
+  is inspected); a thin 64-bit Mach-O has ML-DSA keygen but does not define
   `_btx_mldsa_randombytes` (the 17c2da89 rename; six files in the official
   v0.34.15 macOS archive fail this); a member is not `root:root`, is
   group/world-writable, or a directory is empty.
