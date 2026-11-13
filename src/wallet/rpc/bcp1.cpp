@@ -547,6 +547,16 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
         for (const COutput& c : all) {
             if (cc.IsSelected(c.outpoint)) selected.push_back(c);
         }
+        // A named input that the listing leaves out (locked, below minconf or
+        // min_amount, or spent) stays selected and would be spent by the
+        // transaction outside the plan total, as a second output. Refuse it.
+        for (const COutPoint& named : cc.ListSelected()) {
+            if (std::none_of(selected.begin(), selected.end(), [&](const COutput& c) { return c.outpoint == named; })) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                    strprintf("plan input %s:%u is not spendable here (locked, below minconf or min_amount, or spent)",
+                              named.hash.GetHex(), named.n));
+            }
+        }
     }
     UniValue plan(UniValue::VOBJ);
     UniValue ins(UniValue::VARR);
