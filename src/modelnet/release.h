@@ -71,7 +71,11 @@ bool SignReleaseCampaign(ReleaseCampaign& c, Span<const unsigned char> sk, std::
 bool VerifyReleaseCampaign(const ReleaseCampaign& c, std::string& err);
 UniValue CampaignToJson(const ReleaseCampaign& c);
 bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err);
-bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err);
+/** Load campaigns.json. Returns false when the file exists but is not a campaign list.
+ *  An entry that cannot be read is skipped; its release_id, when it has one, is added
+ *  to skipped_release_ids. */
+bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err,
+                   std::vector<std::string>* skipped_release_ids = nullptr);
 bool SaveCampaigns(const fs::path& dir, const std::vector<ReleaseCampaign>& campaigns, std::string& err);
 
 /** Most campaigns a CampaignIndex holds; the search index and the feed hold as many records. */

@@ -285,4 +285,66 @@ BOOST_AUTO_TEST_CASE(feed_reads_do_not_save_an_older_pledge)
 }
 #endif // WIN32
 
+// A campaigns.json that is there but cannot be read used to load as an empty
+// list. The helper then found no campaign for its own release and served the
+// plaintext of a release that was still being funded.
+BOOST_AUTO_TEST_CASE(loadcampaigns_reports_a_file_that_cannot_be_read)
+{
+    const fs::path dir = m_path_root / "release-campaigns-unreadable";
+    fs::create_directories(dir);
+    std::string err;
+    std::vector<ReleaseCampaign> out;
+    BOOST_CHECK(LoadCampaigns(dir, out, err));
+    BOOST_CHECK(out.empty());
+    for (const std::string text : {"", "{", "[]", "{}", R"({"campaigns":5})"}) {
+        BOOST_TEST_CONTEXT(text) {
+            {
+                std::ofstream f(dir / "campaigns.json", std::ios::trunc);
+                f << text;
+            }
+            err.clear();
+            BOOST_CHECK(!LoadCampaigns(dir, out, err));
+            BOOST_CHECK(!err.empty());
+            BOOST_CHECK(out.empty());
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(loadcampaigns_names_the_entries_it_skips)
+{
+    const fs::path dir = m_path_root / "release-campaigns-skipped";
+    fs::create_directories(dir);
+    std::string err;
+    ReleaseCampaign a;
+    BOOST_REQUIRE(Digest48::FromHex(std::string(96, 'a'), a.release_id, err));
+    a.target_atoms = 111;
+    BOOST_REQUIRE(SaveCampaigns(dir, {a}, err));
+
+    UniValue file;
+    {
+        std::ifstream in(dir / "campaigns.json");
+        const std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        BOOST_REQUIRE(file.read(raw));
+    }
+    UniValue bad(UniValue::VOBJ);
+    bad.pushKV("release_id", std::string(96, 'B'));
+    bad.pushKV("target_atoms", "not a number");
+    UniValue campaigns = file["campaigns"];
+    campaigns.push_back(bad);
+    UniValue rewritten(UniValue::VOBJ);
+    rewritten.pushKV("campaigns", campaigns);
+    {
+        std::ofstream f(dir / "campaigns.json", std::ios::trunc);
+        f << rewritten.write();
+    }
+
+    std::vector<ReleaseCampaign> out;
+    std::vector<std::string> skipped;
+    BOOST_CHECK(LoadCampaigns(dir, out, err, &skipped));
+    BOOST_REQUIRE_EQUAL(out.size(), 1U);
+    BOOST_CHECK(out[0].release_id == a.release_id);
+    BOOST_REQUIRE_EQUAL(skipped.size(), 1U);
+    BOOST_CHECK_EQUAL(skipped[0], std::string(96, 'b'));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
