@@ -7516,6 +7516,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             AfterIndexPut(rec, ConnNowMs());
+            // Aliases live only in the search index; save it as hidesearchmodel does,
+            // or the change is gone after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7660,6 +7664,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             AfterIndexPut(rec, ConnNowMs());
+            // Aliases live only in the search index; save it as hidesearchmodel does,
+            // or the change is gone after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7986,6 +7994,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         if (!existing->signed_ok) {
             g_search_idx.Hide(id, true);
+            // Saved as hidesearchmodel does, or the record comes back after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
             result.pushKV("schema_version", 2);
             result.pushKV("tombstone", false);
             result.pushKV("hidden_local", true);
@@ -8015,6 +8026,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err_code = "REJECTED";
             return false;
         }
+        std::string save_err;
+        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         result.pushKV("schema_version", 2);
         result.pushKV("tombstone", true);
         result.pushKV("guaranteed_global_delete", false);
@@ -8054,6 +8067,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 AfterIndexPut(rec, ConnNowMs());
                 ++ok;
             }
+        }
+        if (ok > 0) {
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         }
         result.pushKV("schema_version", 2);
         result.pushKV("imported", ok);
