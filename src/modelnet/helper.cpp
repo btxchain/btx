@@ -13110,7 +13110,13 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             std::chrono::steady_clock::now() - last_watch >= std::chrono::seconds(5)) {
             UniValue wres;
             std::string werr;
-            ScanWatchDir(cat, wres, werr, {}, stop);
+            // A file in the watch folder must not end the helper; the RPC path
+            // (scanmodelwatch) is already covered by DispatchHelperRpc.
+            try {
+                ScanWatchDir(cat, wres, werr, {}, stop);
+            } catch (const std::exception& e) {
+                LogPrintf("btx-modeld: watch folder scan failed: %s\n", e.what());
+            }
             last_watch = std::chrono::steady_clock::now();
         }
         if (std::chrono::steady_clock::now() - last_records_save >= std::chrono::seconds(RECORDS_SAVE_INTERVAL_S)) {
