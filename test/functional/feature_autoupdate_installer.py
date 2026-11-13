@@ -674,7 +674,9 @@ def test_macos_packaged_daemon_identity():
         run(["cc", str(source), "-o", str(executable)], timeout=20)
         unrelated = root / "btxd.real"
         shutil.copy2(executable, unrelated)
-        node = subprocess.Popen([str(executable), "-regtest"])
+        datadir = root / "data with spaces"
+        residual = '-uacomment=two words "quoted"'
+        node = subprocess.Popen([str(executable), "-regtest", f"-datadir={datadir}", residual])
         other = subprocess.Popen([str(unrelated), "-regtest"])
         try:
             result = subprocess.run([
@@ -683,10 +685,13 @@ set -eu
 source "$1"
 [[ "$(extract_runtime_flags "$2" --packaged-executable)" == "$4" ]]
 require_btxd_like_process "$2"
+flags=$(extract_runtime_flags "$2")
+printf '%s\n' "$flags" | grep -Fx "DATADIR=$5"
+printf '%s\n' "$flags" | grep -Fx "RESIDUAL=$6"
 if require_btxd_like_process "$3" >/dev/null 2>&1; then
     exit 2
 fi
-""", "packaged-identity", str(INSTALLER), str(node.pid), str(other.pid), str(executable),
+""", "packaged-identity", str(INSTALLER), str(node.pid), str(other.pid), str(executable), str(datadir), residual,
             ], capture_output=True, text=True, timeout=10)
             assert_success(result)
         finally:
