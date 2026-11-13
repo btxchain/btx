@@ -201,6 +201,7 @@ BASE_SCRIPTS = [
     'wallet_shielded_postfork_privacy.py',
     'wallet_shielded_rpc_surface.py',
     'wallet_shielded_viewingkey_rescan.py',
+    'wallet_shielded_blank_birth_time.py --descriptors',
     'wallet_shielded_psbt.py --descriptors',
     'wallet_shielded_psbt_3of3.py --descriptors',
     'wallet_shielded_transfer_builder.py --descriptors',
