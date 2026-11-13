@@ -15,7 +15,7 @@
 
 #include <cstdint>
 #include <string>
-#include <sys/stat.h>
+#include <system_error>
 #include <vector>
 
 namespace modelnet {
@@ -210,10 +210,10 @@ BOOST_AUTO_TEST_CASE(jit_mat_05_unsafe_hardlink)
     BOOST_CHECK_EQUAL(std::string(snap.begin(), snap.end()), original);
     BOOST_CHECK(std::string(snap.begin(), snap.end()) != "MUTATED-OPERATOR");
 
-    struct stat st_src {}, st_dst {};
-    BOOST_REQUIRE_EQUAL(::stat(fs::PathToString(src).c_str(), &st_src), 0);
-    BOOST_REQUIRE_EQUAL(::stat(fs::PathToString(dest).c_str(), &st_dst), 0);
-    BOOST_CHECK(st_src.st_ino != st_dst.st_ino);
+    std::error_code identity_error;
+    const bool same_file = fs::equivalent(src, dest, identity_error);
+    BOOST_REQUIRE_MESSAGE(!identity_error, identity_error.message());
+    BOOST_CHECK(!same_file);
     BOOST_CHECK(!FuseMountDirectory(fs::PathToString(m_path_root), "jit-mat-05-snap.bin", {std::vector<unsigned char>(snap.begin(), snap.end())},
                                     {true}, gen, err_code, err));
     BOOST_CHECK_EQUAL(err_code, "OVERWRITE_REFUSED");
