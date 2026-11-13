@@ -371,6 +371,35 @@ BOOST_AUTO_TEST_CASE(model_01_10_adversarial_safetensors_gguf_pickle_encrypted)
     BOOST_CHECK_EQUAL(modelnet::QualifyBytes("x.safetensors", miss, report),
                       modelnet::QualResult::INVALID_MODEL);
 
+    // A header field of the wrong type or range is an invalid model, not an
+    // exception: the watch folder qualifies files outside any RPC.
+    const auto with_header = [](const std::string& h, size_t body) {
+        std::vector<unsigned char> f(8 + h.size() + body, 0);
+        WriteLE64(f.data(), h.size());
+        std::memcpy(f.data() + 8, h.data(), h.size());
+        return f;
+    };
+    for (const std::string h : {
+             R"({"t":{"dtype":"F32","shape":["x"],"data_offsets":[0,4]}})",
+             R"({"t":{"dtype":"F32","shape":[-1],"data_offsets":[0,4]}})",
+             R"({"t":{"dtype":"F32","shape":[1.5],"data_offsets":[0,4]}})",
+             R"({"t":{"dtype":"F32","shape":[1],"data_offsets":["0",4]}})",
+             R"({"t":{"dtype":"F32","shape":[1],"data_offsets":[-1,4]}})",
+             R"({"t":{"dtype":"F32","shape":[1],"data_offsets":{"a":0,"b":4}}})",
+         }) {
+        BOOST_TEST_CONTEXT(h) {
+            const auto f = with_header(h, 4);
+            modelnet::QualResult r{};
+            BOOST_CHECK_NO_THROW(r = modelnet::QualifyBytes("x.safetensors", f, report));
+            BOOST_CHECK_EQUAL(r, modelnet::QualResult::INVALID_MODEL);
+        }
+    }
+    // A file that is only a header, with an end offset close to 2^64: the sum
+    // 8 + hlen + end wrapped below the file size and the file was verified.
+    const auto header_only = with_header(R"({"t":{"dtype":"F32","shape":[1],"data_offsets":[0,18446744073709551615]}})", 0);
+    BOOST_CHECK_EQUAL(modelnet::QualifyBytes("x.safetensors", header_only, report),
+                      modelnet::QualResult::INVALID_MODEL);
+
     std::vector<unsigned char> gguf(24, 0);
     std::memcpy(gguf.data(), "GGUF", 4);
     WriteLE32(gguf.data() + 4, 3);
