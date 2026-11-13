@@ -65,6 +65,12 @@ namespace wallet {
 static const std::string WALLET_PASSPHRASE_NOT_INCLUDED_WARNING{
     "Wallet passphrase is not stored in this backup bundle. Keep the original wallet passphrase separately; any archive passphrase only protects the exported backup container."};
 
+static const std::string WALLET_BUNDLE_PLAINTEXT_PRIVATE_DESCRIPTORS_WARNING{
+    "listdescriptors_private.json in this bundle holds the wallet's private descriptors, including its PQ seeds, in plaintext. The wallet encryption does not protect that file: anyone who can read it can spend this wallet's funds without the wallet passphrase."};
+
+static const std::string WALLET_ARCHIVE_PLAINTEXT_PRIVATE_DESCRIPTORS_WARNING{
+    "listdescriptors_private.json in this archive holds the wallet's private descriptors, including its PQ seeds, in plaintext under the archive encryption only. The wallet encryption does not protect that file: anyone with this archive and its archive passphrase can spend this wallet's funds without the wallet passphrase."};
+
 static const std::string WALLET_ARCHIVE_RESTORE_PASSPHRASE_WARNING{
     "The archive passphrase only decrypted the backup bundle. This restored encrypted wallet still requires its original wallet passphrase before funds can be spent."};
 
@@ -266,18 +272,30 @@ static void EnsureFreshDirectory(const fs::path& path)
     SetOwnerOnlyPermissions(path, /*is_directory=*/true);
 }
 
-static void WriteTextFile(const fs::path& path, const std::string& content)
+//! Write a whole file or throw. These files are a backup, and a .btxwallet
+//! holds the PQ master seed: a buffered write that fails only at close (a full
+//! disk) must not be reported as written. fwrite, the flush and sync, and the
+//! close are all checked, and a short file is removed.
+static void WriteWholeFile(const fs::path& path, Span<const unsigned char> data)
 {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
+    FILE* file = fsbridge::fopen(path, "wb");
+    if (file == nullptr) {
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to open %s for writing", fs::PathToString(path)));
     }
-    out.write(content.data(), content.size());
-    if (!out.good()) {
+    SetOwnerOnlyPermissions(path, /*is_directory=*/false);
+    const bool written{data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{std::fclose(file) == 0};
+    if (!committed || !closed) {
+        std::error_code ec;
+        fs::remove(path, ec);
         throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to write %s", fs::PathToString(path)));
     }
-    out.close();
-    SetOwnerOnlyPermissions(path, /*is_directory=*/false);
+}
+
+static void WriteTextFile(const fs::path& path, const std::string& content)
+{
+    WriteWholeFile(path, MakeUCharSpan(content));
 }
 
 static void WriteJsonFile(const fs::path& path, const UniValue& value)
@@ -614,7 +632,7 @@ static std::vector<RPCResult> WalletBundleManifestDoc()
         {RPCResult::Type::BOOL, "unlocked_by_rpc", "Whether the RPC temporarily unlocked and relocked the wallet"},
         {RPCResult::Type::BOOL, "wallet_encrypted", "Whether the restored wallet file remains encrypted"},
         {RPCResult::Type::BOOL, "wallet_passphrase_included", "Always false; wallet bundles do not store the wallet passphrase"},
-        {RPCResult::Type::BOOL, "wallet_passphrase_required_to_spend", "Whether the original wallet passphrase is needed after restore before funds can be spent"},
+        {RPCResult::Type::BOOL, "wallet_passphrase_required_to_spend", "Whether every bundled file that can spend funds needs the original wallet passphrase. False when private descriptors were exported: listdescriptors_private.json holds them in plaintext"},
         {RPCResult::Type::BOOL, "integrity_ok", "Whether the captured integrity snapshot passed"},
         {RPCResult::Type::ARR, "integrity_warnings", "Warnings from the captured integrity snapshot", {
             {RPCResult::Type::STR, "", "Warning message"},
@@ -666,7 +684,10 @@ static UniValue BuildWalletIntegrityResult(CWallet& wallet)
     out.pushKV("scan_height", report.scan_height);
     out.pushKV("scan_incomplete", report.scan_incomplete);
 
-    if (!report.master_seed_available) {
+    // Shielded keys need an encrypted wallet, so an unencrypted wallet has no
+    // shielded master seed to check.
+    const bool master_seed_expected = wallet.IsCrypted() || report.total_keys > 0;
+    if (master_seed_expected && !report.master_seed_available) {
         warnings.push_back("Master seed is not available — spending keys cannot be derived. Wallet may be locked or seed was not persisted.");
     }
     if (report.spending_keys_missing > 0) {
@@ -708,7 +729,10 @@ static UniValue BuildWalletIntegrityResult(CWallet& wallet)
             }
 
             std::vector<unsigned char> seed;
-            if (batch.ReadPQDescriptorSeed(desc_spkm->GetID(), seed) && seed.size() == 32) {
+            uint256 iv;
+            // An encrypted wallet keeps only the ciphertext record.
+            if ((batch.ReadPQDescriptorSeed(desc_spkm->GetID(), seed) && seed.size() == 32) ||
+                (batch.ReadCryptedPQDescriptorSeed(desc_spkm->GetID(), iv, seed) && !seed.empty())) {
                 ++pq_report.with_seed;
                 if (seed_capable) {
                     ++pq_report.seed_capable_with_seed;
@@ -739,7 +763,7 @@ static UniValue BuildWalletIntegrityResult(CWallet& wallet)
     }
 
     const bool integrity_ok = report.spending_keys_missing == 0 &&
-                              report.master_seed_available &&
+                              (!master_seed_expected || report.master_seed_available) &&
                               !report.scan_incomplete &&
                               (private_keys_disabled || pq_report.missing_local_seed == 0);
     out.pushKV("integrity_ok", integrity_ok);
@@ -833,6 +857,7 @@ struct WalletBundleExportArtifacts
     std::vector<std::string> warnings;
     UniValue integrity{UniValue::VOBJ};
     bool unlocked_by_rpc{false};
+    bool private_descriptors_exported{false};
 };
 
 struct WalletBundleArchiveExportArtifacts
@@ -842,6 +867,7 @@ struct WalletBundleArchiveExportArtifacts
     std::vector<std::string> warnings;
     UniValue integrity{UniValue::VOBJ};
     bool unlocked_by_rpc{false};
+    bool private_descriptors_exported{false};
 };
 
 class ScopedCleanupDirectory
@@ -901,16 +927,7 @@ static fs::path CreateUniqueTempFilePath(const fs::path& parent,
 
 static void WriteBinaryFile(const fs::path& path, Span<const unsigned char> data)
 {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to open %s for writing", fs::PathToString(path)));
-    }
-    out.write(reinterpret_cast<const char*>(data.data()), data.size());
-    if (!out.good()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Failed to write %s", fs::PathToString(path)));
-    }
-    out.close();
-    SetOwnerOnlyPermissions(path, /*is_directory=*/false);
+    WriteWholeFile(path, data);
 }
 
 static void WriteBinaryFileAtomically(const fs::path& path, Span<const unsigned char> data)
@@ -1061,7 +1078,7 @@ static UniValue BuildWalletBundleManifest(const CWallet& wallet,
     manifest.pushKV("unlocked_by_rpc", unlocked_by_rpc);
     manifest.pushKV("wallet_encrypted", wallet.IsCrypted());
     manifest.pushKV("wallet_passphrase_included", false);
-    manifest.pushKV("wallet_passphrase_required_to_spend", wallet.IsCrypted());
+    manifest.pushKV("wallet_passphrase_required_to_spend", wallet.IsCrypted() && !include_private_descriptors);
     manifest.pushKV("integrity_ok", integrity["integrity_ok"].get_bool());
 
     UniValue integrity_warnings(UniValue::VARR);
@@ -1101,8 +1118,12 @@ static WalletBundleExportArtifacts ExportWalletBundleToDirectory(CWallet& wallet
     WalletBundleExportArtifacts artifacts;
     artifacts.bundle_dir = bundle_dir;
     artifacts.unlocked_by_rpc = unlock_session.UnlockedByRPC();
+    artifacts.private_descriptors_exported = include_private_descriptors;
     if (wallet.IsCrypted()) {
         artifacts.warnings.push_back(WALLET_PASSPHRASE_NOT_INCLUDED_WARNING);
+        if (include_private_descriptors) {
+            artifacts.warnings.push_back(WALLET_BUNDLE_PLAINTEXT_PRIVATE_DESCRIPTORS_WARNING);
+        }
     }
     const auto note_file = [&](const fs::path& path) {
         artifacts.files_written.push_back(fs::PathToString(fs::absolute(path)));
@@ -1223,8 +1244,12 @@ static WalletBundleArchiveExportArtifacts ExportWalletBundleToArchivePayload(
 
     WalletBundleArchiveExportArtifacts artifacts;
     artifacts.unlocked_by_rpc = unlock_session.UnlockedByRPC();
+    artifacts.private_descriptors_exported = include_private_descriptors;
     if (wallet.IsCrypted()) {
         artifacts.warnings.push_back(WALLET_PASSPHRASE_NOT_INCLUDED_WARNING);
+        if (include_private_descriptors) {
+            artifacts.warnings.push_back(WALLET_ARCHIVE_PLAINTEXT_PRIVATE_DESCRIPTORS_WARNING);
+        }
     }
 
     WalletBundleArchivePayload payload;
@@ -1794,6 +1819,8 @@ RPCHelpMan exportwalletbundle()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // It reads or writes a server-side file the caller names.
+    EnsureNotWalletRestricted(request);
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
     CWallet& wallet{*pwallet};
@@ -3233,9 +3260,13 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
             throw JSONRPCError(RPC_WALLET_ERROR, "Combo descriptors cannot be set to active");
         }
 
-        // If the wallet disabled private keys, abort if private keys exist
-        if (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && !keys.keys.empty()) {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Cannot import private keys to a wallet with private keys disabled");
+        // If the wallet disabled private keys, abort if private keys or PQ seeds exist
+        if (wallet.IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+            const bool has_pq_seed = std::any_of(parsed_descs.begin(), parsed_descs.end(),
+                [](const std::unique_ptr<Descriptor>& desc) { return !desc->ExtractAllPQSeeds().empty(); });
+            if (!keys.keys.empty() || has_pq_seed) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Cannot import private keys to a wallet with private keys disabled");
+            }
         }
 
         for (size_t j = 0; j < parsed_descs.size(); ++j) {
@@ -3403,6 +3434,8 @@ RPCHelpMan importwalletbundle()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // It reads or writes a server-side file the caller names.
+    EnsureNotWalletRestricted(request);
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
 
@@ -3844,7 +3877,9 @@ RPCHelpMan backupwalletbundle()
                 "include_viewing_keys defaults to false.\n"
                 "\nIf the wallet is encrypted and locked, provide the passphrase as the second argument or use\n"
                 "btx-cli -stdinwalletpassphrase so the CLI prompts without echoing the passphrase.\n"
-                "The wallet passphrase is never stored in the bundle; keep it separately for restore spending.\n",
+                "The wallet passphrase is never stored in the bundle; keep it separately for restore spending.\n"
+                "listdescriptors_private.json holds the private descriptors, including the PQ seeds, in plaintext,\n"
+                "also for an encrypted wallet. Anyone who can read it can spend without the wallet passphrase.\n",
                 {
                     {"destination", RPCArg::Type::STR, RPCArg::Optional::NO, "A new directory path that will receive the bundle files."},
                     {"wallet_passphrase", RPCArg::Type::STR, RPCArg::DefaultHint{"omit if wallet is already unlocked"}, "Wallet passphrase used for temporary private exports."},
@@ -3859,7 +3894,7 @@ RPCHelpMan backupwalletbundle()
                         {RPCResult::Type::BOOL, "unlocked_by_rpc", "True if the RPC temporarily unlocked and relocked the wallet"},
                         {RPCResult::Type::BOOL, "wallet_encrypted", "Whether the wallet backup remains encrypted"},
                         {RPCResult::Type::BOOL, "wallet_passphrase_included", "Always false; the wallet passphrase is not stored in the bundle"},
-                        {RPCResult::Type::BOOL, "wallet_passphrase_required_to_spend", "Whether the original wallet passphrase is needed after restore before funds can be spent"},
+                        {RPCResult::Type::BOOL, "wallet_passphrase_required_to_spend", "Whether every bundled file that can spend funds needs the original wallet passphrase. False when listdescriptors_private.json was written: it holds the private descriptors in plaintext"},
                         {RPCResult::Type::ARR, "files", "Files written by the bundle export",
                             {{RPCResult::Type::STR, "", "Absolute file path"}}},
                         {RPCResult::Type::ARR, "warnings", "Non-fatal warnings generated while exporting",
@@ -3896,7 +3931,7 @@ RPCHelpMan backupwalletbundle()
     result.pushKV("unlocked_by_rpc", artifacts.unlocked_by_rpc);
     result.pushKV("wallet_encrypted", wallet->IsCrypted());
     result.pushKV("wallet_passphrase_included", false);
-    result.pushKV("wallet_passphrase_required_to_spend", wallet->IsCrypted());
+    result.pushKV("wallet_passphrase_required_to_spend", wallet->IsCrypted() && !artifacts.private_descriptors_exported);
     UniValue out_files(UniValue::VARR);
     for (const auto& file : artifacts.files_written) out_files.push_back(file);
     result.pushKV("files", std::move(out_files));
@@ -3919,7 +3954,10 @@ RPCHelpMan backupwalletbundlearchive()
                 "include_viewing_keys defaults to false.\n"
                 "\nIf the wallet is encrypted and locked, provide the wallet passphrase as the third argument or use\n"
                 "btx-cli -stdinwalletpassphrase. Use btx-cli -stdinbundlepassphrase to enter the archive passphrase\n"
-                "without echoing it. The archive passphrase does not replace the wallet passphrase needed after restore.\n",
+                "without echoing it. The archive passphrase does not replace the wallet passphrase needed after restore.\n"
+                "Inside the archive, listdescriptors_private.json holds the private descriptors, including the PQ seeds,\n"
+                "in plaintext. The archive passphrase is their only protection: whoever has the archive and its\n"
+                "passphrase can spend without the wallet passphrase.\n",
                 {
                     {"destination_archive", RPCArg::Type::STR, RPCArg::Optional::NO, "A new file path that will receive the encrypted archive."},
                     {"archive_passphrase", RPCArg::Type::STR, RPCArg::Optional::NO, "Passphrase used to encrypt the bundle archive."},
@@ -3936,7 +3974,7 @@ RPCHelpMan backupwalletbundlearchive()
                         {RPCResult::Type::BOOL, "unlocked_by_rpc", "True if the RPC temporarily unlocked and relocked the wallet"},
                         {RPCResult::Type::BOOL, "wallet_encrypted", "Whether the wallet backup remains encrypted"},
                         {RPCResult::Type::BOOL, "wallet_passphrase_included", "Always false; the wallet passphrase is not stored in the archive"},
-                        {RPCResult::Type::BOOL, "wallet_passphrase_required_to_spend", "Whether the original wallet passphrase is needed after restore before funds can be spent"},
+                        {RPCResult::Type::BOOL, "wallet_passphrase_required_to_spend", "Whether every archived file that can spend funds needs the original wallet passphrase. False when listdescriptors_private.json is archived: only the archive passphrase protects it"},
                         {RPCResult::Type::ARR, "bundle_files", "Relative bundle paths stored inside the archive",
                             {{RPCResult::Type::STR, "", "Relative file path"}}},
                         {RPCResult::Type::ARR, "warnings", "Non-fatal warnings generated while exporting",
@@ -4004,7 +4042,7 @@ RPCHelpMan backupwalletbundlearchive()
     result.pushKV("unlocked_by_rpc", artifacts.unlocked_by_rpc);
     result.pushKV("wallet_encrypted", wallet->IsCrypted());
     result.pushKV("wallet_passphrase_included", false);
-    result.pushKV("wallet_passphrase_required_to_spend", wallet->IsCrypted());
+    result.pushKV("wallet_passphrase_required_to_spend", wallet->IsCrypted() && !artifacts.private_descriptors_exported);
     UniValue bundle_files(UniValue::VARR);
     for (const auto& file : artifacts.bundle_files) bundle_files.push_back(file);
     result.pushKV("bundle_files", std::move(bundle_files));

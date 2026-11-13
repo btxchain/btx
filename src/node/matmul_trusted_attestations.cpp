@@ -179,6 +179,28 @@ struct DurableBlocklistState {
     }
 };
 
+// Separate key from DurableBlocklistKey so legacy secp-only records stay
+// readable; PQ emergency blocks persist independently.
+struct DurablePqBlocklistKey {
+    static constexpr uint8_t PREFIX{'Q'};
+    uint8_t prefix{PREFIX};
+    uint256 chain_id{};
+
+    SERIALIZE_METHODS(DurablePqBlocklistKey, obj)
+    {
+        READWRITE(obj.prefix, obj.chain_id);
+    }
+};
+
+struct DurablePqBlocklistState {
+    std::vector<std::vector<unsigned char>> blocked{};
+
+    SERIALIZE_METHODS(DurablePqBlocklistState, obj)
+    {
+        READWRITE(obj.blocked);
+    }
+};
+
 // V5/RB-12 durable withdrawal tombstone (adv5): (height, hash) this node's own
 // validated reorg disconnected while its local signer had voted. Seeded into
 // the store's off-active-chain set at startup BEFORE attestations load, so a
@@ -378,15 +400,30 @@ bool LoadBlocklistState(
     DurableBlocklistState state;
     const auto status{g_durable_db->TryRead(
         DurableBlocklistKey{.chain_id = store->ChainId()}, state)};
-    if (status.status == CDBWrapper::ReadStatus::Code::NOT_FOUND) return true;
-    if (status.status != CDBWrapper::ReadStatus::Code::OK) {
+    if (status.status == CDBWrapper::ReadStatus::Code::OK) {
+        std::set<CPubKey> blocked{state.blocked.begin(), state.blocked.end()};
+        if (!store->RestoreRuntimeBlocked(std::move(blocked)) ||
+            !store->PinQuorumReachable()) {
+            error = "persisted attestation blocklist leaves fewer than M unblocked pin members or would block the local signer";
+            return false;
+        }
+    } else if (status.status != CDBWrapper::ReadStatus::Code::NOT_FOUND) {
         error = "failed to read persisted attestation blocklist";
         return false;
     }
-    std::set<CPubKey> blocked{state.blocked.begin(), state.blocked.end()};
-    if (!store->RestoreRuntimeBlocked(std::move(blocked)) ||
-        !store->PinQuorumReachable()) {
-        error = "persisted attestation blocklist leaves fewer than M unblocked pin members or would block the local signer";
+    DurablePqBlocklistState pq_state;
+    const auto pq_status{g_durable_db->TryRead(
+        DurablePqBlocklistKey{.chain_id = store->ChainId()}, pq_state)};
+    if (pq_status.status == CDBWrapper::ReadStatus::Code::OK) {
+        std::set<std::vector<unsigned char>> blocked{
+            pq_state.blocked.begin(), pq_state.blocked.end()};
+        if (!store->RestoreRuntimeBlockedPq(std::move(blocked)) ||
+            !store->PinQuorumReachable()) {
+            error = "persisted attestation PQ blocklist leaves fewer than M unblocked pin members or would block the local signer";
+            return false;
+        }
+    } else if (pq_status.status != CDBWrapper::ReadStatus::Code::NOT_FOUND) {
+        error = "failed to read persisted attestation PQ blocklist";
         return false;
     }
     return true;
@@ -405,6 +442,15 @@ bool PersistBlocklistState(
             DurableBlocklistKey{.chain_id = store->ChainId()},
             state, /*fSync=*/true)) {
         error = "failed to persist attestation blocklist";
+        return false;
+    }
+    DurablePqBlocklistState pq_state;
+    const auto runtime_pq{store->RuntimeBlockedPqSigners()};
+    pq_state.blocked.assign(runtime_pq.begin(), runtime_pq.end());
+    if (!g_durable_db->Write(
+            DurablePqBlocklistKey{.chain_id = store->ChainId()},
+            pq_state, /*fSync=*/true)) {
+        error = "failed to persist attestation PQ blocklist";
         return false;
     }
     return true;
@@ -731,11 +777,15 @@ bool LoadDurablePqAttestations(
                 }
                 continue;
             }
+            // LoadBlocklistState runs first, so a vote a key cast before the
+            // operator blocked it comes back as BlocklistedSigner. Skip it
+            // (the record stays on disk), as the secp256k1 loaders do.
             const auto result{store->AddPq(attestation, key.block_hash, key.height)};
             if (result != matmul::trusted::AddResult::Accepted &&
                 result != matmul::trusted::AddResult::Duplicate &&
                 result != matmul::trusted::AddResult::Capacity &&
-                result != matmul::trusted::AddResult::UntrustedSigner) {
+                result != matmul::trusted::AddResult::UntrustedSigner &&
+                result != matmul::trusted::AddResult::BlocklistedSigner) {
                 error = strprintf("durable PQ hot-cache import rejected: %s",
                                   matmul::trusted::AddResultName(result));
                 return false;
@@ -969,10 +1019,18 @@ std::vector<matmul::trusted::ExactReplayPqAttestation> ReadDurablePqAttestations
 void PersistAfterPqMutation(
     const matmul::trusted::ExactReplayPqAttestation& attestation)
 {
-    std::lock_guard config_lock{g_mutex};
-    if (!g_persist_enabled || g_persist_path.empty()) return;
-    std::string error;
+    // PersistDurablePqAttestations calls Store(), which locks g_mutex, so
+    // g_mutex is held only for the admission check. Taking the io lock first
+    // (the order every other persistence path uses) and keeping it across
+    // the write means ClosePersistence cannot reset the database under a
+    // record admitted here, the same guarantee PersistAfterMutation gives
+    // its queue.
     std::lock_guard io_lock{g_persist_io_mutex};
+    {
+        std::lock_guard config_lock{g_mutex};
+        if (!g_persist_enabled || g_persist_path.empty()) return;
+    }
+    std::string error;
     (void)PersistDurablePqAttestations(Span{&attestation, 1}, error);
 }
 
@@ -1491,11 +1549,25 @@ bool IsBlocked(const CPubKey& pubkey)
     return store && store->IsBlocked(pubkey);
 }
 
+bool IsBlockedPq(const std::vector<unsigned char>& pubkey)
+{
+    auto store{Store()};
+    return store && store->IsBlockedPq(pubkey);
+}
+
 std::vector<CPubKey> BlockedSigners()
 {
     auto store{Store()};
     if (!store) return {};
     const auto blocked{store->BlockedSigners()};
+    return {blocked.begin(), blocked.end()};
+}
+
+std::vector<std::vector<unsigned char>> BlockedPqSigners()
+{
+    auto store{Store()};
+    if (!store) return {};
+    const auto blocked{store->BlockedPqSigners()};
     return {blocked.begin(), blocked.end()};
 }
 
@@ -1534,6 +1606,20 @@ matmul::trusted::BlocklistResult AddBlocklistedSigner(
     auto store{Store()};
     if (!store) return matmul::trusted::BlocklistResult::Invalid;
     const auto result{store->AddBlocklistedSigner(pubkey)};
+    if (result == matmul::trusted::BlocklistResult::Blocked) {
+        std::lock_guard io_lock{g_persist_io_mutex};
+        (void)PersistBlocklistState(store, persist_error);
+    }
+    return result;
+}
+
+matmul::trusted::BlocklistResult AddBlocklistedPqSigner(
+    const std::vector<unsigned char>& pubkey, std::string& persist_error)
+{
+    persist_error.clear();
+    auto store{Store()};
+    if (!store) return matmul::trusted::BlocklistResult::Invalid;
+    const auto result{store->AddBlocklistedPqSigner(pubkey)};
     if (result == matmul::trusted::BlocklistResult::Blocked) {
         std::lock_guard io_lock{g_persist_io_mutex};
         (void)PersistBlocklistState(store, persist_error);

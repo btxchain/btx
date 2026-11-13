@@ -66,6 +66,16 @@ struct WalletMigrationResult;
 using WalletOrderForm = std::vector<std::pair<std::string, std::string>>;
 using WalletValueMap = std::map<std::string, std::string>;
 
+/** An explicitly reserved recovery scan. Keeps the underlying wallet alive.
+ * Cancellation applies only while this operation owns the scan reservation. */
+class WalletRecovery
+{
+public:
+    virtual ~WalletRecovery() = default;
+    virtual void run(unsigned int keypool_size) = 0;
+    virtual void cancel() = 0;
+};
+
 //! Interface for accessing a wallet.
 class Wallet
 {
@@ -93,6 +103,9 @@ public:
 
     //! Abort a rescan.
     virtual void abortRescan() = 0;
+
+    //! Reserve explicit recovery; relock at completion if this action unlocked the wallet.
+    virtual std::unique_ptr<WalletRecovery> createRecovery(bool relock) = 0;
 
     virtual bool canBackupToDbDump() = 0;
 

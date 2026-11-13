@@ -2844,6 +2844,7 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
             // Keep live mempool spends unavailable for reselection until the
             // transaction leaves the mempool or confirms in a block.
             m_pending_spends.insert(nullifier);
+            m_inflight_spends.erase(nullifier);
             spend_view.amount = it->second.note.value;
             spend_view.is_ours = true;
             tx_has_local_visibility = true;
@@ -2858,6 +2859,8 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
         if (note_it != m_notes.end()) {
             m_pending_spends.insert(recovery_spend->nullifier);
             m_pending_spends.insert(note_it->first);
+            m_inflight_spends.erase(recovery_spend->nullifier);
+            m_inflight_spends.erase(note_it->first);
             spend_view.amount = note_it->second.note.value;
             spend_view.is_ours = true;
             tx_has_local_visibility = true;
@@ -3051,6 +3054,7 @@ void CShieldedWallet::Rescan(int start_height)
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_tx_view_cache.clear();
     m_tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     m_last_scanned_height = start_height - 1;
@@ -3067,6 +3071,7 @@ void CShieldedWallet::PruneStalePendingSpends() const
 
     std::vector<Nullifier> stale_pending;
     for (const auto& nf : m_pending_spends) {
+        if (m_inflight_spends.count(nf)) continue;
         if (!NullifierReservedByAnotherMempoolTx(nf)) stale_pending.push_back(nf);
     }
     for (const auto& nf : stale_pending) {
@@ -7183,6 +7188,7 @@ void CShieldedWallet::LoadPersistedState()
     // session. The mempool is empty after a restart, so no in-flight transactions
     // exist that would still need the reservations.
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
 
@@ -7340,6 +7346,7 @@ void CShieldedWallet::LoadPersistedState()
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_recent_ring_exclusions.clear();
     m_tx_view_cache.clear();
     m_tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
@@ -7541,6 +7548,14 @@ void CShieldedWallet::LoadPersistedState()
     }
 }
 
+void CShieldedWallet::LockSpendingKeys()
+{
+    AssertLockHeld(cs_shielded);
+    for (auto& [_, keyset] : m_key_sets) {
+        keyset.spending_key.ClearKeyData();
+    }
+}
+
 bool CShieldedWallet::MaybeRehydrateSpendingKeys()
 {
     AssertLockHeld(cs_shielded);
@@ -7639,6 +7654,23 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
         }
     }
 
+    std::vector<unsigned char> master_seed = GetMasterSeed();
+    ScopedByteVectorCleanse master_seed_cleanse_rehydrate(master_seed);
+    // Keys wiped by LockSpendingKeys() keep spending_key_loaded: their hash was
+    // checked when they were first derived. Derive them again before the note
+    // repair below, which needs them. A lock changes no note, so no rebuild.
+    // A key that no longer derives takes the missing-key path.
+    if (!master_seed.empty()) {
+        for (auto& [_, keyset] : m_key_sets) {
+            if (!keyset.has_spending_key || !keyset.spending_key_loaded || keyset.spending_key.IsValid()) {
+                continue;
+            }
+            if (!DeriveSpendingKeyForKeyset(master_seed, keyset)) {
+                keyset.spending_key_loaded = false;
+            }
+        }
+    }
+
     bool have_missing_spending_keys{false};
     for (const auto& [_, keyset] : m_key_sets) {
         if (keyset.has_spending_key && !keyset.spending_key_loaded) {
@@ -7646,8 +7678,6 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
             break;
         }
     }
-    std::vector<unsigned char> master_seed = GetMasterSeed();
-    ScopedByteVectorCleanse master_seed_cleanse_rehydrate(master_seed);
     if (have_missing_spending_keys && master_seed.empty()) {
         return rehydrated;
     }
@@ -7967,7 +7997,7 @@ CShieldedWallet::KeyIntegrityReport CShieldedWallet::VerifyKeyIntegrity()
     KeyIntegrityReport report;
     report.total_keys = static_cast<int>(m_key_sets.size());
     for (const auto& [addr, ks] : m_key_sets) {
-        if (ks.spending_key_loaded) {
+        if (ks.spending_key_loaded && ks.spending_key.IsValid()) {
             ++report.spending_keys_loaded;
         } else if (ks.has_spending_key) {
             ++report.spending_keys_missing;
@@ -8001,6 +8031,7 @@ void CShieldedWallet::ReservePendingSpends(const std::vector<Nullifier>& nullifi
     AssertLockHeld(cs_shielded);
     for (const auto& nf : nullifiers) {
         m_pending_spends.insert(nf);
+        m_inflight_spends.insert(nf);
     }
 }
 
@@ -8009,6 +8040,7 @@ void CShieldedWallet::ReleasePendingSpends(const std::vector<Nullifier>& nullifi
     AssertLockHeld(cs_shielded);
     for (const auto& nf : nullifiers) {
         m_pending_spends.erase(nf);
+        m_inflight_spends.erase(nf);
     }
 }
 

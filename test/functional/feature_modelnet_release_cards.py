@@ -99,9 +99,10 @@ class ModelnetReleaseCardsTest(BitcoinTestFramework):
         self.generatetoaddress(node, 110, mine)
         hosted = node.hostmodel(path)
         height = node.getblockcount()
+        secret = hashlib.sha256(b"release-key").hexdigest()
         rel = node.createmodelrelease({
             "uri": hosted["uri"],
-            "secret32_hex": hashlib.sha256(b"release-key").hexdigest(),
+            "secret32_hex": secret,
             "refund_height": height + 50,
             "target_atoms": 5_000_000,
             "display_name": "Pretty Beta",
@@ -124,7 +125,12 @@ class ModelnetReleaseCardsTest(BitcoinTestFramework):
         claimant = wallet.exportpqkey(wallet.getnewaddress())["pubkey"]
         refund_pk = wallet.exportpqkey(wallet.getnewaddress())["pubkey"]
         amount = 2_000_000
-        plan = node.preparefundmodelrelease(rid, {
+        # The options form takes explicit terms (help: "Explicit key_hash,
+        # claimant, refund_height, and amount_atoms are required") and runs
+        # the wallet coin selector, so it goes to the wallet endpoint.
+        plan = wallet.preparefundmodelrelease(rid, {
+            "key_hash": hashlib.sha256(bytes.fromhex(secret)).hexdigest(),
+            "refund_height": height + 50,
             "amount_atoms": amount,
             "claimant": claimant,
             "refund_pubkey": refund_pk,

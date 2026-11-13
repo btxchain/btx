@@ -34,9 +34,9 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 #=============================
 set(CLIENT_NAME "BTX")
 set(CLIENT_VERSION_MAJOR 0)
-set(CLIENT_VERSION_MINOR 35)
-set(CLIENT_VERSION_BUILD 0)
-set(CLIENT_VERSION_RC 1)
+set(CLIENT_VERSION_MINOR 34)
+set(CLIENT_VERSION_BUILD 16)
+set(CLIENT_VERSION_RC 0)
 set(CLIENT_VERSION_IS_RELEASE "true")
 set(COPYRIGHT_YEAR "2026")
 
@@ -665,16 +665,8 @@ endif()
 configure_file(cmake/script/Coverage.cmake Coverage.cmake USE_SOURCE_PERMISSIONS COPYONLY)
 configure_file(cmake/script/CoverageFuzz.cmake CoverageFuzz.cmake USE_SOURCE_PERMISSIONS COPYONLY)
 configure_file(cmake/script/CoverageInclude.cmake.in CoverageInclude.cmake USE_SOURCE_PERMISSIONS @ONLY)
-configure_file(cmake/script/CoverageSanitize.cmake.in CoverageSanitize.cmake USE_SOURCE_PERMISSIONS @ONLY)
 configure_file(cmake/script/cov_tool_wrapper.sh.in cov_tool_wrapper.sh.in USE_SOURCE_PERMISSIONS COPYONLY)
 configure_file(contrib/filter-lcov.py filter-lcov.py USE_SOURCE_PERMISSIONS COPYONLY)
-
-if(CMAKE_BUILD_TYPE STREQUAL "Coverage")
-  execute_process(
-    COMMAND ${CMAKE_COMMAND} -P "${PROJECT_BINARY_DIR}/CoverageSanitize.cmake"
-    COMMAND_ERROR_IS_FATAL ANY
-  )
-endif()
 
 # Don't allow extended (non-ASCII) symbols in identifiers. This is easier for code review.
 try_append_cxx_flags("-fno-extended-identifiers" TARGET core_interface SKIP_LINK)

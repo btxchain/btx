@@ -318,7 +318,7 @@ class Scenario:
         stop_process(self.distractor)
         shutil.rmtree(self.tmp)
 
-    def run_installer(self):
+    def run_installer(self, installer=INSTALLER):
         env = os.environ.copy()
         env.update(
             {
@@ -353,7 +353,7 @@ class Scenario:
         env.update(self.extra_env)
         (self.tmp / "tmp").mkdir(exist_ok=True)
         return subprocess.run(
-            [str(INSTALLER)],
+            [str(installer)],
             cwd=self.tmp,
             env=env,
             text=True,
@@ -561,6 +561,142 @@ def test_unhealthy_restart_triggers_rollback_path():
                 raise AssertionError(f"expected a health-probe failure message; got:\n{result.stderr}")
         finally:
             _kill_datadir_daemon(scenario.target_datadir)
+
+
+
+def test_failed_activation_restarts_previous_release():
+    with Scenario("activation-swap", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        install = scenario.tmp / "install"
+        previous = install / "releases" / "old"
+        (previous / "bin").mkdir(parents=True)
+        write_executable(previous / "bin" / "btxd", PREBUILT_BTXD)
+        write_executable(previous / "bin" / "btx-cli", PREBUILT_BTXCLI)
+        (previous / "manifest.json").write_text('{"git_commit": "old"}', encoding="utf8")
+        current = install / "current"
+        current.symlink_to(previous)
+        links = scenario.tmp / "links"
+        links.mkdir()
+        for tool in ("btxd", "btx-cli"):
+            (links / tool).symlink_to(current / "bin" / tool)
+        _add_prebuilt_to_manifest(scenario)
+
+        # Replace only the pointer-swap call in a disposable copy of the installer.
+        # The fault remains armed through recovery and leaves the active pointer in place.
+        faulted = scenario.tmp / "installer-swap-fault.sh"
+        source = INSTALLER.read_text(encoding="utf8")
+        swap = "os.replace(tmp, link)"
+        if source.count(swap) != 1:
+            raise AssertionError("cannot locate the updater's current-pointer swap")
+        lines = source.splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            if line.strip() == swap:
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i:i] = [
+                    indent + 'if os.path.basename(link) == "current":\n',
+                    indent + '    print("fixture: refused current swap", file=sys.stderr)\n',
+                    indent + '    raise OSError("fixture current swap fault")\n',
+                ]
+                break
+        write_executable(faulted, "".join(lines))
+
+        def assert_rpc():
+            run([str(links / "btx-cli"), f"-datadir={scenario.target_datadir}", "uptime"],
+                timeout=5, capture_output=True)
+
+        try:
+            result = scenario.run_installer(faulted)
+            assert_failure(result)
+            scenario.target.wait(timeout=5)
+            output = result.stdout + result.stderr
+            if output.count("fixture: refused current swap") != 1 or current.resolve() != previous.resolve():
+                raise AssertionError(f"unexpected activation path or current pointer:\n{output}")
+            if not (scenario.target_datadir / "node.ready").exists():
+                raise AssertionError(f"the previous release did not restart after the swap failed:\n{output}")
+            assert_rpc()
+            if list(install.glob("current.tmp.*")):
+                raise AssertionError("failed swap left a temporary current link")
+
+            scenario.extra_env["BTX_AUTOUPDATE_PID"] = (scenario.target_datadir / "pid").read_text().strip()
+            assert_success(scenario.run_installer())
+            if current.resolve() == previous.resolve():
+                raise AssertionError("healthy retry did not activate the new release")
+            assert_rpc()
+            if scenario.distractor.poll() is not None:
+                raise AssertionError("activation touched the distractor process")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
+
+def test_unusable_previous_release_leaves_running_node_untouched():
+    with Scenario("broken-rollback", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        install = scenario.tmp / "install"
+        previous = install / "releases" / "broken"
+        (previous / "bin").mkdir(parents=True)
+        for tool in ("btxd", "btx-cli"):
+            write_executable(previous / "bin" / tool, '#!/bin/sh\nexec "$0.real" "$@"\n')
+        (previous / "manifest.json").write_text('{"git_commit": "old"}', encoding="utf8")
+        current = install / "current"
+        current.symlink_to(previous)
+        links = scenario.tmp / "links"
+        links.mkdir()
+        launcher = links / "btx-cli"
+        write_executable(launcher, PREBUILT_BTXCLI)
+        original = launcher.read_bytes()
+        _add_prebuilt_to_manifest(scenario)
+        try:
+            result = scenario.run_installer()
+            if scenario.target.poll() is not None or (scenario.target_datadir / "term.received").exists():
+                raise AssertionError("installer stopped the node without a usable rollback release")
+            assert_failure(result)
+            output = result.stdout + result.stderr
+            if "could not prepare release activation" not in output:
+                raise AssertionError(f"unexpected activation failure:\n{output}")
+            if current.resolve() != previous.resolve() or launcher.is_symlink() or launcher.read_bytes() != original:
+                raise AssertionError("failed preparation changed the active release or public launcher")
+            if scenario.distractor.poll() is not None:
+                raise AssertionError("activation touched the distractor process")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
+
+def test_macos_packaged_daemon_identity():
+    with tempfile.TemporaryDirectory(prefix="btx-packaged-pid-") as tmp:
+        root = Path(tmp).resolve()
+        package = root / "with spaces"
+        (package / "bin").mkdir(parents=True)
+        (package / "libexec").mkdir()
+        write_executable(package / "bin" / "btxd", "#!/bin/sh\nexit 0\n")
+        executable = package / "libexec" / "btxd.real"
+        source = root / "probe.c"
+        source.write_text("#include <unistd.h>\nint main(void) { for (;;) pause(); }\n", encoding="utf8")
+        run(["cc", str(source), "-o", str(executable)], timeout=20)
+        unrelated = root / "btxd.real"
+        shutil.copy2(executable, unrelated)
+        datadir = root / "data with spaces"
+        residual = '-uacomment=two words "quoted"'
+        node = subprocess.Popen([str(executable), "-regtest", f"-datadir={datadir}", residual])
+        other = subprocess.Popen([str(unrelated), "-regtest"])
+        try:
+            result = subprocess.run([
+                "bash", "-c", """
+set -eu
+source "$1"
+[[ "$(extract_runtime_flags "$2" --packaged-executable)" == "$4" ]]
+require_btxd_like_process "$2"
+flags=$(extract_runtime_flags "$2")
+printf '%s\n' "$flags" | grep -Fx "DATADIR=$5"
+printf '%s\n' "$flags" | grep -Fx "RESIDUAL=$6"
+if require_btxd_like_process "$3" >/dev/null 2>&1; then
+    exit 2
+fi
+""", "packaged-identity", str(INSTALLER), str(node.pid), str(other.pid), str(executable), str(datadir), residual,
+            ], capture_output=True, text=True, timeout=10)
+            assert_success(result)
+        finally:
+            stop_process(node)
+            stop_process(other)
 
 
 def _prebuilt_manifest_entry(scenario, name, *, bad_btxd=False, with_sha256=True):
@@ -775,6 +911,31 @@ def test_pinned_manifest_ignores_url_and_version_overrides():
             )
 
 
+def test_unreadable_highest_accepted_version_is_refused():
+    # A floor path that exists but is not a readable file is not a missing
+    # floor: btxd pauses auto-update for it (ReadHighestAcceptedVersion), and
+    # the installer must refuse the manifest too, without replacing the path
+    # or writing into it.
+    for kind in ("directory", "dangling-symlink"):
+        with Scenario(f"floor-{kind}") as scenario:
+            watermark = scenario.target_datadir / "autoupdate" / "highest-accepted-version"
+            watermark.parent.mkdir(parents=True, exist_ok=True)
+            missing = scenario.tmp / "missing-floor"
+            if kind == "directory":
+                watermark.mkdir()
+            else:
+                watermark.symlink_to(missing)
+            result = scenario.run_installer()
+            assert_failure(result)
+            output = result.stdout + result.stderr
+            if "highest accepted version state is unreadable" not in output:
+                raise AssertionError(f"expected an unreadable-floor refusal for the {kind}; got:\n{output}")
+            if kind == "directory" and any(watermark.iterdir()):
+                raise AssertionError("installer wrote into the floor directory")
+            if kind == "dangling-symlink" and (not watermark.is_symlink() or missing.exists()):
+                raise AssertionError("installer replaced or followed the dangling floor link")
+
+
 def test_pinned_manifest_digest_mismatch_aborts():
     with Scenario(
         "pinned-digest",
@@ -895,6 +1056,8 @@ def main():
         test_manual_mode_refuses_ambiguous_processes,
         test_healthy_restart_passes_health_probe,
         test_unhealthy_restart_triggers_rollback_path,
+        test_failed_activation_restarts_previous_release,
+        test_unusable_previous_release_leaves_running_node_untouched,
         test_prebuilt_binary_is_used_without_source_build,
         test_cuda13_prebuilt_is_preferred_over_generic_linux,
         test_cuda12_prebuilt_is_preferred_over_generic_linux,
@@ -903,10 +1066,13 @@ def main():
         test_prebuilt_without_sha256_is_not_used,
         test_prebuilt_without_sha256_is_not_downloaded,
         test_pinned_manifest_ignores_url_and_version_overrides,
+        test_unreadable_highest_accepted_version_is_refused,
         test_pinned_manifest_digest_mismatch_aborts,
         test_unpinned_manifest_must_match_verified_version,
         test_python_module_in_working_directory_is_not_imported,
     ]
+    if platform.system() == "Darwin" and shutil.which("cc"):
+        tests.append(test_macos_packaged_daemon_identity)
     for test in tests:
         test()
         print(f"PASS {test.__name__}")

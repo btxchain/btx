@@ -796,6 +796,24 @@ static std::vector<RPCArg> FundTxDoc(bool solving_data = true)
     return args;
 }
 
+/** Whether a locked wallet left coins of its own out of this coin selection.
+ *
+ *  Locking drops the PQ seeds, so a locked wallet cannot size its own P2MR
+ *  inputs: AvailableCoins() marks them unspendable and coin selection skips
+ *  them, while getbalances still counts them as trusted.
+ */
+bool LockedWalletLeftOutOwnCoins(const CWallet& wallet, const CCoinControl& coin_control) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (!wallet.IsLocked()) return false;
+    // AvailableCoins() skips preselected inputs, so list them too.
+    CCoinControl all_coins{coin_control};
+    all_coins.UnSelectAll();
+    for (const COutput& coin : AvailableCoinsListUnspent(wallet, &all_coins).All()) {
+        if (!coin.spendable && (wallet.IsMine(coin.txout) & ISMINE_SPENDABLE)) return true;
+    }
+    return false;
+}
+
 CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransaction& tx, const std::vector<CRecipient>& recipients, const UniValue& options, CCoinControl& coinControl, bool override_min_fee)
 {
     // We want to make sure tx.vout is not used now that we are passing outputs as a vector of recipients.
@@ -1041,6 +1059,8 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
     LOCK(wallet.cs_wallet);
     auto txr = FundTransaction(wallet, tx, recipients, change_position, lockUnspents, coinControl);
     if (!txr) {
+        // The failure says nothing about the coins the lock hid: ask for the unlock instead.
+        if (LockedWalletLeftOutOwnCoins(wallet, coinControl)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, ErrorString(txr).original);
     }
     return *txr;
@@ -1857,6 +1877,10 @@ RPCHelpMan sendall()
                 if (!available_coins_res) {
                     throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(available_coins_res).original);
                 }
+                // sendall does not go through FundTransaction(). AvailableCoins()
+                // leaves out the wallet's own P2MR coins while it is locked, so the
+                // sweep would miss them: ask for the passphrase instead.
+                if (LockedWalletLeftOutOwnCoins(*pwallet, coin_control)) EnsureWalletIsUnlocked(*pwallet);
                 for (const COutput& output : available_coins_res->All()) {
                     if (send_max && fee_rate.GetFee(output.input_bytes) > output.txout.nValue) {
                         continue;
@@ -1877,6 +1901,8 @@ RPCHelpMan sendall()
             // estimate final size of tx
             const TxSize tx_size{CalculateMaximumSignedTxSize(CTransaction(rawTx), pwallet.get())};
             if (tx_size.vsize == -1) {
+                // An own P2MR input given in "inputs" cannot be sized while the wallet is locked.
+                if (LockedWalletLeftOutOwnCoins(*pwallet, coin_control)) EnsureWalletIsUnlocked(*pwallet);
                 throw JSONRPCError(RPC_WALLET_ERROR, "Unable to determine the size of the transaction, the wallet contains unsolvable descriptors");
             }
             const CAmount fee_from_size{fee_rate.GetFee(tx_size.vsize)};

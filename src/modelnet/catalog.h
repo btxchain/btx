@@ -15,6 +15,7 @@
 #include <univalue.h>
 #include <util/fs.h>
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <set>
@@ -23,6 +24,8 @@
 #include <vector>
 
 namespace modelnet {
+
+struct VerifiedManifest;
 
 struct CatalogEntry {
     Digest48 model_id;
@@ -55,7 +58,9 @@ class ModelCatalog {
     std::vector<CatalogEntry> m_models;
     std::vector<std::string> m_peers;
     PreservationPolicy m_policy;
-    std::set<Digest48> m_active_artifacts;
+    //! Running transfers per artifact. Several catalog entries can share one
+    //! artifact, so more than one transfer can protect it at a time.
+    std::map<Digest48, uint32_t> m_active_artifacts;
 
     /** Merkle cache for GetVerifiedPiece. rows[0] is the power-of-two padded leaves.
      *  Keyed by (artifact, file_index); the stored pieces_root must match or the slot is ignored. */
@@ -71,6 +76,7 @@ class ModelCatalog {
     void DropPieceTreeCache(const Digest48& artifact) const;
     void DropPieceTreeCache(const Digest48& artifact, uint32_t file_index) const;
 
+    bool EnforceQuotaLocked(uint64_t need_bytes, std::string& err);
     bool PersistLocked(std::string& err);
     bool LoadLocked(std::string& err);
     void DemandSeedLocked(CatalogEntry& e);
@@ -84,6 +90,10 @@ public:
     PreservationPolicy Policy() const;
     bool ApplyDemandSeed(const Digest48& model_id, std::string& err);
     bool EnforceQuota(uint64_t need_bytes, std::string& err);
+    /** Admit a verified download, crediting proof-verified pieces only while
+     *  its artifact is active and protected from quota eviction. */
+    bool EnforceDownloadQuota(const VerifiedManifest& manifest, std::string& err,
+                              const std::atomic<bool>* stop = nullptr);
     bool PinModel(const Digest48& model_id, bool on, std::string& err);
     /** True while this model's artifact is marked active (fetch or serve). */
     bool TransferActive(const Digest48& model_id) const;

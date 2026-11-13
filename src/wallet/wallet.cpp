@@ -83,6 +83,9 @@
 #include <wallet/bcp1_watchonly.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
+#include <memory>
 #include <cassert>
 #include <condition_variable>
 #include <exception>
@@ -926,7 +929,8 @@ std::shared_ptr<CWallet> RestoreWallet(WalletContext& context, const fs::path& b
     const fs::path wallet_path = fsbridge::AbsPathJoin(GetWalletDir(), fs::u8path(wallet_name));
     auto wallet_file = wallet_path / "wallet.dat";
     std::shared_ptr<CWallet> wallet;
-    bool wallet_file_copied = false;
+    bool wallet_file_created = false;
+    bool copy_complete = false;
     bool created_parent_dir = false;
 
     try {
@@ -958,24 +962,61 @@ std::shared_ptr<CWallet> RestoreWallet(WalletContext& context, const fs::path& b
             created_parent_dir = true;
         }
 
-        fs::copy_file(backup_file, wallet_file, fs::copy_options::none);
-        wallet_file_copied = true;
+        // Open exclusively so a failed copy can only clean up its own file.
+        // Keep copy_file's regular-file requirement and source permissions.
+        if (!fs::is_regular_file(backup_file)) throw std::runtime_error("Backup is not a regular file");
+        using FilePtr = std::unique_ptr<FILE, decltype(&std::fclose)>;
+        FilePtr input{fsbridge::fopen(backup_file, "rb"), std::fclose};
+        if (!input) throw std::runtime_error("Unable to open wallet backup");
+        {
+            FilePtr output{fsbridge::fopen(wallet_file, "wbx"), std::fclose};
+            if (!output) throw std::runtime_error("Unable to create restored wallet file exclusively");
+            wallet_file_created = true;
+            fs::permissions(wallet_file, fs::status(backup_file).permissions());
+            std::array<unsigned char, 65536> buffer;
+            while (const auto count{std::fread(buffer.data(), 1, buffer.size(), input.get())}) {
+                if (std::fwrite(buffer.data(), 1, count, output.get()) != count) {
+                    throw std::runtime_error("Unable to write restored wallet file");
+                }
+            }
+            if (std::ferror(input.get())) throw std::runtime_error("Unable to read wallet backup");
+            // Buffered writes can fail only when the stream is closed.
+            if (std::fclose(output.release()) != 0) throw std::runtime_error("Unable to close restored wallet file");
+        }
+        copy_complete = true;
 
         if (load_after_restore) {
             wallet = LoadWallet(context, wallet_name, load_on_start, options, status, error, warnings);
         }
     } catch (const std::exception& e) {
         assert(!wallet);
+        status = DatabaseStatus::FAILED_LOAD;
         if (!error.empty()) error += Untranslated("\n");
         error += Untranslated(strprintf("Unexpected exception: %s", e.what()));
     }
 
-    // Remove created wallet path only when loading fails
-    if (load_after_restore && !wallet) {
-        if (wallet_file_copied) fs::remove(wallet_file);
+    // Failed migration rollback copies also need cleanup when no load was requested.
+    if (!copy_complete || (load_after_restore && !wallet)) {
+        std::error_code cleanup_error;
+        if (wallet_file_created) {
+            fs::remove(wallet_file, cleanup_error);
+            if (cleanup_error) error += Untranslated(strprintf("\nUnable to remove incomplete wallet file: %s", cleanup_error.message()));
+        }
+        // Never remove unrelated files or assume the directory is still empty.
         if (created_parent_dir) {
-            Assume(fs::is_empty(wallet_path));
-            fs::remove(wallet_path);
+            fs::remove(wallet_path, cleanup_error);
+            if (cleanup_error) error += Untranslated(strprintf("\nUnable to remove restored wallet directory: %s", cleanup_error.message()));
+        }
+    }
+
+    if (wallet) {
+        LOCK(wallet->cs_wallet);
+        // A locked PQ descriptor wallet cannot extend the backup's cached
+        // address range during its initial rescan. Unlocking derives keys,
+        // but does not revisit blocks already processed while locked.
+        if (!wallet->IsLegacy() && wallet->IsCrypted() && wallet->IsLocked() &&
+            !wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+            warnings.emplace_back(_("This encrypted wallet was restored while locked. Payments to addresses used after this backup may be missing. Unlock the wallet, refill its keypool with keypoolrefill, then use rescanblockchain to scan the available history. Unlocking alone does not recover those payments. If addresses remain outside the derived range or required blocks are unavailable, recovery is incomplete."));
         }
     }
 
@@ -1592,6 +1633,36 @@ bool CWallet::IsSpentKey(const CScript& scriptPubKey) const
     return false;
 }
 
+#if HAVE_SYSTEM
+/** Run each -walletdepositnotify command once per event. */
+static void RunDepositNotifyCommands(const CWallet& wallet, const uint256& hash, const std::vector<UniValue>& events)
+{
+    if (events.empty()) return;
+    const std::vector<std::string> deposit_cmds = gArgs.GetArgs("-walletdepositnotify");
+#ifdef WIN32
+    const std::string walletname_escaped = "wallet_name_substitution_is_not_available_on_Windows";
+#else
+    const std::string walletname_escaped = ShellEscape(wallet.GetName());
+#endif
+    for (const UniValue& ev : events) {
+        const std::string ev_name = ev.exists("event") && ev["event"].isStr() ? ev["event"].get_str() : "";
+        const std::string json = ev.write();
+        for (std::string command : deposit_cmds) {
+            ReplaceAll(command, "%s", hash.GetHex());
+            ReplaceAll(command, "%e", ev_name);
+            ReplaceAll(command, "%w", walletname_escaped);
+#ifndef WIN32
+            ReplaceAll(command, "%j", ShellEscape(json));
+#else
+            ReplaceAll(command, "%j", json);
+#endif
+            std::thread t(runCommand, command);
+            t.detach();
+        }
+    }
+}
+#endif
+
 CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const UpdateWalletTxFn& update_wtx, bool fFlushOnClose, bool rescanning_old_block)
 {
     LOCK(cs_wallet);
@@ -1726,27 +1797,12 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
             t.detach(); // thread runs free
         }
     }
-    const std::vector<std::string> deposit_cmds = gArgs.GetArgs("-walletdepositnotify");
-    if (!deposit_cmds.empty()) {
-#ifdef WIN32
-        const std::string walletname_escaped = "wallet_name_substitution_is_not_available_on_Windows";
-#else
-        const std::string walletname_escaped = ShellEscape(GetName());
-#endif
-        for (const UniValue& ev : DepositNotifyEventsForTx(*this, hash, fInsertedNew)) {
-            const std::string ev_name = ev.exists("event") && ev["event"].isStr() ? ev["event"].get_str() : "";
-            const std::string json = ev.write();
-            for (std::string command : deposit_cmds) {
-                ReplaceAll(command, "%s", hash.GetHex());
-                ReplaceAll(command, "%e", ev_name);
-                ReplaceAll(command, "%w", walletname_escaped);
-#ifndef WIN32
-                ReplaceAll(command, "%j", ShellEscape(json));
-#else
-                ReplaceAll(command, "%j", json);
-#endif
-                std::thread t(runCommand, command);
-                t.detach();
+    if (!gArgs.GetArgs("-walletdepositnotify").empty()) {
+        RunDepositNotifyCommands(*this, hash, DepositNotifyEventsForTx(*this, hash, fInsertedNew));
+        // The deposits this transaction spends do not pass through here; report them now.
+        if (fInsertedNew) {
+            for (const auto& [spent_txid, event] : DepositSpentEventsForTx(*this, hash)) {
+                RunDepositNotifyCommands(*this, spent_txid, {event});
             }
         }
     }
@@ -1950,6 +2006,11 @@ void CWallet::RecursiveUpdateTxState(const uint256& tx_hash, const TryUpdatingSt
 void CWallet::RecursiveUpdateTxState(WalletBatch* batch, const uint256& tx_hash, const TryUpdatingStateFn& try_updating_state) {
     std::set<uint256> todo;
     std::set<uint256> done;
+#if HAVE_SYSTEM
+    // A conflict (or its removal, or an abandon) changes a deposit's status without
+    // going through AddToWallet, so -walletdepositnotify is run from here as well.
+    const bool deposit_notify = !gArgs.GetArgs("-walletdepositnotify").empty();
+#endif
 
     todo.insert(tx_hash);
 
@@ -1960,6 +2021,10 @@ void CWallet::RecursiveUpdateTxState(WalletBatch* batch, const uint256& tx_hash,
         auto it = mapWallet.find(now);
         assert(it != mapWallet.end());
         CWalletTx& wtx = it->second;
+#if HAVE_SYSTEM
+        std::vector<DepositStatusResult> deposits_before;
+        if (deposit_notify) deposits_before = DepositStatusesForTx(*this, now);
+#endif
 
         TxUpdate update_state = try_updating_state(wtx);
         if (update_state != TxUpdate::UNCHANGED) {
@@ -1982,6 +2047,11 @@ void CWallet::RecursiveUpdateTxState(WalletBatch* batch, const uint256& tx_hash,
             // If a transaction changes its tx state, that usually changes the balance
             // available of the outputs it spends. So force those to be recomputed
             MarkInputsDirty(wtx.tx);
+#if HAVE_SYSTEM
+            if (deposit_notify) {
+                RunDepositNotifyCommands(*this, now, DepositNotifyEventsForStateChange(*this, now, deposits_before));
+            }
+#endif
         }
     }
 }
@@ -2783,8 +2853,9 @@ void CWallet::MaybeUpdateBirthTime(int64_t time)
  * @return Earliest timestamp that could be successfully scanned from. Timestamp
  * returned will be higher than startTime if relevant blocks could not be read.
  */
-int64_t CWallet::RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool update)
+int64_t CWallet::RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool update, bool* interrupted)
 {
+    if (interrupted) *interrupted = false;
     // Find starting block. May be null if nCreateTime is greater than the
     // highest blockchain timestamp, in which case there is nothing that needs
     // to be scanned.
@@ -2795,8 +2866,8 @@ int64_t CWallet::RescanFromTime(int64_t startTime, const WalletRescanReserver& r
     WalletLogPrintf("%s: Rescanning last %i blocks\n", __func__, rescan_blocks);
 
     if (start) {
-        // NOTE: this should take into account failure by ScanResult::USER_ABORT
         ScanResult result = ScanForWalletTransactions(start_block, start_height, /*max_height=*/{}, reserver, /*fUpdate=*/update, /*save_progress=*/false);
+        if (interrupted) *interrupted = result.status == ScanResult::USER_ABORT;
         if (result.status == ScanResult::FAILURE) {
             int64_t time_max;
             CHECK_NONFATAL(chain().findBlock(result.last_failed_block, FoundBlock().maxTime(time_max)));
@@ -3677,32 +3748,23 @@ util::Result<void> CWallet::RemoveTxs(WalletBatch& batch, std::vector<uint256>& 
 
 bool CWallet::SetAddressBookWithDB(WalletBatch& batch, const CTxDestination& address, const std::string& strName, const std::optional<AddressPurpose>& new_purpose)
 {
-    bool fUpdated = false;
-    bool is_mine;
-    std::optional<AddressPurpose> purpose;
-    {
-        LOCK(cs_wallet);
-        std::map<CTxDestination, CAddressBookData>::iterator mi = m_address_book.find(address);
-        fUpdated = mi != m_address_book.end() && !mi->second.IsChange();
-
-        CAddressBookData& record = mi != m_address_book.end() ? mi->second : m_address_book[address];
-        record.SetLabel(strName);
-        is_mine = IsMine(address) != ISMINE_NO;
-        if (new_purpose) { /* update purpose only if requested */
-            record.purpose = new_purpose;
-        }
-        purpose = record.purpose;
-    }
-
-    const std::string& encoded_dest = EncodeDestination(address);
-    if (new_purpose && !batch.WritePurpose(encoded_dest, PurposeToString(*new_purpose))) {
-        WalletLogPrintf("Error: fail to write address book 'purpose' entry\n");
+    LOCK(cs_wallet);
+    const std::string encoded_dest = EncodeDestination(address);
+    if (!batch.TxnBegin()) return false;
+    if ((new_purpose && !batch.WritePurpose(encoded_dest, PurposeToString(*new_purpose))) ||
+        !batch.WriteName(encoded_dest, strName) || !batch.TxnCommit()) {
+        batch.TxnAbort();
         return false;
     }
-    if (!batch.WriteName(encoded_dest, strName)) {
-        WalletLogPrintf("Error: fail to write address book 'name' entry\n");
-        return false;
-    }
+
+    // Publish the label and purpose only after both have been committed.
+    auto mi = m_address_book.find(address);
+    const bool fUpdated = mi != m_address_book.end() && !mi->second.IsChange();
+    CAddressBookData& record = m_address_book[address];
+    record.SetLabel(strName);
+    const bool is_mine = IsMine(address) != ISMINE_NO;
+    if (new_purpose) record.purpose = new_purpose;
+    const auto purpose = record.purpose;
 
     // In very old wallets, address purpose may not be recorded so we derive it from IsMine
     NotifyAddressBookChanged(address, strName, is_mine,
@@ -5404,9 +5466,18 @@ bool CWallet::Lock()
 
     {
         LOCK2(m_relock_mutex, cs_wallet);
+        if (m_shielded_wallet) {
+            // Wipe the shielded spending keys too (cs_wallet before cs_shielded).
+            LOCK(m_shielded_wallet->cs_shielded);
+            m_shielded_wallet->LockSpendingKeys();
+        }
         if (!vMasterKey.empty()) {
             memory_cleanse(vMasterKey.data(), vMasterKey.size() * sizeof(decltype(vMasterKey)::value_type));
             vMasterKey.clear();
+        }
+        for (const auto& spk_man_pair : m_spk_managers) {
+            auto* desc_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(spk_man_pair.second.get());
+            if (desc_spkm != nullptr) desc_spkm->LockPQSeeds();
         }
     }
 

@@ -2221,9 +2221,28 @@ bool HcpEngine::Persist()
     std::lock_guard<std::mutex> lock(m->mu);
     if (m->migration_crash) return false;
     if (m->cfg.persist_dir.empty()) return true;
-    std::ofstream out(m->cfg.persist_dir / "hcp-state.json");
-    if (!out) return false;
-    out << m->PersistObj().write();
+    // Write a temp file, check it after close and rename it over the state, so
+    // a write that a full disk cuts short keeps the previous state instead of
+    // leaving a file Restore cannot read.
+    const fs::path path = m->cfg.persist_dir / "hcp-state.json";
+    const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
+    std::error_code ec;
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (out) {
+            out << m->PersistObj().write();
+            out.close();
+        }
+        if (!out) {
+            fs::remove(tmp, ec);
+            return false;
+        }
+    }
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
+        return false;
+    }
     return true;
 }
 

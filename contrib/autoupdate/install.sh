@@ -371,10 +371,18 @@ resolve_btx_util_path() {
   for candidate in "$BTX_INSTALL_ROOT/current/bin/btx-util" "$BTX_LINK_DIR/btx-util"; do
     [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
   done
-  if [[ -n "${BTX_TARGET_PID:-}" && -r "/proc/$BTX_TARGET_PID/exe" ]]; then
-    local exe bindir
+  local verifier_pid="${BTX_TARGET_PID:-${BTX_AUTOUPDATE_PID:-}}"
+  if [[ -n "$BTX_TARGET_PID" && -n "$BTX_AUTOUPDATE_PID" && "$BTX_TARGET_PID" != "$BTX_AUTOUPDATE_PID" ]]; then
+    return 1
+  fi
+  if pid_is_numeric "$verifier_pid" && [[ -r "/proc/$verifier_pid/exe" ]]; then
+    local exe bindir packaged
+    if packaged=$(extract_runtime_flags "$verifier_pid" --packaged-executable 2>/dev/null); then
+      candidate="${packaged%/libexec/btxd.real}/bin/btx-util"
+      [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    fi
     # /proc/<pid>/exe already resolves to an absolute path, so plain readlink (no GNU -f) suffices.
-    exe="$(readlink "/proc/$BTX_TARGET_PID/exe" 2>/dev/null || true)"
+    exe="$(readlink "/proc/$verifier_pid/exe" 2>/dev/null || true)"
     if [[ -n "$exe" ]]; then
       bindir="$(dirname "$exe")"
       [[ -x "$bindir/btx-util" ]] && { printf '%s\n' "$bindir/btx-util"; return 0; }
@@ -510,15 +518,69 @@ find_prebuilt_bindir() {
   return 1
 }
 
+# Keep trees created by the old copier available for diagnosis and rollback.
+# A failed version check must never turn a damaged tree into a reusable cache hit.
+select_release_dir() {
+  local original="$1" release_dir="$1" attempt=0
+  while [[ -e "$release_dir" || -L "$release_dir" ]]; do
+    if release_tree_valid "$release_dir" && check_binaries "$release_dir/bin" >/dev/null; then
+      break
+    fi
+    if (( attempt == 0 )); then
+      release_dir="$original.repaired"
+    else
+      release_dir="$original.repaired.$attempt"
+    fi
+    attempt=$((attempt + 1))
+  done
+  printf '%s\n' "$release_dir"
+}
+
+stage_release_tree() {
+  local bin_dir="$1" release_dir="$2" origin="$3"
+  local archive_dir stage
+  archive_dir=$(dirname -- "$bin_dir")
+  stage=$(mktemp -d "${release_dir}.stage.XXXXXX") || return 1
+  if (
+    if [[ "$origin" == prebuilt && "${bin_dir##*/}" == bin && -d "$archive_dir/libexec" ]]; then
+      cp -RP "$bin_dir" "$archive_dir/libexec" "$stage/" || exit 1
+      if [[ -d "$archive_dir/lib" ]]; then
+        cp -RP "$archive_dir/lib" "$stage/" || exit 1
+      fi
+    else
+      mkdir "$stage/bin" || exit 1
+      local tool
+      for tool in btxd btx-cli btx-wallet btx-util; do
+        if [[ -x "$bin_dir/$tool" ]]; then
+          cp "$bin_dir/$tool" "$stage/bin/$tool" || exit 1
+        fi
+      done
+    fi
+    check_binaries "$stage/bin" || exit 1
+    cat >"$stage/manifest.json" || exit 1
+    # The updater lock serializes installers for this root. Never replace a
+    # previous release with a tree that has not passed its version probes.
+    python3 -I - "$stage" "$release_dir" <<'PY_RENAME'
+import os
+import sys
+
+os.rename(*sys.argv[1:])
+PY_RENAME
+  ); then
+    return 0
+  fi
+  python3 -I - "$stage" <<'PY_CLEANUP'
+import shutil
+import sys
+
+shutil.rmtree(sys.argv[1])
+PY_CLEANUP
+  return 1
+}
+
 install_prebuilt_release_tree() {
   local bin_dir="$1" version="$2" release_dir="$3" platform="$4" url="$5" commit="$6"
-  mkdir -p "$release_dir/bin"
-  cp "$bin_dir/btxd" "$release_dir/bin/btxd"
-  cp "$bin_dir/btx-cli" "$release_dir/bin/btx-cli"
-  [[ -x "$bin_dir/btx-wallet" ]] && cp "$bin_dir/btx-wallet" "$release_dir/bin/btx-wallet"
-  # btx-util ships in the tree (and is symlinked on activate) so the NEXT cycle can verify PQ sigs.
-  [[ -x "$bin_dir/btx-util" ]] && cp "$bin_dir/btx-util" "$release_dir/bin/btx-util"
-  cat >"$release_dir/manifest.json" <<EOF
+  stage_release_tree "$bin_dir" "$release_dir" prebuilt <<EOF
 {
   "version": "${version}",
   "source": "prebuilt",
@@ -586,7 +648,10 @@ try_install_prebuilt() {
       status_event "prebuilt" "rejected" "$key: ${verify_error}"
       continue
     fi
-    install_prebuilt_release_tree "$bindir" "$version" "$release_dir" "$key" "$url" "$expected_commit"
+    if ! install_prebuilt_release_tree "$bindir" "$version" "$release_dir" "$key" "$url" "$expected_commit"; then
+      warn "prebuilt install verification failed ($key); will try next/source"
+      continue
+    fi
     status_event "prebuilt" "installed" "$key"
     note "Installed verified prebuilt release for $key"
     return 0
@@ -725,6 +790,12 @@ enforce_highest_accepted_version() {
   local version="$1"
   local path highest status
   path="$(highest_accepted_version_file)"
+  # Only a missing entry means no floor. A directory, a dangling link or an
+  # unreadable file is an unusable floor, as ReadHighestAcceptedVersion in
+  # btxd treats it.
+  if [[ -e "$path" || -L "$path" ]] && [[ ! -f "$path" || ! -r "$path" ]]; then
+    die "refusing manifest: highest accepted version state is unreadable"
+  fi
   if [[ -f "$path" ]]; then
     highest="$(tr -d '[:space:]' <"$path" || true)"
     [[ -n "$highest" ]] || die "refusing manifest: highest accepted version state is unreadable"
@@ -867,8 +938,12 @@ require_btxd_like_process() {
   fi
 
   local cmd
+  if extract_runtime_flags "$pid" --packaged-executable >/dev/null 2>&1; then
+    return 0
+  fi
   cmd="$(process_command "$pid")"
   case "$cmd" in
+    *btxd.real*) ;;
     *btxd*) return 0 ;;
   esac
   printf '[btx-updater] error: target pid %s does not look like a btxd process\n' "$pid" >&2
@@ -933,6 +1008,11 @@ detect_running_btxd() {
   while IFS= read -r pid; do
     append_unique_pid "$pid"
   done < <(pgrep -f '(^|/)btxd([[:space:]]|$)' 2>/dev/null || true)
+  while IFS= read -r pid; do
+    if extract_runtime_flags "$pid" --packaged-executable >/dev/null 2>&1; then
+      append_unique_pid "$pid"
+    fi
+  done < <(pgrep -x 'btxd\.real' 2>/dev/null; pgrep -f '/libexec/btxd\.real([[:space:]]|$)' 2>/dev/null || true)
 
   local -a filtered=()
   if [[ -n "$requested_datadir" ]]; then
@@ -1046,14 +1126,105 @@ target_note_pid() {
 
 extract_runtime_flags() {
   local pid="$1"
-  python3 -I - "$pid" <<'PY'
+  python3 -I - "$pid" "${2:-}" <<'PY'
+import os
+from pathlib import Path
 import shlex
 import subprocess
 import sys
 
-pid = sys.argv[1]
-cmd = subprocess.check_output(["ps", "-ww", "-o", "command=", "-p", pid], text=True).strip()
-tokens = shlex.split(cmd)
+pid, mode = sys.argv[1:]
+proc = Path("/proc") / pid
+packaged = None
+try:
+    raw_argv = (proc / "cmdline").read_bytes() if sys.platform.startswith("linux") else None
+except OSError:
+    raw_argv = None
+
+if raw_argv is not None:
+    tokens = [os.fsdecode(arg) for arg in raw_argv.split(b"\0")]
+    if tokens[-1] == "":
+        tokens.pop()
+    if not tokens:
+        raise SystemExit(1)
+    try:
+        executable = Path(os.readlink(proc / "exe"))
+        cwd = Path(os.readlink(proc / "cwd"))
+    except OSError:
+        executable = cwd = None
+
+    def installed_daemon(arg):
+        if cwd is None or not arg:
+            return None
+        target = (cwd / arg).resolve()
+        if target.name == "btxd.real" and target.parent.name == "libexec":
+            launcher = target.parent.parent / "bin" / "btxd"
+            if launcher.is_file() and os.access(target, os.X_OK):
+                return target
+        return None
+
+    if executable is not None:
+        translated = executable == Path("/mnt/lima-rosetta/rosetta")
+        if translated and len(tokens) > 1 and Path(tokens[0]) == executable:
+            tokens = tokens[1:]
+        daemon = installed_daemon(tokens[0])
+        if daemon is not None and (executable == daemon or translated):
+            packaged = daemon
+        elif len(tokens) >= 4 and tokens[1] == "--library-path":
+            loader = (cwd / tokens[0]).resolve()
+            if loader.name == "ld-linux-x86-64.so.2" and os.access(loader, os.X_OK) and (executable == loader or translated):
+                packaged = installed_daemon(tokens[3])
+                if packaged is not None:
+                    tokens = tokens[3:]
+else:
+    if sys.platform == "darwin":
+        import ctypes
+
+        proc_pidpath = ctypes.CDLL("/usr/lib/libproc.dylib").proc_pidpath
+        proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+        proc_pidpath.restype = ctypes.c_int
+        path = ctypes.create_string_buffer(4096)
+        if proc_pidpath(int(pid), path, len(path)) > 0:
+            executable = Path(os.fsdecode(path.value))
+            if executable.name == "btxd.real" and executable.parent.name == "libexec":
+                launcher = executable.parent.parent / "bin" / "btxd"
+                if launcher.is_file() and os.access(executable, os.X_OK):
+                    packaged = executable
+    if mode != "--packaged-executable":
+        if sys.platform == "darwin":
+            import struct
+
+            # ps renders argv as text and loses boundaries for paths with spaces.
+            # Darwin's KERN_PROCARGS2 returns argc and the original NUL-delimited argv.
+            sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+            sysctl.argtypes = (ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                               ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
+            sysctl.restype = ctypes.c_int
+            mib = (ctypes.c_int * 3)(1, 49, int(pid))  # CTL_KERN, KERN_PROCARGS2
+            size = ctypes.c_size_t()
+            if sysctl(mib, len(mib), None, ctypes.byref(size), None, 0) != 0:
+                raise OSError(ctypes.get_errno(), "cannot size Darwin process arguments")
+            buffer = ctypes.create_string_buffer(size.value)
+            if sysctl(mib, len(mib), buffer, ctypes.byref(size), None, 0) != 0:
+                raise OSError(ctypes.get_errno(), "cannot read Darwin process arguments")
+            data = buffer.raw[:size.value]
+            argc = struct.unpack_from("=i", data)[0]
+            start = data.index(b"\0", struct.calcsize("=i")) + 1
+            while start < len(data) and data[start] == 0:
+                start += 1
+            argv = data[start:].split(b"\0", argc)
+            if argc <= 0 or len(argv) != argc + 1:
+                raise SystemExit(1)
+            tokens = [os.fsdecode(arg) for arg in argv[:argc]]
+        else:
+            cmd = subprocess.check_output(["ps", "-ww", "-o", "command=", "-p", pid], text=True).strip()
+            tokens = shlex.split(cmd)
+
+if mode == "--packaged-executable":
+    if packaged is None:
+        raise SystemExit(1)
+    print(packaged)
+    raise SystemExit(0)
 
 def take_flag(name):
     for i, token in enumerate(tokens):
@@ -1269,7 +1440,11 @@ try:
 except FileNotFoundError:
     pass
 os.symlink(target, tmp)
-os.replace(tmp, link)
+try:
+    os.replace(tmp, link)
+finally:
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
 PY
 }
 
@@ -1280,47 +1455,87 @@ install_release_tree() {
   local release_dir="$4"
   local repo_url="$5"
   local source_ref="$6"
-  mkdir -p "$release_dir/bin"
-
-  cp "$bin_dir/btxd" "$release_dir/bin/btxd"
-  cp "$bin_dir/btx-cli" "$release_dir/bin/btx-cli"
-  if [[ -x "$bin_dir/btx-wallet" ]]; then
-    cp "$bin_dir/btx-wallet" "$release_dir/bin/btx-wallet"
-  fi
-  # Ship btx-util so the next auto-update cycle can verify post-quantum release signatures
-  # (btx-util verifyupdatesig) instead of falling back to classical openssl.
-  if [[ -x "$bin_dir/btx-util" ]]; then
-    cp "$bin_dir/btx-util" "$release_dir/bin/btx-util"
-  fi
-
-  cat >"$release_dir/manifest.json" <<EOF
+  local commit
+  commit=$(git -C "$source_dir" rev-parse HEAD) || return 1
+  stage_release_tree "$bin_dir" "$release_dir" source <<EOF
 {
   "version": "${version}",
   "repo_url": "${repo_url}",
   "source_ref": "${source_ref}",
-  "git_commit": "$(git -C "$source_dir" rev-parse HEAD)",
+  "git_commit": "${commit}",
   "installed_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 }
 EOF
 }
 
-activate_release_tree() {
-  local release_dir="$1"
-  local target_root="$2"
-  local link_dir="$3"
+# Invoke a packaged launcher at its installed path so its sibling lookup
+# works even when the public entry point lives in a different directory.
+activate_release_command() {
+  local launcher="$1" link="$2"
+  if [[ -d "${launcher%/*}/../libexec" ]]; then
+    python3 -I - "$launcher" "$link" <<'PY_LAUNCHER'
+import os
+import shlex
+import sys
+import tempfile
 
-  mkdir -p "$target_root" "$link_dir"
+target, link = sys.argv[1:]
+with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(link), delete=False) as f:
+    temp = f.name
+    try:
+        f.write("#!/bin/sh\nexec " + shlex.quote(target) + ' "$@"\n')
+        f.close()
+        os.chmod(temp, 0o755)
+        os.replace(temp, link)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+PY_LAUNCHER
+  else
+    swap_symlink "$launcher" "$link"
+  fi
+}
+
+prepare_release_dispatch() {
+  local release_dir="$1" tool
+  local dispatch="$release_dir/.btx-dispatch"
+  [[ -x "$release_dir/bin/btxd" && -x "$release_dir/bin/btx-cli" ]] || return 1
+  [[ ! -L "$dispatch" ]] || return 1
+  mkdir -p "$dispatch" || return 1
+  for tool in btxd btx-cli btx-wallet btx-util; do
+    if [[ -x "$release_dir/bin/$tool" ]]; then
+      activate_release_command "$release_dir/bin/$tool" "$dispatch/$tool" || return 1
+    fi
+  done
+}
+
+prepare_release_activation() {
+  local release_dir="$1" target_root="$2" link_dir="$3" require_previous="${4:-0}" tool
+  local previous=""
+  if [[ -d "$target_root/current" ]]; then
+    previous=$(cd -- "$target_root/current" && pwd -P) || return 1
+    if check_binaries "$previous/bin" >/dev/null; then
+      prepare_release_dispatch "$previous" || return 1
+    elif [[ "$require_previous" == 1 ]]; then
+      return 1
+    else
+      previous=""
+    fi
+  fi
+  prepare_release_dispatch "$release_dir" || return 1
+  mkdir -p "$target_root" "$link_dir" || return 1
+  for tool in btxd btx-cli btx-wallet btx-util; do
+    if [[ "$tool" == btxd || "$tool" == btx-cli ||
+          -x "$release_dir/bin/$tool" || ( -n "$previous" && -x "$previous/bin/$tool" ) ]]; then
+      swap_symlink "$target_root/current/.btx-dispatch/$tool" "$link_dir/$tool" || return 1
+    fi
+  done
+}
+
+activate_release_tree() {
+  local release_dir="$1" target_root="$2" link_dir="$3"
+  prepare_release_activation "$release_dir" "$target_root" "$link_dir" || return 1
   swap_symlink "$release_dir" "$target_root/current"
-  swap_symlink "$target_root/current/bin/btxd" "$link_dir/btxd"
-  swap_symlink "$target_root/current/bin/btx-cli" "$link_dir/btx-cli"
-  if [[ -x "$target_root/current/bin/btx-wallet" ]]; then
-    swap_symlink "$target_root/current/bin/btx-wallet" "$link_dir/btx-wallet"
-  fi
-  # Link btx-util too so the next update cycle can find the post-quantum verifier on PATH / in the
-  # link dir on every platform (not just via Linux /proc).
-  if [[ -x "$target_root/current/bin/btx-util" ]]; then
-    swap_symlink "$target_root/current/bin/btx-util" "$link_dir/btx-util"
-  fi
 }
 
 current_release_commit() {
@@ -1339,10 +1554,11 @@ stop_running_node() {
   local rpcconnect="$8"
   local rpccookiefile="$9"
   local rpcuser="${10}"
-  local rpcpassword="${11}"
+  local rpcpassword="${11}" chain_flag="${12:-}"
   local -a cli_args
 
   cli_args=()
+  [[ -n "$chain_flag" ]] && cli_args+=("$chain_flag")
   [[ -n "$datadir" ]] && cli_args+=("-datadir=$datadir")
   [[ -n "$conf_path" ]] && cli_args+=("-conf=$conf_path")
   [[ -n "$walletdir" ]] && cli_args+=("-walletdir=$walletdir")
@@ -1457,7 +1673,10 @@ rollback_release() {
   fi
   warn "updated node ($failed_label) failed its health probe; rolling back to $previous_current"
   status_event "rollback" "begin" "from $failed_label to $(basename "$previous_current")"
-  activate_release_tree "$previous_current" "$BTX_INSTALL_ROOT" "$BTX_LINK_DIR"
+  # If the atomic switch failed, the prepared previous dispatch is already active.
+  if [[ "$(cd -- "$BTX_INSTALL_ROOT/current" 2>/dev/null && pwd -P || true)" != "$previous_current" ]]; then
+    activate_release_tree "$previous_current" "$BTX_INSTALL_ROOT" "$BTX_LINK_DIR"
+  fi
   # "$@" is the same restart tail as the update path (wallets + residual command-line tokens).
   restart_node "$BTX_LINK_DIR/btxd" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "$BTX_INSTALL_ROOT/logs" "$@"
   if ! health_probe "$BTX_LINK_DIR/btx-cli" "$datadir" "$conf_path" "$chain_flag" ${BTX_PROBE_RPC_ARGS[@]+"${BTX_PROBE_RPC_ARGS[@]}"}; then
@@ -1593,7 +1812,13 @@ main() {
   [[ -n "$datadir" ]] || datadir="$runtime_datadir"
   [[ -n "$datadir" ]] || datadir="$(default_datadir)"
   validate_target_datadir_match "$detected_pid" "$datadir" "$runtime_datadir"
-  [[ -n "$conf_path" ]] || conf_path="$(default_conf_path "$datadir")"
+  if [[ -z "$conf_path" ]]; then
+    local default_conf
+    default_conf="$(default_conf_path "$datadir")"
+    if [[ -f "$default_conf" || "$BTX_ENSURE_RETAIN_INDEX" == "1" ]]; then
+      conf_path="$default_conf"
+    fi
+  fi
 
   mkdir -p "$BTX_INSTALL_ROOT" "$BTX_CACHE_ROOT"
 
@@ -1631,7 +1856,8 @@ main() {
     note "Data directory: $datadir"
     target_note_pid "$detected_pid"
 
-    if release_tree_valid "$release_dir"; then
+    release_dir="$(select_release_dir "$release_dir")"
+    if release_tree_valid "$release_dir" && check_binaries "$release_dir/bin" >/dev/null; then
       stage "reuse-release"
       note "Reusing existing installed release tree at $release_dir"
       prepared_bin_dir="$release_dir/bin"
@@ -1693,7 +1919,8 @@ main() {
       verify_detached_signature "$expected_commit_path" "$expected_commit_sig_path" "$release_pub_path"
     fi
 
-    if release_tree_valid "$release_dir"; then
+    release_dir="$(select_release_dir "$release_dir")"
+    if release_tree_valid "$release_dir" && check_binaries "$release_dir/bin" >/dev/null; then
       stage "reuse-release"
       note "Reusing existing installed release tree at $release_dir"
       prepared_bin_dir="$release_dir/bin"
@@ -1705,8 +1932,9 @@ main() {
       build_btx "$worktree_path" "$build_dir" "$jobs"
       stage "verify-binaries"
       verify_binaries "$build_dir/bin"
-      install_release_tree "$worktree_path" "$build_dir/bin" "$version" "$release_dir" "$repo_url" "$source_ref"
-      prepared_bin_dir="$build_dir/bin"
+      install_release_tree "$worktree_path" "$build_dir/bin" "$version" "$release_dir" "$repo_url" "$source_ref" ||
+        die "source release failed staging verification"
+      prepared_bin_dir="$release_dir/bin"
     fi
   fi
 
@@ -1727,16 +1955,25 @@ main() {
 
   # Remember the release the running node was using, so a failed update can be rolled back to it.
   local previous_current=""
-  previous_current="$(readlink "$BTX_INSTALL_ROOT/current" 2>/dev/null || true)"
+  previous_current="$(cd -- "$BTX_INSTALL_ROOT/current" 2>/dev/null && pwd -P || true)"
+  local require_previous=0
+  [[ -z "$detected_pid" ]] || require_previous=1
+  prepare_release_activation "$release_dir" "$BTX_INSTALL_ROOT" "$BTX_LINK_DIR" "$require_previous" ||
+    die "could not prepare release activation"
 
   if [[ -n "$detected_pid" ]]; then
     stage "stop-node"
     validate_target_process_before_stop "$detected_pid" "$target_fingerprint" "$datadir" "$runtime_datadir"
-    stop_running_node "$prepared_bin_dir/btx-cli" "$detected_pid" "$target_fingerprint" "$datadir" "$conf_path" "$walletdir" "$rpcport" "$rpcconnect" "$rpccookiefile" "$rpcuser" "$rpcpassword"
+    stop_running_node "$prepared_bin_dir/btx-cli" "$detected_pid" "$target_fingerprint" "$datadir" "$conf_path" "$walletdir" "$rpcport" "$rpcconnect" "$rpccookiefile" "$rpcuser" "$rpcpassword" "$chain_flag"
   fi
 
   stage "activate"
-  activate_release_tree "$release_dir" "$BTX_INSTALL_ROOT" "$BTX_LINK_DIR"
+  if ! swap_symlink "$release_dir" "$BTX_INSTALL_ROOT/current"; then
+    if [[ -n "$detected_pid" && "$BTX_AUTO_RESTART" == "1" ]]; then
+      rollback_release "$previous_current" "$datadir" "$conf_path" "$walletdir" "$chain_flag" "$blocksdir" "$pidfile" "${version}-${resolved_short_sha}" ${restart_extra_args[@]+"${restart_extra_args[@]}"}
+    fi
+    die "could not activate prepared release"
+  fi
 
   if [[ -n "$detected_pid" && "$BTX_AUTO_RESTART" == "1" ]]; then
     stage "restart"

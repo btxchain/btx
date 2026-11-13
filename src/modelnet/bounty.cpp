@@ -10,10 +10,13 @@
 #include <modelnet/search.h>
 #include <crypto/sha384.h>
 #include <random.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <mutex>
@@ -149,6 +152,39 @@ bool AddMoneyAtoms(int64_t& total, int64_t amount, std::string& err)
     return true;
 }
 
+//! The request without its idempotency_key and with object keys sorted, so a
+//! replay can tell the request a key first answered from another one.
+std::string IdemFingerprint(const UniValue& params)
+{
+    auto strip = [](const UniValue& v) -> UniValue {
+        if (!v.isObject()) return v;
+        std::vector<std::string> keys = v.getKeys();
+        std::sort(keys.begin(), keys.end());
+        UniValue o(UniValue::VOBJ);
+        for (const auto& k : keys) {
+            if (k != "idempotency_key") o.pushKV(k, v[k]);
+        }
+        return o;
+    };
+    UniValue out(UniValue::VARR);
+    if (params.isArray()) {
+        for (const auto& p : params.getValues()) out.push_back(strip(p));
+    } else {
+        out.push_back(strip(params));
+    }
+    return out.write();
+}
+
+//! Whether `key` already answered some request to `method`. Remembered results
+//! are stored under method|key<US>fingerprint.
+bool IdemKeyUsed(const std::map<std::string, UniValue>& idem, const std::string& method, const std::string& key)
+{
+    if (key.empty()) return false;
+    const std::string prefix = method + "|" + key + '\x1f';
+    const auto it = idem.lower_bound(prefix);
+    return it != idem.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+}
+
 std::string IdemKey(const UniValue& params)
 {
     const UniValue& a = ArgN(params, 0);
@@ -185,13 +221,26 @@ bool ReadJson(const fs::path& p, UniValue& o)
 
 bool WriteJson(const fs::path& p, const UniValue& o, std::string& err)
 {
+    // Write a temp file, sync it and rename it over p. Writing p in place lost
+    // the previous store when the write failed (a full disk fails only the
+    // flush at close), and the caller was told it was saved.
     fs::create_directories(p.parent_path());
-    std::ofstream out(p, std::ios::trunc);
-    if (!out) {
+    const fs::path tmp = p + ".tmp";
+    const std::string text = o.write() + "\n";
+    FILE* file = fsbridge::fopen(tmp, "wb");
+    if (!file) {
         err = "write " + fs::PathToString(p);
         return false;
     }
-    out << o.write() << "\n";
+    const bool written{fwrite(text.data(), 1, text.size(), file) == text.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    if (!committed || !closed || !RenameOver(tmp, p)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        err = "write " + fs::PathToString(p);
+        return false;
+    }
     return true;
 }
 
@@ -765,6 +814,63 @@ int64_t MandateBudget::Used() const
     return m_used;
 }
 
+UniValue MandateBudget::SaveState() const
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("total_atoms", std::to_string(m_total));
+    o.pushKV("per_action_atoms", std::to_string(m_per_action));
+    o.pushKV("revoked", m_revoked);
+    UniValue reservations(UniValue::VARR);
+    for (const auto& [key, req] : m_req) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("key", key);
+        r.pushKV("amount_atoms", std::to_string(req.first));
+        r.pushKV("refund_key", req.second);
+        reservations.push_back(r);
+    }
+    o.pushKV("reservations", reservations);
+    return o;
+}
+
+bool MandateBudget::LoadState(const UniValue& state, std::string& err)
+{
+    int64_t total = 0, per_action = 0, used = 0;
+    if (!state.isObject() || !state["total_atoms"].isStr() || !state["per_action_atoms"].isStr() ||
+        !CanonicalAtoms(state["total_atoms"].get_str(), total, err) ||
+        !CanonicalAtoms(state["per_action_atoms"].get_str(), per_action, err)) {
+        if (err.empty()) err = "mandate budget";
+        return false;
+    }
+    std::map<std::string, std::pair<int64_t, std::string>> req;
+    if (state.exists("reservations")) {
+        if (!state["reservations"].isArray()) {
+            err = "mandate reservations";
+            return false;
+        }
+        for (const UniValue& r : state["reservations"].getValues()) {
+            int64_t amount = 0;
+            if (!r.isObject() || !r["key"].isStr() || !r["amount_atoms"].isStr() ||
+                !CanonicalAtoms(r["amount_atoms"].get_str(), amount, err) || !AddMoneyAtoms(used, amount, err)) {
+                if (err.empty()) err = "mandate reservations";
+                return false;
+            }
+            req[r["key"].get_str()] = {amount, r.exists("refund_key") && r["refund_key"].isStr() ? r["refund_key"].get_str() : ""};
+        }
+    }
+    if (used > total) {
+        err = "mandate reservations exceed total";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(m_mu);
+    m_total = total;
+    m_per_action = per_action;
+    m_used = used;
+    m_revoked = state.exists("revoked") && state["revoked"].isBool() && state["revoked"].get_bool();
+    m_req = std::move(req);
+    return true;
+}
+
 void BountyChainIndex::Observe(const BountyChainFact& f)
 {
     m_undo.push_back(m_facts);
@@ -907,12 +1013,49 @@ bool BountyStore::Load(std::string& err)
     load_map("awards", m_awards);
     load_map("watches", m_watches);
     load_map("mandates", m_mandates);
+    // A mandate whose budget is missing or unreadable keeps no budget, so
+    // reservemandate refuses it rather than starting from zero.
+    if (o.exists("mandate_budgets") && o["mandate_budgets"].isObject()) {
+        for (const auto& id : o["mandate_budgets"].getKeys()) {
+            if (!m_mandates.count(id)) continue;
+            auto slot = std::make_unique<MandateBudget>();
+            std::string budget_err;
+            if (slot->LoadState(o["mandate_budgets"][id], budget_err)) m_budgets[id] = std::move(slot);
+        }
+    }
     if (o.exists("terms") && o["terms"].isObject()) {
         for (const auto& key : o["terms"].getKeys()) {
             SignedEnvelope env;
             if (EnvelopeFromJson(o["terms"][key], env, err)) m_terms[key] = env;
         }
     }
+    // The signed pledges, nominations, appointments, evaluation reports and
+    // challenges and the evaluation plans are loaded like the terms.
+    auto load_envelopes = [&](const char* k, std::map<std::string, SignedEnvelope>& dst) {
+        if (!o.exists(k) || !o[k].isObject()) return;
+        for (const auto& key : o[k].getKeys()) {
+            SignedEnvelope env;
+            if (EnvelopeFromJson(o[k][key], env, err)) dst[key] = env;
+        }
+    };
+    auto load_envelope_lists = [&](const char* k, std::map<std::string, std::vector<SignedEnvelope>>& dst) {
+        if (!o.exists(k) || !o[k].isObject()) return;
+        for (const auto& key : o[k].getKeys()) {
+            if (!o[k][key].isArray()) continue;
+            auto& list = dst[key];
+            list.clear();
+            for (const auto& j : o[k][key].getValues()) {
+                SignedEnvelope env;
+                if (EnvelopeFromJson(j, env, err)) list.push_back(env);
+            }
+        }
+    };
+    load_envelopes("pledges", m_pledges);
+    load_envelope_lists("nominations", m_noms);
+    load_envelope_lists("appointments", m_appointments);
+    load_envelopes("eval_reports", m_eval_reports);
+    load_envelopes("challenges", m_challenges);
+    load_map("eval_plans", m_eval_plans);
     return true;
 }
 
@@ -934,9 +1077,33 @@ bool BountyStore::PersistLocked(std::string& err) const
     dump("awards", m_awards);
     dump("watches", m_watches);
     dump("mandates", m_mandates);
+    UniValue budgets(UniValue::VOBJ);
+    for (const auto& [id, budget] : m_budgets) budgets.pushKV(id, budget->SaveState());
+    o.pushKV("mandate_budgets", budgets);
     UniValue terms(UniValue::VOBJ);
     for (const auto& kv : m_terms) terms.pushKV(kv.first, EnvelopeToJson(kv.second));
     o.pushKV("terms", terms);
+    // These were kept in memory only and were gone after every restart.
+    auto dump_envelopes = [&](const char* k, const std::map<std::string, SignedEnvelope>& m) {
+        UniValue x(UniValue::VOBJ);
+        for (const auto& kv : m) x.pushKV(kv.first, EnvelopeToJson(kv.second));
+        o.pushKV(k, x);
+    };
+    auto dump_envelope_lists = [&](const char* k, const std::map<std::string, std::vector<SignedEnvelope>>& m) {
+        UniValue x(UniValue::VOBJ);
+        for (const auto& kv : m) {
+            UniValue arr(UniValue::VARR);
+            for (const auto& env : kv.second) arr.push_back(EnvelopeToJson(env));
+            x.pushKV(kv.first, arr);
+        }
+        o.pushKV(k, x);
+    };
+    dump_envelopes("pledges", m_pledges);
+    dump_envelope_lists("nominations", m_noms);
+    dump_envelope_lists("appointments", m_appointments);
+    dump_envelopes("eval_reports", m_eval_reports);
+    dump_envelopes("challenges", m_challenges);
+    dump("eval_plans", m_eval_plans);
     return WriteJson(m_dir / "bounty-store.json", o, err);
 }
 
@@ -1080,9 +1247,18 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
                           std::string& err)
 {
     std::unique_lock<std::mutex> lock(m_mu);
-    const std::string idem = IdemKey(params);
+    // A result is remembered under the key and the request it answered. The
+    // same request again is a replay; another request under a used key is a
+    // conflict, as for NETWORK-02 writes and mandate reservations.
+    const std::string idem_key = IdemKey(params);
+    const std::string idem = idem_key.empty() ? std::string{} : idem_key + '\x1f' + IdemFingerprint(params);
     const bool skip_idem = (method == "reservemandate");
     if (!skip_idem && Idem(method, idem, result)) return true;
+    if (!skip_idem && IdemKeyUsed(m_idem, method, idem_key)) {
+        err_code = "IDEMPOTENCY_CONFLICT";
+        err = "idempotency conflict";
+        return false;
+    }
 
     auto fail = [&](const char* code, const std::string& e) {
         err_code = code;
@@ -1090,8 +1266,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         return false;
     };
     auto ok = [&]() {
+        // Report a failed save. Remember the result only once it is saved, so
+        // a retry with the same request saves again.
+        if (!PersistLocked(err)) return fail("IO", err);
         Remember(method, idem, result);
-        PersistLocked(err);
         return true;
     };
 
@@ -1102,7 +1280,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "createbountydraft") {
         UniValue terms = ObjArg(params, 0);
-        if (terms.exists("terms")) terms = terms["terms"];
+        if (terms.exists("terms")) {
+            // Copy the member out first: assigning terms from its own member
+            // reads it after the assignment has freed it.
+            UniValue inner = terms["terms"];
+            terms = std::move(inner);
+        }
         const bool complete = ValidateBountyTerms(terms, m_network, err);
         if (!complete) {
             if (!terms.exists("title") || !terms["title"].isStr() || terms["title"].get_str().empty()) {
@@ -1188,7 +1371,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (id.empty() && patch.exists("draft_id") && patch["draft_id"].isStr()) {
             id = patch["draft_id"].get_str();
         }
-        if (patch.exists("terms") && patch["terms"].isObject()) patch = patch["terms"];
+        if (patch.exists("terms") && patch["terms"].isObject()) {
+            UniValue inner = patch["terms"]; // copy out before patch is overwritten
+            patch = std::move(inner);
+        }
         auto it = m_drafts.find(id);
         if (it == m_drafts.end()) return fail("NOT_FOUND", "draft");
         UniValue merged(UniValue::VOBJ);
@@ -1237,7 +1423,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "validatebountyterms") {
         UniValue terms = ObjArg(params, 0);
-        if (terms.exists("terms")) terms = terms["terms"];
+        if (terms.exists("terms")) {
+            // Copy the member out first: assigning terms from its own member
+            // reads it after the assignment has freed it.
+            UniValue inner = terms["terms"];
+            terms = std::move(inner);
+        }
         result.setObject();
         const bool ok_terms = ValidateBountyTerms(terms, m_network, err);
         result.pushKV("ok", ok_terms);
@@ -1279,6 +1470,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         // title-only drafts) so a partial checklist can never reach the chain view.
         if (!ValidateBountyTerms(it->second, m_network, err)) {
             return fail("INVALID_PARAMETER", err.empty() ? "recipe incomplete" : ("recipe incomplete: " + err));
+        }
+        // expected_terms_id names the terms the user reviewed (the draft's
+        // terms_id_preview). A draft changed since must not be signed.
+        if (a.exists("expected_terms_id") &&
+            (!a["expected_terms_id"].isStr() || a["expected_terms_id"].get_str() != TermsIdPreview(it->second))) {
+            return fail("REJECTED", "expected_terms_id does not match the current draft terms");
         }
         SignedEnvelope env;
         if (!sign_terms(it->second, env)) return fail("REJECTED", err);
@@ -1424,10 +1621,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "acceptbountyappointment") {
         const UniValue a = ObjArg(params, 0);
+        // As nominatebountyevaluator: only for terms this store published.
+        const std::string terms_id = a.exists("terms_id") && a["terms_id"].isStr() ? a["terms_id"].get_str() : "";
+        if (!m_terms.count(terms_id)) return fail("NOT_FOUND", "terms");
         SignedEnvelope env;
         if (!sign_payload("CouncilAppointment", a.exists("appointment") ? a["appointment"] : a, env))
             return fail("REJECTED", err);
-        const std::string terms_id = a.exists("terms_id") ? a["terms_id"].get_str() : "";
         m_appointments[terms_id].push_back(env);
         result = EnvelopeToJson(env);
         result.pushKV("spending_authority", false);
@@ -1549,6 +1748,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "commitbountysubmission") {
         const UniValue a = ObjArg(params, 0);
+        // As pledgebounty and nominatebountyevaluator: only for a known bounty.
+        if (!a.exists("bounty_id") || !a["bounty_id"].isStr() || !m_bounties.count(a["bounty_id"].get_str())) {
+            return fail("NOT_FOUND", "bounty");
+        }
         UniValue p = a.exists("commitment") ? a["commitment"] : a;
         p.pushKV("bounty_id", a["bounty_id"]);
         SignedEnvelope env;
@@ -1701,9 +1904,21 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "listbountyevaluations") {
         const std::string sid = StrArg(params, 0, "submission_id");
+        // Only the reports for this submission: a report names its job, and
+        // the job's plan names the submission.
+        auto report_submission = [&](const SignedEnvelope& env) -> std::string {
+            if (!env.body.exists("payload") || !env.body["payload"].isObject()) return {};
+            const UniValue& payload = env.body["payload"];
+            if (!payload.exists("job_id") || !payload["job_id"].isStr()) return {};
+            auto job = m_eval_jobs.find(payload["job_id"].get_str());
+            if (job == m_eval_jobs.end() || !job->second.exists("plan") || !job->second["plan"].isObject()) return {};
+            const UniValue& plan = job->second["plan"];
+            return plan.exists("submission_id") && plan["submission_id"].isStr() ? plan["submission_id"].get_str() : std::string{};
+        };
         UniValue arr(UniValue::VARR);
-        for (const auto& kv : m_eval_reports) arr.push_back(EnvelopeToJson(kv.second));
-        (void)sid;
+        for (const auto& kv : m_eval_reports) {
+            if (!sid.empty() && report_submission(kv.second) == sid) arr.push_back(EnvelopeToJson(kv.second));
+        }
         result.setObject();
         result.pushKV("evaluations", arr);
         return true;
@@ -1711,8 +1926,14 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "createbountychallenge") {
         const UniValue a = ObjArg(params, 0);
+        // A challenge is against a known bounty, named in the signed payload.
+        const UniValue& challenge = a.exists("challenge") ? a["challenge"] : a;
+        if (!challenge.isObject() || !challenge.exists("bounty_id") || !challenge["bounty_id"].isStr() ||
+            !m_bounties.count(challenge["bounty_id"].get_str())) {
+            return fail("NOT_FOUND", "bounty");
+        }
         SignedEnvelope env;
-        if (!sign_payload("Challenge", a.exists("challenge") ? a["challenge"] : a, env)) return fail("REJECTED", err);
+        if (!sign_payload("Challenge", challenge, env)) return fail("REJECTED", err);
         m_challenges[env.record_id.Hex()] = env;
         result = EnvelopeToJson(env);
         result.pushKV("challenge_id", env.record_id.Hex());
@@ -1721,9 +1942,16 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "listbountychallenges") {
         const std::string bounty_id = StrArg(params, 0, "bounty_id");
+        // Only the challenges against this bounty.
         UniValue arr(UniValue::VARR);
-        for (const auto& kv : m_challenges) arr.push_back(EnvelopeToJson(kv.second));
-        (void)bounty_id;
+        for (const auto& kv : m_challenges) {
+            const UniValue& body = kv.second.body;
+            if (bounty_id.empty() || !body.exists("payload") || !body["payload"].isObject()) continue;
+            const UniValue& payload = body["payload"];
+            if (payload.exists("bounty_id") && payload["bounty_id"].isStr() && payload["bounty_id"].get_str() == bounty_id) {
+                arr.push_back(EnvelopeToJson(kv.second));
+            }
+        }
         result.setObject();
         result.pushKV("challenges", arr);
         return true;
@@ -1742,11 +1970,37 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "proposebountyaward") {
         const UniValue a = ObjArg(params, 0);
+        // An award names a published bounty, a submission to that bounty that
+        // was not withdrawn, and one of the documented modes.
+        auto str_field = [&](const char* k) { return a.exists(k) && a[k].isStr() ? a[k].get_str() : std::string{}; };
+        const std::string bounty_id = str_field("bounty_id");
+        if (!m_bounties.count(bounty_id)) return fail("NOT_FOUND", "bounty");
+        const std::string submission_id = str_field("submission_id");
+        auto sub = m_submissions.find(submission_id);
+        if (sub == m_submissions.end()) return fail("NOT_FOUND", "submission");
+        if (!sub->second.exists("bounty_id") || !sub->second["bounty_id"].isStr() ||
+            sub->second["bounty_id"].get_str() != bounty_id) {
+            return fail("INVALID_PARAMETER", "submission is not for this bounty");
+        }
+        auto withdrawn = [&](const std::string& id) {
+            auto it = m_submissions.find(id);
+            return it != m_submissions.end() && it->second.exists("withdrawn") && it->second["withdrawn"].isTrue();
+        };
+        const std::string commitment_id = sub->second.exists("commitment_id") && sub->second["commitment_id"].isStr()
+                                              ? sub->second["commitment_id"].get_str()
+                                              : std::string{};
+        if (withdrawn(submission_id) || (!commitment_id.empty() && withdrawn(commitment_id))) {
+            return fail("REJECTED", "submission withdrawn");
+        }
+        const UniValue mode = a.exists("mode") ? a["mode"] : UniValue("PUBLIC_PAYOUT");
+        if (!mode.isStr() || (mode.get_str() != "PUBLIC_PAYOUT" && mode.get_str() != "STAGED_RELEASE")) {
+            return fail("INVALID_PARAMETER", "mode must be PUBLIC_PAYOUT or STAGED_RELEASE");
+        }
         UniValue p(UniValue::VOBJ);
-        p.pushKV("bounty_id", a["bounty_id"]);
-        p.pushKV("submission_id", a["submission_id"]);
+        p.pushKV("bounty_id", bounty_id);
+        p.pushKV("submission_id", submission_id);
         p.pushKV("lot_ids", a.exists("lot_ids") ? a["lot_ids"] : UniValue(UniValue::VARR));
-        p.pushKV("mode", a.exists("mode") ? a["mode"] : "PUBLIC_PAYOUT");
+        p.pushKV("mode", mode);
         p.pushKV("paid", false);
         SignedEnvelope env;
         if (!sign_payload("AwardProposal", p, env)) return fail("REJECTED", err);
@@ -1768,7 +2022,17 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const std::string award_id = a.exists("award_id") ? a["award_id"].get_str() : "";
         auto it = m_awards.find(award_id);
         if (it == m_awards.end()) return fail("NOT_FOUND", "award");
-        if (a.exists("decision") && a["decision"].get_str() == "REJECT") {
+        // Only an exact APPROVE (or no decision) approves: "reject", "DENY" or
+        // any other value used to sign and publish an approval.
+        const bool no_decision = !a.exists("decision") || a["decision"].isNull();
+        const std::string decision = no_decision ? "APPROVE" : a["decision"].isStr() ? a["decision"].get_str() : "";
+        if (decision != "APPROVE" && decision != "REJECT") {
+            return fail("INVALID_PARAMETER", "decision must be APPROVE or REJECT");
+        }
+        if (decision == "APPROVE" && it->second.exists("rejected") && it->second["rejected"].isTrue()) {
+            return fail("REJECTED", "award was rejected");
+        }
+        if (decision == "REJECT") {
             it->second.pushKV("rejected", true);
             result = it->second;
             result.pushKV("transaction_signature", false);
@@ -1800,21 +2064,32 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const UniValue a = ObjArg(params, 0);
         const std::string bounty_id = a.exists("bounty_id") ? a["bounty_id"].get_str() : StrArg(params, 0);
         uint64_t since = 0;
-        if (a.exists("cursor") && a["cursor"].isStr() && !a["cursor"].get_str().empty())
-            since = std::stoull(a["cursor"].get_str());
+        if (a.exists("cursor") && a["cursor"].isStr() && !a["cursor"].get_str().empty()) {
+            const auto parsed = ToIntegral<uint64_t>(a["cursor"].get_str());
+            if (!parsed) return fail("INVALID_PARAMETER", "cursor");
+            since = *parsed;
+        }
         int limit = a.exists("limit") ? a["limit"].getInt<int>() : 50;
+        if (limit < 1) return fail("INVALID_PARAMETER", "limit");
         if (limit > BOUNTY_PAGE_MAX) limit = BOUNTY_PAGE_MAX;
         UniValue arr(UniValue::VARR);
+        // A full page continues after its last event; m_seq would skip the
+        // events between the page and the newest one.
+        uint64_t next = m_seq;
         for (const auto& e : m_events) {
-            if (e["seq"].getInt<int64_t>() <= static_cast<int64_t>(since)) continue;
+            const uint64_t seq = static_cast<uint64_t>(e["seq"].getInt<int64_t>());
+            if (seq <= since) continue;
             if (!bounty_id.empty() && e["bounty_id"].get_str() != bounty_id) continue;
             arr.push_back(e);
-            if (static_cast<int>(arr.size()) >= limit) break;
+            if (static_cast<int>(arr.size()) >= limit) {
+                next = seq;
+                break;
+            }
         }
         result.setObject();
         result.pushKV("events", arr);
         result.pushKV("epoch", static_cast<int64_t>(m_epoch));
-        result.pushKV("cursor", std::to_string(m_seq));
+        result.pushKV("cursor", std::to_string(next));
         result.pushKV("gap", false);
         return true;
     }
@@ -1946,7 +2221,13 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
                 return fail("INVALID_PARAMETER", err.empty() ? "amount_atoms" : err);
         }
         if (a.exists("confirmations")) f.confirmations = a["confirmations"].getInt<int>();
-        if (a.exists("height")) f.height = static_cast<uint32_t>(a["height"].getInt<int64_t>());
+        if (a.exists("height")) {
+            const int64_t height = a["height"].getInt<int64_t>();
+            if (height < 0 || height > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                return fail("INVALID_PARAMETER", "height out of range");
+            }
+            f.height = static_cast<uint32_t>(height);
+        }
         if (a.exists("spent")) f.spent = a["spent"].get_bool();
         if (!f.spent) {
             int64_t confirmed = m_chain.ConfirmedAtoms(f.bounty_id);

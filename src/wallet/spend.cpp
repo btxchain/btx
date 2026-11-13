@@ -1691,7 +1691,16 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         if (GetTransactionWeight(CTransaction{mtx}) > MAX_STANDARD_TX_WEIGHT) {
             return util::Error{_("Transaction too large")};
         }
-        return CreatedTransactionResult(MakeTransactionRef(std::move(mtx)), chosen.fee, chosen.change_pos, chosen.fee_calc);
+        CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+        // The internal build checked the chain limits on the unsigned
+        // transaction. Check them again with the signed vsize.
+        if (gArgs.GetBoolArg("-walletrejectlongchains", DEFAULT_WALLET_REJECT_LONG_CHAINS)) {
+            auto result = wallet.chain().checkChainLimits(tx);
+            if (!result) {
+                return util::Error{util::ErrorString(result)};
+            }
+        }
+        return CreatedTransactionResult(tx, chosen.fee, chosen.change_pos, chosen.fee_calc);
     };
     const auto& txr_ungrouped = *res;
     // try with avoidpartialspends unless it's enabled already

@@ -693,6 +693,7 @@ bool ParseSearchQuery(const UniValue& o, SearchQuery& q, std::string& err)
                 !take_int(f, "min_provider_count", q.filters.min_provider_count) ||
                 !take_bool(f, "pinned", q.filters.pinned) ||
                 !take_bool(f, "seeded", q.filters.seeded) ||
+                !take_bool(f, "locally_available", q.filters.locally_available) ||
                 !take_bool(f, "locally_verified", q.filters.locally_verified) ||
                 !take_bool(f, "funding_only", q.filters.funding_only) ||
                 !take_bool(f, "released_only", q.filters.released_only) ||
@@ -1083,7 +1084,9 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
             }
         }
     }
-    if (m_by_model.size() >= m_cap && it == m_by_model.end()) {
+    // The cap and the publisher quota below limit what peers can add. Local
+    // records come only from this node's own catalog and its own RPCs.
+    if (m_by_model.size() >= m_cap && it == m_by_model.end() && !r.local_catalog) {
         err = "index cap";
         return false;
     }
@@ -1097,6 +1100,10 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
     }
     ModelSearchRecord stored = r;
     stored.signed_ok = verified;
+    // A newer version of a record this node signed (an alias change, for
+    // example) is still its own. A record that only replaces the unsigned
+    // catalog stub is not: any key may sign one for the same model.
+    if (it != m_by_model.end() && it->second.local_catalog && it->second.signed_ok) stored.local_catalog = true;
     if (r.tombstone) stored.tombstone = true;
     m_by_model[key] = std::move(stored);
     ++m_seq;
@@ -1246,8 +1253,10 @@ void SearchIndex::Hide(const Digest48& model_id, bool on)
 }
 void SearchIndex::MutePublisher(const std::string& publisher_hex, bool on)
 {
-    if (on) m_muted_publishers.insert(publisher_hex);
-    else m_muted_publishers.erase(publisher_hex);
+    // Records carry the publisher id as lower-case hex (Digest48::Hex).
+    const std::string id = ToLower(publisher_hex);
+    if (on) m_muted_publishers.insert(id);
+    else m_muted_publishers.erase(id);
 }
 bool SearchIndex::Hidden(const Digest48& model_id) const
 {
@@ -1255,7 +1264,7 @@ bool SearchIndex::Hidden(const Digest48& model_id) const
 }
 bool SearchIndex::Muted(const std::string& publisher_hex) const
 {
-    return m_muted_publishers.count(publisher_hex) > 0;
+    return m_muted_publishers.count(ToLower(publisher_hex)) > 0;
 }
 void SearchIndex::AddIndexPeer(const std::string& endpoint)
 {
@@ -1308,15 +1317,39 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
     }
     UniValue snap(UniValue::VOBJ);
     snap.pushKV("schema_version", 2);
+    // The local search policy (hidesearchmodel, mutesearchpublisher) is kept
+    // with the index, so a restart does not show the records again.
+    UniValue hidden(UniValue::VARR);
+    for (const auto& id : m_hidden) hidden.push_back(id);
+    UniValue muted(UniValue::VARR);
+    for (const auto& id : m_muted_publishers) muted.push_back(id);
+    snap.pushKV("hidden", hidden);
+    snap.pushKV("muted_publishers", muted);
     snap.pushKV("sequence", static_cast<int64_t>(m_seq));
     snap.pushKV("records", arr);
     fs::create_directories(path.parent_path());
-    std::ofstream out(path, std::ios::trunc);
-    if (!out) {
+    // Write a temp file, check it after close and rename it over the index, so
+    // a write that a full disk cuts short keeps the previous file.
+    const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
+    std::error_code ec;
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (out) {
+            out << snap.write() << "\n";
+            out.close();
+        }
+        if (!out) {
+            fs::remove(tmp, ec);
+            err = "search-index write";
+            return false;
+        }
+    }
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
         err = "search-index write";
         return false;
     }
-    out << snap.write() << "\n";
     return true;
 }
 
@@ -1350,6 +1383,20 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
             }
             (void)Put(rec, now_ms, err);
         }
+        const auto load_ids = [&](const char* key, std::set<std::string>& dest) {
+            if (!o.exists(key)) return;
+            if (!o[key].isArray()) {
+                LogSkippedJson(std::string(key) + " type");
+                return;
+            }
+            for (const auto& v : o[key].getValues()) {
+                if (!v.isStr()) continue;
+                const std::string id = ToLower(v.get_str());
+                if (id.size() == 96 && IsHex(id)) dest.insert(id);
+            }
+        };
+        load_ids("hidden", m_hidden);
+        load_ids("muted_publishers", m_muted_publishers);
         if (o.exists("sequence")) {
             if (!o["sequence"].isNum()) {
                 LogSkippedJson("sequence type");

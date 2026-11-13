@@ -116,9 +116,14 @@ public:
 
     bool Note(FeedEvent ev, int64_t now_ms);
     bool NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms);
+    /** NoteSearchRecord for the helper re-reading its own index: a record the store
+     *  already holds is left as it is, so it does not count as another source. */
+    bool RefreshSearchRecord(const ModelSearchRecord& r, int64_t now_ms);
     bool NoteCampaign(const ReleaseCampaign& c, int64_t now_ms);
     bool NoteUnlock(const Digest48& model_id, const std::string& release_id, const ModelSearchRecord& r, int64_t now_ms);
     bool NoteFundingChanged(const ReleaseCampaign& c, int64_t now_ms);
+    /** The event NoteFundingChanged noted for c's current funding step, if any. */
+    bool NotedFundingEvent(const ReleaseCampaign& c, FeedEvent& out) const;
 
     std::vector<FeedEvent> Query(const FeedQuery& q, int64_t now_ms, std::string& next_cursor) const;
     UniValue StatusJson(int public_models, int campaigns, int unreleased, int unlocked, const FeedCoverage& cov) const;

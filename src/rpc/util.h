@@ -126,6 +126,21 @@ CAmount AmountFromValue(const UniValue& value, int decimals = 8);
  */
 CFeeRate ParseFeeRate(const UniValue& json);
 
+/**
+ * Narrow a JSON integer read with getInt<int64_t>() to a uint32_t (an output
+ * index, a height, a count, a chunk size).
+ *
+ * A plain static_cast<uint32_t> wraps: -1 becomes 4294967295 and 4294967297
+ * becomes 1. This refuses both instead.
+ *
+ * @param[in]  v     the value to narrow
+ * @param[out] out   set only when v is in [0, 4294967295]
+ * @param[in]  name  the field name, used in err
+ * @param[out] err   "<name> cannot be negative" or "<name> exceeds uint32 range"
+ * @returns true if v fits in a uint32_t
+ */
+[[nodiscard]] bool ParseUint32Index(int64_t v, uint32_t& out, const char* name, std::string& err);
+
 using RPCArgList = std::vector<std::pair<std::string, UniValue>>;
 std::string HelpExampleCli(const std::string& methodname, const std::string& args);
 std::string HelpExampleCliNamed(const std::string& methodname, const RPCArgList& args);

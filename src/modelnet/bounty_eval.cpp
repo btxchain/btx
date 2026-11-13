@@ -264,6 +264,13 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
 
 bool CancelEvaluationJob(UniValue& job, std::string& err)
 {
+    // A job that is no longer running keeps its state. The pid it recorded
+    // belongs to a child that was already reaped, and the bounty store keeps
+    // that pid across restarts, so by now it may name an unrelated process.
+    if (!job.exists("state") || !job["state"].isStr() || job["state"].get_str() != "RUNNING") {
+        err.clear();
+        return true;
+    }
     job.pushKV("cancel", true);
 #ifndef _WIN32
     if (job.exists("pid") && job["pid"].isNum()) {

@@ -587,7 +587,7 @@ bool HandleApiV1Get(const std::string& path, BrowserBridgeResponse& out)
         UniValue req(UniValue::VOBJ);
         std::string mode = "NEWEST";
         if (route == "/api/v1/feed/releases") mode = "NEW_RELEASE_CAMPAIGNS";
-        else if (route == "/api/v1/feed/unlocked") mode = "RECENTLY_UNLOCKED";
+        else if (route == "/api/v1/feed/unlocked") mode = "JUST_UNLOCKED";
         req.pushKV("mode", mode);
         params.push_back(std::move(req));
         UniValue rpc;

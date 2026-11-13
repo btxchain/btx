@@ -6,6 +6,7 @@
 
 from decimal import Decimal
 
+from test_framework.blocktools import REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -20,6 +21,9 @@ class WalletSweepToSelfTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
+        # Without these the coinbase outputs never mature here and the test
+        # only checks the empty-wallet errors.
+        self.extra_args = [list(REGTEST_GENERIC_P2P_MATMUL_ARGS)]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -105,6 +109,21 @@ class WalletSweepToSelfTest(BitcoinTestFramework):
             sweep.sweeptoself,
             {"minconf": 999999},
         )
+
+        self.log.info("a locked wallet is asked for the passphrase, not reported as empty")
+        node.createwallet(wallet_name="locked_sweep", passphrase="sweep pass", descriptors=True)
+        locked = node.get_wallet_rpc("locked_sweep")
+        locked.walletpassphrase("sweep pass", 60)
+        funder.sendtoaddress(locked.getnewaddress(), 1)
+        self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
+        locked.walletlock()
+        assert_raises_rpc_error(
+            -13,
+            "Please enter the wallet passphrase with walletpassphrase first",
+            locked.sweeptoself,
+        )
+        locked.walletpassphrase("sweep pass", 60)
+        assert "txid" in locked.sweeptoself()
 
 
 if __name__ == "__main__":

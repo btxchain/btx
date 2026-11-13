@@ -704,6 +704,10 @@ public:
     //! Decrypt PQ seed ciphertext loaded from an encrypted wallet and inject it.
     bool UnlockPQSeeds(const CKeyingMaterial& master_key);
 
+    //! Drop the cached signing providers that hold private keys, and wipe the PQ seeds
+    //! that have a ciphertext record, which UnlockPQSeeds() decrypts again.
+    void LockPQSeeds();
+
     void LoadCryptedPQSeed(const uint256& iv, std::vector<unsigned char> ciphertext);
     void LoadCryptedPQSeedMap(const uint256& iv, std::vector<unsigned char> ciphertext);
 

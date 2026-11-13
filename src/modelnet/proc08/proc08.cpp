@@ -20,6 +20,9 @@ constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
 std::string StripTrailingSlashes(std::string value)
 {
+#ifdef WIN32
+    std::replace(value.begin(), value.end(), '\\', '/');
+#endif
     while (value.size() > 1 && value.back() == '/') {
         value.pop_back();
     }

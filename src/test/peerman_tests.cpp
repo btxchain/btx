@@ -15344,6 +15344,320 @@ BOOST_AUTO_TEST_CASE(dropped_historical_holes_stay_fetch_suppressed_past_one_win
         pending = now_released;
     }
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == tip);
+
+    // A tip move keeps one window of these holes, the lowest heights (what
+    // the background walk asks for next), and releases the rest.
+    m_node.validation_signals->RegisterValidationInterface(&peerman);
+    struct UnregisterPeerman {
+        ValidationSignals& signals;
+        CValidationInterface* iface;
+        ~UnregisterPeerman() { signals.UnregisterValidationInterface(iface); }
+    } unregister{*m_node.validation_signals, &peerman};
+    {
+        const CBlock next{MineTipChild(m_node, *tip, /*extra_time=*/89)};
+        SetMockTime(std::chrono::seconds{next.GetBlockTime() + 1});
+        BOOST_REQUIRE(chainman.ProcessNewBlock(
+            std::make_shared<const CBlock>(next), /*force_processing=*/true,
+            /*min_pow_checked=*/true, nullptr));
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.ActiveTip())->GetBlockHash() ==
+                      next.GetHash());
+    }
+    const auto after_move{released()};
+    BOOST_CHECK_MESSAGE(after_move.size() == 1 && after_move[0] == holes.size() - 1,
+                        "after a tip move, released:" << describe(after_move)
+                            << "; expected only the highest hole");
+}
+
+// Issue #292, the window refetch. The holes of the case above are
+// dropped again on every delivery, and both tip notifications (ActiveTipChange
+// and UpdatedBlockTip) used to clear the whole of m_header_only_competing. So
+// the background walk fetched its whole window again after every block and
+// dropped every body again; on mainnet one archive sent one such peer about 540
+// coinbase-only bodies per block. A tip move changes nothing admission checks
+// for a hole on the new active chain that lies deeper than
+// MATMUL_RC_NEAR_TIP_DEPTH: the depth gate refuses it again, and a quorum or a
+// signed frontier that covers it is checked by IsHeaderOnlyFetchSuppressed
+// itself. Such holes must stay suppressed across a tip move. A competing
+// sibling of the old tip, and a hole the new tip brings back inside the
+// near-tip band, must still be released.
+BOOST_AUTO_TEST_CASE(dropped_deep_holes_stay_fetch_suppressed_across_tip_moves)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ResetMatMulEncDrVerdictsForTest();
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    PeerManager& peerman{*m_node.peerman};
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        chainman.GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    chainman.m_cached_finished_ibd.store(true, std::memory_order_relaxed);
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    ActivateRcAtTip(consensus, *tip);
+
+    // Building the chain is not under test: connect each block without a
+    // device replay.
+    SetMatMulExactReplayUnderReleasedCsMainHookForTest(
+        []() -> std::optional<bool> { return true; });
+    struct Cleanup {
+        node::NodeContext& node;
+        PeerManager& peerman;
+        ~Cleanup()
+        {
+            SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+            ResetMatMulEncDrVerdictsForTest();
+            NeutralizeUnconnectedHeaders(*Assert(node.chainman));
+            peerman.ResetMatMulVerifyAdmissionForTest();
+        }
+    } cleanup{m_node, peerman};
+
+    auto connect_tip_child = [&]() {
+        const CBlockIndex* parent{
+            WITH_LOCK(::cs_main, return chainman.ActiveTip())};
+        CBlock block{MineTipChild(m_node, *parent, /*extra_time=*/89)};
+        SetMockTime(std::chrono::seconds{block.GetBlockTime() + 1});
+        BOOST_REQUIRE(chainman.ProcessNewBlock(
+            std::make_shared<const CBlock>(block), /*force_processing=*/true,
+            /*min_pow_checked=*/true, nullptr));
+        return block;
+    };
+
+    // Eight holes, then MATMUL_RC_NEAR_TIP_DEPTH + 1 bodies on top so every
+    // hole is below the near-tip replay band.
+    constexpr int kHoles{8};
+    constexpr int kAbove{4};
+    std::vector<CBlock> blocks;
+    blocks.reserve(kHoles + kAbove);
+    for (int i = 0; i < kHoles + kAbove; ++i) blocks.push_back(connect_tip_child());
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    tip = WITH_LOCK(::cs_main, return chainman.ActiveTip());
+    BOOST_REQUIRE(tip->GetBlockHash() == blocks.back().GetHash());
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+
+    // Model never-downloaded history: the headers are on the active chain,
+    // the bodies and any local replay verdict are not.
+    struct Hole {
+        CBlockIndex* index;
+        uint32_t status;
+    };
+    std::vector<Hole> holes;
+    holes.reserve(kHoles);
+    {
+        LOCK(::cs_main);
+        chainman.m_blockman.m_have_pruned = true;
+        for (int i = 0; i < kHoles; ++i) {
+            CBlockIndex* index{
+                chainman.m_blockman.LookupBlockIndex(blocks[i].GetHash())};
+            BOOST_REQUIRE(index != nullptr);
+            holes.push_back({index, index->nStatus});
+            index->nStatus &= ~(BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO |
+                                BLOCK_EXACT_REPLAY_VERIFIED);
+            BOOST_REQUIRE(chainman.IsMatMulFollowedHistoricalHole(index));
+            BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(
+                index->nHeight));
+            BOOST_REQUIRE(index->nHeight < tip->nHeight - 3);
+        }
+    }
+    ResetMatMulEncDrVerdictsForTest();
+    struct RestoreHoles {
+        ChainstateManager& chainman;
+        std::vector<Hole>& holes;
+        ~RestoreHoles()
+        {
+            LOCK(::cs_main);
+            for (const Hole& hole : holes) hole.index->nStatus = hole.status;
+            chainman.m_blockman.m_have_pruned = false;
+        }
+    } restore_holes{chainman, holes};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode archive{/*id=*/2921, /*sock=*/nullptr,
+                  CAddress{PeermanTestService(0x2921007f), NODE_NETWORK},
+                  /*nKeyedNetGroupIn=*/0x93, /*nLocalHostNonceIn=*/0,
+                  CAddress{}, /*addrNameIn=*/"archive-292-tipmove",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(archive, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight);
+    connman.AddTestNode(archive);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& peer;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(peer);
+            connman.RemoveTestNode(peer);
+        }
+    } finalize{connman, peerman, archive};
+
+    // A single-inv GETDATA for the body, answered with the body: what the
+    // background-chainstate walk sends.
+    auto deliver = [&](const CBlockIndex& index, const CBlock& body)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        BOOST_REQUIRE(!peerman.FetchBlock(archive.GetId(), index).has_value());
+        connman.FlushSendBuffer(archive);
+        archive.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            archive, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(body))));
+        (void)connman.ProcessMessagesOnce(archive);
+        connman.FlushSendBuffer(archive);
+        archive.fPauseSend = false;
+    };
+    auto released = [&]() {
+        std::vector<int> out;
+        for (int i = 0; i < kHoles; ++i) {
+            if (!peerman.HeaderFetchSuppressedForTest(blocks[i].GetHash())) {
+                out.push_back(holes[i].index->nHeight);
+            }
+        }
+        return out;
+    };
+    auto describe = [](const std::vector<int>& heights) {
+        std::string out;
+        for (const int h : heights) out += strprintf(" %d", h);
+        return out.empty() ? std::string{" none"} : out;
+    };
+    auto persisted = [&]() {
+        LOCK(::cs_main);
+        int n{0};
+        for (const Hole& hole : holes) {
+            if (hole.index->nStatus & BLOCK_HAVE_DATA) ++n;
+        }
+        return n;
+    };
+
+    for (int i = 0; i < kHoles; ++i) deliver(*holes[i].index, blocks[i]);
+    BOOST_REQUIRE(!archive.fDisconnect);
+    BOOST_REQUIRE_EQUAL(persisted(), 0);
+    BOOST_REQUIRE_MESSAGE(released().empty(),
+                          "precondition: a delivered hole was released before the tip moved:"
+                              << describe(released()));
+
+    // A competing sibling of the current tip, dropped HEADER_ONLY in the same
+    // interval. The tip move must still release it.
+    const CBlockIndex* twin_index{nullptr};
+    CBlock twin{MineBlockOnParent(m_node, tip->pprev->GetBlockHash(),
+                                  tip->nHeight, tip->nTime + 1,
+                                  tip->pprev->GetMedianTimePast())};
+    {
+        BlockValidationState header_state;
+        std::vector<CBlockHeader> headers{twin.GetBlockHeader()};
+        BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+            headers, /*min_pow_checked=*/true, header_state, &twin_index));
+        BOOST_REQUIRE(twin_index != nullptr);
+    }
+    deliver(*twin_index, twin);
+    const bool twin_suppressed{peerman.HeaderFetchSuppressedForTest(twin.GetHash())};
+    BOOST_CHECK_MESSAGE(twin_suppressed,
+                        "precondition: the tip sibling was not dropped into the skip set");
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.ActiveTip()) == tip);
+
+    // The tip moves by one block. RegTestingSetup does not register the
+    // PeerManager for validation signals; do it here so ActiveTipChange and
+    // UpdatedBlockTip reach it as they do on a node.
+    m_node.validation_signals->RegisterValidationInterface(&peerman);
+    struct UnregisterPeerman {
+        ValidationSignals& signals;
+        CValidationInterface* iface;
+        ~UnregisterPeerman() { signals.UnregisterValidationInterface(iface); }
+    } unregister{*m_node.validation_signals, &peerman};
+    const CBlock next{connect_tip_child()};
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    tip = WITH_LOCK(::cs_main, return chainman.ActiveTip());
+    BOOST_REQUIRE(tip->GetBlockHash() == next.GetHash());
+
+    const auto after_move{released()};
+    BOOST_CHECK_MESSAGE(after_move.empty(),
+                        "the tip move released deep holes for GETDATA:"
+                            << describe(after_move));
+    if (twin_suppressed) {
+        BOOST_CHECK_MESSAGE(!peerman.HeaderFetchSuppressedForTest(twin.GetHash()),
+                            "the tip move kept the old tip's sibling suppressed");
+    }
+
+    // Admission is unchanged: a hole delivered again after the move is
+    // dropped again and stays suppressed.
+    deliver(*holes[0].index, blocks[0]);
+    BOOST_CHECK_EQUAL(persisted(), 0);
+    BOOST_CHECK_MESSAGE(released().empty(),
+                        "a re-delivered hole was released:" << describe(released()));
+
+    // Cover does not wait for a tip move. With a pinned signer's quorum on
+    // the tip in memory, IsHeaderOnlyFetchSuppressed releases every hole
+    // below it by itself, so keeping the entries cannot strand a covered hole.
+    {
+        CKey signer;
+        signer.MakeNewKey(/*fCompressed=*/true);
+        matmul::trusted::StoreConfig config;
+        config.chain_id = HeardServeChainId();
+        config.replay_authority_context = HeardServeContext();
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(node::matmul_trusted::Configure(
+                                  std::move(config), /*trusted_mirror=*/false,
+                                  /*serve=*/false, std::chrono::milliseconds{50},
+                                  error),
+                              error);
+        struct StoreReset {
+            ~StoreReset() { node::matmul_trusted::ResetForTest(); }
+        } store_reset;
+        BOOST_REQUIRE(node::matmul_trusted::Add(
+                          SignForHeardServe(signer, tip->GetBlockHash(), tip->nHeight),
+                          tip->GetBlockHash(), tip->nHeight) ==
+                      matmul::trusted::AddResult::Accepted);
+        const auto covered{released()};
+        BOOST_CHECK_MESSAGE(covered.size() == static_cast<size_t>(kHoles),
+                            "a quorum on the tip left holes suppressed; released:"
+                                << describe(covered));
+    }
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+
+    // Moving the tip back down to blocks[kHoles] puts the three highest holes
+    // inside MATMUL_RC_NEAR_TIP_DEPTH of the new tip, where admission would
+    // replay them. Those must be released; the deeper ones must not.
+    CBlockIndex* above_first{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(
+                                                       blocks[kHoles + 1].GetHash()))};
+    BOOST_REQUIRE(above_first != nullptr);
+    {
+        BlockValidationState invalidate_state;
+        BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(
+            invalidate_state, above_first));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    tip = WITH_LOCK(::cs_main, return chainman.ActiveTip());
+    BOOST_REQUIRE(tip->GetBlockHash() == blocks[kHoles].GetHash());
+    std::vector<int> expected_released;
+    for (int i = 0; i < kHoles; ++i) {
+        if (holes[i].index->nHeight >= tip->nHeight - 3) {
+            expected_released.push_back(holes[i].index->nHeight);
+        }
+    }
+    BOOST_REQUIRE_EQUAL(expected_released.size(), 3U);
+    const auto after_back{released()};
+    BOOST_CHECK_MESSAGE(after_back == expected_released,
+                        "after the tip moved back, released:" << describe(after_back)
+                            << "; expected:" << describe(expected_released));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

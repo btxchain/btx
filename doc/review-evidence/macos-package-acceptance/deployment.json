@@ -1,0 +1,123 @@
+{
+  "utc": "2026-11-08T23:48:53.897613+00:00",
+  "run": 42536199088,
+  "fixture": "28196c4409f201ae9fedf0628ad466670dc1e072",
+  "source": "36ab43008cac48aa5c8410e4b70d90a249196a33",
+  "code_files": [
+    "scripts/release/bundle_qt_gui.py",
+    "test/util/package_release_archive_test.py"
+  ],
+  "candidate_patch_sha256": "70886f514d01bf8d8ba2a8aed046475f6a92be55a0185610d37f05c675b2a417",
+  "candidate_archive_sha256": "1f38442ac8d7253abdad32ed5aa5d76567d81f9d617517093d55bee903ce3b53",
+  "before": {
+    "cases": [
+      {
+        "plugin": "platforms/libqcocoa.dylib",
+        "loaded": true,
+        "exit": 0,
+        "error": "Unknown error"
+      },
+      {
+        "plugin": "styles/libqmacstyle.dylib",
+        "loaded": true,
+        "exit": 0,
+        "error": "Unknown error"
+      },
+      {
+        "plugin": "iconengines/libqsvgicon.dylib",
+        "loaded": false,
+        "exit": 1,
+        "error": "Cannot load library /Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/iconengines/libqsvgicon.dylib: dlopen(/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/iconengines/libqsvgicon.dylib, 0x0005): Library not loaded: @rpath/QtSvg.framework/Versions/A/QtSvg\n  Referenced from: <965856C8-6DFC-3634-A7E1-D7E2DB0B06B3> /Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/iconengines/libqsvgicon.dylib\n  Reason: tried: '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/iconengines/../../../../lib/QtSvg.framework/Versions/A/QtSvg' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/iconengines/../../../../lib/QtSvg.framework/Versions/A/QtSvg' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/Frameworks/QtCore.framework/Versions/A/../../../QtSvg.framework/Versions/A/QtSvg' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/Frameworks/QtSvg.framework/Versions/A/QtSvg' (no such file)"
+      },
+      {
+        "plugin": "imageformats/libqpdf.dylib",
+        "loaded": false,
+        "exit": 1,
+        "error": "Cannot load library /Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/imageformats/libqpdf.dylib: dlopen(/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/imageformats/libqpdf.dylib, 0x0005): Library not loaded: @rpath/QtPdf.framework/Versions/A/QtPdf\n  Referenced from: <78584D82-672C-3B32-A722-B51AD3CBAE16> /Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/imageformats/libqpdf.dylib\n  Reason: tried: '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/imageformats/../../../../lib/QtPdf.framework/Versions/A/QtPdf' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/imageformats/../../../../lib/QtPdf.framework/Versions/A/QtPdf' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/Frameworks/QtCore.framework/Versions/A/../../../QtPdf.framework/Versions/A/QtPdf' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/Frameworks/QtPdf.framework/Versions/A/QtPdf' (no such file)"
+      },
+      {
+        "plugin": "platforminputcontexts/libqtvirtualkeyboardplugin.dylib",
+        "loaded": false,
+        "exit": 1,
+        "error": "Cannot load library /Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib: dlopen(/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib, 0x0005): Library not loaded: @rpath/QtVirtualKeyboardQml.framework/Versions/A/QtVirtualKeyboardQml\n  Referenced from: <63543553-D62F-31DD-A920-486A77A9C0D9> /Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib\n  Reason: tried: '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/platforminputcontexts/../../../../lib/QtVirtualKeyboardQml.framework/Versions/A/QtVirtualKeyboardQml' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/PlugIns/platforminputcontexts/../../../../lib/QtVirtualKeyboardQml.framework/Versions/A/QtVirtualKeyboardQml' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/Frameworks/QtCore.framework/Versions/A/../../../QtVirtualKeyboardQml.framework/Versions/A/QtVirtualKeyboardQml' (no such file), '/Users/runner/work/btx/btx/baseline/btx-0.34.16/btx-qt.app/Contents/Frameworks/QtVirtualKeyboardQml.framework/Versions/A/QtVirtualKeyboardQml' (no such file)"
+      }
+    ],
+    "package_bytes_unchanged": true,
+    "files": 160,
+    "ambient_homebrew_loads": false
+  },
+  "after": {
+    "cases": [
+      {
+        "plugin": "platforms/libqcocoa.dylib",
+        "loaded": true,
+        "exit": 0,
+        "error": "Unknown error"
+      },
+      {
+        "plugin": "styles/libqmacstyle.dylib",
+        "loaded": true,
+        "exit": 0,
+        "error": "Unknown error"
+      },
+      {
+        "plugin": "iconengines/libqsvgicon.dylib",
+        "loaded": true,
+        "exit": 0,
+        "error": "Unknown error"
+      },
+      {
+        "plugin": "imageformats/libqpdf.dylib",
+        "loaded": true,
+        "exit": 0,
+        "error": "Unknown error"
+      },
+      {
+        "plugin": "platforminputcontexts/libqtvirtualkeyboardplugin.dylib",
+        "loaded": true,
+        "exit": 0,
+        "error": "Unknown error"
+      }
+    ],
+    "package_bytes_unchanged": true,
+    "files": 176,
+    "ambient_homebrew_loads": false
+  },
+  "producer_binaries_unchanged": true,
+  "original_archive_unchanged": true,
+  "frameworks_present": [
+    "QtSvg",
+    "QtPdf",
+    "QtVirtualKeyboardQml",
+    "QtVirtualKeyboard"
+  ],
+  "stock_checker_exit": 0,
+  "unit_suite": "30 tests, OK,1skip",
+  "artifacts": [
+    {
+      "id": 13639990751,
+      "name": "mac-deployment-fix-records",
+      "digest": "sha256:f83ef969c536d438f7cfb2ff5a5d338013f537e8481f1d67dbf9eb82df751129",
+      "size_in_bytes": 2803230,
+      "expires_at": "2026-11-22T23:47:14Z"
+    },
+    {
+      "id": 13639762129,
+      "name": "mac-deployment-fix-candidates",
+      "digest": "sha256:4288afe76704a71598f74f746a6ff7963a5def23742147512c5efe6ec5bb8f40",
+      "size_in_bytes": 84747197,
+      "expires_at": "2026-11-22T23:47:17Z"
+    }
+  ],
+  "prior_attempts": {
+    "42535332369": "Libpath-only candidate insufficient; native assembly correctly refused unresolved Qt frameworks; baseline five cases reproduced and maintained units passed.",
+    "42536037232": "Cancelled during setup after source review found duplicate temporary rpath deletion; no native result claimed."
+  },
+  "review_catch": "Qt6.12 removes used rpaths on additional executables; final cleanup re-inspects and deletes only if still present. Regression for both outcomes.",
+  "scope": "Native macOS ARM64 plugin loading and stock packaging with exact pinned producer binaries. Temporary probe QtCore binding is explicit and diagnostics reject ambient Homebrew loads. No actual app window, node/helper restart, GPU/full-suite, older macOS, signing identity/notarization or release qualification.",
+  "pr452_included": false,
+  "working_node_untouched": true,
+  "original_caches_preserved": true,
+  "upstream_publication": false,
+  "credit": "Original BTX authors/license retained. JPP #452 is a separate unincluded guard packaging candidate; internal code review caught temporary-rpath cleanup issue, not independent native verification."
+}

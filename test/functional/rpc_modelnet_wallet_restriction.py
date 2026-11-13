@@ -57,23 +57,46 @@ class StubHelper(threading.Thread):
         self.path = path
         self.output_script = ""
         self.ingested = []
+        self.last_observation = None
+        self.scoped_supported = True
+        self.requests = []
+        self.read_error = None
+        self.refund_height = None
         self.stop_event = threading.Event()
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.sock.bind(path)
         self.sock.listen(16)
         self.sock.settimeout(0.2)
 
-    def card(self):
-        return {"release_id": RELEASE_ID, "output_script": self.output_script, "target_atoms": 100 * 10**8}
+    def card(self, restricted=False):
+        card = {"release_id": RELEASE_ID, "output_script": self.output_script, "target_atoms": 100 * 10**8}
+        if self.refund_height is not None:
+            card["refund_height"] = self.refund_height
+        if not restricted and self.last_observation:
+            card.update(self.last_observation)
+            card["wallet_local_state"] = True
+            card["requires_wallet"] = True
+        return card
 
     def reply(self, method, params):
+        self.requests.append((method, params))
+        restricted = False
+        if method == "getrestrictedmodelview":
+            if not self.scoped_supported:
+                return None, {"code": "METHOD_NOT_FOUND", "message": "unknown model RPC"}
+            assert len(params) == 2 and params[0] in FEED_METHODS
+            method, params = params
+            restricted = True
         if method == "ingestchainfundingobservation":
             self.ingested.append(params[0] if params else None)
+            self.last_observation = params[0]
             return {"accepted": True}
         if method in FEED_METHODS:
+            if self.read_error:
+                return None, self.read_error
             if method in ("getmodeleconomyentry", "getmodelreleaseeconomics"):
-                return self.card()
-            return {"results": [self.card()]}
+                return self.card(restricted)
+            return {"results": [self.card(restricted)]}
         return {}
 
     def run(self):
@@ -93,7 +116,10 @@ class StubHelper(threading.Thread):
                         buf += data
                     req = json.loads(buf.decode())
                     result = self.reply(req.get("method"), req.get("params") or [])
-                    conn.sendall((json.dumps({"result": result, "error": None, "id": req.get("id")}) + "\n").encode())
+                    error = None
+                    if isinstance(result, tuple):
+                        result, error = result
+                    conn.sendall((json.dumps({"result": result, "error": error, "id": req.get("id")}) + "\n").encode())
                 except (OSError, ValueError):
                     continue
 
@@ -223,6 +249,46 @@ class ModelnetWalletRestrictionTest(BitcoinTestFramework):
             assert v["wallet_local_state"] is not True, (case, user, method, v)
             assert v["confirmed_funded_atoms"] in (None, 0), (case, user, method, v)
             assert v["requires_wallet"] is not True, (case, user, method, v)
+
+        # Supported helpers must preserve ordinary read errors.
+        self.helper.read_error = {"code": "INVALID_PARAMETER", "message": "invalid release id"}
+        for method in ("getmodelreleaseeconomics", "getfundablemodels"):
+            params = [RELEASE_ID] if method == "getmodelreleaseeconomics" else [{"limit": 10}]
+            try:
+                getattr(node, method)(*params)
+            except Exception as error:
+                assert hasattr(error, "error"), error
+                expected = error.error
+            else:
+                raise AssertionError("Unrestricted invalid read unexpectedly succeeded")
+            status, out = self.call_as("no_wallet", method, params)
+            assert_equal(status, 500)
+            assert_equal(out["error"], expected)
+        self.helper.read_error = None
+
+        # A separately managed older helper must refuse the scoped request;
+        # the node must not retry the ordinary read and expose its cached view.
+        self.helper.scoped_supported = False
+        for method in ("getmodelreleaseeconomics", "getfundablemodels"):
+            params = [RELEASE_ID] if method == "getmodelreleaseeconomics" else [{"limit": 10}]
+            before = len(self.helper.requests)
+            status, out = self.call_as("no_wallet", method, params)
+            assert_equal(status, 500)
+            assert "getrestrictedmodelview" in out["error"]["message"]
+            calls = [call for call in self.helper.requests[before:]
+                     if call[0] in ("getrestrictedmodelview", "getmodelreleaseeconomics", "getfundablemodels")]
+            assert_equal(len(calls), 1)
+            assert_equal(calls[0][0], "getrestrictedmodelview")
+        self.helper.scoped_supported = True
+
+        self.log.info("A refund_height outside uint32 is unknown, not a wrapped height")
+        # 2**32 + 1000000 used to wrap to 1000000 (NOT_MATURE), -1 to 4294967295.
+        for refund_height, status in ((1_000_000, "NOT_MATURE"), (2**32 + 1_000_000, "UNKNOWN"), (-1, "UNKNOWN")):
+            self.helper.refund_height = refund_height
+            card = node.getmodelreleaseeconomics(RELEASE_ID)
+            assert_equal((refund_height, card.get("refund_status")), (refund_height, status))
+        self.helper.refund_height = None
+
 
 
 if __name__ == "__main__":

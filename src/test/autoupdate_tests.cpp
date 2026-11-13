@@ -20,6 +20,7 @@
 #include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
+#include <csignal>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -27,6 +28,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifndef WIN32
+#include <sys/resource.h>
+#endif
 
 namespace {
 
@@ -712,6 +717,46 @@ BOOST_AUTO_TEST_CASE(real_signature_path_accepts_supported_encodings_and_rejects
     }
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(installer_cut_short_at_close_is_not_staged)
+{
+    // LaunchInstaller runs the staged file as it is on disk. A full disk can
+    // fail only the flush at close, so the staging must not report a cut-off
+    // script as staged. RLIMIT_FSIZE lets only the first line reach the file.
+    const std::string first_line{"#!/bin/sh\necho one\n"};
+    const std::string text{first_line + "echo two\n"};
+    const std::vector<unsigned char> script{text.begin(), text.end()};
+    const fs::path datadir{m_path_root / "stage"};
+    const fs::path update_dir{datadir / "autoupdate"};
+    const auto read_file = [](const fs::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    };
+
+    struct rlimit old_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cut{old_limit};
+    cut.rlim_cur = first_line.size();
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+    const auto staged{node::StageAutoUpdateInstallerScript(datadir, "99.0.0", script)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    if (staged) {
+        BOOST_CHECK_EQUAL(read_file(*staged), text);
+    }
+    BOOST_CHECK(!staged);
+    BOOST_CHECK(fs::is_empty(update_dir));
+
+    // With room again the same script is staged in full and executable.
+    const auto later{node::StageAutoUpdateInstallerScript(datadir, "99.0.0", script)};
+    BOOST_REQUIRE(later);
+    BOOST_CHECK_EQUAL(read_file(*later), text);
+    BOOST_CHECK((fs::status(*later).permissions() & fs::perms::owner_exec) != fs::perms::none);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
 {
     CPQKey signing_key;
@@ -764,6 +809,79 @@ BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("ecdsa") == nullptr);
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("not-a-scheme") == nullptr);
 }
+
+BOOST_AUTO_TEST_CASE(unreadable_floor_is_refused_and_logged)
+{
+    fs::create_directories(m_path_root / "autoupdate");
+    {
+        std::ofstream empty{m_path_root / "autoupdate" / "highest-accepted-version", std::ios::trunc};
+    }
+    Harness h;
+    h.config.datadir = m_path_root;
+    h.AddManifest();
+    h.AddSignature();
+    h.AddScript();
+    {
+        ASSERT_DEBUG_LOG("Auto-update is paused");
+        const auto result = h.Run();
+        BOOST_CHECK(result.status == node::AutoUpdateStatus::BAD_MANIFEST);
+        BOOST_CHECK(result.detail.find("unreadable") != std::string::npos);
+    }
+    BOOST_CHECK_EQUAL(h.runner.calls, 0);
+}
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(dangling_floor_is_refused_and_logged)
+{
+    const auto dir = m_path_root / "autoupdate";
+    fs::create_directories(dir);
+    fs::create_symlink(dir / "missing-floor", dir / "highest-accepted-version");
+    Harness h;
+    h.config.datadir = m_path_root;
+    h.AddManifest();
+    h.AddSignature();
+    h.AddScript();
+    ASSERT_DEBUG_LOG("Auto-update is paused");
+    BOOST_CHECK(h.Run().status == node::AutoUpdateStatus::BAD_MANIFEST);
+    BOOST_CHECK_EQUAL(h.runner.calls, 0);
+}
+
+BOOST_AUTO_TEST_CASE(failed_state_write_is_not_reported_as_written)
+{
+    // RLIMIT_FSIZE 0 fails every write that grows a file (EFBIG), the way a
+    // full disk fails the flush at close.
+    Harness first;
+    first.config.datadir = m_path_root;
+    first.AddManifest();
+    first.AddSignature();
+    first.AddScript();
+    struct rlimit old_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit no_growth{old_limit};
+    no_growth.rlim_cur = 0;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &no_growth) == 0);
+    const auto during{first.Run()};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK(during.status == node::AutoUpdateStatus::LAUNCH_FAILED);
+    BOOST_CHECK_EQUAL(first.runner.calls, 0);
+    BOOST_CHECK(!fs::exists(m_path_root / "autoupdate" / "highest-accepted-version"));
+
+    // Once writes work again the next poll proceeds normally.
+    Harness later;
+    later.config.datadir = m_path_root;
+    later.AddManifest();
+    later.AddSignature();
+    later.AddScript();
+    BOOST_CHECK(later.Run().status == node::AutoUpdateStatus::LAUNCHED);
+    std::ifstream mark_in{m_path_root / "autoupdate" / "highest-accepted-version"};
+    std::string marked;
+    std::getline(mark_in, marked);
+    BOOST_CHECK_EQUAL(marked, "99.0.0");
+}
+#endif
 
 // End-to-end artifact generator: when BTX_AUTOUPDATE_E2E_DIR + BTX_AUTOUPDATE_E2E_BASEURL are
 // set, emit a real ML-DSA-44-signed manifest, signature, installer, and public key so a live

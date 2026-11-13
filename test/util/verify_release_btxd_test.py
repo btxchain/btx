@@ -553,6 +553,37 @@ class ArchiveContentGateTest(unittest.TestCase):
         self.assertIn("needs OPENSSL_3.2.0 from the host's libssl.so.3", text)
         self._gate({"btx-0.35.0/bin/btxd": self._btxd(openssl="OPENSSL_3.0.0")})
 
+    def _qt_archive(self, gui_qt: str, plugin_qt: str) -> dict[str, bytes]:
+        def lib(*needed: str) -> bytes:
+            return make_elf(list(needed), executable=False)
+
+        gui_core = f"libQt{gui_qt}Core.so.{gui_qt}"
+        gui_widgets = f"libQt{gui_qt}Widgets.so.{gui_qt}"
+        plugin_gui = f"libQt{plugin_qt}Gui.so.{plugin_qt}"
+        files = {
+            "btx-0.35.0/bin/btxd": self._btxd(runpath="$ORIGIN/../lib"),
+            "btx-0.35.0/lib/libssl.so.3": self._libssl(),
+            "btx-0.35.0/bin/btx-qt": b'#!/bin/sh\nexec "$SELF_DIR/../libexec/btx-qt.real" "$@"\n',
+            "btx-0.35.0/libexec/btx-qt.real": make_elf([gui_widgets, gui_core, "libc.so.6"],
+                                                       runpath="$ORIGIN/../lib"),
+            f"btx-0.35.0/lib/{gui_widgets}": lib(gui_core),
+            f"btx-0.35.0/lib/{gui_core}": lib("libc.so.6"),
+            f"btx-0.35.0/lib/{plugin_gui}": lib("libc.so.6"),
+            "btx-0.35.0/lib/qt6/plugins/platforms/libqxcb.so": lib(plugin_gui),
+        }
+        return files
+
+    def test_qt5_gui_with_qt6_platform_plugin_fails(self) -> None:
+        # 0.34.16: btx-qt.real NEEDs libQt5*; the only platform plugin is
+        # lib/qt6/plugins/platforms/libqxcb.so, which NEEDs libQt6Gui.
+        text = self._problems(self._qt_archive("5", "6"))
+        self.assertIn("Qt 5 and Qt 6 in one archive", text)
+        self.assertIn("btx-0.35.0/libexec/btx-qt.real", text)
+        self.assertIn("btx-0.35.0/lib/qt6/plugins/platforms/libqxcb.so", text)
+
+    def test_one_qt_major_passes(self) -> None:
+        self.assertIn("+contents", self._gate(self._qt_archive("6", "6")))
+
     def test_openssl_floor_is_per_library(self) -> None:
         # Ubuntu 24.04's libssl.so.3 defines only OPENSSL_3.0.0; its libcrypto.so.3
         # defines up to OPENSSL_3.0.9. ld.so looks for a version node only in the
@@ -651,6 +682,18 @@ class ArchiveContentGateTest(unittest.TestCase):
             with self.assertRaises(self.mod.VerifyError) as caught:
                 self.mod.verify_glibc_ceiling(self.root)
         self.assertIn("lib/libgnutls.so.30 needs GLIBC_2.43", str(caught.exception))
+
+    def test_glibc_ceiling_reads_every_elf_not_only_bin_libexec_lib(self) -> None:
+        # Qt's own deployment layout puts plugins/ beside lib/. The ceiling
+        # used to walk only bin/, libexec/ and lib/, so this plugin passed.
+        files = {"btx-0.35.0/bin/btxd": self._btxd(openssl="OPENSSL_3.0.0"),
+                 "btx-0.35.0/plugins/platforms/libqxcb.so": make_elf(["libc.so.6"], executable=False)}
+        versions = {"btxd": {"GLIBC": "2.38"}, "libqxcb.so": {"GLIBC": "2.43"}}
+        with mock.patch.object(self.mod, "elf_required_versions",
+                               side_effect=lambda p: versions.get(p.name, {})):
+            text = self._problems(files)
+        self.assertIn("btx-0.35.0/plugins/platforms/libqxcb.so needs GLIBC_2.43", text)
+        self.assertNotIn("btxd needs", text)
 
     def test_owner_mode_and_empty_directory(self) -> None:
         text = self._problems({"./bin/btxd": self._btxd(openssl="OPENSSL_3.0.0")},
@@ -773,6 +816,41 @@ class ArchiveContentGateTest(unittest.TestCase):
         with self.assertRaises(self.mod.VerifyError) as caught:
             self.mod.verify_archive(archive, launch=False)
         self.assertIn("btx-qt: unreadable Mach-O: symbol table past the end of the file", str(caught.exception))
+
+    def test_archive_checks_nested_macho_load_paths(self) -> None:
+        def image(command, name):
+            raw = name.encode() + b"\0"
+            offset = 12 if command == 0x8000001C else 24
+            size = (offset + len(raw) + 7) & ~7
+            header = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 6, 1, size, 0, 0)
+            load = struct.pack("<III", command, size, offset)
+            return header + load.ljust(offset, b"\0") + raw.ljust(size - offset, b"\0")
+
+        def universal(first, second):
+            # The first slice is x86-64 and the second is arm64.
+            first = first[:4] + struct.pack("<II", 0x01000007, 3) + first[12:]
+            start = 48
+            return (struct.pack(">12I", 0xCAFEBABE, 2, 0x01000007, 3, start, len(first), 0,
+                                0x0100000C, 0, start + len(first), len(second), 0)
+                    + first + second)
+
+        archive = self.root / "macos.tar.gz"
+        plugin = "btx/btx-qt.app/Contents/PlugIns/platforms/libprobe.dylib"
+        daemon = {"btx/bin/btxd": make_macho(extra=ZMQ_HELP)}
+        clean = image(0xC, "/usr/lib/libSystem.B.dylib")
+        with mock.patch.object(self.mod, "verify_macos_signature"):
+            write_tar(archive, {**daemon, plugin: universal(clean, image(0x8000001C, "@loader_path/../Frameworks"))})
+            self.mod.verify_archive(archive, launch=False)
+            for payload, message in (
+                (image(0xC, "/opt/homebrew/lib/libprobe.dylib"), "library dependency"),
+                (universal(clean, image(0x8000001F, "/usr/local/lib/libprobe.dylib")), "library dependency"),
+                (image(0x8000001C, "/opt/homebrew/lib"), "runpath"),
+                (image(0x18, "@rpath/libprobe.dylib")[:-1], "unreadable Mach-O"),
+            ):
+                with self.subTest(message=message):
+                    write_tar(archive, {**daemon, plugin: payload})
+                    with self.assertRaisesRegex(self.mod.VerifyError, f"{plugin}: .*{message}"):
+                        self.mod.verify_archive(archive, launch=False)
 
     def test_v0_34_15_macos_archive_fails_the_randombytes_checks(self) -> None:
         archive = V0_34_15_DIR / "btx-0.34.15-arm64-apple-darwin.tar.gz"

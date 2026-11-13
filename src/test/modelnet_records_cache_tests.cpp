@@ -262,6 +262,95 @@ BOOST_AUTO_TEST_CASE(announced_records_are_bounded_in_bytes)
     BOOST_CHECK_LT(accepted, 700);
 }
 
+// doc/modelnet/http.md bounds /records/get to 16 IDs and 128 KiB aggregate. A
+// repeated ID is served once, and the records stop at the aggregate bound.
+BOOST_AUTO_TEST_CASE(records_get_serves_each_id_once_within_128_kib)
+{
+    const fs::path tmp = m_path_root / "records-get-bound";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    const Signer s = NewSigner();
+    std::vector<std::string> ids;
+    size_t payload{0};
+    for (int k = 0; k < 6; ++k) {
+        const Record r = MakeCollection(s, Now(), 0, 512, k);
+        const auto resp = Announce(cat, "ext/objects/announce", s, r);
+        BOOST_REQUIRE_MESSAGE(resp.status == 200, resp.body);
+        UniValue ann;
+        BOOST_REQUIRE(ann.read(resp.body));
+        ids.push_back(ann["record_id"].get_str());
+        payload = std::max(payload, r.payload.size());
+    }
+    BOOST_TEST_MESSAGE("record payload up to " << payload << " bytes");
+    // Each record is about twice its payload in the response (hex).
+    BOOST_REQUIRE_GT(2 * payload * ids.size(), 128U * 1024);
+    BOOST_REQUIRE_LT(4 * payload, 128U * 1024);
+    const auto get = [&](const std::vector<std::string>& want) {
+        UniValue arr(UniValue::VARR);
+        for (const auto& id : want) arr.push_back(id);
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("ids", arr);
+        modelnet::NativeRequest req;
+        req.method = "POST";
+        req.path = "/btx-model/2/records/get";
+        req.body = body.write();
+        modelnet::NativeResponse resp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, req, resp));
+        BOOST_TEST_MESSAGE(want.size() << " ids: " << resp.body.size() << " response bytes");
+        UniValue out;
+        BOOST_REQUIRE(out.read(resp.body));
+        return out;
+    };
+    const auto records_size = [](const UniValue& out) {
+        size_t total{0};
+        for (const UniValue& rec : out["records"].getValues()) total += rec.write().size();
+        return total;
+    };
+
+    // One ID asked 16 times is one record.
+    const UniValue same = get(std::vector<std::string>(16, ids[0]));
+    BOOST_CHECK_EQUAL(same["records"].size(), 1U);
+
+    // Six distinct records: as many as fit in 128 KiB, then truncated.
+    const UniValue distinct = get(ids);
+    BOOST_CHECK_LE(records_size(distinct), 128U * 1024);
+    BOOST_CHECK_GE(distinct["records"].size(), 1U);
+    BOOST_CHECK_LT(distinct["records"].size(), ids.size());
+    BOOST_CHECK(distinct.exists("truncated") && distinct["truncated"].isTrue());
+
+    // A request within the bound is answered in full and not marked truncated.
+    const UniValue two = get({ids[0], ids[1]});
+    BOOST_CHECK_EQUAL(two["records"].size(), 2U);
+    BOOST_CHECK(!two.exists("truncated"));
+
+    // Twenty small records: the 16-record cap also marks the answer truncated.
+    std::vector<std::string> small;
+    for (int k = 0; k < 20; ++k) {
+        const auto resp = Announce(cat, "records/announce", s, MakeCollection(s, Now(), 0, 1, 100 + k));
+        BOOST_REQUIRE_MESSAGE(resp.status == 200, resp.body);
+        UniValue ann;
+        BOOST_REQUIRE(ann.read(resp.body));
+        small.push_back(ann["record_id"].get_str());
+    }
+    const UniValue capped = get(small);
+    BOOST_CHECK_EQUAL(capped["records"].size(), 16U);
+    BOOST_CHECK(capped.exists("truncated") && capped["truncated"].isTrue());
+
+    // /ext/objects/get serves a repeated ID once as well.
+    UniValue arr(UniValue::VARR);
+    for (const auto& id : {small[0], small[0], small[1]}) arr.push_back(id);
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("ids", arr);
+    modelnet::NativeRequest req;
+    req.method = "POST";
+    req.path = "/btx-model/2/ext/objects/get";
+    req.body = body.write();
+    modelnet::NativeResponse resp;
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, req, resp));
+    UniValue objs;
+    BOOST_REQUIRE(objs.read(resp.body));
+    BOOST_CHECK_EQUAL(objs["objects"].size(), 2U);
+}
+
 BOOST_AUTO_TEST_CASE(full_cache_still_refreshes_a_record_it_holds)
 {
     const int64_t now = 1700000000;

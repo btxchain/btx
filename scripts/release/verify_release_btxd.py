@@ -50,7 +50,8 @@ that NEEDs a library the archive ships must reach it through RUNPATH/RPATH
 or the packaged wrapper; no ELF may need a GLIBCXX, CXXABI, GCC or OPENSSL
 version above the floor from a host library (OPENSSL per library: libssl
 and libcrypto define different nodes); a Windows .exe/.dll may import
-only system DLLs or DLLs beside it; a Mach-O with ML-DSA keygen must define
+only system DLLs or DLLs beside it; Mach-O dependencies and runpaths must be portable in every bundled image; a thin
+64-bit Mach-O with ML-DSA keygen must define
 _btx_mldsa_randombytes (17c2da89); tar members must be root-owned and not
 group/world-writable, no directory may be empty, and no name or link may
 leave the archive. These checks read the files and run nothing, so a Mac
@@ -83,6 +84,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -91,8 +93,20 @@ ELF_MAGIC = b"\x7fELF"
 MACHO_MAGIC_64LE = 0xFEEDFACF
 LC_LOAD_DYLIB = 0xC
 LC_LOAD_WEAK_DYLIB = 0x18
+LC_REEXPORT_DYLIB = 0x1F
+LC_LAZY_LOAD_DYLIB = 0x20
+LC_LOAD_UPWARD_DYLIB = 0x23
+LC_RPATH = 0x1C
 LC_REQ_DYLD = 0x80000000
 HOMEBREW_PREFIXES = ("/opt/homebrew", "/usr/local/opt")
+MACHO_LOAD_COMMANDS = {LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB,
+                       LC_LAZY_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB}
+MACHO_THIN_MAGICS = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+                     b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce"}
+MACHO_FAT_MAGICS = {b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf",
+                    b"\xbe\xba\xfe\xca", b"\xbf\xba\xfe\xca"}
+MACOS_RUNTIME_PREFIXES = ("/usr/lib/", "/System/Library/", "@rpath/",
+                          "@loader_path/", "@executable_path/")
 
 
 class VerifyError(RuntimeError):
@@ -109,27 +123,94 @@ def has_enable_zmq_help(path: Path) -> bool:
     return ENABLE_ZMQ_HELP in path.read_bytes()
 
 
+def macho_slices(data: bytes) -> Iterator[bytes]:
+    """Yield the images in a thin or universal Mach-O."""
+    magic = data[:4]
+    if magic in MACHO_THIN_MAGICS:
+        yield data
+        return
+    if magic not in MACHO_FAT_MAGICS or len(data) < 8:
+        raise VerifyError("invalid Mach-O header")
+    order = ">" if magic[0] == 0xCA else "<"
+    wide = 0xBF in magic
+    stride = 32 if wide else 20
+    count, = struct.unpack_from(order + "I", data, 4)
+    table_end = 8 + count * stride
+    if not count or table_end > len(data):
+        raise VerifyError("invalid universal Mach-O architecture table")
+    for record in range(8, table_end, stride):
+        offset, size = struct.unpack_from(order + ("QQ" if wide else "II"), data, record + 8)
+        if offset < table_end or size < 4 or offset + size > len(data):
+            raise VerifyError("invalid universal Mach-O slice")
+        yield data[offset:offset + size]
+
+
+def macho_load_paths(path: Path) -> tuple[list[str], list[str]]:
+    dylibs, rpaths = [], []
+    for data in macho_slices(path.read_bytes()):
+        magic = data[:4]
+        order = ">" if magic[:1] == b"\xfe" else "<"
+        header_size = 32 if b"\xcf" in magic else 28
+        if magic not in MACHO_THIN_MAGICS or len(data) < header_size:
+            raise VerifyError("invalid Mach-O slice header")
+        count, command_bytes = struct.unpack_from(order + "II", data, 16)
+        end = header_size + command_bytes
+        if end > len(data):
+            raise VerifyError("truncated Mach-O load commands")
+        offset = header_size
+        for _ in range(count):
+            if offset + 8 > end:
+                raise VerifyError("truncated Mach-O load command")
+            cmd, size = struct.unpack_from(order + "II", data, offset)
+            if size < 8 or offset + size > end:
+                raise VerifyError("invalid Mach-O load command size")
+            cmd &= ~LC_REQ_DYLD
+            if cmd in MACHO_LOAD_COMMANDS or cmd == LC_RPATH:
+                minimum = 12 if cmd == LC_RPATH else 24
+                if size <= minimum:
+                    raise VerifyError("invalid Mach-O load path command")
+                start, = struct.unpack_from(order + "I", data, offset + 8)
+                if not minimum <= start < size:
+                    raise VerifyError("invalid Mach-O load path offset")
+                name = data[offset + start:offset + size]
+                if not name[0] or b"\0" not in name:
+                    raise VerifyError("invalid Mach-O load path string")
+                target = rpaths if cmd == LC_RPATH else dylibs
+                target.append(name.split(b"\0", 1)[0].decode("utf-8", "replace"))
+            offset += size
+        if offset != end:
+            raise VerifyError("inconsistent Mach-O load command table")
+    return dylibs, rpaths
+
+
 def macho_dylibs(path: Path) -> list[str]:
-    data = path.read_bytes()
-    if len(data) < 32:
-        raise VerifyError(f"{path}: too small to be Mach-O")
-    magic = struct.unpack_from("<I", data, 0)[0]
-    if magic != MACHO_MAGIC_64LE:
-        raise VerifyError(f"{path}: not a little-endian 64-bit Mach-O (magic {magic:#x})")
-    ncmds = struct.unpack_from("<I", data, 16)[0]
-    off = 32
-    names: list[str] = []
-    for _ in range(ncmds):
-        if off + 8 > len(data):
-            raise VerifyError(f"{path}: truncated Mach-O load commands")
-        cmd, cmdsize = struct.unpack_from("<II", data, off)
-        load = cmd & ~LC_REQ_DYLD
-        if load in (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB):
-            name_off = struct.unpack_from("<I", data, off + 8)[0]
-            raw = data[off + name_off : off + cmdsize]
-            names.append(raw.split(b"\x00", 1)[0].decode("ascii", "replace"))
-        off += cmdsize
-    return names
+    try:
+        return macho_load_paths(path)[0]
+    except VerifyError as exc:
+        raise VerifyError(f"{path}: {exc}") from exc
+
+
+def portable_macos_load_path(name: str) -> bool:
+    if homebrew_loads([name]):
+        return False
+    if name.startswith("/"):
+        name = posixpath.normpath(name)
+    return (name.startswith(MACOS_RUNTIME_PREFIXES)
+            or name in ("/usr/lib", "/System/Library", "@loader_path", "@executable_path"))
+
+
+def macos_archive_load_problems(path: Path, label: str) -> list[str]:
+    """Check load-path spelling without resolving dyld's runtime search."""
+    try:
+        dylibs, rpaths = macho_load_paths(path)
+    except VerifyError as exc:
+        return [f"{label}: unreadable Mach-O: {exc}"]
+    return [
+        f"{label}: non-portable macOS {kind}: {name}"
+        for kind, paths in (("library dependency", dylibs), ("runpath", rpaths))
+        for name in dict.fromkeys(paths)
+        if not portable_macos_load_path(name)
+    ]
 
 
 LC_SYMTAB = 0x2
@@ -980,6 +1061,36 @@ def linux_elf_problems(root: Path, files: list[Path], floor: dict[str, str]) -> 
     return problems
 
 
+QT_SONAME_RE = re.compile(r"^libQt([0-9]+)[A-Za-z]")
+
+
+def qt_major_problems(root: Path, files: list[Path]) -> list[str]:
+    """One Qt major per archive.
+
+    0.34.16 shipped a Qt 5 btx-qt.real whose only platform plugin was the Qt 6
+    lib/qt6/plugins/platforms/libqxcb.so (bundle_qt_gui.py took whatever
+    qtpaths6 found), so the GUI had no platform plugin it could load.
+    """
+    by_major: dict[str, list[str]] = {}
+    for path in files:
+        try:
+            needed = elf_dynamic_info(path).needed
+        except (VerifyError, struct.error):
+            continue  # linux_elf_problems reports an unreadable ELF
+        for major in {m.group(1) for m in map(QT_SONAME_RE.match, needed) if m}:
+            by_major.setdefault(major, []).append(str(path.relative_to(root)))
+    if len(by_major) < 2:
+        return []
+    parts = []
+    for major, names in sorted(by_major.items()):
+        names.sort()
+        shown = [n for n in names if "/libexec/" in n or "/bin/" in n or "/plugins/" in n] or names[:2]
+        rest = len(names) - len(shown)
+        parts.append(f"Qt {major} in {', '.join(shown)}" + (f" (+{rest} libraries)" if rest else ""))
+    return [f"Qt {' and Qt '.join(sorted(by_major))} in one archive: " + "; ".join(parts)
+            + ". A GUI cannot load a platform plugin built for another Qt major."]
+
+
 def pe_imports(path: Path) -> list[str]:
     """Names in the PE import directory (what the loader must find at start)."""
     data = path.read_bytes()
@@ -1143,11 +1254,17 @@ def archive_content_problems(root: Path, *, floor: dict[str, str],
             elves.append(path)
         elif prefix[:2] == b"MZ":
             pes.append(path)
-        elif len(prefix) >= 4 and struct.unpack_from("<I", prefix, 0)[0] == MACHO_MAGIC_64LE:
+        elif prefix[:4] in MACHO_THIN_MAGICS | MACHO_FAT_MAGICS:
             machos.append(path)
     problems += linux_elf_problems(root, elves, floor)
+    problems += qt_major_problems(root, elves)
     problems += pe_problems(root, pes)
-    for path in machos:  # btx-qt, btx-util and the helpers link the PQ code too
+    for path in machos:
+        label = str(path.relative_to(root))
+        load_problems = macos_archive_load_problems(path, label)
+        problems.extend(load_problems)
+        if read_prefix(path, 4) != b"\xcf\xfa\xed\xfe":
+            continue  # the separate PQ symbol reader supports thin 64-bit images
         try:
             problem = macho_randombytes_problem(path, str(path.relative_to(root)))
         except (VerifyError, struct.error) as exc:
@@ -1232,21 +1349,19 @@ def verify_glibc_ceiling(root: Path, ceiling: str | None = None) -> None:
     verify_launch only runs btxd. rc1 shipped btx-qt and a bundled libgnutls
     that needed GLIBC_2.43 against a documented 2.38 (issue 237), so the GUI
     could not start on Ubuntu 24.04 and the bundled lib/ broke host tools
-    when put on LD_LIBRARY_PATH. Read every ELF under bin/, libexec/ and lib/.
+    when put on LD_LIBRARY_PATH. Read every ELF in the tree, as the
+    GLIBCXX/OPENSSL floor does: a Qt plugins/ directory beside lib/ (Qt's own
+    deployment layout) is shipped as much as lib/ is.
     """
     ceiling = ceiling or os.environ.get("BTX_RELEASE_GLIBC_CEILING", GLIBC_CEILING)
     limit = version_key(ceiling)
     offenders: list[str] = []
-    for sub in ("bin", "libexec", "lib"):
-        for directory in sorted(root.rglob(sub)):
-            if not directory.is_dir():
-                continue
-            for path in sorted(directory.rglob("*")):
-                if path.is_symlink() or not path.is_file():
-                    continue
-                glibc = elf_required_versions(path).get("GLIBC")
-                if glibc and version_key(glibc) > limit:
-                    offenders.append(f"{path.relative_to(root)} needs GLIBC_{glibc}")
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        glibc = elf_required_versions(path).get("GLIBC")
+        if glibc and version_key(glibc) > limit:
+            offenders.append(f"{path.relative_to(root)} needs GLIBC_{glibc}")
     if offenders:
         raise VerifyError(
             f"packaged files need a GLIBC newer than the documented {ceiling}: "

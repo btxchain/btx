@@ -166,7 +166,10 @@ RPCHelpMan issuecomputequalification()
             in.profile_name = request.params[1].get_str();
             std::memcpy(in.subject.data(), subject.data(), 32);
             GetStrongRandBytes(in.issuer_nonce);
-            in.episode_count = static_cast<uint32_t>(request.params[2].getInt<int64_t>());
+            std::string episodes_err;
+            if (!ParseUint32Index(request.params[2].getInt<int64_t>(), in.episode_count, "episode_count", episodes_err)) {
+                ThrowCode("COMPUTE_CHALLENGE_INVALID", episodes_err);
+            }
             const int64_t expires = request.params[3].getInt<int64_t>();
             if (expires < 1 || expires > 86400) ThrowCode("COMPUTE_CHALLENGE_INVALID", "expires_in_s");
             in.issued_at_ms = NowMs();

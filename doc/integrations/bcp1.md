@@ -101,6 +101,7 @@ BCP/1 event names (JSON). `-walletdepositnotify=<cmd>` runs a command on deposit
 | `transaction.mempool` | Tx accepted to mempool | `sequence` `A`; `hashtx` / `rawtx`; `hashwallettx-mempool` |
 | `transaction.confirmed` | Tx included in a **connected** block (depth ≥ 1) | `hashtx` / `rawtx` on block; `hashwallettx-block`; confirm with RPC |
 | `transaction.reorged` | Confirming block disconnected; tx may return to mempool | `sequence` `D` then wallet status `REORGED` |
+| `transaction.conflicted` | Another tx spending the same prevout is in the active chain or mempool (fee bump, double-spend, reorg) | `-walletdepositnotify` + `getdepositstatus` → `CONFLICTED` |
 | `deposit.detected` | Watch-only wallet first sees a matching output | `-walletdepositnotify` (`%e`, `%j`) + `getdepositstatus` |
 | `deposit.confirmations_changed` | Depth or block identity changed | `-walletdepositnotify` + poll `getdepositstatus` |
 | `deposit.finalized` | **Policy alias only**: confirmations ≥ the venue's configured depth. **Not** chain finality |

@@ -16,7 +16,7 @@
 #include <univalue.h>
 
 #include <cstdio>
-#include <fstream>
+#include <memory>
 #include <map>
 #include <optional>
 #include <string>
@@ -78,7 +78,32 @@ public:
             m_fp = nullptr;
         }
     }
+
+    //! Flush and close the file. False if a write, the flush or the close
+    //! failed: a buffered write can fail only there (a full disk).
+    [[nodiscard]] bool finish()
+    {
+        if (!m_fp) return false;
+        const bool flushed{std::fflush(m_fp) == 0};
+        const bool closed{std::fclose(m_fp) == 0};
+        m_fp = nullptr;
+        return flushed && closed;
+    }
 };
+
+//! Read one JSONL record. Return a final unterminated line only on clean EOF.
+bool ReadLabelImportLine(FILE* file, std::string& line)
+{
+    line.clear();
+    for (int ch; (ch = std::fgetc(file)) != EOF;) {
+        if (ch == '\n') return true;
+        line.push_back(static_cast<char>(ch));
+    }
+    if (std::ferror(file)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to read labels import file");
+    }
+    return !line.empty();
+}
 
 void SetOwnerOnlyFilePermissions(const fs::path& path)
 {
@@ -147,6 +172,8 @@ RPCHelpMan exportlabels()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // It reads or writes a server-side file the caller names.
+    EnsureNotWalletRestricted(request);
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
 
@@ -183,10 +210,11 @@ RPCHelpMan exportlabels()
         ++written;
     });
 
-    if (!file.is_open()) {
+    if (!file.finish()) {
+        std::error_code ec;
+        fs::remove(filepath, ec);
         throw JSONRPCError(RPC_WALLET_ERROR, "Failed to write labels export file");
     }
-    file.close();
     SetOwnerOnlyFilePermissions(filepath);
 
     UniValue reply(UniValue::VOBJ);
@@ -220,6 +248,8 @@ RPCHelpMan importlabels()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
+    // It reads or writes a server-side file the caller names.
+    EnsureNotWalletRestricted(request);
     std::shared_ptr<CWallet> const pwallet = GetWalletForJSONRPCRequest(request);
     if (!pwallet) return UniValue::VNULL;
 
@@ -231,8 +261,8 @@ RPCHelpMan importlabels()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot open labels import file");
     }
 
-    std::ifstream file{filepath};
-    if (!file.is_open()) {
+    const std::unique_ptr<FILE, decltype(&std::fclose)> file{fsbridge::fopen(filepath, "r"), std::fclose};
+    if (!file) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Cannot open labels import file");
     }
 
@@ -241,7 +271,7 @@ RPCHelpMan importlabels()
     int skipped{0};
     int line_no{0};
     std::string raw_line;
-    while (std::getline(file, raw_line)) {
+    while (ReadLabelImportLine(file.get(), raw_line)) {
         ++line_no;
         const std::string line = util::TrimString(raw_line);
         if (line.empty()) continue;
@@ -273,18 +303,19 @@ RPCHelpMan importlabels()
         const std::string label = LabelFromValue(rec["label"]);
         pending[DecodeDestination(ref)] = label;
     }
-
     LOCK(pwallet->cs_wallet);
+    int imported{0};
     for (const auto& [address, label] : pending) {
-        if (pwallet->IsMine(address)) {
-            pwallet->SetAddressBook(address, label, AddressPurpose::RECEIVE);
-        } else {
-            pwallet->SetAddressBook(address, label, AddressPurpose::SEND);
+        const auto purpose = pwallet->IsMine(address) ? AddressPurpose::RECEIVE : AddressPurpose::SEND;
+        if (!pwallet->SetAddressBook(address, label, purpose)) {
+            throw JSONRPCError(RPC_WALLET_ERROR,
+                               strprintf("Failed to save address label after importing %d labels", imported));
         }
+        ++imported;
     }
 
     UniValue reply(UniValue::VOBJ);
-    reply.pushKV("imported", static_cast<int>(pending.size()));
+    reply.pushKV("imported", imported);
     reply.pushKV("skipped", skipped);
     return reply;
 },

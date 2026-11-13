@@ -530,6 +530,268 @@ BOOST_AUTO_TEST_CASE(rpc_convert_walletprocesspsbt_named_options)
     BOOST_CHECK_EQUAL(legacy[4].get_bool(), false);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_convert_string_alternative_of_multi_type_params)
+{
+    // dumptxoutset type|format, descriptorprocesspsbt options|sighashtype and
+    // createmultisig options|address_type take a string or a JSON value at the
+    // same position. Text that is not JSON must stay a string, as the
+    // dumptxoutset help examples pass it; JSON values keep their types.
+    const auto check_text = [](const std::string& method, const std::vector<std::string>& args, size_t idx) {
+        BOOST_TEST_CONTEXT(method << " " << args.at(idx)) {
+            UniValue positional;
+            BOOST_CHECK_NO_THROW(positional = RPCConvertValues(method, args));
+            BOOST_CHECK_EQUAL(positional.size(), args.size());
+            BOOST_CHECK(positional[idx].isStr());
+            if (positional[idx].isStr()) BOOST_CHECK_EQUAL(positional[idx].get_str(), args.at(idx));
+        }
+    };
+    check_text("dumptxoutset", {"utxo.dat", "latest"}, 1);
+    check_text("dumptxoutset", {"utxo.dat", "rollback"}, 1);
+    check_text("descriptorprocesspsbt", {"psbt", "[]", "ALL"}, 2);
+    check_text("descriptorprocesspsbt", {"psbt", "[]", "SINGLE|ANYONECANPAY"}, 2);
+    check_text("createmultisig", {"1", "[]", "p2mr"}, 2);
+
+    // JSON keeps its type: a JSON string, the Knots-compatible format array
+    // with its show_header Boolean, and the options objects.
+    BOOST_CHECK_EQUAL(RPCConvertValues("descriptorprocesspsbt", {"psbt", "[]", R"("ALL")"})[2].get_str(), "ALL");
+    const UniValue knots = RPCConvertValues("dumptxoutset", {"utxo.dat", R"(["txid","vout"])", "false"});
+    BOOST_CHECK(knots[1].isArray());
+    BOOST_CHECK(knots[2].isBool());
+    BOOST_CHECK(RPCConvertValues("dumptxoutset", {"utxo.dat", "[]", R"({"rollback":5})"})[2].isObject());
+    BOOST_CHECK(RPCConvertValues("descriptorprocesspsbt", {"psbt", "[]", R"({"sighashtype":"ALL","finalize":false})"})[2].isObject());
+    BOOST_CHECK(RPCConvertValues("createmultisig", {"1", "[]", R"({"address_type":"p2mr","sort":true})"})[2].isObject());
+    BOOST_CHECK_THROW(RPCConvertValues("dumptxoutset", {"utxo.dat", "[]", "not-json"}), std::runtime_error);
+
+    // Named forms: JSON values still parse and string parameters stay strings.
+    // type|format is STR|ARR, so the format alias takes plain text as well.
+    UniValue named_format;
+    BOOST_CHECK_NO_THROW(named_format = RPCConvertNamedValues("dumptxoutset", {"path=utxo.dat", "format=latest"}));
+    BOOST_CHECK(named_format["format"].isStr());
+    if (named_format["format"].isStr()) BOOST_CHECK_EQUAL(named_format["format"].get_str(), "latest");
+    const UniValue named = RPCConvertNamedValues("dumptxoutset", {"path=utxo.dat", "type=latest", "format=[]", "show_header=false"});
+    BOOST_CHECK_EQUAL(named["type"].get_str(), "latest");
+    BOOST_CHECK(named["format"].isArray());
+    BOOST_CHECK(named["show_header"].isBool());
+    BOOST_CHECK_EQUAL(RPCConvertNamedValues("descriptorprocesspsbt", {"psbt=x", "descriptors=[]", "sighashtype=ALL"})["sighashtype"].get_str(), "ALL");
+    BOOST_CHECK_EQUAL(RPCConvertNamedValues("createmultisig", {"nrequired=1", "keys=[]", "address_type=p2mr"})["address_type"].get_str(), "p2mr");
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_btx_rows_the_server_types)
+{
+    // The server takes a number, bool, object or array for each of these, so
+    // btx-cli must parse the argument as JSON instead of sending a string.
+    // positional=false: a key inside an options object, set with -named.
+    struct Row {
+        const char* method;
+        int index;
+        const char* name;
+        bool positional;
+    };
+    const Row rows[]{
+        {"bridge_buildegressbatchtx", 1, "descriptors", true},
+        {"bridge_buildegressbatchtx", 2, "proof_receipts", true},
+        {"bridge_buildegressbatchtx", 3, "recipients", true},
+        {"bridge_buildegressbatchtx", 4, "options", true},
+        {"bridge_buildegressstatement", 0, "recipients", true},
+        {"bridge_buildegressstatement", 1, "options", true},
+        {"bridge_buildingressbatchtx", 1, "intents", true},
+        {"bridge_buildingressbatchtx", 2, "reserve_outputs", true},
+        {"bridge_buildingressbatchtx", 3, "options", true},
+        {"bridge_buildingressstatement", 0, "intents", true},
+        {"bridge_buildingressstatement", 1, "options", true},
+        {"buildhtlcclaim", 5, "min_confirmations", false},
+        {"createconsolidationtx", 1, "fee_ceiling", false},
+        {"createconsolidationtx", 1, "max_inputs", false},
+        {"createconsolidationtx", 1, "minconf", false},
+        {"createconsolidationtx", 1, "plan", false},
+        {"createexchangebatch", 1, "fee_ceiling", false},
+        {"createexchangebatch", 1, "fee_rate", false},
+        {"createexchangebatch", 1, "minconf", false},
+        {"deriveexchangeaddress", 1, "account", false},
+        {"deriveexchangeaddress", 1, "branch", false},
+        {"estimateconsolidationfee", 0, "fee_ceiling", false},
+        {"estimateconsolidationfee", 0, "max_inputs", false},
+        {"estimateconsolidationfee", 0, "minconf", false},
+        {"estimateconsolidationfee", 0, "plan", false},
+        {"finalizeexternalsign", 2, "sign", false},
+        {"importdepositpool", 1, "rescan", false},
+        {"listdepositutxos", 0, "include_change", false},
+        {"listdepositutxos", 0, "include_spent", false},
+        {"listdepositutxos", 0, "maxconf", false},
+        {"listdepositutxos", 0, "min_amount", false},
+        {"listdepositutxos", 0, "min_confirmations", false},
+        {"listdepositutxos", 0, "minconf", false},
+        {"planconsolidation", 0, "batch_size", false},
+        {"planconsolidation", 0, "fee_ceiling", false},
+        {"planconsolidation", 0, "max_inputs", false},
+        {"planconsolidation", 0, "min_confirmations", false},
+        {"planconsolidation", 0, "minconf", false},
+        {"planconsolidation", 0, "minimum_input_value", false},
+        {"planconsolidation", 0, "target_utxo_count", false},
+        {"prepareexternalsign", 1, "sign", false},
+        {"signbountyclaim", 0, "options", true},
+        {"submitbountyclaim", 0, "options", true},
+        {"submitbountyfunding", 0, "options", true},
+        {"verifymatmulserviceproof", 3, "include_local_registry_status", true},
+        {"verifymatmulserviceproofs", 1, "include_local_registry_status", true},
+        {"walletprocesspsbt", 1, "allow_late_claim", false},
+        {"walletprocesspsbt", 1, "allow_unconfirmed_funding", false},
+        {"walletprocesspsbt", 1, "min_confirmations", false},
+        {"z_exportviewingkey", 1, "allow_sensitive", true},
+        {"z_finalizepsbt", 1, "broadcast", true},
+        {"z_fundpsbt", 0, "amount", true},
+        {"z_fundpsbt", 2, "fee", true},
+        {"z_fundpsbt", 3, "options", true},
+        {"z_planshieldfunds", 0, "amount", true},
+        {"z_planshieldfunds", 2, "fee", true},
+        {"z_planshieldfunds", 3, "options", true},
+        {"z_recoverstrandednote", 2, "fee", true},
+        {"z_recoverstrandednote", 3, "verbose", true},
+        {"z_recoverstrandednote", 4, "conf_target", true},
+        {"z_revokeaddress", 1, "fee", true},
+        {"z_rotateaddress", 1, "fee", true},
+        {"z_shieldfunds", 3, "options", true},
+        {"z_sweeptotransparent", 1, "max_notes", true},
+        {"z_sweeptotransparent", 2, "fee", true},
+        {"z_sweeptotransparent", 3, "dry_run", true},
+        {"z_sweeptotransparent", 4, "minconf", true},
+        {"z_sweeptotransparent", 5, "conf_target", true},
+    };
+    for (const Row& row : rows) {
+        BOOST_TEST_CONTEXT(row.method << " " << row.name) {
+            const UniValue named = RPCConvertNamedValues(row.method, {std::string{row.name} + "=1"});
+            BOOST_CHECK(named[row.name].isNum());
+            if (row.positional) {
+                std::vector<std::string> args(row.index, "null");
+                args.emplace_back("1");
+                const UniValue positional = RPCConvertValues(row.method, args);
+                BOOST_CHECK(positional[row.index].isNum());
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_p2mr_psbt_remaining_rows)
+{
+    // adjust_timelocks and p2mr_leaf convert in every RPC that takes them,
+    // positionally and by name.
+    const std::string leaf = "{\"" + std::string(64, '1') + ":0\":0}";
+    UniValue expected_leaf;
+    BOOST_REQUIRE(expected_leaf.read(leaf));
+
+    for (const std::string text : {"false", "true"}) {
+        BOOST_TEST_CONTEXT(text) {
+            const UniValue wallet = RPCConvertValues("signrawtransactionwithwallet", {"00", "[]", "ALL", text});
+            BOOST_CHECK(wallet[1].isArray());
+            BOOST_CHECK_EQUAL(wallet[2].get_str(), "ALL");
+            BOOST_CHECK(wallet[3].isBool());
+            if (wallet[3].isBool()) BOOST_CHECK_EQUAL(wallet[3].get_bool(), text == "true");
+            const UniValue wallet_named = RPCConvertNamedValues("signrawtransactionwithwallet", {"hexstring=00", "adjust_timelocks=" + text});
+            BOOST_CHECK(wallet_named["adjust_timelocks"].isBool());
+
+            const UniValue key = RPCConvertValues("signrawtransactionwithkey", {"00", "[]", "[]", "ALL", text});
+            BOOST_CHECK(key[1].isArray());
+            BOOST_CHECK(key[2].isArray());
+            BOOST_CHECK_EQUAL(key[3].get_str(), "ALL");
+            BOOST_CHECK(key[4].isBool());
+            if (key[4].isBool()) BOOST_CHECK_EQUAL(key[4].get_bool(), text == "true");
+            const UniValue key_named = RPCConvertNamedValues("signrawtransactionwithkey", {"hexstring=00", "privkeys=[]", "adjust_timelocks=" + text});
+            BOOST_CHECK(key_named["adjust_timelocks"].isBool());
+        }
+    }
+    BOOST_CHECK_THROW(RPCConvertNamedValues("signrawtransactionwithwallet", {"adjust_timelocks=not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertValues("signrawtransactionwithkey", {"00", "[]", "[]", "ALL", "not-json"}), std::runtime_error);
+
+    const UniValue update = RPCConvertValues("utxoupdatepsbt", {"psbt", "[]", "[]", leaf});
+    BOOST_CHECK(update[1].isArray());
+    BOOST_CHECK(update[2].isArray());
+    BOOST_CHECK(update[3].isObject());
+    BOOST_CHECK_EQUAL(update[3].write(), expected_leaf.write());
+    BOOST_CHECK(RPCConvertNamedValues("utxoupdatepsbt", {"psbt=x", "p2mr_leaf=" + leaf})["p2mr_leaf"].isObject());
+
+    const UniValue descriptor = RPCConvertNamedValues("descriptorprocesspsbt", {"psbt=x", "descriptors=[]", "p2mr_leaf=" + leaf});
+    BOOST_CHECK(descriptor["descriptors"].isArray());
+    BOOST_CHECK(descriptor["p2mr_leaf"].isObject());
+    BOOST_CHECK_EQUAL(descriptor["p2mr_leaf"].write(), expected_leaf.write());
+    BOOST_CHECK_THROW(RPCConvertNamedValues("descriptorprocesspsbt", {"p2mr_leaf=not-json"}), std::runtime_error);
+
+    // Unchanged: index 2 of descriptorprocesspsbt is still the options object,
+    // and the walletprocesspsbt rows still apply.
+    const std::string options = R"({"sighashtype":"ALL","p2mr_leaf":{}})";
+    BOOST_CHECK(RPCConvertValues("descriptorprocesspsbt", {"psbt", "[]", options})[2].isObject());
+    BOOST_CHECK(RPCConvertNamedValues("walletprocesspsbt", {"p2mr_leaf=" + leaf})["p2mr_leaf"].isObject());
+    BOOST_CHECK(RPCConvertNamedValues("walletprocesspsbt", {"adjust_timelocks=true"})["adjust_timelocks"].isBool());
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_include_sensitive_rows)
+{
+    // include_sensitive is a Boolean in z_listunspent (index 3, like
+    // include_watchonly before it) and in z_viewtransaction (index 1),
+    // positionally and by name.
+    const std::string txid(64, 'a');
+    for (const std::string text : {"false", "true"}) {
+        BOOST_TEST_CONTEXT(text) {
+            UniValue positional;
+            BOOST_CHECK_NO_THROW(positional = RPCConvertValues("z_listunspent", {"1", "9999999", "false", text}));
+            BOOST_CHECK_EQUAL(positional.size(), 4U);
+            BOOST_CHECK(positional[0].isNum());
+            BOOST_CHECK(positional[2].isBool());
+            BOOST_CHECK(positional[3].isBool());
+            if (positional[3].isBool()) BOOST_CHECK_EQUAL(positional[3].get_bool(), text == "true");
+            const UniValue named = RPCConvertNamedValues("z_listunspent", {"include_sensitive=" + text});
+            BOOST_CHECK(named["include_sensitive"].isBool());
+            if (named["include_sensitive"].isBool()) BOOST_CHECK_EQUAL(named["include_sensitive"].get_bool(), text == "true");
+            UniValue view;
+            BOOST_CHECK_NO_THROW(view = RPCConvertValues("z_viewtransaction", {txid, text}));
+            BOOST_CHECK_EQUAL(view.size(), 2U);
+            BOOST_CHECK(view[0].isStr());
+            BOOST_CHECK(view[1].isBool());
+            if (view[1].isBool()) BOOST_CHECK_EQUAL(view[1].get_bool(), text == "true");
+            const UniValue view_named = RPCConvertNamedValues("z_viewtransaction", {"txid=" + txid, "include_sensitive=" + text});
+            BOOST_CHECK(view_named["txid"].isStr());
+            BOOST_CHECK(view_named["include_sensitive"].isBool());
+            if (view_named["include_sensitive"].isBool()) BOOST_CHECK_EQUAL(view_named["include_sensitive"].get_bool(), text == "true");
+        }
+    }
+    BOOST_CHECK_THROW(RPCConvertValues("z_listunspent", {"1", "9999999", "false", "not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertNamedValues("z_listunspent", {"include_sensitive=not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertValues("z_viewtransaction", {txid, "not-json"}), std::runtime_error);
+    BOOST_CHECK_THROW(RPCConvertNamedValues("z_viewtransaction", {"include_sensitive=not-json"}), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_sendall_preferred_pq_algo_stays_text)
+{
+    // preferred_pq_algo is a string option (ml_dsa_44 or slh_dsa_128s). send,
+    // fundrawtransaction and walletcreatefundedpsbt have no row for it, so by
+    // name sendall passes it on as text too, as typed.
+    for (const std::string algo : {"ml_dsa_44", "slh_dsa_128s", R"("ml_dsa_44")"}) {
+        BOOST_TEST_CONTEXT(algo) {
+            UniValue named;
+            BOOST_CHECK_NO_THROW(named = RPCConvertNamedValues("sendall", {R"(recipients=["addr"])", "preferred_pq_algo=" + algo}));
+            BOOST_CHECK(named["recipients"].isArray());
+            BOOST_CHECK(named["preferred_pq_algo"].isStr());
+            if (named["preferred_pq_algo"].isStr()) BOOST_CHECK_EQUAL(named["preferred_pq_algo"].get_str(), algo);
+            const UniValue send = RPCConvertNamedValues("send", {"preferred_pq_algo=" + algo});
+            BOOST_CHECK(send["preferred_pq_algo"].isStr());
+            if (send["preferred_pq_algo"].isStr()) BOOST_CHECK_EQUAL(send["preferred_pq_algo"].get_str(), algo);
+        }
+    }
+
+    // Unchanged: the options object at index 4, by position and by name, and
+    // the typed options next to preferred_pq_algo.
+    const std::string options = R"({"preferred_pq_algo":"ml_dsa_44","add_to_wallet":false})";
+    const UniValue positional = RPCConvertValues("sendall", {R"(["addr"])", "null", "unset", "null", options});
+    BOOST_CHECK(positional[0].isArray());
+    BOOST_CHECK(positional[4].isObject());
+    BOOST_CHECK_EQUAL(positional[4]["preferred_pq_algo"].get_str(), "ml_dsa_44");
+    BOOST_CHECK(RPCConvertNamedValues("sendall", {"options=" + options})["options"].isObject());
+    const UniValue typed = RPCConvertNamedValues("sendall", {"add_to_wallet=false", "send_max=true", "include_watching=false", "fee_rate=1.5"});
+    BOOST_CHECK(typed["add_to_wallet"].isBool());
+    BOOST_CHECK(typed["send_max"].isBool());
+    BOOST_CHECK(typed["include_watching"].isBool());
+    BOOST_CHECK(typed["fee_rate"].isNum());
+}
+
 BOOST_AUTO_TEST_CASE(rpc_convert_values_pq_wallet_methods)
 {
     UniValue result;
@@ -832,6 +1094,38 @@ BOOST_AUTO_TEST_CASE(rpc_convert_values_generatemodel_invalid_options)
         BOOST_CHECK_EQUAL(RPCConvertValues("generatemodel", {"id", other})[1].write(), expected.write());
         BOOST_CHECK_EQUAL(RPCConvertNamedValues("generatemodel", {"opts=" + other})["opts"].write(), expected.write());
     }
+}
+
+BOOST_AUTO_TEST_CASE(rpc_convert_model_identity_labels_are_literal)
+{
+    // Labels are strings, including text which also happens to be valid JSON.
+    const std::vector<std::string> labels{
+        "sunny-label", "true", "123", "null", R"({"team":"btx"})", "[1,2]",
+        R"("quoted")", "", "sunny river=\xE5\x90\x8D",
+    };
+    for (const std::string& label : labels) {
+        BOOST_TEST_CONTEXT(label) {
+            UniValue positional;
+            BOOST_CHECK_NO_THROW(positional = RPCConvertValues("createmodelidentity", {label}));
+            BOOST_CHECK_EQUAL(positional.size(), 1U);
+            if (positional.size() == 1) {
+                BOOST_CHECK(positional[0].isStr());
+                if (positional[0].isStr()) BOOST_CHECK_EQUAL(positional[0].get_str(), label);
+            }
+            UniValue named;
+            BOOST_CHECK_NO_THROW(named = RPCConvertNamedValues("createmodelidentity", {"label=" + label}));
+            BOOST_CHECK(named.exists("label"));
+            if (named.exists("label")) {
+                BOOST_CHECK(named["label"].isStr());
+                if (named["label"].isStr()) BOOST_CHECK_EQUAL(named["label"].get_str(), label);
+            }
+        }
+    }
+    BOOST_CHECK(RPCConvertValues("createmodelidentity", {}).empty());
+    BOOST_CHECK(RPCConvertNamedValues("createmodelidentity", {}).empty());
+    // Do not disable JSON conversion for unrelated typed arguments.
+    BOOST_CHECK(RPCConvertValues("removemodelrule", {"3"})[0].isNum());
+    BOOST_CHECK(RPCConvertValues("setmodelpolicy", {R"({"preserve_rare":false})"})[0].isObject());
 }
 
 BOOST_AUTO_TEST_CASE(rpc_convert_values_modelnet_methods)
@@ -1534,6 +1828,59 @@ BOOST_AUTO_TEST_CASE(p2mr_only_descriptor_rpcs_on_enforcing_chain)
     BOOST_CHECK(decoded.exists("type"));
     BOOST_CHECK(!decoded.exists("p2sh"));
     BOOST_CHECK(!decoded.exists("segwit"));
+}
+
+BOOST_AUTO_TEST_CASE(rpc_parse_uint32_index)
+{
+    const int64_t u32_max{std::numeric_limits<uint32_t>::max()};
+    uint32_t out{7};
+    std::string err;
+    BOOST_CHECK(ParseUint32Index(0, out, "vout", err));
+    BOOST_CHECK_EQUAL(out, 0U);
+    BOOST_CHECK(ParseUint32Index(u32_max, out, "vout", err));
+    BOOST_CHECK_EQUAL(out, std::numeric_limits<uint32_t>::max());
+
+    const auto refused = [](int64_t v, const std::string& want) {
+        uint32_t untouched{42};
+        std::string e;
+        BOOST_CHECK(!ParseUint32Index(v, untouched, "vout", e));
+        BOOST_CHECK_EQUAL(untouched, 42U);
+        BOOST_CHECK_EQUAL(e, want);
+    };
+    refused(-1, "vout cannot be negative");
+    refused(std::numeric_limits<int64_t>::min(), "vout cannot be negative");
+    refused(u32_max + 1, "vout exceeds uint32 range");
+    refused(std::numeric_limits<int64_t>::max(), "vout exceeds uint32 range");
+}
+
+BOOST_AUTO_TEST_CASE(offerattestedutxosnapshot_chunk_size_not_wrapped)
+{
+    // The files do not exist, so a chunk size that passes the range check
+    // fails at the manifest open. 2^32 + 65536 used to wrap to 65536 and get
+    // there; -1 used to wrap to 4294967295 and fail as "Invalid chunk size".
+    // CallRPC sends the default request, which is wallet-restricted ("-"), and
+    // this RPC refuses wallet-restricted users. Send it as an unrestricted user.
+    const auto error_for = [&](int64_t chunk_size) -> std::string {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = "offerattestedutxosnapshot";
+        request.m_wallet_restriction.clear();
+        request.params = UniValue{UniValue::VARR};
+        request.params.push_back("missing-snapshot.dat");
+        request.params.push_back("missing-snapshot.manifest");
+        request.params.push_back(chunk_size);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            tableRPC.execute(request);
+        } catch (const UniValue& e) {
+            return e.find_value("message").get_str();
+        }
+        return "no error";
+    };
+    BOOST_CHECK_EQUAL(error_for(65536), "Couldn't open manifest file");
+    BOOST_CHECK_EQUAL(error_for(4194305), "Invalid chunk size");
+    BOOST_CHECK_EQUAL(error_for(4295032832), "chunk_size exceeds uint32 range");
+    BOOST_CHECK_EQUAL(error_for(-1), "chunk_size cannot be negative");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

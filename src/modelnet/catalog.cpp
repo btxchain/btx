@@ -11,6 +11,7 @@
 #include <modelnet/safety.h>
 #include <modelnet/verified_manifest.h>
 #include <modelnet/hello_caps.h>
+#include <modelnet/model_nat.h>
 #include <crypto/sha384.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -19,11 +20,22 @@
 #include <atomic>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
+#include <stdexcept>
+#include <system_error>
 
 namespace modelnet {
 namespace {
+/** Model peers are dialed as host:port; anything else can never be reached. */
+bool DialablePeerEndpoint(const std::string& endpoint)
+{
+    std::string host;
+    uint16_t port{0};
+    return SplitListenBind(endpoint, host, port);
+}
+
 
 FileRole RoleFromRelPath(const std::string& rel, bool& skip)
 {
@@ -401,6 +413,77 @@ bool ModelCatalog::EnforceQuota(uint64_t need_bytes, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
     m_store.EvictUnpinned();
+    return EnforceQuotaLocked(need_bytes, err);
+}
+
+bool ModelCatalog::EnforceDownloadQuota(const VerifiedManifest& manifest, std::string& err,
+                                        const std::atomic<bool>* stop)
+{
+    const auto cancelled = [&] {
+        if (!stop || !stop->load()) return false;
+        err = "stopped";
+        return true;
+    };
+    if (cancelled()) return false;
+    uint64_t need_bytes = 0;
+    for (const auto& file : manifest.core.files) {
+        if (need_bytes > std::numeric_limits<uint64_t>::max() - file.size) {
+            err = "quota overflow";
+            return false;
+        }
+        need_bytes += file.size;
+    }
+    bool active;
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        active = m_active_artifacts.count(manifest.artifact_id) != 0;
+    }
+    struct Credit { uint32_t file; uint32_t piece; uint64_t bytes; };
+    std::vector<Credit> credits;
+    // Reading and hashing a large cached model must not hold the catalog lock.
+    // Only an active artifact is protected from ordinary quota eviction.
+    if (active) {
+        for (uint32_t fi = 0; fi < manifest.core.files.size(); ++fi) {
+            const auto& file = manifest.core.files[fi];
+            std::vector<uint32_t> pieces;
+            m_store.ListCommittedPieces(manifest.artifact_id, fi, pieces);
+            for (const auto index : pieces) {
+                if (cancelled()) return false;
+                std::vector<unsigned char> bytes;
+                std::vector<Digest48> proof;
+                uint64_t size = 0;
+                Digest48 root;
+                std::string local_err;
+                try {
+                    if (!m_store.LoadPieceProof(manifest.artifact_id, fi, index, size, root, proof, local_err)) continue;
+                } catch (const std::runtime_error&) {
+                    // Wrong-typed local proof fields are not reusable bytes.
+                    continue;
+                }
+                if (size != file.size || root != file.pieces_root ||
+                    !m_store.GetPiece(manifest.artifact_id, fi, index, bytes, local_err) ||
+                    !VerifyPiece(file.pieces_root, file.size, index, bytes, proof)) continue;
+                credits.push_back({fi, index, bytes.size()});
+            }
+        }
+    }
+    if (cancelled()) return false;
+    std::lock_guard<std::mutex> lock(m_mu);
+    m_store.EvictUnpinned();
+    if (active && m_active_artifacts.count(manifest.artifact_id)) {
+        for (const auto& credit : credits) {
+            const fs::path path = m_store.Root() / "artifacts" / manifest.artifact_id.Hex().c_str() /
+                                  std::to_string(credit.file).c_str() / (std::to_string(credit.piece) + ".piece").c_str();
+            std::error_code ec;
+            // Do not credit a piece removed while the lock was released.
+            if (fs::file_size(path, ec) == credit.bytes && !ec) need_bytes -= credit.bytes;
+        }
+    }
+    return EnforceQuotaLocked(need_bytes, err);
+}
+
+bool ModelCatalog::EnforceQuotaLocked(uint64_t need_bytes, std::string& err)
+{
     const uint64_t cap = m_policy.storage_quota_bytes ? std::min(m_policy.storage_quota_bytes, m_store.QuotaBytes()) : m_store.QuotaBytes();
     if (!cap) {
         err = "payload storage is 0 until -modelstorage / -modelcache allocates a quota";
@@ -547,6 +630,14 @@ bool ModelCatalog::PersistLocked(std::string& err)
     out << root.write(2, 0) << "\n";
     out.close();
     std::error_code ec;
+    if (!out) {
+        // A full disk can fail the write or only the flush at close. Do not
+        // rename a cut-short file over catalog.json: LoadLocked cannot read it
+        // and the catalog would start empty.
+        fs::remove(tmp, ec);
+        err = "catalog write failed";
+        return false;
+    }
     fs::rename(tmp, final_path, ec);
     if (ec) {
         err = "catalog rename failed";
@@ -568,7 +659,11 @@ bool ModelCatalog::LoadLocked(std::string& err)
         return false;
     }
     if (root.exists("peers")) {
-        for (const auto& p : root["peers"].getValues()) m_peers.push_back(p.get_str());
+        for (const auto& p : root["peers"].getValues()) {
+            // Drop contacts saved before AddPeer checked them, so they do not
+            // keep taking one of the 64 slots.
+            if (DialablePeerEndpoint(p.get_str())) m_peers.push_back(p.get_str());
+        }
     }
     if (!root.exists("models")) return true;
     for (const auto& o : root["models"].getValues()) {
@@ -757,31 +852,62 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     const Digest48 artifact_id = ArtifactCoreId(aenc);
     if (!m_store.RenameArtifact(staging, artifact_id, err)) {
         if (err != "destination artifact exists") return false;
-        std::string ignored;
-        (void)m_store.RemoveArtifact(staging, ignored);
-        DropPieceTreeCache(staging);
-        commit_staging = true;
         for (auto& m : m_models) {
-            if (m.artifact_id == artifact_id) {
-                if (pin && !m.pinned) {
-                    // Pin the catalog entry itself: eviction ranks by it.
-                    std::string pin_err;
-                    m_store.Pin(model_id, pin_err);
-                    m_store.Pin(artifact_id, pin_err);
-                    m.pinned = true;
-                    m.admission = AdmissionLevel::PINNED;
-                    m.bytes_verified = true;
-                    out = m;
-                    return PersistLocked(err);
+            if (m.artifact_id != artifact_id) continue;
+            if (pin && !m.pinned) {
+                const auto previous_admission = m.admission;
+                const bool previous_verification = m.bytes_verified;
+                m.pinned = true;
+                m.admission = AdmissionLevel::PINNED;
+                m.bytes_verified = true;
+                if (!PersistLocked(err)) {
+                    m.pinned = false;
+                    m.admission = previous_admission;
+                    m.bytes_verified = previous_verification;
+                    return false;
                 }
-                out = m;
-                return true;
+                std::string pin_err;
+                m_store.Pin(model_id, pin_err);
+                m_store.Pin(artifact_id, pin_err);
+            }
+            err.clear();
+            out = m;
+            return true;
+        }
+
+        // A prior import can leave complete pieces after a failed catalog save.
+        // Verify them against this import before adding the missing entry.
+        for (uint32_t i = 0; i < cores.size(); ++i) {
+            PieceIndex staged_index, existing_index;
+            try {
+                if (!m_store.LoadPieceIndex(staging, i, staged_index, err) ||
+                    !m_store.LoadPieceIndex(artifact_id, i, existing_index, err) ||
+                    staged_index.file_size != existing_index.file_size ||
+                    staged_index.pieces_root != existing_index.pieces_root ||
+                    staged_index.leaves != existing_index.leaves) {
+                    err = "existing artifact index does not match import";
+                    return false;
+                }
+            } catch (const std::runtime_error&) {
+                err = "invalid existing artifact index";
+                return false;
+            }
+            const uint64_t pieces = cores[i].size / PIECE_SIZE + (cores[i].size % PIECE_SIZE != 0);
+            std::vector<unsigned char> staged_piece, existing_piece;
+            for (uint64_t j = 0; j < pieces; ++j) {
+                const auto index = static_cast<uint32_t>(j);
+                if (!m_store.GetPiece(staging, i, index, staged_piece, err) ||
+                    !m_store.GetPiece(artifact_id, i, index, existing_piece, err) ||
+                    staged_piece != existing_piece) {
+                    err = "existing artifact bytes do not match import";
+                    return false;
+                }
             }
         }
-        err = "destination artifact exists";
-        return false;
+        err.clear();
+    } else {
+        commit_staging = true;
     }
-    commit_staging = true;
     DropPieceTreeCache(staging);
 
     out = {};
@@ -800,14 +926,26 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     out.completed_at = out.imported_at;
     out.last_access_at = out.imported_at;
     out.incomplete = false;
+    DemandSeedLocked(out);
+    m_models.push_back(out);
+    if (!PersistLocked(err)) {
+        m_models.pop_back();
+        if (commit_staging) {
+            // Only undo a rename performed by this call. If the move back fails,
+            // keep the complete artifact for a later verified retry.
+            std::string rollback_err;
+            if (m_store.RenameArtifact(artifact_id, staging, rollback_err)) {
+                commit_staging = false;
+            }
+        }
+        return false;
+    }
     if (pin) {
         std::string pin_err;
         m_store.Pin(model_id, pin_err);
         m_store.Pin(artifact_id, pin_err);
     }
-    DemandSeedLocked(out);
-    m_models.push_back(out);
-    return PersistLocked(err);
+    return true;
 }
 
 bool ModelCatalog::Seed(const Digest48& model_id, bool on, std::string& err)
@@ -873,13 +1011,15 @@ void ModelCatalog::SetQuotaBytes(uint64_t bytes)
 void ModelCatalog::BeginTransfer(const Digest48& artifact)
 {
     std::lock_guard<std::mutex> lock(m_mu);
-    m_active_artifacts.insert(artifact);
+    ++m_active_artifacts[artifact];
 }
 
 void ModelCatalog::EndTransfer(const Digest48& artifact)
 {
     std::lock_guard<std::mutex> lock(m_mu);
-    m_active_artifacts.erase(artifact);
+    const auto it = m_active_artifacts.find(artifact);
+    if (it == m_active_artifacts.end()) return;
+    if (--it->second == 0) m_active_artifacts.erase(it);
 }
 
 UniValue ModelCatalog::FileAvailabilityJson(const Digest48& artifact, const ModelCore& core) const
@@ -1266,7 +1406,9 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
 
 bool ModelCatalog::AddPeer(const std::string& endpoint)
 {
-    if (endpoint.empty()) return false;
+    // There is no RPC to remove a contact, so one that cannot be dialed would
+    // hold its slot for good.
+    if (!DialablePeerEndpoint(endpoint)) return false;
     std::lock_guard<std::mutex> lock(m_mu);
     if (std::find(m_peers.begin(), m_peers.end(), endpoint) != m_peers.end()) return true;
     if (m_peers.size() >= 64) return false;

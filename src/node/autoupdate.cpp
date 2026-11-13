@@ -27,6 +27,7 @@
 #include <cassert>
 #include <charconv>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
@@ -677,31 +678,14 @@ public:
             return false;
         }
         try {
-            fs::path update_dir = config.datadir / "autoupdate";
-            fs::create_directories(update_dir);
-            const std::string script_hash = SHA256Hex(script);
-            const std::string safe_version = SanitizeFileComponent(manifest.version);
-            const fs::path final_path = update_dir / fs::u8path(strprintf("install-%s-%s.sh", safe_version, script_hash.substr(0, 16)));
-            const fs::path temp_path = update_dir / fs::u8path(strprintf(".install-%s-%s.tmp", safe_version, script_hash.substr(0, 16)));
-            {
-                std::ofstream out{temp_path, std::ios::binary | std::ios::trunc};
-                if (!out.is_open()) return false;
-                out.write(reinterpret_cast<const char*>(script.data()), script.size());
-                if (!out.good()) return false;
-            }
-#ifndef WIN32
-            if (chmod(fs::PathToString(temp_path).c_str(), S_IRUSR | S_IWUSR | S_IXUSR) != 0) {
-                fs::remove(temp_path);
-                return false;
-            }
-#endif
-            if (!RenameOver(temp_path, final_path)) {
-                fs::remove(temp_path);
+            const std::optional<fs::path> final_path{StageAutoUpdateInstallerScript(config.datadir, manifest.version, script)};
+            if (!final_path) {
+                LogDebug(BCLog::AUTOUPDATE, "Auto-update could not write the installer script in full\n");
                 return false;
             }
 
 #ifndef WIN32
-            return LaunchDetachedPosix(config, manifest, final_path);
+            return LaunchDetachedPosix(config, manifest, *final_path);
 #else
             LogDebug(BCLog::AUTOUPDATE, "Auto-update installer launch is not implemented on Windows\n");
             return false;
@@ -866,22 +850,21 @@ AutoUpdateStatus SilentStatusForVerifierFailure(bool missing_signature)
 
 bool WriteExactFile(const fs::path& path, const std::vector<unsigned char>& bytes)
 {
+    // Flush, sync and close before the rename. A buffered write that fails
+    // only at close (a full disk) or a crash before the data reaches the disk
+    // would otherwise leave an empty file under the final name.
     const fs::path tmp = path + ".tmp";
-    {
-        std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
-        if (!out.is_open()) return false;
-        if (!bytes.empty()) {
-            out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        }
-        if (!out.good()) {
-            fs::remove(tmp);
-            return false;
-        }
-    }
-    if (!RenameOver(tmp, path)) {
-        fs::remove(tmp);
+    FILE* file{fsbridge::fopen(tmp, "wb")};
+    if (!file) return false;
+    const bool written{bytes.empty() || fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    if (!committed || !closed || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         return false;
     }
+    DirectoryCommit(path.parent_path());
     return true;
 }
 
@@ -897,7 +880,15 @@ std::optional<std::string> ReadHighestAcceptedVersion(const fs::path& datadir, b
     corrupt = false;
     const fs::path path = HighestAcceptedVersionPath(datadir);
     std::ifstream in{path};
-    if (!in.is_open()) return std::nullopt;
+    if (!in.is_open()) {
+        // Only a missing entry means no floor. A dangling link, unreadable
+        // file, or inaccessible parent is an unusable floor.
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        corrupt = status.type() != fs::file_type::not_found ||
+                  (ec && ec != std::errc::no_such_file_or_directory);
+        return std::nullopt;
+    }
     std::string line;
     if (!std::getline(in, line)) {
         corrupt = true;
@@ -952,6 +943,37 @@ bool PinVerifiedAutoUpdateManifest(const fs::path& datadir,
 }
 
 } // namespace
+
+std::optional<fs::path> StageAutoUpdateInstallerScript(const fs::path& datadir,
+                                                       std::string_view version,
+                                                       const std::vector<unsigned char>& script)
+{
+    const fs::path update_dir = datadir / "autoupdate";
+    fs::create_directories(update_dir);
+    const std::string script_hash = SHA256Hex(script);
+    const std::string safe_version = SanitizeFileComponent(version);
+    const fs::path final_path = update_dir / fs::u8path(strprintf("install-%s-%s.sh", safe_version, script_hash.substr(0, 16)));
+    const fs::path temp_path = update_dir / fs::u8path(strprintf(".install-%s-%s.tmp", safe_version, script_hash.substr(0, 16)));
+    // The staged file is run as it is on disk. Write, sync and close it before
+    // the rename: a buffered write that fails only at close (a full disk) would
+    // otherwise leave a cut-off script under the final name.
+    FILE* file{fsbridge::fopen(temp_path, "wb")};
+    if (!file) return std::nullopt;
+    const bool written{script.empty() || fwrite(script.data(), 1, script.size(), file) == script.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    bool staged{committed && closed};
+#ifndef WIN32
+    staged = staged && chmod(fs::PathToString(temp_path).c_str(), S_IRUSR | S_IWUSR | S_IXUSR) == 0;
+#endif
+    if (!staged || !RenameOver(temp_path, final_path)) {
+        std::error_code ec;
+        fs::remove(temp_path, ec);
+        return std::nullopt;
+    }
+    DirectoryCommit(update_dir);
+    return final_path;
+}
 
 std::string LocalClientVersion()
 {
@@ -1223,6 +1245,11 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
         bool corrupt_highest{false};
         highest_accepted = ReadHighestAcceptedVersion(config.datadir, corrupt_highest);
         if (corrupt_highest) {
+            // Refused, as the installer refuses it, but this does not clear on
+            // its own, so say it at the default level and not only under
+            // -debug=autoupdate.
+            LogWarning("Auto-update is paused: %s is empty or unreadable. Fix or remove it to resume (a missing file sets no floor).\n",
+                       fs::PathToString(HighestAcceptedVersionPath(config.datadir)));
             result.status = AutoUpdateStatus::BAD_MANIFEST;
             result.detail = "highest accepted version state is unreadable";
             return result;

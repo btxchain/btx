@@ -1,7 +1,7 @@
 # Managing the Wallet
 
 Note: BTX operational runbooks usually set explicit `-datadir` / `-conf` paths
-(for example `/var/lib/btx` or `~/.btx/bitcoin.conf`). Default directory paths
+(for example `/var/lib/btx` or `~/.btx/btx.conf`). Default directory paths
 below apply when those options are not provided.
 
 For BTX-native P2MR custody, PQ multisig, timelocked recovery, external-signer
@@ -29,9 +29,11 @@ By default, wallets are created in the `wallets` folder of the data directory, w
 
 | Operating System | Default wallet directory                                    |
 | -----------------|:------------------------------------------------------------|
-| Linux            | `/home/<user>/.bitcoin/wallets`                             |
-| Windows          | `C:\Users\<user>\AppData\Local\Bitcoin\wallets`             |
-| macOS            | `/Users/<user>/Library/Application Support/Bitcoin/wallets` |
+| Linux            | `~/.btx/wallets`                                            |
+| Windows          | `%LOCALAPPDATA%\BTX\wallets`                                |
+| macOS            | `~/Library/Application Support/BTX/wallets`                 |
+
+If the BTX directory does not exist yet, `btxd` reuses a legacy Bitcoin Core data directory only when it already looks like a BTX one (for example it holds `btx.conf`, BTX block files or a BTX `debug.log`); otherwise it uses the BTX directory above.
 
 ### 1.2 Encrypting the Wallet
 
@@ -174,7 +176,7 @@ $ btx-cli -rpcwallet=mywallet -stdinwalletpassphrase \
     backupwalletbundle /var/backups/btx/mywallet-bundle
 ```
 
-This is the preferred single-wallet backup flow because it is implemented in BTX itself and exercises the same RPC surface used for restore verification.
+The bundle directory is not encrypted. Its `listdescriptors_private.json` holds the wallet's private descriptors, including the PQ seeds, in plaintext, and this is also true for an encrypted wallet: anyone who can read that file can spend the wallet's funds without the wallet passphrase. Only the `backupwallet` file in it keeps the wallet encryption. So the RPC reports `wallet_passphrase_required_to_spend: false` for such a bundle, and for an encrypted wallet it adds a warning. Store the directory like the seed itself, or use the encrypted archive below.
 
 ### 1.4.3 BTX Wallet Bundle Archive RPC
 
@@ -200,6 +202,8 @@ $ btx-cli -stdinbundlepassphrase \
 
 This is the preferred sealed-offline backup flow when operators want a single encrypted file per wallet without relying on external archive tooling.
 
+The archive holds the same plaintext `listdescriptors_private.json` inside its encryption, so for the PQ seeds the archive passphrase is the only protection: whoever has the archive and its archive passphrase can spend without the wallet passphrase. Choose a strong archive passphrase and keep it apart from the archive. `restorewalletbundlearchive` itself restores only the encrypted `backupwallet` file, which still needs the wallet passphrase to spend.
+
 ### 1.4.4 BTX Secure Backup Utility
 
 BTX ships a helper script for the production backup flow that:
@@ -212,6 +216,8 @@ BTX ships a helper script for the production backup flow that:
 - when `--encrypt-output` is used, stages only a short-lived backup snapshot in scratch space and writes the final archive atomically
 - exports raw shielded viewing keys only when the active privacy regime still permits them and `--skip-viewing-keys` is not set
 - optionally writes native encrypted `.bundle.btx` archives for each wallet
+
+Without `--encrypt-output`, each wallet directory gets a plaintext `listdescriptors_private.json` (the private descriptors with their PQ seeds) whenever the wallet has private keys, encrypted or not.
 
 Example:
 

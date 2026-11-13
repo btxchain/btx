@@ -377,6 +377,66 @@ BOOST_AUTO_TEST_CASE(imported_direct_receipt_is_bound_to_work)
     modelnet::SetPwcQualificationRegistryPath("");
 }
 
+// issuecomputereceipt holds a direct-compute receipt to the agreement's
+// qualification terms (ConfirmRedeemedQualification: minimum rate, maximum
+// age). importcomputereceipt checks a challenge this node redeemed against the
+// registry too, and must apply the same terms, with the age taken when the
+// receipt was accepted.
+BOOST_AUTO_TEST_CASE(imported_direct_receipt_meets_the_agreement_terms)
+{
+    std::vector<unsigned char> pk, sk, kpk, ksk;
+    const fs::path dir = NewDir(m_path_root, "r-direct-terms", pk, sk);
+    std::string gen_err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(kpk, ksk, gen_err));
+    const std::string me = HexStr(pk), third = HexStr(kpk);
+
+    const auto agreement = [&](const std::string& tag, const char* key, uint64_t value) {
+        UniValue offer = Offer(me, Keys({me}), Keys({me, third}), "PREPAID", 3'000'000, tag);
+        UniValue settlement = offer["settlement"];
+        settlement.pushKV(key, value);
+        offer.pushKV("settlement", settlement);
+        const std::string offer_id = CreateOffer(dir, offer);
+        return Call(dir, "issuecomputeagreement", AgreementReq(offer_id, me, 1000, 9'000'000, tag))["agreement_id"].get_str();
+    };
+    const auto local_receipt = [&](const std::string& aid, const std::string& cid) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("agreement_id", aid);
+        r.pushKV("credited_p1e_microunits", 1'000'000);
+        r.pushKV("profile_id", pwc::ProfileIdHex(pwc::ToyProfile()));
+        r.pushKV("subject_pubkey", me);
+        r.pushKV("verification_method", "DIRECT_COMPUTE");
+        r.pushKV("evidence_commitment", cid);
+        r.pushKV("now_ms", 2000);
+        return r;
+    };
+
+    const fs::path qpath = m_path_root / "r-direct-terms-qual.dat";
+    UniValue challenge, response;
+    RedeemedChallenge(qpath, pk, 1, challenge, response);
+    modelnet::SetPwcQualificationRegistryPath(fs::PathToString(qpath));
+    const std::string cid = challenge["challenge_id"].get_str();
+
+    // A minimum rate no toy challenge reaches.
+    const std::string slow = agreement("rate", "optional_min_rate_p1e_microunits_per_hour", 1'000'000'000'000'000);
+    BOOST_CHECK(Refused(dir, "issuecomputereceipt", local_receipt(slow, cid), "COMPUTE_RATE_TOO_LOW"));
+    BOOST_CHECK(Refused(dir, "importcomputereceipt", Envelope(SignEnvelope("ComputeReceipt", kpk, ksk, DirectReceipt(slow, me, 1'000'000, cid, "rate"))), "COMPUTE_RATE_TOO_LOW"));
+    BOOST_CHECK_EQUAL(Credited(dir, slow, 3000), 0u);
+
+    // The challenge was redeemed at 1500; the receipt was accepted at 2000.
+    const std::string fresh = agreement("age", "max_qualification_age_ms", 100);
+    BOOST_CHECK(Refused(dir, "issuecomputereceipt", local_receipt(fresh, cid), "COMPUTE_QUALIFICATION_REQUIRED"));
+    BOOST_CHECK(Refused(dir, "importcomputereceipt", Envelope(SignEnvelope("ComputeReceipt", kpk, ksk, DirectReceipt(fresh, me, 1'000'000, cid, "age"))), "COMPUTE_QUALIFICATION_REQUIRED"));
+    BOOST_CHECK_EQUAL(Credited(dir, fresh, 3000), 0u);
+
+    // Within the terms the imported receipt is still credited.
+    const std::string loose = agreement("loose", "max_qualification_age_ms", 10'000);
+    UniValue out;
+    std::string code;
+    BOOST_CHECK(TryCall(dir, "importcomputereceipt", Envelope(SignEnvelope("ComputeReceipt", kpk, ksk, DirectReceipt(loose, me, 1'000'000, cid, "loose"))), out, code));
+    BOOST_CHECK_EQUAL(Credited(dir, loose, 3000), 1'000'000u);
+    modelnet::SetPwcQualificationRegistryPath("");
+}
+
 // P4. The registry must keep issuing after kQualRegistryMax redemptions, and a
 // challenge dropped to make room must still never redeem again.
 BOOST_AUTO_TEST_CASE(registry_keeps_issuing_after_many_redemptions)
@@ -529,6 +589,36 @@ BOOST_AUTO_TEST_CASE(local_create_validates_periods_and_expiry)
     BOOST_CHECK(Refused(dir, "createcomputejob", JobReq(aid, me, 1, "past", 2000, 1500), "COMPUTE_JOB_EXPIRED"));
 }
 
+// Outstanding jobs on one agreement are bounded (doc/pay-with-compute.md):
+// createcomputejob refuses a 65th unexpired, unsettled job. importcomputejob
+// has to apply the same bound to a job signed elsewhere.
+BOOST_AUTO_TEST_CASE(imported_jobs_count_towards_the_outstanding_limit)
+{
+    std::vector<unsigned char> pk, sk;
+    const fs::path dir = NewDir(m_path_root, "r-job-limit", pk, sk);
+    const std::string me = HexStr(pk);
+    const std::string offer = CreateOffer(dir, Offer(me, Keys({me}), Keys({me}), "PREPAID", 1'000, "limit"));
+    const std::string aid = Call(dir, "issuecomputeagreement", AgreementReq(offer, me, 1000, 9'000'000, "lim"))["agreement_id"].get_str();
+
+    UniValue template_payload;
+    for (int i = 0; i < 64; ++i) {
+        const UniValue job = Call(dir, "createcomputejob", JobReq(aid, me, 1, "l" + std::to_string(i), 2000, 8'000'000));
+        if (i == 0) template_payload = job["body"]["payload"];
+    }
+    BOOST_CHECK(Refused(dir, "createcomputejob", JobReq(aid, me, 1, "l64", 2000, 8'000'000), "COMPUTE_RECORD_INVALID"));
+
+    // The same job, signed by the same scheduler key and imported, must not get past the bound.
+    UniValue payload(UniValue::VOBJ);
+    for (const auto& key : template_payload.getKeys()) {
+        if (key == "nonce" || key == "input_commitment") continue;
+        payload.pushKV(key, template_payload[key]);
+    }
+    payload.pushKV("nonce", "job-imported-65");
+    payload.pushKV("input_commitment", "in-imported-65");
+    const UniValue env = SignEnvelope("ComputeJob", pk, sk, payload);
+    BOOST_CHECK(Refused(dir, "importcomputejob", Envelope(env, 2100), "COMPUTE_RECORD_INVALID"));
+}
+
 UniValue Pad(size_t bytes)
 {
     // Strings are capped at 8 KiB by the canonical codec; an array of them is not.
@@ -592,6 +682,53 @@ BOOST_AUTO_TEST_CASE(passport_rate_and_privacy_properties)
     over.wall_us = {std::numeric_limits<uint64_t>::max(), 1};
     BOOST_CHECK(!pwc::BuildPassport(over, p, err));
     BOOST_CHECK_EQUAL(err, "COMPUTE_CREDIT_OVERFLOW");
+}
+
+// A job reserves its credit until expires_at_ms; BalanceOf stops counting it after
+// that and createcomputejob gives the room to a new job. Settling the expired job
+// afterwards would credit the same room twice, so it fails like a late result does.
+BOOST_AUTO_TEST_CASE(expired_job_cannot_be_settled)
+{
+    std::vector<unsigned char> pk, sk;
+    const fs::path dir = NewDir(m_path_root, "r-expired-settle", pk, sk);
+    const std::string me = HexStr(pk);
+    const std::string offer = CreateOffer(dir, Offer(me, Keys({me}), Keys({me}), "PREPAID", 10, "expired"));
+    const std::string aid = Call(dir, "issuecomputeagreement", AgreementReq(offer, me, 1000, 9'000'000, "exp"))["agreement_id"].get_str();
+
+    // J1 takes the whole obligation and expires at 3000; its result comes in time.
+    const UniValue j1 = Call(dir, "createcomputejob", JobReq(aid, me, 10, "j1", 2000, 3000));
+    UniValue rq(UniValue::VOBJ);
+    rq.pushKV("job_id", j1["job_id"]);
+    rq.pushKV("output_commitment", "out-j1");
+    rq.pushKV("now_ms", 2500);
+    const UniValue r1 = Call(dir, "submitcomputejobresult", rq);
+
+    // Once J1 has expired its credit is free again, and J2 takes it.
+    UniValue j2_receipt;
+    BOOST_REQUIRE(TrySettleByJob(dir, aid, me, 10, "j2", 3500, j2_receipt));
+
+    UniValue acc(UniValue::VOBJ);
+    acc.pushKV("result_id", r1["result_id"]);
+    acc.pushKV("expected_output_commitment", "out-j1");
+    acc.pushKV("now_ms", 4000);
+    BOOST_CHECK(Refused(dir, "acceptcomputejobresult", acc, "COMPUTE_JOB_EXPIRED"));
+
+    UniValue iss(UniValue::VOBJ);
+    iss.pushKV("agreement_id", aid);
+    iss.pushKV("job_id", j1["job_id"]);
+    iss.pushKV("credited_p1e_microunits", 10);
+    iss.pushKV("profile_id", pwc::ProfileIdHex(pwc::ToyProfile()));
+    iss.pushKV("subject_pubkey", me);
+    iss.pushKV("verification_method", "ISSUER_ACCEPTANCE");
+    iss.pushKV("evidence_commitment", "out-j1");
+    iss.pushKV("now_ms", 4000);
+    BOOST_CHECK(Refused(dir, "issuecomputereceipt", iss, "COMPUTE_JOB_EXPIRED"));
+
+    UniValue b(UniValue::VOBJ);
+    b.pushKV("agreement_id", aid);
+    b.pushKV("now_ms", 4000);
+    const UniValue bal = Call(dir, "getcomputebalance", b);
+    BOOST_CHECK_EQUAL(bal["credited_p1e_microunits"].getInt<uint64_t>(), 10U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

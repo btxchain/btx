@@ -7,9 +7,11 @@
 
 #include <crypto/common.h>
 #include <modelnet/catalog.h>
+#include <modelnet/feed.h>
 #include <modelnet/free_grant.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
+#include <modelnet/model_watch.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/search.h>
 #include <random.h>
@@ -24,6 +26,7 @@
 #include <chrono>
 #include <ctime>
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -188,6 +191,107 @@ int ImportReissuedRecords(modelnet::ModelCatalog& cat, const modelnet::Digest48&
 
 } // namespace
 
+// Funding changes of a release reach the model event journal at the feed's
+// granularity (per 5 % of the target, frozen and disclosed). Every change after
+// the first used to share one dedupe key, so the journal dropped them.
+BOOST_AUTO_TEST_CASE(release_funding_changes_reach_the_event_journal)
+{
+    const fs::path tmp = m_path_root / "release-funding-events";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    modelnet::BindModelEventLayer(tmp / "events", 1000);
+    const auto model = ImportTiny(cat);
+    // A release with a target of 100000 atoms: the feed notes a change every 5000.
+    std::string uri, code, err;
+    BOOST_REQUIRE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, model.model_id, uri, err));
+    unsigned char secret[32];
+    for (int i = 0; i < 32; ++i) secret[i] = static_cast<unsigned char>(i + 41);
+    UniValue release_params(UniValue::VARR);
+    release_params.push_back(uri);
+    release_params.push_back(HexStr(Span{secret, 32}));
+    release_params.push_back(100000);
+    release_params.push_back(100000);
+    UniValue created;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "createmodelrelease", release_params, created, code, err), code << " " << err);
+    const std::string release = created["release_id"].get_str();
+    const auto changes = [&] {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("cursor", "0");
+        UniValue params(UniValue::VARR);
+        params.push_back(p);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelevents", params, out, code, err), code << " " << err);
+        int n{0};
+        for (const UniValue& ev : out["events"].getValues()) {
+            if (ev["event_type"].get_str() == "RELEASE_FUNDING_CHANGED" && ev.exists("release_id") &&
+                ev["release_id"].get_str() == release) {
+                ++n;
+            }
+        }
+        return n;
+    };
+    const auto pledge = [&](int64_t atoms) {
+        UniValue params(UniValue::VARR);
+        params.push_back(release);
+        params.push_back(atoms);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "pledgemodelrelease", params, out, code, err), code << " " << err);
+    };
+    const int64_t step = 5000;
+    pledge(step);
+    BOOST_CHECK_EQUAL(changes(), 1);
+    pledge(step);
+    BOOST_CHECK_EQUAL(changes(), 2);
+    pledge(1);
+    BOOST_CHECK_EQUAL(changes(), 2);
+    pledge(step - 1);
+    BOOST_CHECK_EQUAL(changes(), 3);
+}
+
+// The journal key of a funding step comes from the feed's id for the step, not
+// from the feed sequence: a restart can hand out a feed sequence again before
+// feed.json is saved. Creating a campaign keeps the key of its published record.
+BOOST_AUTO_TEST_CASE(release_funding_steps_keep_their_journal_key)
+{
+    const fs::path tmp = m_path_root / "release-funding-keys";
+    modelnet::BindModelEventLayer(tmp / "events", 1000);
+    modelnet::Digest48 model;
+    model.data[0] = 0x71;
+    const std::string release = RandHex48();
+    std::string err;
+    const auto step = [&](const std::string& extra, uint64_t feed_sequence) {
+        modelnet::FeedEvent fe;
+        fe.event_type = modelnet::FeedEventType::RELEASE_FUNDING_CHANGED;
+        fe.model_id = model;
+        fe.release_id = release;
+        fe.event_id = modelnet::MakeFeedEventId(fe.event_type, model, release, 0, extra);
+        fe.sequence = feed_sequence;
+        modelnet::ObserveResult r;
+        BOOST_REQUIRE_MESSAGE(modelnet::JournalObserveFeed(fe, r, err), err);
+        return r.duplicate;
+    };
+    // Step 1 under feed sequence 7; after a restart, step 2 gets feed sequence 7 again.
+    BOOST_CHECK(!step("001", 7));
+    BOOST_CHECK_MESSAGE(!step("002", 7), "a new funding step was dropped as a duplicate");
+    // The same step noted again under another feed sequence is a repeat.
+    BOOST_CHECK(step("002", 9));
+
+    // createmodelrelease journals the campaign without a record; publishing its
+    // record (sequence 1) later is the same event.
+    modelnet::FeedEvent created;
+    created.event_type = modelnet::FeedEventType::RELEASE_CAMPAIGN_CREATED;
+    created.model_id = model;
+    created.release_id = release;
+    modelnet::ObserveResult first, second;
+    BOOST_REQUIRE_MESSAGE(modelnet::JournalObserveFeed(created, first, err), err);
+    BOOST_CHECK(!first.duplicate);
+    modelnet::ModelSearchRecord rec;
+    rec.model_id = model;
+    rec.release_id = release;
+    rec.metadata_sequence = 1;
+    BOOST_REQUIRE_MESSAGE(modelnet::JournalObserveSearchRecord(rec, second, err), err);
+    BOOST_CHECK_MESSAGE(second.duplicate, "campaign creation journalled twice");
+}
+
 // W1. A search record from any peer can name a public model's artifact_id as
 // part of a "release campaign". The v0.34.14 gate then refuses to serve that
 // public model's plaintext. Here the record arrives through importmodelindex;
@@ -238,6 +342,103 @@ BOOST_AUTO_TEST_CASE(forged_campaign_record_does_not_stop_public_serving)
     modelnet::CatalogEntry after;
     BOOST_REQUIRE(cat.Find(pub.model_id, after));
     BOOST_TEST_MESSAGE("seeded after: " << after.seeded);
+}
+
+// doc/modelnet/search.md lists locally_available among the search filters, and
+// the economy filters apply it. The query parser must read it, so searchmodels
+// keeps only models this node holds a copy of.
+BOOST_AUTO_TEST_CASE(search_filter_locally_available_is_applied)
+{
+    const fs::path tmp = m_path_root / "search-locally-available";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    const auto held = ImportTiny(cat);
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    modelnet::ModelSearchRecord remote;
+    remote.model_id.data[0] = 0x6c;
+    remote.artifact_id.data[0] = 0x6d;
+    remote.canonical_name = "not held here";
+    remote.display_name = remote.canonical_name;
+    remote.expires_at = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count() + 3'600'000;
+    remote.pubkey = pk;
+    BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(remote, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+    UniValue recs(UniValue::VARR);
+    recs.push_back(modelnet::SearchRecordToJson(remote));
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    const auto search = [&](bool only_local) {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        if (only_local) {
+            UniValue filters(UniValue::VOBJ);
+            filters.pushKV("locally_available", true);
+            q.pushKV("filters", filters);
+        }
+        UniValue sp(UniValue::VARR);
+        sp.push_back(q);
+        UniValue res;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "searchmodels", sp, res, code, err), code << " " << err);
+        std::set<std::string> ids;
+        for (const UniValue& card : res["results"].getValues()) ids.insert(card["model_id"].get_str());
+        return ids;
+    };
+    const auto all = search(false);
+    BOOST_REQUIRE(all.count(held.model_id.Hex()));
+    BOOST_REQUIRE(all.count(remote.model_id.Hex()));
+    const auto local = search(true);
+    BOOST_CHECK(local.count(held.model_id.Hex()));
+    BOOST_CHECK_MESSAGE(!local.count(remote.model_id.Hex()), "locally_available kept a model this node does not hold");
+
+    // The campaign modes of getmodelfeed apply the same filter to a release of
+    // the local model.
+    std::string uri;
+    BOOST_REQUIRE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, held.model_id, uri, err));
+    unsigned char secret[32];
+    for (int i = 0; i < 32; ++i) secret[i] = static_cast<unsigned char>(i + 91);
+    UniValue rp(UniValue::VARR);
+    rp.push_back(uri);
+    rp.push_back(HexStr(Span{secret, 32}));
+    rp.push_back(100000);
+    rp.push_back(100000);
+    UniValue created;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "createmodelrelease", rp, created, code, err), code << " " << err);
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("locally_available", true);
+    UniValue fq(UniValue::VOBJ);
+    fq.pushKV("scope", "LOCAL");
+    fq.pushKV("mode", "NEARLY_FUNDED");
+    fq.pushKV("filters", filters);
+    UniValue fp(UniValue::VARR);
+    fp.push_back(fq);
+    UniValue feed;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+    bool campaign_listed{false};
+    for (const UniValue& item : feed["items"].getValues()) {
+        if (item["release_id"].get_str() == created["release_id"].get_str()) campaign_listed = true;
+    }
+    BOOST_CHECK_MESSAGE(campaign_listed, "locally_available dropped the release campaign of a local model");
+
+    // So does getfundablemodels.
+    UniValue gq(UniValue::VOBJ);
+    gq.pushKV("filters", filters);
+    UniValue gp(UniValue::VARR);
+    gp.push_back(gq);
+    UniValue fundable;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getfundablemodels", gp, fundable, code, err), code << " " << err);
+    bool fundable_listed{false};
+    for (const UniValue& card : fundable["results"].getValues()) {
+        if (card["model_id"].get_str() == held.model_id.Hex()) fundable_listed = true;
+    }
+    BOOST_CHECK_MESSAGE(fundable_listed, "locally_available dropped a local model from getfundablemodels");
 }
 
 // W2. grant_redeems.json is rewritten in place (truncate, then write). A
@@ -330,6 +531,99 @@ BOOST_AUTO_TEST_CASE(grant_store_growth_measurement)
     }
 }
 
+// Every economy and feed RPC feeds the whole search index into the feed again.
+// That is the helper re-reading its own index, not another peer relaying a
+// record, so it must not raise sources_observed (which TRENDING sorts on).
+BOOST_AUTO_TEST_CASE(feed_rereads_do_not_count_as_sources)
+{
+    const fs::path tmp = m_path_root / "feed-rereads";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+    UniValue recs(UniValue::VARR);
+    for (int i = 0; i < 3; ++i) {
+        modelnet::ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(0x50 + i);
+        r.artifact_id.data[0] = static_cast<unsigned char>(0x58 + i);
+        r.canonical_name = "reread " + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.published_at = now_ms - 1000 * (3 - i);
+        r.expires_at = now_ms + 3'600'000;
+        r.pubkey = pk;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+        recs.push_back(modelnet::SearchRecordToJson(r));
+    }
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    UniValue q(UniValue::VOBJ);
+    q.pushKV("scope", "LOCAL");
+    q.pushKV("mode", "TRENDING");
+    UniValue fp(UniValue::VARR);
+    fp.push_back(q);
+    UniValue feed;
+    for (int poll = 0; poll < 5; ++poll) {
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    }
+    int models{0};
+    for (const UniValue& item : feed["items"].getValues()) {
+        if (item["event_type"].get_str() != "MODEL_PUBLISHED") continue;
+        ++models;
+        BOOST_CHECK_EQUAL(item["provenance"]["sources_observed"].getInt<int>(), 1);
+    }
+    BOOST_CHECK_EQUAL(models, 3);
+}
+
+// A re-read keeps a record the feed holds current without counting a source, so
+// a record that stays in the index does not expire from the feed and come back
+// as a new event (new sequence, first_seen_at and sources_observed).
+BOOST_AUTO_TEST_CASE(feed_reread_keeps_a_held_record_current)
+{
+    modelnet::FeedStore feed;
+    feed.SetTtlMs(1000);
+    modelnet::ModelSearchRecord r;
+    r.model_id.data[0] = 0x52;
+    r.canonical_name = "held in the index";
+    BOOST_REQUIRE(feed.NoteSearchRecord(r, 1000));
+    const uint64_t noted = feed.Sequence();
+    BOOST_REQUIRE(feed.RefreshSearchRecord(r, 1900));
+    // More than the TTL after the record was noted, less after it was re-read.
+    feed.Expire(2500);
+    BOOST_CHECK_EQUAL(feed.Size(), 1U);
+    BOOST_REQUIRE(feed.RefreshSearchRecord(r, 2600));
+    BOOST_CHECK_EQUAL(feed.Sequence(), noted);
+}
+
+// A record that is no longer re-read (it left the index, for example through a
+// tombstone) still expires when only the re-read writes to the feed.
+BOOST_AUTO_TEST_CASE(feed_reread_still_expires_records_that_left_the_index)
+{
+    modelnet::FeedStore feed;
+    feed.SetTtlMs(1000);
+    modelnet::ModelSearchRecord gone, held;
+    gone.model_id.data[0] = 0x53;
+    gone.canonical_name = "left the index";
+    held.model_id.data[0] = 0x54;
+    held.canonical_name = "still in the index";
+    BOOST_REQUIRE(feed.NoteSearchRecord(gone, 1000));
+    BOOST_REQUIRE(feed.NoteSearchRecord(held, 1000));
+    const uint64_t noted = feed.Sequence();
+    BOOST_REQUIRE(feed.RefreshSearchRecord(held, 1800));
+    BOOST_REQUIRE(feed.RefreshSearchRecord(held, 2500));
+    BOOST_CHECK_EQUAL(feed.Size(), 1U);
+    BOOST_CHECK_EQUAL(feed.Sequence(), noted);
+}
+
 // W3. The uses of an expired grant are never dropped. An expired grant cannot
 // verify again, so keeping them only grows the file every piece GET rewrites.
 BOOST_AUTO_TEST_CASE(expired_grant_uses_are_pruned)
@@ -376,6 +670,147 @@ BOOST_AUTO_TEST_CASE(expired_grant_uses_are_pruned)
 }
 
 
+
+// NEARLY_FUNDED and FUNDED_AWAITING_RELEASE build their page from the campaign
+// list. They take limit and cursor like the other feed modes: default 50, at most
+// 100, and a cursor that continues after the last card of the previous page.
+BOOST_AUTO_TEST_CASE(campaign_feed_modes_page_like_the_feed)
+{
+    const fs::path tmp = m_path_root / "campaign-feed-paging";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+    std::set<std::string> campaigns;
+    UniValue recs(UniValue::VARR);
+    for (int i = 0; i < 5; ++i) {
+        modelnet::ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(0x30 + i);
+        r.artifact_id.data[0] = static_cast<unsigned char>(0x38 + i);
+        r.canonical_name = "paged campaign " + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.release_id = RandHex48();
+        r.release_state = "FUNDING";
+        r.release_target_atoms = 1000;
+        r.expires_at = now_ms + 3'600'000;
+        r.pubkey = pk;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+        recs.push_back(modelnet::SearchRecordToJson(r));
+        campaigns.insert(r.model_id.Hex());
+    }
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    const auto page = [&](int limit, const std::string& cursor) {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        q.pushKV("mode", "NEARLY_FUNDED");
+        q.pushKV("limit", limit);
+        if (!cursor.empty()) q.pushKV("cursor", cursor);
+        UniValue fp(UniValue::VARR);
+        fp.push_back(q);
+        UniValue feed;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+        return feed;
+    };
+    std::set<std::string> seen;
+    std::string cursor;
+    int pages{0};
+    do {
+        const UniValue feed = page(2, cursor);
+        BOOST_CHECK_LE(feed["items"].size(), 2U);
+        for (const UniValue& item : feed["items"].getValues()) {
+            const std::string id = item["model_id"].get_str();
+            if (campaigns.count(id)) BOOST_CHECK_MESSAGE(seen.insert(id).second, "repeated on a later page: " << id);
+        }
+        cursor = feed["next_cursor"].get_str();
+    } while (!cursor.empty() && ++pages < 10);
+    BOOST_CHECK(seen == campaigns);
+
+    // limit 0 is the default page, not an empty one.
+    std::set<std::string> by_default;
+    const UniValue default_page = page(0, "");
+    for (const UniValue& item : default_page["items"].getValues()) by_default.insert(item["model_id"].get_str());
+    for (const auto& id : campaigns) BOOST_CHECK(by_default.count(id));
+}
+
+// Two releases of one model are two campaigns. The cursor must tell them apart,
+// or a page that ends on the first one is followed by the same page again.
+BOOST_AUTO_TEST_CASE(campaign_feed_cursor_tells_releases_of_one_model_apart)
+{
+    const fs::path tmp = m_path_root / "campaign-feed-releases";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::string code, err;
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    // Model X gets two releases and a second local model W one. These local
+    // campaigns tie on every NEARLY_FUNDED key, so the order falls back to the
+    // model id; W is picked so that it sorts after X and X's releases sit before
+    // another card.
+    const auto x = ImportTiny(cat);
+    modelnet::CatalogEntry w;
+    for (int v = 1; v < 32; ++v) {
+        const fs::path wsrc = tmp.parent_path() / fs::PathFromString("campaign-feed-releases-w" + std::to_string(v));
+        fs::create_directories(wsrc);
+        std::vector<unsigned char> st(10 + v, ' ');
+        WriteLE64(st.data(), 2 + v);
+        st[8] = '{';
+        st.back() = '}';
+        {
+            std::ofstream out(wsrc / "model.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(wsrc), true, w, err), err);
+        if (x.model_id < w.model_id) break;
+    }
+    BOOST_REQUIRE(x.model_id < w.model_id);
+    std::set<std::string> releases;
+    const auto release = [&](const modelnet::Digest48& model, int64_t target, int salt) {
+        std::string uri;
+        BOOST_REQUIRE(modelnet::EncodeResource(modelnet::ResourceKind::MODEL, model, uri, err));
+        unsigned char secret[32];
+        for (int i = 0; i < 32; ++i) secret[i] = static_cast<unsigned char>(i + salt);
+        UniValue params(UniValue::VARR);
+        params.push_back(uri);
+        params.push_back(HexStr(Span{secret, 32}));
+        params.push_back(100000);
+        params.push_back(target);
+        UniValue created;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "createmodelrelease", params, created, code, err), code << " " << err);
+        releases.insert(created["release_id"].get_str());
+    };
+    release(x.model_id, 100000, 7);
+    release(x.model_id, 100000, 47);
+    release(w.model_id, 100000, 87);
+    BOOST_REQUIRE_EQUAL(releases.size(), 3U);
+
+    std::multiset<std::string> seen;
+    std::string cursor;
+    int pages{0};
+    do {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        q.pushKV("mode", "NEARLY_FUNDED");
+        q.pushKV("limit", 1);
+        if (!cursor.empty()) q.pushKV("cursor", cursor);
+        UniValue fp(UniValue::VARR);
+        fp.push_back(q);
+        UniValue feed;
+        BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+        for (const UniValue& item : feed["items"].getValues()) seen.insert(item["release_id"].get_str());
+        cursor = feed["next_cursor"].get_str();
+    } while (!cursor.empty() && ++pages < 10);
+    BOOST_CHECK_MESSAGE(pages < 10, "paging did not end");
+    for (const auto& r : releases) BOOST_CHECK_EQUAL(seen.count(r), 1U);
+}
 
 // W1 fix, damaged state. The fix keeps the ids of releases this node created
 // in local_releases.json. If that file exists but cannot be parsed, the gate
@@ -479,6 +914,64 @@ BOOST_AUTO_TEST_CASE(truncated_grant_nonce_store_does_not_wedge_issuance)
     BOOST_CHECK(fs::exists(fs::PathFromString(fs::PathToString(store) + ".quarantine")));
 }
 
+// getmodeldirectory and getmodeldirectoryentry describe the local copy of a
+// model the way searchmodels does: known, downloaded, seeded, pinned, partial.
+BOOST_AUTO_TEST_CASE(directory_shows_the_local_copy_like_search)
+{
+    const fs::path tmp = m_path_root / "directory-local";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto model = ImportTiny(cat);
+    std::string code, err;
+    UniValue sq(UniValue::VOBJ);
+    sq.pushKV("scope", "LOCAL");
+    UniValue sp(UniValue::VARR);
+    sp.push_back(sq);
+    UniValue search;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "searchmodels", sp, search, code, err), code << " " << err);
+    UniValue from_search;
+    for (const UniValue& card : search["results"].getValues()) {
+        if (card["model_id"].get_str() == model.model_id.Hex()) from_search = card["local"];
+    }
+    BOOST_REQUIRE(from_search.isObject());
+    BOOST_REQUIRE(from_search["known"].get_bool());
+    BOOST_REQUIRE(from_search["downloaded"].get_bool());
+
+    UniValue ep(UniValue::VARR);
+    ep.push_back(model.model_id.Hex());
+    UniValue entry;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodeldirectoryentry", ep, entry, code, err), code << " " << err);
+    BOOST_CHECK_EQUAL(entry["local"].write(), from_search.write());
+
+    UniValue directory;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodeldirectory", UniValue(UniValue::VARR), directory, code, err), code << " " << err);
+    bool listed{false};
+    for (const UniValue& card : directory["results"].getValues()) {
+        if (card["model_id"].get_str() != model.model_id.Hex()) continue;
+        listed = true;
+        BOOST_CHECK_EQUAL(card["local"].write(), from_search.write());
+    }
+    BOOST_CHECK(listed);
+
+    // The economy lists that go through the same entries (getnewmodels here) report
+    // the local copy too, so their pinned filter matches it.
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("pinned", true);
+    UniValue nq(UniValue::VOBJ);
+    nq.pushKV("scope", "LOCAL");
+    nq.pushKV("filters", filters);
+    UniValue np(UniValue::VARR);
+    np.push_back(nq);
+    UniValue fresh;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getnewmodels", np, fresh, code, err), code << " " << err);
+    bool fresh_listed{false};
+    for (const UniValue& card : fresh["results"].getValues()) {
+        if (card["model_id"].get_str() != model.model_id.Hex()) continue;
+        fresh_listed = true;
+        BOOST_CHECK_EQUAL(card["local"].write(), from_search.write());
+    }
+    BOOST_CHECK_MESSAGE(fresh_listed, "getnewmodels with pinned does not list the local model");
+}
+
 // A publisher may re-sign its search record for the same model with a higher
 // sequence and a new release_id. The index takes each one (same model, so no
 // new slot and no publisher quota). The campaign learned from the older record
@@ -541,6 +1034,71 @@ BOOST_AUTO_TEST_CASE(local_release_survives_reissued_records)
     UniValue gj2;
     BOOST_REQUIRE_EQUAL(Grant(cat, rel, "reissue-local-b", gj2), 200);
     BOOST_CHECK_EQUAL(GetPiece0(cat, rel, gj2), 404);
+}
+
+// A feed filter drops a model's economy entry, but its feed item stayed. The
+// page pairs items and entries by position, so the items after it showed the
+// entry of another model, and the filtered model was still listed.
+BOOST_AUTO_TEST_CASE(filtered_feed_keeps_each_entry_with_its_model)
+{
+    const fs::path tmp = m_path_root / "feed-filter-pairs";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::vector<unsigned char> pk, sk;
+    std::string code, err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count();
+    // Bind the helper's feed and economy state to this catalog before importing.
+    UniValue status;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeedstatus", UniValue(UniValue::VARR), status, code, err), code << " " << err);
+    std::set<std::string> funding;
+    UniValue recs(UniValue::VARR);
+    for (int i = 0; i < 6; ++i) {
+        modelnet::ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(0x60 + i);
+        r.artifact_id.data[0] = static_cast<unsigned char>(0x70 + i);
+        r.canonical_name = "feed filter " + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.metadata_sequence = 1;
+        r.published_at = now_ms - 1000 * (6 - i);
+        if (i % 2 == 0) {
+            // A model still in its funding campaign: not released.
+            r.release_id = RandHex48();
+            r.release_state = "FUNDING";
+            r.release_target_atoms = 1000;
+            funding.insert(r.model_id.Hex());
+        }
+        r.expires_at = now_ms + 3'600'000;
+        r.pubkey = pk;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+        recs.push_back(modelnet::SearchRecordToJson(r));
+    }
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("records", recs);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(import);
+    UniValue out;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "importmodelindex", ip, out, code, err), code << " " << err);
+
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("released_only", true);
+    UniValue q(UniValue::VOBJ);
+    q.pushKV("scope", "LOCAL");
+    q.pushKV("mode", "NEWEST");
+    q.pushKV("limit", 50);
+    q.pushKV("filters", filters);
+    UniValue fp(UniValue::VARR);
+    fp.push_back(q);
+    UniValue feed;
+    BOOST_REQUIRE_MESSAGE(Rpc(cat, "getmodelfeed", fp, feed, code, err), code << " " << err);
+    BOOST_REQUIRE(feed["items"].isArray());
+    BOOST_CHECK(!feed["items"].empty());
+    for (const UniValue& item : feed["items"].getValues()) {
+        const std::string id = item["model_id"].get_str();
+        BOOST_CHECK_MESSAGE(!funding.count(id), "a model the filter excludes is listed: " << id);
+        BOOST_REQUIRE_MESSAGE(item.exists("entry"), "item without its entry: " << id);
+        BOOST_CHECK_EQUAL(item["entry"]["model_id"].get_str(), id);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

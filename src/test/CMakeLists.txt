@@ -279,6 +279,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_ordinary_recursive_leaf_tests.cpp
   matmul_v4_rc_stage3_v13_fixedpoint_bytecode_coverage_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_merkle_fold_tests.cpp
+  matmul_v4_rc_stage3_multirow_v11_merkle_fold_public_plan_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_decoder_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_deep_vm_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_deep_vm_public_plan_tests.cpp
@@ -560,6 +561,7 @@ if(WITH_MODELNET)
     modelnet_v11_negative_tests.cpp
     modelnet_funding_tests.cpp
     modelnet_bridge_tests.cpp
+    modelnet_store_write_tests.cpp
     modelnet_cuda_qual_tests.cpp
     modelnet_planner_tests.cpp
     modelnet_firstrun_tests.cpp
@@ -577,17 +579,20 @@ if(WITH_MODELNET)
     modelnet_b0_remaining_tests.cpp
     modelnet_b0_pq_rest_tests.cpp
     modelnet_hosting_tests.cpp
+    modelnet_identity_secret_tests.cpp
     modelnet_infra_tests.cpp
     modelnet_swarm_tests.cpp
     modelnet_conn_tests.cpp
     modelnet_pq1_worker_share_tests.cpp
     modelnet_ainode_notes_tests.cpp
     modelnet_search_tests.cpp
+    modelnet_search_local_policy_tests.cpp
     modelnet_first_run_tests.cpp
     modelnet_file_stream_tests.cpp
     modelnet_store2_tests.cpp
     modelnet_cloud_tests.cpp
     modelnet_bounty_tests.cpp
+    modelnet_release_store_tests.cpp
     modelnet_035_codec_tests.cpp
     modelnet_035_envver_tests.cpp
     modelnet_envelope_dupkey_tests.cpp
@@ -2494,6 +2499,7 @@ if(WITH_MODELNET)
     modelnet_035_live_path_tests.cpp
     modelnet_submandate_tests.cpp
     modelnet_bounty_script_spend_tests.cpp
+    modelnet_bounty_eval_tests.cpp
     modelnet_economy_tests.cpp
     modelnet_feed_tests.cpp
     modelnet_release_directory_tests.cpp
@@ -2604,6 +2610,7 @@ if(WITH_MODELNET)
     modelnet_r7_package_tests.cpp
     modelnet_r10_security_tests.cpp
     modelnet_authz_tests.cpp
+    modelnet_helper_store_race_tests.cpp
     modelnet_r2_storage_tests.cpp
     modelnet_r3_import_tests.cpp
     modelnet_registry_independence_tests.cpp
@@ -2615,10 +2622,9 @@ if(WITH_MODELNET)
   target_compile_definitions(test_btx PRIVATE
     MODELNET_V11_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/modelnet_v11_vectors.json\"
     MODELNET_B0_CODEC_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/modelnet_b0_codec_vectors.json\"
-    MODELNET_BTX_OPEN_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-open\"
+    MODELNET_BTX_OPEN_PATH=\"$<TARGET_FILE:btx-open>\"
     MODELNET_BOUNTY_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/bounty/reference/golden-vectors.json\"
-    MODELNET_MODELD_PATH=\"${CMAKE_BINARY_DIR}/bin/btx-modeld\"
-    MODELNET_BTXD_PATH=\"${CMAKE_BINARY_DIR}/bin/btxd\"
+    MODELNET_MODELD_PATH=\"$<TARGET_FILE:btx-modeld>\"
     MODELNET_AHP_FIXTURE_DIR=\"${PROJECT_SOURCE_DIR}/src/test/data/agent-package\"
     MODELNET_BTX_PACKAGE_VECTORS_PATH=\"${PROJECT_SOURCE_DIR}/src/test/data/btx-package-vectors\"
     MODELNET_HCP_PORTAL_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/hcp-portal/index.html\"
@@ -2626,6 +2632,15 @@ if(WITH_MODELNET)
     MODELNET_CRL12_SCHEMA_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/CognitiveReserveLayer.schema.json\"
     MODELNET_CRL12_OPERATIONS_PATH=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/crl12/schemas/operations-v1.2.json\"
   )
+  # Use the configured executables, including the platform suffix and output directory.
+  add_dependencies(test_btx btx-open btx-modeld)
+  if(TARGET btxd)
+    target_compile_definitions(test_btx PRIVATE MODELNET_BTXD_PATH=\"$<TARGET_FILE:btxd>\")
+    add_dependencies(test_btx btxd)
+  else()
+    target_compile_definitions(test_btx PRIVATE
+      MODELNET_BTXD_PATH=\"${CMAKE_BINARY_DIR}/bin/btxd${CMAKE_EXECUTABLE_SUFFIX}\")
+  endif()
   set_property(SOURCE modelnet_ahp_comp_tests.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     "MODELNET_OFF_CHECK_SCRIPT=\"${PROJECT_SOURCE_DIR}/contrib/modelnet/check-with-modelnet-off.sh\"")
   set(_modelnet_b0_spec "/home/administrator/Documents/btx-0.34.7-spec-ref/BTX_0.34.7_Model_Network_v1.1/baseline/BTX_0.34.7_PQ_Native_Model_Network_Specification.md")

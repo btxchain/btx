@@ -21,6 +21,7 @@
 #include <modelnet/policy.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/supervisor.h>
+#include <modelnet/security_v2/native.h>
 #include <core_io.h>
 #include <httpserver.h>
 #include <kernel/chainstatemanager_opts.h>
@@ -185,7 +186,26 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
             req.pushKV("params", params);
             UniValue result;
             std::string err;
-            if (HelperCall(name, params, result, err)) {
+            std::string wallet_restriction;
+            const bool restricted_view = modelnet::IsWalletObservationRead(name) &&
+                GetWalletRestrictionFromJSONRPCRequest(request, wallet_restriction);
+            UniValue scoped_params(UniValue::VARR);
+            if (restricted_view) {
+                scoped_params.push_back(name);
+                scoped_params.push_back(params);
+            }
+            const bool helper_ok = restricted_view
+                ? HelperCall("getrestrictedmodelview", scoped_params, result, err)
+                : HelperCall(name, params, result, err);
+            UniValue helper_error;
+            if (!helper_ok && restricted_view && helper_error.read(err) &&
+                helper_error.isObject() && helper_error["code"].isStr() &&
+                helper_error["code"].get_str() == "METHOD_NOT_FOUND") {
+                throw JSONRPCError(RPC_MISC_ERROR,
+                    "Restricted model view failed. The node and external helper must both support "
+                    "getrestrictedmodelview. No unrestricted retry was made: " + err);
+            }
+            if (helper_ok) {
                 if (name == "getmodelnetworkinfo") {
                     const auto helper = modelnet::SnapshotManagedHelper();
                     result.pushKV("helper_managed_by_btxd", helper.managed_by_btxd);
@@ -216,7 +236,9 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
                             kh = (*rel)["key_hash_sha256"].get_str();
                         }
                         if (rel->exists("refund_height") && (*rel)["refund_height"].isNum()) {
-                            rh = static_cast<uint32_t>((*rel)["refund_height"].getInt<int64_t>());
+                            // Out of range stays 0 (refund_status UNKNOWN), never a wrapped height.
+                            std::string rh_err;
+                            if (!ParseUint32Index((*rel)["refund_height"].getInt<int64_t>(), rh, "refund_height", rh_err)) rh = 0;
                         }
                         std::vector<CScript> scripts;
                         auto add_script = [&](const std::string& hex) {
@@ -1001,9 +1023,11 @@ static RPCHelpMan openbtxuri()
 static RPCHelpMan resolveresource()
 {
     return ProxyOrLocal("resolveresource", "Typed lookup with incomplete coverage. Local catalog first.\n",
-                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "digest48 / text", {
-                            {"digest48", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "96-hex"},
-                            {"text", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "search text"},
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "digest48, id or uri, and kind", {
+                            {"digest48", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "96-hex digest of the object"},
+                            {"id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Same as digest48"},
+                            {"uri", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "btx:// URI; its kind is used"},
+                            {"kind", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Resource kind as a number or a name such as \"MODEL\" (default: MODEL)"},
                         }}});
 }
 
@@ -2442,6 +2466,44 @@ PWC_RPC(verifycomputeaccessgrant, "Check a ComputeAccessGrant signature, trusted
 PWC_RPC(getcomputesigningidentity, "Return the local application signing identity. Not a wallet key.")
 #undef PWC_RPC
 
+
+static RPCHelpMan modelsecurity()
+{
+    return RPCHelpMan{
+        "modelsecurity",
+        "Dispatch a bounded local model-security request through the node-owned guard. "
+        "This is an owner RPC, not a public peer endpoint. Long jobs return a job id. "
+        "No request grants wallet or automatic spending authority.\n",
+        {{"request", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Typed security request", {},
+          RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "Scoped result or refusal"}}},
+        RPCExamples{HelpExampleCli("modelsecurity", "'{\"op\":\"status\"}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+            // An owner RPC: a pause needs no signed record and stops the guard
+            // for the whole node, like stop.
+            EnsureNotWalletRestricted(request);
+#ifdef ENABLE_MODELNET
+            UniValue input = request.params[0];
+            if (input.isStr()) {
+                const auto raw = input.get_str();
+                if (raw.size() > 1024 * 1024 || !input.read(raw))
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "SEC_SCHEMA");
+            }
+            if (!input.isObject() || input.write().size() > 1024 * 1024)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "SEC_SCHEMA");
+            UniValue result;
+            std::string error;
+            if (!modelnet::SwarmSecurityRequest(input, result, error))
+                throw JSONRPCError(RPC_MISC_ERROR, error);
+            return result;
+#else
+            throw JSONRPCError(RPC_MISC_ERROR, "SEC_MODELNET_NOT_BUILT");
+#endif
+        },
+    };
+}
+
 static RPCHelpMan lab035()
 {
     return RPCHelpMan{
@@ -2816,6 +2878,7 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &verifycomputeaccessgrant},
         {"modelnet", &getcomputesigningidentity},
         {"modelnet", &lab035},
+        {"modelnet", &modelsecurity},
     };
     for (const auto& c : commands) t.appendCommand(c.name, &c);
 #else

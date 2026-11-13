@@ -870,6 +870,24 @@ BOOST_AUTO_TEST_CASE(jit_map_range_mat_load)
         BOOST_REQUIRE(modelnet::MaterializeCompleteFile(pieces, fs::PathToString(dest), modelnet::NewGeneration(), code, err));
         BOOST_CHECK(!modelnet::MaterializeCompleteFile(pieces, fs::PathToString(dest), modelnet::NewGeneration(), code, err));
         BOOST_CHECK_EQUAL(code, "OVERWRITE_REFUSED");
+        const fs::path occupied = m_path_root / "mat.sidecar";
+        const fs::path sidecar = fs::PathFromString(fs::PathToString(occupied) + ".gen");
+        {
+            std::ofstream old(sidecar);
+            old << "existing generation";
+            BOOST_REQUIRE(old.good());
+        }
+        BOOST_CHECK(!modelnet::MaterializeCompleteFile(pieces, fs::PathToString(occupied), modelnet::NewGeneration(), code, err));
+        BOOST_CHECK_EQUAL(code, "IO_ERROR");
+        BOOST_CHECK(!fs::exists(occupied));
+        {
+            std::ifstream old(sidecar);
+            std::string existing;
+            BOOST_REQUIRE(std::getline(old, existing));
+            BOOST_CHECK_EQUAL(existing, "existing generation");
+        }
+        BOOST_REQUIRE(fs::remove(sidecar));
+        BOOST_CHECK(modelnet::MaterializeCompleteFile(pieces, fs::PathToString(occupied), modelnet::NewGeneration(), code, err));
         std::vector<std::vector<unsigned char>> holey{{'a'}, {}};
         const fs::path dest_hole = m_path_root / "mat.hole";
         BOOST_CHECK(!modelnet::MaterializeCompleteFile(holey, fs::PathToString(dest_hole), modelnet::NewGeneration(), code, err));
@@ -1348,10 +1366,10 @@ BOOST_AUTO_TEST_CASE(jit_api_priv_scale_journey_safety)
     BOOST_TEST_CONTEXT("JIT-SAFETY-07") {
         BOOST_CHECK(CLIENT_VERSION_IS_RELEASE);
         BOOST_CHECK_EQUAL(CLIENT_VERSION_MAJOR, 0);
-        BOOST_CHECK_EQUAL(CLIENT_VERSION_MINOR, 35);
-        BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 0);
-        BOOST_CHECK_EQUAL(std::string(CLIENT_VERSION_STRING), "0.35.0rc1");
-        BOOST_TEST_MESSAGE("lab candidate is 0.35.0rc1; this test does not restart production");
+        BOOST_CHECK_EQUAL(CLIENT_VERSION_MINOR, 34);
+        BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 16);
+        BOOST_CHECK_EQUAL(std::string(CLIENT_VERSION_STRING), "0.34.16");
+        BOOST_TEST_MESSAGE("lab candidate is 0.34.16; this test does not restart production");
     }
 }
 

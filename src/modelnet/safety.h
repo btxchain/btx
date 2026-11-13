@@ -61,6 +61,7 @@ private:
 
     void RebuildLocked(int64_t now);
     bool PersistLocked(std::string& err) const;
+    bool PersistPublishersLocked(std::string& err) const;
     void LoadLocked();
 
 public:
@@ -68,7 +69,8 @@ public:
     void ResetForTests();
 
     bool PinPublisher(const std::string& publisher_id_hex, const std::string& label, std::string& err);
-    bool UnpinPublisher(const std::string& publisher_id_hex);
+    /** Returns true if unpinned. If false, err tells a failed save from a publisher that was not pinned. */
+    bool UnpinPublisher(const std::string& publisher_id_hex, std::string& err);
     bool PublisherPinned(const std::string& publisher_id_hex) const;
 
     bool LocalReport(const std::string& target_hex, uint8_t target_kind, uint8_t severity,

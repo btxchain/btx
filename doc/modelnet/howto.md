@@ -130,7 +130,7 @@ bundled `lib/`.
 | Concurrent two-host wave | `contrib/modelnet/e2e-parallel-hosts.sh` | Isolated CUDA worker + two-host regtest + Chrome + production PID watch |
 | Cross-host inspect | `contrib/modelnet/e2e-cross-host-inspect.sh` | granite bytes match (13888336427) + production PIDs + GPU still holds ExactReplay |
 | Isolated CUDA worker | `contrib/modelnet/cuda-isolated-e2e.sh` | Tiny kernel on a dedicated CUDA workstation only; never the live attestor GPU |
-| Granite FIT vs ExactReplay | `contrib/modelnet/e2e-cuda-granite-fit.sh` | Isolated worker: 13.8 GiB would FIT; live ExactReplay reserve is not starved |
+| Granite FIT vs ExactReplay | `contrib/modelnet/e2e-cuda-granite-fit.sh` | Isolated worker: 13.8 GiB would FIT; live ExactReplay reserve is not starved. `CUDA_FIT_RESERVE_MIB` below 4096 is an operator override (§10) |
 | One-node regtest + helper | `python3 test/functional/feature_modelnet_helper.py --configfile=build-gcc13/test/config.ini --timeout-factor=1` | `btxd -regtest` + unix helper; import demand-seeds; EXPLICIT_PAID journals a quote (automatic spend 0) |
 | Bounty create → find → on-chain complete | `python3 test/functional/feature_modelnet_bounty_lifecycle.py --descriptors --configfile=build-gcc13/test/config.ini --timeout-factor=1` | Owned helper, unix-only bind. Publish, `searchbounties`, mature-coinbase fund of two-leaf CLTV+refund or staged `htlc_sha256`, mine to locktime, `preparebountyaward` / `preparebountyrefund` / `preparebountyclaim`. No auto-spend. |
 | HTLC (0.34.6 reuse / WRC) | **Direct file**, disk tmpdir (do **not** use `test_runner.py` cache or tmpfs `/tmp`): `mkdir -p build-gcc13/tmp-func/atomicswap && python3 test/functional/wallet_htlc_atomicswap.py --descriptors --configfile=build-gcc13/test/config.ini --tmpdir=build-gcc13/tmp-func/atomicswap --timeout-factor=1`. Same pattern: `wallet_modelnet_funding.py` | SCRIPT-03/09/11 claim mined + preimage on-chain; wrong preimage refused; refund signed before locktime is non-final and mempool-rejected until height. |
@@ -417,6 +417,27 @@ Default `-modelruntimecheck=0` remains `NOT_RUN_CUDA_ISOLATION`.
 `capabilities.cuda_qualification=true` because the isolated worker exists;
 a live `GPU-01 RUNTIME_OBSERVED` is the e2e above. See
 `planning/acceptance-matrix.csv`.
+
+ISO-05 FIT (`e2e-cuda-granite-fit.sh`, or the worker's `--granite-bytes`)
+refuses unless model MiB + reserve MiB <= total MiB - 3382. The 3382 MiB
+is the observed ExactReplay footprint, a fixed figure, not a reading of
+the running validator. The reserve defaults to 4096 MiB, and the default
+does not change. An operator who accepts less headroom on a shared card
+sets it explicitly:
+
+```bash
+CUDA_HOST=<cuda-workstation> GRANITE_BYTES=<model bytes> CUDA_FIT_RESERVE_MIB=<MiB> \
+  contrib/modelnet/e2e-cuda-granite-fit.sh
+```
+
+A value below 4096 is an override. The worker then prints
+`ISO-05 OVERRIDE_FIT` and `CUDA_GRANITE_FIT OVERRIDE_PASS`, never
+`CUDA_GRANITE_FIT PASS`, and the script ends in
+`E2E_CUDA_GRANITE_FIT OVERRIDE_PASS`. That result is the operator's call
+for that host, not release qualification. `e2e-parallel-prod.sh` refuses
+to start while `CUDA_FIT_RESERVE_MIB` is set. A value that is not a decimal
+count fails before any CUDA call: the script stops before SSH, the worker
+exits 2.
 
 `ensurebtxcapability` remains the lab CPU fixture unless the request names
 a complete catalog replica and a non-CPU runtime (`safetensors-cuda` /

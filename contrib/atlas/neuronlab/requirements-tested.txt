@@ -1,0 +1,12 @@
+# Exact DIRECT scientific packages exercised in the authoring environment.
+# Not a complete audited transitive lock; select the correct platform wheels.
+numpy==2.3.5
+torch==2.10.0
+safetensors==0.7.0
+# Actual authoring build was torch 2.10.0+cpu. OpenSSL 3.5.5 is an OS binary.
+# Optional Transformers was NOT installed or qualified. No automatic downloads.
+
+# Scientific expansion: direct packages actually exercised.
+scipy==1.17.0
+scikit-learn==1.8.0
+# Optional umap-learn was unavailable; UMAP is implemented via its real API but NOT_RUN.

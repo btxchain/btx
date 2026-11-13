@@ -600,7 +600,11 @@ static constexpr size_t MATMUL_BUDGET_DEFERRED_MAX{256};
  *  plus the near-tip bodies dropped alongside them. At exactly one window, a
  *  single extra drop overflowed the set; the overflow erases begin(), the
  *  smallest hash, so the two smallest dropped holes then evicted each other
- *  and were fetched again on every delivery until the tip moved (#292). */
+ *  and were fetched again on every delivery until the tip moved (#292).
+ *  m_header_only_competing now keeps up to one window of deep dropped holes
+ *  across a tip move (ReleaseHeaderOnlySkipOnTipMove, #292): the holes the
+ *  walk would otherwise fetch and drop again, at most one window of the four,
+ *  so the bound is unchanged. */
 static constexpr size_t MAX_HEADER_ONLY_SKIP_HASHES{4 * BLOCK_DOWNLOAD_WINDOW};
 
 //! Claimed unique unattested tip-child for ExactReplay GPU. File-static so
@@ -2464,7 +2468,9 @@ private:
     /** Competing near-tip P2P bodies dropped HEADER_ONLY so miner GPU /
      *  trusted-mirror / local-signer sole-child persist is not flooded.
      *  FindNextBlocks must not re-getdata these until the active tip
-     *  moves OR quorum is recorded for that hash (qualifier: snapshot
+     *  moves OR quorum is recorded for that hash. A tip move keeps the
+     *  dropped holes deep on the new active chain
+     *  (ReleaseHeaderOnlySkipOnTipMove, #292) (qualifier: snapshot
      *  backfill re-requested the same pre-snapshot hash 150–301 times
      *  after HEADER_ONLY discarded a delivered body; a later quorum
      *  used to leave the hash suppressed forever because both clear
@@ -6155,6 +6161,44 @@ bool PeerManagerImpl::HeaderFetchSuppressedForTest(const uint256& hash) const
     return true;
 }
 
+//! Release the HEADER_ONLY skip entries a tip move can make admissible. Both
+//! tip notifications used to clear the whole set. A dropped body that is on
+//! the new active chain, has no data and lies deeper than
+//! MATMUL_RC_NEAR_TIP_DEPTH below the new tip meets the same depth gate after
+//! the move (IndependentConsensusMaySpendExactReplayGpu), and
+//! IsHeaderOnlyFetchSuppressed lifts its suppression by itself once a quorum
+//! or the signed frontier covers it. Clearing such holes made the assumeutxo
+//! background walk fetch its whole window again after every block and drop
+//! every body again (#292). Keep them; release every other entry as before.
+//! The walk asks for at most BLOCK_DOWNLOAD_WINDOW heights past its tip, so
+//! only that many are kept, lowest first: a followed hole's body is admitted
+//! even unrequested, and bodies pushed from further up must not hold the set
+//! full across tip moves.
+static void ReleaseHeaderOnlySkipOnTipMove(std::set<uint256>& hashes,
+                                           const ChainstateManager& chainman,
+                                           const CBlockIndex& new_tip)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    std::vector<std::pair<int, std::set<uint256>::iterator>> kept;
+    for (auto it{hashes.begin()}; it != hashes.end();) {
+        const CBlockIndex* const index{chainman.m_blockman.LookupBlockIndex(*it)};
+        if (index != nullptr &&
+            (index->nStatus & BLOCK_HAVE_DATA) == 0 &&
+            index->nHeight < new_tip.nHeight - MATMUL_RC_NEAR_TIP_DEPTH &&
+            new_tip.GetAncestor(index->nHeight) == index) {
+            kept.emplace_back(index->nHeight, it++);
+        } else {
+            it = hashes.erase(it);
+        }
+    }
+    if (kept.size() > BLOCK_DOWNLOAD_WINDOW) {
+        const auto keep_end{kept.begin() + BLOCK_DOWNLOAD_WINDOW};
+        std::nth_element(kept.begin(), keep_end, kept.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (auto k{keep_end}; k != kept.end(); ++k) hashes.erase(k->second);
+    }
+}
+
 //! True if another unattested tip-child already has a body or ExactReplay
 //! verdict. Used so a trusted mirror persists at most one such child.
 [[nodiscard]] static bool ConfiguredTipChildAlreadyHasBody(
@@ -9696,7 +9740,7 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     // Both paths update the same chain-dependent caches below. Take the
     // recursive lock here instead of requiring an undocumented caller lock.
     LOCK(::cs_main);
-    m_header_only_competing.clear();
+    ReleaseHeaderOnlySkipOnTipMove(m_header_only_competing, m_chainman, new_tip);
     m_header_only_followed_skip.clear();
     g_configured_claimed_tip_child.SetNull();
 
@@ -10127,8 +10171,9 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
 
     {
         LOCK(cs_main);
-        if (pindexNew == m_chainman.ActiveTip()) {
-            m_header_only_competing.clear();
+        if (pindexNew != nullptr && pindexNew == m_chainman.ActiveTip()) {
+            ReleaseHeaderOnlySkipOnTipMove(m_header_only_competing, m_chainman,
+                                           *pindexNew);
             m_header_only_followed_skip.clear();
             m_structural_download_skip.clear();
         }

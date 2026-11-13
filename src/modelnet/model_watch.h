@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -117,7 +118,10 @@ class ModelWatchStore
     fs::path m_channel_path;
     std::map<std::string, ModelWatch> m_watches;
     std::map<std::string, SignedChannel> m_channels;
-    std::vector<QueuedWatchAction> m_actions;
+    //! Oldest first. Bounded by m_action_cap: nothing drains it unless getmodelwatchactions is called.
+    std::deque<QueuedWatchAction> m_actions;
+    size_t m_action_cap{MODEL_EVENT_CAP_DEFAULT};
+    uint64_t m_dropped_actions{0};
     ModelEventJournal* m_journal{nullptr};
     mutable std::mutex m_mu;
 
@@ -127,18 +131,22 @@ class ModelWatchStore
     void EnqueueLocked(const ModelWatch& w, const ModelEvent& ev);
 
 public:
-    explicit ModelWatchStore(fs::path modeldir);
+    /** action_cap bounds the queued actions; the oldest is dropped when it is reached. */
+    explicit ModelWatchStore(fs::path modeldir, size_t action_cap = MODEL_EVENT_CAP_DEFAULT);
     void BindJournal(ModelEventJournal* journal) { m_journal = journal; }
 
     bool PutWatch(ModelWatch& w, std::string& err);
     bool GetWatch(const std::string& watch_id, ModelWatch& out) const;
-    bool RemoveWatch(const std::string& watch_id);
+    /** Returns true if removed. If false, err distinguishes save failure from an absent watch. */
+    bool RemoveWatch(const std::string& watch_id, std::string& err);
     std::vector<ModelWatch> List() const;
     bool Match(const ModelEvent& ev, const ModelWatch& watch) const { return WatchMatchesEvent(watch, ev); }
     void NoteEvent(const ModelEvent& ev);
     /** Admission gate: FUND_WITH_MANDATE is omitted if the mandate is missing or Revoked(). */
     std::vector<QueuedWatchAction> DrainActions();
     std::vector<QueuedWatchAction> PeekActions() const;
+    /** Actions dropped because the queue was full, since the store was created. */
+    uint64_t DroppedActions() const;
 
     bool ApplySignedChannel(SignedChannel ch, std::string& err);
     bool GetChannel(const std::string& publisher_id, const std::string& name, const std::string& channel,

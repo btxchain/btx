@@ -46,6 +46,8 @@ struct ShieldedKeySet
     uint256 kem_pk_hash;
     uint32_t account{0};
     uint32_t index{0};
+    // The spending key was derived and matched spending_pk_hash. While the
+    // wallet is locked the key itself is wiped (spending_key.IsValid() is false).
     bool spending_key_loaded{false};
     bool has_spending_key{true};
 };
@@ -542,6 +544,11 @@ public:
      *  a locked-wallet startup (tree-only fallback). */
     bool MaybeRehydrateSpendingKeys() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** Wipe the spending keys held in memory, for CWallet::Lock(). The viewing
+     *  keys, notes and spend-authority flags stay, and the next
+     *  MaybeRehydrateSpendingKeys() after an unlock derives the keys again. */
+    void LockSpendingKeys() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Flush in-memory shielded state to the wallet database.
      *  Must be called before backupwallet to ensure a consistent snapshot. */
     [[nodiscard]] bool PersistState() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
@@ -594,6 +601,11 @@ private:
     // M4 audit fix: mutable so const member functions can clean up stale
     // pending-spend reservations without const_cast UB.
     mutable std::set<Nullifier> m_pending_spends GUARDED_BY(cs_shielded);
+    // Nullifiers reserved by ReservePendingSpends whose transaction has not
+    // reached the mempool yet. PruneStalePendingSpends keeps these: it drops
+    // pending spends that no wallet transaction in the mempool backs, which a
+    // send that is still being built or committed does not have yet.
+    std::set<Nullifier> m_inflight_spends GUARDED_BY(cs_shielded);
     std::vector<uint64_t> m_recent_ring_exclusions GUARDED_BY(cs_shielded);
     uint32_t m_next_spending_index GUARDED_BY(cs_shielded){0};
     uint32_t m_next_kem_index GUARDED_BY(cs_shielded){0};

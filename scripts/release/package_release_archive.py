@@ -91,6 +91,12 @@ SUPPORT_FILES = load_support_files()
 # failure under --require-model-helpers (0.35.0rc1 shipped none, #235).
 OPTIONAL_SIBLING_BINARIES = (
     "btx-qt",
+    "btx-atlas",
+    "btx-security",
+    "btx-guardd",
+    "btx-tx",
+    "btx-wallet",
+    "btx-native-qualify",
 )
 MODEL_HELPER_BINARIES = (
     "btx-modeld",
@@ -180,9 +186,11 @@ if command -v ldd >/dev/null 2>&1; then
     need_glibc_v=${need_glibc#GLIBC_}
     if btx_ver_lt "$host_glibc" "$need_glibc_v"; then
       echo "BTX @BINARY@ requires $need_glibc (this host provides GLIBC_${host_glibc})." >&2
-      echo "Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) cannot load this archive; Ubuntu 24.04 / Debian 13 can." >&2
+      echo "Debian 12 (glibc 2.36) and Ubuntu 22.04 (2.35) cannot load a binary that needs GLIBC_2.38." >&2
+      echo "Ubuntu 24.04 is glibc 2.39 and Debian 13 is glibc 2.41. Neither can load a binary that needs GLIBC_2.43." >&2
+      echo "btx-qt and the bundled Qt and GnuTLS in the Linux archive built on a newer host need GLIBC_2.43. A private prefix of Debian 13 libc6 is glibc 2.41, so it does not satisfy that." >&2
       echo "ldd reported no missing .so files because libc is present; the version nodes are not." >&2
-      echo "Build from source on this host, or unpack Debian 13 libc6/libstdc++6/libgcc-s1 into a private prefix and set BTX_GLIBC_PREFIX. See doc/btx-download-and-go.md." >&2
+      echo "Build that binary on a host whose glibc is no newer than the machines that will run it. See doc/btx-download-and-go.md." >&2
       echo "The packaged binary is located at: $REAL" >&2
       exit 127
     fi
@@ -274,17 +282,26 @@ def wrapper_payload(binary_name: str, platform_id: str) -> str | None:
             extra_hint = " libsqlite3-0 libzmq5 libgomp1"
         elif binary_name in ("btx-modeld", "btx-hcpd", "btx-capabilityd"):
             extra_hint = " libgomp1"
+        elif binary_name == "btx-atlas":
+            extra_hint = " libwebkit2gtk-4.1-0 libgtk-3-0"
         # ldd's "=> not found" only catches missing sonames. Debian 12 / Ubuntu
         # 22.04 have libc.so.6 and libstdc++.so.6, so that check passes, then
         # the loader dies on GLIBC_2.38 / GLIBCXX_3.4.32. Prefer objdump -T
         # (then readelf -V, then a grep of the ELF) against getconf /
         # libstdc++ version nodes. BTX_GLIBC_PREFIX skips the host check and
         # execs through a private loader (unprivileged dpkg-deb -x prefix).
-        return (
-            LINUX_WRAPPER.replace("@BINARY@", binary_name).replace(
-                "@EXTRA_HINT@", extra_hint
-            )
-        )
+        payload = LINUX_WRAPPER.replace("@BINARY@", binary_name).replace("@EXTRA_HINT@", extra_hint)
+        if binary_name == "btx-qt":
+            # Keep Qt's build-time libraries out of Atlas and the node's path.
+            payload = payload.replace(
+                'if [ -e "$LIB_DIR/libssl.so.3" ]; then\n'
+                '  LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+                '  export LD_LIBRARY_PATH\nfi',
+                'LD_LIBRARY_PATH="$SELF_DIR/../lib/qt-private:$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+                'export LD_LIBRARY_PATH',
+            ).replace('PLUGIN_DIR="$SELF_DIR/../lib/qt6/plugins"',
+                      'PLUGIN_DIR="$SELF_DIR/../lib/qt-private/qt6/plugins"')
+        return payload
     if platform_id.startswith("macos-"):
         return f"""#!/bin/sh
 set -eu
@@ -445,6 +462,39 @@ def verify_shipped_helper(path: Path) -> None:
         module.verify_macos_portable(path)
 
 
+def verify_staged_abi_floor(release_root: Path) -> None:
+    """Refuse to pack any ELF that needs more than the documented floor.
+
+    verify_shipped_btxd reads btxd alone and prints its version nodes. 0.34.16
+    was packed after that note said GLIBC_2.38, while libexec/btx-qt.real,
+    lib/qt-private/libQt6Gui.so.6 and lib/qt-private/libgnutls.so.30 need
+    GLIBC_2.43, so the GUI cannot start on Ubuntu 24.04 or Debian 13. Read
+    every ELF in the staged tree with the `--archive` readers: the GLIBC
+    ceiling, and the GLIBCXX/CXXABI/GCC/OPENSSL floor for what a host
+    library must provide. The floor stays in verify_release_btxd.py.
+    """
+    module = _load_verify_module()
+    elves = [path for path in sorted(release_root.rglob("*"))
+             if not path.is_symlink() and path.is_file() and module.classify(path) == "elf"]
+    if not elves:
+        return
+    problems = module.linux_elf_problems(release_root, elves, dict(module.DEFAULT_ABI_FLOOR))
+    try:
+        module.verify_glibc_ceiling(release_root)
+    except module.VerifyError as exc:
+        problems.append(str(exc))
+    if problems:
+        raise RuntimeError(
+            f"refusing to pack: {len(problems)} problem(s) in the staged archive\n  - "
+            + "\n  - ".join(problems)
+        )
+    print(
+        f"package_release_archive: read the version needs of {len(elves)} packaged ELF files; "
+        "none is above the documented floor",
+        file=sys.stderr,
+    )
+
+
 def resolve_optional_sibling_binaries(btxd_path: Path, exe_suffix: str) -> list[tuple[Path, str]]:
     found: list[tuple[Path, str]] = []
     for name in OPTIONAL_SIBLING_BINARIES:
@@ -519,6 +569,13 @@ def _load_qt_bundle():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def set_linux_bundled_lib_runpath(path: Path) -> None:
+    """Point a staged ELF executable at the archive's shared libraries."""
+    bundle = _load_qt_bundle()
+    if bundle._needed(path):
+        bundle._set_rpath(path, "$ORIGIN/../lib")
 
 
 def stage_release_tree(
@@ -605,13 +662,32 @@ def stage_release_tree(
         shutil.copy2(source, real_destination)
         real_destination.chmod(0o755)
         included.append(str(real_destination.relative_to(release_root)))
+        if platform_id.startswith("linux-") and qt_source is not None and dest_name in (
+            "btx-atlas", "btx-native-qualify", "btx-security",
+        ):
+            # The Qt bundle can place libraries needed by these tools in lib/.
+            set_linux_bundled_lib_runpath(real_destination)
+        if platform_id.startswith(("linux-", "macos-")) and dest_name == "btx-guardd":
+            # Patch before linking: an ELF editor may replace the inode.
+            # Both regular names must resolve the packaged libraries directly.
+            if platform_id.startswith("linux-"):
+                set_linux_bundled_lib_runpath(real_destination)
+            # The guard supervisor requires a regular sibling of btxd.real.
+            # A hard link preserves that rule without another binary payload.
+            sibling = libexec_dir / "btx-guardd"
+            os.link(real_destination, sibling)
+            included.append(str(sibling.relative_to(release_root)))
 
         destination = bin_dir / dest_name
         destination.write_text(wrapper, encoding="utf-8")
         destination.chmod(0o755)
         included.append(str(destination.relative_to(release_root)))
         if dest_name.startswith("btx-qt") and platform_id.startswith("linux-"):
-            _load_qt_bundle().bundle_linux_qt(real_destination, release_root / "lib")
+            _load_qt_bundle().bundle_linux_qt(
+                real_destination, release_root / "lib" / "qt-private",
+                shared_roots=[path for path, name in binary_pairs
+                              if not name.startswith(("btx-qt", "btx-atlas"))],
+            )
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
@@ -687,6 +763,7 @@ def stage_release_tree(
         shutil.copy2(source, destination)
         included.append(str(destination.relative_to(release_root)))
 
+    verify_staged_abi_floor(release_root)
     return release_root, sorted(included), skipped_binaries
 
 

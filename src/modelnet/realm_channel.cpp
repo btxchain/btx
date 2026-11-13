@@ -7,6 +7,10 @@
 #include <crypto/hex_base.h>
 #include <crypto/sha384.h>
 #include <span.h>
+#include <util/readwritefile.h>
+#ifdef _WIN32
+#include <util/string.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -390,7 +394,7 @@ bool CollectArchive(const std::filesystem::path& dir, const std::string& prefix,
     return true;
 }
 
-bool WriteHeader(std::ostream& out, const std::string& tar_name, char typeflag, uint64_t size)
+bool WriteHeader(std::FILE* out, const std::string& tar_name, char typeflag, uint64_t size)
 {
     std::string name;
     std::string prefix;
@@ -411,25 +415,22 @@ bool WriteHeader(std::ostream& out, const std::string& tar_name, char typeflag, 
     WriteOctal(header.data() + 337, 8, 0);
     if (!prefix.empty()) std::memcpy(header.data() + 345, prefix.data(), prefix.size());
     WriteChecksum(header.data());
-    out.write(header.data(), static_cast<std::streamsize>(header.size()));
-    return static_cast<bool>(out);
+    return std::fwrite(header.data(), 1, header.size(), out) == header.size();
 }
 
-bool WritePadding(std::ostream& out, uint64_t size)
+bool WritePadding(std::FILE* out, uint64_t size)
 {
     const uint64_t pad = (kTarBlock - (size % kTarBlock)) % kTarBlock;
     if (pad == 0) return true;
     std::array<char, kTarBlock> zeros{};
-    out.write(zeros.data(), static_cast<std::streamsize>(pad));
-    return static_cast<bool>(out);
+    return std::fwrite(zeros.data(), 1, pad, out) == pad;
 }
 
-bool WriteItemBytes(std::ostream& out, const ArchiveItem& item)
+bool WriteItemBytes(std::FILE* out, const ArchiveItem& item)
 {
     if (item.directory || item.size == 0) return true;
     if (item.synthetic) {
-        out.write(item.bytes.data(), static_cast<std::streamsize>(item.bytes.size()));
-        return static_cast<bool>(out);
+        return std::fwrite(item.bytes.data(), 1, item.bytes.size(), out) == item.bytes.size();
     }
     std::ifstream in(item.source, std::ios::binary);
     if (!in) return false;
@@ -439,8 +440,7 @@ bool WriteItemBytes(std::ostream& out, const ArchiveItem& item)
         const std::size_t chunk = static_cast<std::size_t>(std::min<uint64_t>(left, buf.size()));
         in.read(buf.data(), static_cast<std::streamsize>(chunk));
         if (static_cast<std::size_t>(in.gcount()) != chunk) return false;
-        out.write(buf.data(), static_cast<std::streamsize>(chunk));
-        if (!out) return false;
+        if (std::fwrite(buf.data(), 1, chunk, out) != chunk) return false;
         left -= chunk;
     }
     return true;
@@ -882,14 +882,11 @@ bool RealmRollout::WriteOfflineBundle(const std::filesystem::path& path, const s
     text += "body=" + body + "\n";
     if (!channel_name.empty()) text += "name=" + channel_name + "\n";
 
-    std::ofstream out(path, std::ios::out | std::ios::trunc);
-    if (!out) {
-        err = "BTX035_BUNDLE";
-        return false;
-    }
-    out << text;
-    out.flush();
-    if (!out) {
+#ifdef _WIN32
+    // Preserve the CRLF bytes previously emitted by the Windows text stream.
+    ReplaceAll(text, "\n", "\r\n");
+#endif
+    if (!WriteBinaryFileAtomically(fs::path{path}, text)) {
         err = "BTX035_BUNDLE";
         return false;
     }
@@ -1276,28 +1273,19 @@ bool RealmRollout::WritePortableArchive(const std::filesystem::path& directory, 
         }
     }
 
-    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
-    if (!out) {
+    const bool written = WriteBinaryFileAtomically(fs::path{destination}, [&](std::FILE* out) {
+        for (const ArchiveItem& item : items) {
+            const char typeflag = item.directory ? '5' : '0';
+            if (!WriteHeader(out, item.TarName(), typeflag, item.size) ||
+                !WriteItemBytes(out, item) || !WritePadding(out, item.size)) return false;
+        }
+        const std::array<char, kTarBlock * 2> zeros{};
+        return std::fwrite(zeros.data(), 1, zeros.size(), out) == zeros.size();
+    });
+    if (!written) {
         err = "BTX035_BUNDLE";
         return false;
     }
-    auto fail = [&](const char* code) {
-        out.close();
-        std::error_code ignore;
-        std::filesystem::remove(destination, ignore);
-        err = code;
-        return false;
-    };
-    for (const ArchiveItem& item : items) {
-        const char typeflag = item.directory ? '5' : '0';
-        if (!WriteHeader(out, item.TarName(), typeflag, item.size) || !WriteItemBytes(out, item) || !WritePadding(out, item.size)) {
-            return fail("BTX035_BUNDLE");
-        }
-    }
-    std::array<char, kTarBlock * 2> zeros{};
-    out.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
-    out.flush();
-    if (!out) return fail("BTX035_BUNDLE");
     err.clear();
     return true;
 }

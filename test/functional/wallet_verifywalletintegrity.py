@@ -23,6 +23,18 @@ class WalletVerifyWalletIntegrityTest(BitcoinTestFramework):
 
     def run_test(self):
         node = self.nodes[0]
+
+        self.log.info("An encrypted wallet keeps its PQ seeds as ciphertext; that is not a missing seed")
+        node.createwallet(wallet_name="encrypted", descriptors=True, passphrase="pass")
+        encrypted = node.get_wallet_rpc("encrypted")
+        encrypted.walletpassphrase("pass", 600)
+        report = encrypted.z_verifywalletintegrity()
+        assert_equal(report["master_seed_available"], True)
+        assert_equal(report["pq_seed_capable_descriptors"], 2)
+        assert_equal(report["pq_seed_capable_with_seed"], 2)
+        assert_equal(report["warnings"], [])
+        assert_equal(report["integrity_ok"], True)
+
         signer_wallets = []
         pq_keys = []
 
