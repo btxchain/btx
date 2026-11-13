@@ -137,6 +137,7 @@ BASE_SCRIPTS = [
     'feature_segwit.py --descriptors --v2transport',
     'p2p_tx_download.py',
     'wallet_avoidreuse.py --descriptors',
+    'wallet_balance_at_height_reuse.py --descriptors',
     'feature_abortnode.py',
     'wallet_address_types.py --descriptors',
     'p2p_orphan_handling.py',
