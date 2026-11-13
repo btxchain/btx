@@ -45,6 +45,7 @@
 #include <sys/types.h>
 
 #ifndef WIN32
+#include <stdexcept>
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1989,6 +1990,52 @@ BOOST_AUTO_TEST_CASE(util_WriteBinaryFile)
     file >> actual_text;
     BOOST_CHECK(valid);
     BOOST_CHECK_EQUAL(actual_text, expected_text);
+}
+
+BOOST_AUTO_TEST_CASE(atomic_writer_keeps_previous_contents_on_callback_failure)
+{
+    const fs::path target = m_path_root / "atomic-target";
+    const fs::path staging = m_path_root / "atomic-staging";
+    BOOST_REQUIRE(fs::create_directory(staging));
+    BOOST_REQUIRE(WriteBinaryFileAtomically(target, "previous"));
+    const auto check_previous = [&] {
+        const auto [ok, bytes] = ReadBinaryFile(target);
+        BOOST_REQUIRE(ok);
+        BOOST_CHECK_EQUAL(bytes, "previous");
+        BOOST_CHECK(fs::is_empty(staging));
+    };
+    bool reached = false;
+    BOOST_CHECK(!WriteBinaryFileAtomically(target, [&](std::FILE* file) {
+        reached = std::fwrite("partial", 1, 7, file) == 7;
+        return false;
+    }, staging));
+    BOOST_REQUIRE(reached);
+    check_previous();
+
+    reached = false;
+    BOOST_CHECK_THROW(WriteBinaryFileAtomically(target, [&](std::FILE* file) -> bool {
+        reached = std::fwrite("partial", 1, 7, file) == 7;
+        throw std::runtime_error("writer aborted");
+    }, staging), std::runtime_error);
+    BOOST_REQUIRE(reached);
+    check_previous();
+
+    BOOST_REQUIRE(WriteBinaryFileAtomically(target, "replacement", staging));
+    const auto [ok, bytes] = ReadBinaryFile(target);
+    BOOST_REQUIRE(ok);
+    BOOST_CHECK_EQUAL(bytes, "replacement");
+    BOOST_CHECK(fs::is_empty(staging));
+
+    const fs::path directory = m_path_root / "occupied-directory";
+    BOOST_REQUIRE(fs::create_directory(directory));
+    reached = false;
+    BOOST_CHECK(!WriteBinaryFileAtomically(directory, [&](std::FILE*) {
+        reached = true;
+        return true;
+    }, staging));
+    BOOST_CHECK(!reached);
+    BOOST_CHECK(fs::is_directory(directory));
+    BOOST_CHECK(fs::is_empty(staging));
 }
 
 BOOST_AUTO_TEST_CASE(clearshrink_test)
