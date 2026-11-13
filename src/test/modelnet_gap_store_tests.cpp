@@ -15,6 +15,11 @@
 #include <string>
 #include <vector>
 
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#endif
+
 BOOST_FIXTURE_TEST_SUITE(modelnet_gap_store_tests, BasicTestingSetup)
 
 namespace {
@@ -98,5 +103,80 @@ BOOST_AUTO_TEST_CASE(get_piece_rejects_8mib_planted_file)
     BOOST_CHECK(!err.empty());
     BOOST_CHECK(out.empty());
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(short_writes_preserve_piece_metadata_and_remove_staging)
+{
+    const fs::path root = m_path_root / "piece-short-write";
+    modelnet::ModelStore store{root, 1 << 20};
+    const modelnet::Digest48 artifact{};
+    const std::vector<unsigned char> bytes(128, 42);
+    const auto leaf = modelnet::ChunkLeaf(0, bytes);
+    std::string err;
+    auto index = [&](uint64_t size) { return store.SavePieceIndex(artifact, 0, {size, leaf, {leaf}}, err); };
+    auto proof = [&](uint64_t size) { return store.SavePieceProof(artifact, 0, 0, size, leaf, {leaf}, err); };
+    auto piece = [&] { return store.PutVerifiedPiece(artifact, 0, 0, bytes, leaf, err); };
+    BOOST_REQUIRE(index(64));
+    BOOST_REQUIRE(proof(64));
+    struct FileLimit {
+        struct rlimit original {};
+        decltype(std::signal(SIGXFSZ, SIG_IGN)) handler{SIG_ERR};
+        ~FileLimit()
+        {
+            if (handler == SIG_ERR) return;
+            ::setrlimit(RLIMIT_FSIZE, &original);
+            std::signal(SIGXFSZ, handler);
+        }
+    };
+    bool index_ok, proof_ok, piece_ok;
+    {
+        FileLimit limit;
+        BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &limit.original) == 0);
+        limit.handler = std::signal(SIGXFSZ, SIG_IGN);
+        BOOST_REQUIRE(limit.handler != SIG_ERR);
+        auto shortened = limit.original;
+        shortened.rlim_cur = 8;
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &shortened) == 0);
+        index_ok = index(128);
+        proof_ok = proof(128);
+        piece_ok = piece();
+    }
+    BOOST_CHECK(!index_ok);
+    BOOST_CHECK(!proof_ok);
+    BOOST_CHECK(!piece_ok);
+    BOOST_CHECK(!store.HasPiece(artifact, 0, 0));
+    BOOST_CHECK_EQUAL(store.UsedBytes(), 0U);
+    BOOST_CHECK(fs::is_empty(root / "tmp"));
+
+    modelnet::PieceIndex loaded;
+    uint64_t size = 0;
+    modelnet::Digest48 proof_root;
+    std::vector<modelnet::Digest48> siblings;
+    auto read_proof = [&] { return store.LoadPieceProof(artifact, 0, 0, size, proof_root, siblings, err); };
+    BOOST_REQUIRE(store.LoadPieceIndex(artifact, 0, loaded, err));
+    BOOST_CHECK_EQUAL(loaded.file_size, 64U);
+    BOOST_REQUIRE(read_proof());
+    BOOST_CHECK_EQUAL(size, 64U);
+
+    BOOST_REQUIRE(index(128));
+    BOOST_REQUIRE(proof(128));
+    BOOST_REQUIRE(piece());
+    BOOST_CHECK_EQUAL(store.UsedBytes(), bytes.size());
+    std::vector<unsigned char> loaded_piece;
+    BOOST_REQUIRE(store.GetPiece(artifact, 0, 0, loaded_piece, err));
+    BOOST_CHECK(loaded_piece == bytes);
+    BOOST_REQUIRE(store.LoadPieceIndex(artifact, 0, loaded, err));
+    BOOST_CHECK_EQUAL(loaded.file_size, 128U);
+    BOOST_REQUIRE(read_proof());
+    BOOST_CHECK_EQUAL(size, 128U);
+    BOOST_CHECK(fs::is_empty(root / "tmp"));
+
+    const auto dir = PiecePath(store, artifact, 0, 0).parent_path();
+    WriteBytes(dir / "index.json", {'{', '"'});
+    WriteBytes(dir / "0.proof.json", {'{', '"'});
+    BOOST_CHECK(!store.LoadPieceIndex(artifact, 0, loaded, err));
+    BOOST_CHECK(!read_proof());
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()
