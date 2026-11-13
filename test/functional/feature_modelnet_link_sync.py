@@ -116,6 +116,18 @@ class ModelnetLinkSyncTest(BitcoinTestFramework):
                 assert_equal(target.stat().st_mode & 0o777, 0o640)
                 assert_equal(list(export_dir.glob(".btx-export-*.tmp")), [])
                 assert_equal(trace.read_text().splitlines()[1:], [f"{sync_call} 0 {len(expected)}", "directory"])
+
+                # This control truncates the export before its URI. Complete
+                # standalone BTX URIs in share files are also supported.
+                uri = json.loads(expected)["uri"].encode()
+                assert_equal(self.rpc("openmodelshare", [str(target)])["uri"], uri.decode())
+                uri_pos = expected.index(uri)
+                assert uri_pos > 0
+                target.write_bytes(expected[:uri_pos])
+                invalid = self.rpc("openmodelshare", [str(target)], allow_error=True)
+                assert_equal((invalid.get("error") or {}).get("code"), "INVALID_PARAMETER")
+                target.write_bytes(expected)
+                assert_equal(self.rpc("openmodelshare", [str(target)])["uri"], uri.decode())
                 self.log.info("Retry saved exact link bytes with original permissions and synced the parent directory")
             finally:
                 proc.terminate()

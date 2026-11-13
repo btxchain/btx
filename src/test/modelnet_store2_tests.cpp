@@ -12,6 +12,7 @@
 #include <span.h>
 #include <test/util/setup_common.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -206,6 +207,18 @@ BOOST_AUTO_TEST_CASE(store2_03_never_serve_unverified)
     BOOST_CHECK(!local.GetPiece(art, 0, 0, got, err));
     BOOST_CHECK(err.find("corrupt") != std::string::npos);
     BOOST_CHECK(got.empty());
+
+    // A valid prefix on disk is still incomplete and must not be served.
+    BOOST_REQUIRE(WriteBinaryFile(piece_path, std::string(bytes.begin(), bytes.end())));
+    BOOST_REQUIRE_EQUAL(fs::file_size(piece_path), bytes.size());
+    fs::resize_file(piece_path, bytes.size() / 2);
+    err.clear();
+    BOOST_CHECK(!local.GetPiece(art, 0, 0, got, err));
+    BOOST_CHECK_EQUAL(err, "corrupt chunk");
+    BOOST_CHECK(got.empty());
+    BOOST_REQUIRE(WriteBinaryFile(piece_path, std::string(bytes.begin(), bytes.end())));
+    BOOST_REQUIRE(local.GetPiece(art, 0, 0, got, err));
+    BOOST_CHECK(got == bytes);
 
     auto loc2 = std::make_unique<modelnet::LocalPieceStore>(tmp / "tiered", /*quota*/ 4096);
     auto cloud = std::make_unique<FakeCloudObjectStore>();
