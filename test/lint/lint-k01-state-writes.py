@@ -24,9 +24,7 @@ EXCEPTIONS = {
     "src/modelnet/acc04/acc04.cpp": (
         "std::ofstream file(present);",  # Disposable acceptance fixture.
     ),
-    "src/modelnet/capability_bytes.cpp": (
-        "std::ofstream gf(gen_path);",  # Sidecar issue remains tracked.
-    ),
+    "src/modelnet/capability_bytes.cpp": (),
     "src/modelnet/import_coordinator.cpp": (
         "std::ofstream out(marker);",  # Job-local status markers.
         "std::ofstream out(marker);",
