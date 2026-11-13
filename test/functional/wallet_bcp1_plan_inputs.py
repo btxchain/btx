@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from test_framework.blocktools import REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 
 def outpoints(items):
@@ -62,6 +62,14 @@ class WalletBcp1PlanInputsTest(BitcoinTestFramework):
         assert_equal(cons["fee_atoms"], fee["fee_atoms"])
         tx = node.decodepsbt(cons["psbt"])["tx"]
         assert_equal(sorted((i["txid"], i["vout"]) for i in tx["vin"]), named)
+
+        self.log.info("createconsolidationtx takes the options next to a plan object")
+        cons = wallet.createconsolidationtx(plan, {"change_address": change})
+        tx = node.decodepsbt(cons["psbt"])["tx"]
+        assert_equal(sorted((i["txid"], i["vout"]) for i in tx["vin"]), named)
+        assert_equal([o["scriptPubKey"]["address"] for o in tx["vout"]], [change])
+        assert_raises_rpc_error(-4, "estimated fee exceeds fee_ceiling", wallet.createconsolidationtx,
+                                plan, {"change_address": change, "fee_ceiling": Decimal("0.00000001")})
 
 
 if __name__ == "__main__":
