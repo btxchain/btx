@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <vector>
@@ -1371,6 +1372,86 @@ BOOST_AUTO_TEST_CASE(remaining_identity_policy_circle_release_ops)
             }
         }
     }
+}
+
+// setmodelalias, removemodelalias, removemodelsearchrecord and importmodelindex
+// changed the search index in memory only. search-index.json is what the helper
+// loads after a restart, so each change must be in that file.
+BOOST_AUTO_TEST_CASE(search_index_changes_are_saved)
+{
+    auto saved_record = [](const fs::path& helper_dir, const std::string& model_id) {
+        std::ifstream in(helper_dir / "search-index.json");
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue snap;
+        if (snap.read(text) && snap["records"].isArray()) {
+            for (const auto& r : snap["records"].getValues()) {
+                if (r["model_id"].isStr() && r["model_id"].get_str() == model_id) return r;
+            }
+        }
+        return UniValue{};
+    };
+    auto has_alias = [](const UniValue& rec, const std::string& alias) {
+        if (!rec.isObject() || !rec["aliases"].isArray()) return false;
+        for (const auto& a : rec["aliases"].getValues()) {
+            if (a.isStr() && a.get_str() == alias) return true;
+        }
+        return false;
+    };
+
+    const fs::path root_b = m_path_root / "search-save-b";
+    fs::create_directories(root_b / "m");
+    {
+        const auto st = MinimalSafeTensors();
+        std::ofstream out(root_b / "m" / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    modelnet::ModelCatalog cat_b{root_b, 8 << 20};
+    const fs::path dir_b = cat_b.Store().Root().parent_path();
+    UniValue hp(UniValue::VARR);
+    hp.push_back(fs::PathToString(root_b / "m"));
+    const UniValue hosted = Dispatch(cat_b, Rpc("hostmodel", hp));
+    const std::string uri = hosted["uri"].get_str();
+    const std::string model_id = hosted["model_id"].get_str();
+
+    UniValue ap(UniValue::VARR);
+    ap.push_back(uri);
+    ap.push_back("r16-saved-alias");
+    Dispatch(cat_b, Rpc("setmodelalias", ap));
+    BOOST_CHECK_MESSAGE(has_alias(saved_record(dir_b, model_id), "r16-saved-alias"), "setmodelalias not saved");
+    const UniValue exported = Dispatch(cat_b, Rpc("exportmodelindex"));
+
+    // hidesearchmodel saves the whole index (#553): from here on the alias is in
+    // the file whether setmodelalias saved it or not, so the next check shows
+    // whether removemodelalias saves.
+    UniValue hide(UniValue::VARR);
+    hide.push_back(uri);
+    Dispatch(cat_b, Rpc("hidesearchmodel", hide));
+    Dispatch(cat_b, Rpc("unhidesearchmodel", hide));
+    BOOST_REQUIRE(has_alias(saved_record(dir_b, model_id), "r16-saved-alias"));
+    Dispatch(cat_b, Rpc("removemodelalias", ap));
+    BOOST_CHECK_MESSAGE(!has_alias(saved_record(dir_b, model_id), "r16-saved-alias"), "removemodelalias not saved");
+
+    UniValue rp(UniValue::VARR);
+    rp.push_back(uri);
+    const UniValue removed = Dispatch(cat_b, Rpc("removemodelsearchrecord", rp));
+    BOOST_REQUIRE(removed["tombstone"].isTrue());
+    const UniValue tomb = saved_record(dir_b, model_id);
+    BOOST_CHECK_MESSAGE(tomb.isObject() && tomb["tombstone"].isTrue(), "removemodelsearchrecord not saved");
+
+    // A fresh helper directory: getmodelfeedstatus binds the economy (and the
+    // index) to it, then the exported record is imported there.
+    const fs::path root_a = m_path_root / "search-save-a";
+    fs::create_directories(root_a);
+    modelnet::ModelCatalog cat_a{root_a, 8 << 20};
+    const fs::path dir_a = cat_a.Store().Root().parent_path();
+    Dispatch(cat_a, Rpc("getmodelfeedstatus"));
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("records", exported["records"]);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(body);
+    const UniValue imported = Dispatch(cat_a, Rpc("importmodelindex", ip));
+    BOOST_REQUIRE_GE(imported["imported"].getInt<int>(), 1);
+    BOOST_CHECK_MESSAGE(has_alias(saved_record(dir_a, model_id), "r16-saved-alias"), "importmodelindex not saved");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
