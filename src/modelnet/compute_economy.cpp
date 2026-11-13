@@ -15,6 +15,7 @@
 #include <matmul/compute_qualification.h>
 #include <univalue.h>
 #include <util/fs_helpers.h>
+#include <util/readwritefile.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
@@ -303,16 +304,10 @@ bool ComputeStore::WriteEnvelope(const SignedEnvelope& env, std::string& err)
         }
         return true;
     }
-    const fs::path tmp = dir / fs::PathFromString(env.record_id.Hex() + ".json.tmp");
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) {
-            err = "COMPUTE_RECORD_INVALID";
-            return false;
-        }
-        out << bytes << "\n";
-    }
-    if (!RenameOver(tmp, dest)) {
+    // The shared atomic writer checks the write, syncs and renames only on
+    // success. An unchecked stream left a record cut short at `dest` after a
+    // failed write; the next Load then marked the whole store corrupt.
+    if (!WriteBinaryFileAtomically(dest, bytes + "\n")) {
         err = "COMPUTE_RECORD_INVALID";
         return false;
     }
