@@ -1273,7 +1273,8 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
         const std::vector<CRecipient>& vecSend,
         std::optional<unsigned int> change_pos,
         const CCoinControl& coin_control,
-        bool sign) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+        bool sign,
+        bool* inputs_failed) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
 
@@ -1406,7 +1407,10 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     PreSelectedInputs preset_inputs;
     if (coin_control.HasSelected()) {
         auto res_fetch_inputs = FetchSelectedInputs(wallet, coin_control, coin_selection_params);
-        if (!res_fetch_inputs) return util::Error{util::ErrorString(res_fetch_inputs)};
+        if (!res_fetch_inputs) {
+            if (inputs_failed) *inputs_failed = true;
+            return util::Error{util::ErrorString(res_fetch_inputs)};
+        }
         preset_inputs = *res_fetch_inputs;
     }
 
@@ -1424,6 +1428,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     if (!select_coins_res) {
         // 'SelectCoins' either returns a specific error message or, if empty, means a general "Insufficient funds".
         const bilingual_str& err = util::ErrorString(select_coins_res);
+        if (inputs_failed) *inputs_failed = true;
         return util::Error{err.empty() ?_("Insufficient funds") : err};
     }
     const SelectionResult& result = *select_coins_res;
@@ -1516,6 +1521,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     TxSize tx_sizes = CalculateMaximumSignedTxSize(CTransaction(txNew), &wallet, &coin_control);
     int nBytes = tx_sizes.vsize;
     if (nBytes == -1) {
+        if (inputs_failed) *inputs_failed = true;
         return util::Error{_("Missing solving data for estimating transaction size")};
     }
     CAmount fee_needed = coin_selection_params.m_effective_feerate.GetFee(nBytes) + result.GetTotalBumpFees();
@@ -1595,6 +1601,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
         tx_sizes = CalculateMaximumSignedTxSize(CTransaction(txNew), &wallet, &coin_control);
         nBytes = tx_sizes.vsize;
         if (nBytes == -1) {
+            if (inputs_failed) *inputs_failed = true;
             return util::Error{_("Missing solving data for estimating transaction size")};
         }
         fee_needed = coin_selection_params.m_effective_feerate.GetFee(nBytes) + result.GetTotalBumpFees();
@@ -1659,7 +1666,8 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         const std::vector<CRecipient>& vecSend,
         std::optional<unsigned int> change_pos,
         const CCoinControl& coin_control,
-        bool sign)
+        bool sign,
+        bool* inputs_failed)
 {
     AssertLockHeld(wallet.cs_wallet);
 
@@ -1676,7 +1684,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
     // Signing both spends a full PQ signature round on a transaction that
     // is then thrown away.
     const bool defer_sign = sign && wallet.m_max_aps_fee > -1 && !coin_control.m_avoid_partial_spends;
-    auto res = CreateTransactionInternal(wallet, vecSend, change_pos, coin_control, sign && !defer_sign);
+    auto res = CreateTransactionInternal(wallet, vecSend, change_pos, coin_control, sign && !defer_sign, inputs_failed);
     TRACEPOINT(coin_selection, normal_create_tx_internal,
            wallet.GetName().c_str(),
            bool(res),
@@ -1714,7 +1722,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
             ExtractDestination(txr_ungrouped.tx->vout[*txr_ungrouped.change_pos].scriptPubKey, tmp_cc.destChange);
         }
 
-        auto txr_grouped = CreateTransactionInternal(wallet, vecSend, change_pos, tmp_cc, /*sign=*/false);
+        auto txr_grouped = CreateTransactionInternal(wallet, vecSend, change_pos, tmp_cc, /*sign=*/false, /*inputs_failed=*/nullptr);
         // if fee of this alternative one is within the range of the max fee, we use this one
         const bool use_aps{txr_grouped.has_value() ? (txr_grouped->fee <= txr_ungrouped.fee + wallet.m_max_aps_fee) : false};
         TRACEPOINT(coin_selection, aps_create_tx_internal,
@@ -1736,7 +1744,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
     return res;
 }
 
-util::Result<CreatedTransactionResult> FundTransaction(CWallet& wallet, const CMutableTransaction& tx, const std::vector<CRecipient>& vecSend, std::optional<unsigned int> change_pos, bool lockUnspents, CCoinControl coinControl)
+util::Result<CreatedTransactionResult> FundTransaction(CWallet& wallet, const CMutableTransaction& tx, const std::vector<CRecipient>& vecSend, std::optional<unsigned int> change_pos, bool lockUnspents, CCoinControl coinControl, bool* inputs_failed)
 {
     // We want to make sure tx.vout is not used now that we are passing outputs as a vector of recipients.
     // This sets us up to remove tx completely in a future PR in favor of passing the inputs directly.
@@ -1776,7 +1784,7 @@ util::Result<CreatedTransactionResult> FundTransaction(CWallet& wallet, const CM
         preset_txin.SetScriptWitness(txin.scriptWitness);
     }
 
-    auto res = CreateTransaction(wallet, vecSend, change_pos, coinControl, false);
+    auto res = CreateTransaction(wallet, vecSend, change_pos, coinControl, false, inputs_failed);
     if (!res) {
         return res;
     }
