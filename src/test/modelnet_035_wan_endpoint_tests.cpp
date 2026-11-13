@@ -490,6 +490,12 @@ BOOST_AUTO_TEST_CASE(portable_archive_entries)
     BOOST_CHECK_EQUAL(paths[0], "b.txt");
     BOOST_CHECK_EQUAL(paths[1], "nested");
     BOOST_CHECK_EQUAL(paths[2], "nested/c.txt");
+    const fs::path truncated = m_path_root / "wan-truncated.tar";
+    BOOST_REQUIRE(std::filesystem::copy_file(archive, truncated));
+    std::filesystem::resize_file(truncated, std::filesystem::file_size(truncated) / 2);
+    BOOST_CHECK(!roll.ReadPortableArchive(truncated, paths, err));
+    BOOST_CHECK(paths.empty());
+
 
     const fs::path empty = m_path_root / "wan-empty";
     BOOST_REQUIRE(fs::create_directories(empty));
