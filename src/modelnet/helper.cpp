@@ -8742,7 +8742,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         if (cat.Find(r.digest, local)) {
             if (local.incomplete) {
                 std::string herr;
-                (void)TryHydrateFromCloud(cat, local, result, herr);
+                if (!TryHydrateFromCloud(cat, local, result, herr) && !herr.empty()) {
+                    result.pushKV("cloud_hydrate_error", herr);
+                }
                 cat.Find(r.digest, local);
             }
             if (!local.incomplete) {
