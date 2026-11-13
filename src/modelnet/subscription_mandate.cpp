@@ -1096,6 +1096,9 @@ bool SubscriptionBudget::LoadStateJson(const UniValue& state, std::string& err)
                 return false;
             }
             Reservation r;
+            // A budget holds the reservations of its one mandate; the file does
+            // not repeat the id per reservation.
+            r.mandate_id = m.mandate_id;
             r.reservation_id = StrField(e, "reservation_id");
             r.event_id = StrField(e, "event_id");
             r.object_id = StrField(e, "object_id");
