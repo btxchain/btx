@@ -13,6 +13,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -133,6 +134,24 @@ BOOST_AUTO_TEST_CASE(local_tip_behind_peer_median_keeps_mining_with_recovery_war
     BOOST_CHECK_EQUAL(status.reason, "local_tip_behind_peer_median");
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(status));
     BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "mine_current_tip_and_catch_up");
+}
+
+// With an even number of peers the two middle heights were added as int. Two
+// peers announcing INT_MAX overflowed (undefined behaviour) and, as it wraps on
+// common builds, gave a median of -1 and "local tip ahead of the peers".
+BOOST_AUTO_TEST_CASE(median_of_large_peer_heights_does_not_overflow)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+    const int top{std::numeric_limits<int>::max()};
+    const auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{top, top, top, top},
+        options);
+    BOOST_CHECK_EQUAL(status.median_peer_tip, top);
+    BOOST_CHECK_EQUAL(status.reason, "local_tip_behind_peer_median");
 }
 
 BOOST_AUTO_TEST_CASE(near_tip_peer_quorum_keeps_mining_with_recovery_warning)
