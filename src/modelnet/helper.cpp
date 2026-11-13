@@ -11921,9 +11921,30 @@ bool HelperRefusalFromError(const std::string& err, std::string& code, std::stri
     return !code.empty();
 }
 
-bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err)
+static bool UnixConnectedPeerMatchesPid(int fd, int64_t expected_pid, std::string& err)
+{
+#ifndef _WIN32
+#if defined(__linux__) && defined(SO_PEERCRED)
+    struct ucred peer {};
+    socklen_t len = sizeof(peer);
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &len) == 0 &&
+        len == sizeof(peer) && peer.pid == expected_pid &&
+        peer.uid == ::getuid()) return true;
+#elif defined(__APPLE__) && defined(LOCAL_PEERPID)
+    pid_t peer = 0;
+    socklen_t len = sizeof(peer);
+    if (::getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &len) == 0 &&
+        len == sizeof(peer) && peer == expected_pid) return true;
+#endif
+#endif
+    err = "helper Unix RPC peer is not the owned child";
+    return false;
+}
+
+bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err, std::atomic<bool>* stop, int reply_timeout_ms, bool check_peer, int64_t expected_peer_pid)
 {
 #ifdef _WIN32
+    (void)stop; (void)reply_timeout_ms; (void)check_peer; (void)expected_peer_pid;
     (void)socket_path; (void)method; (void)params; (void)result;
     err = "helper Unix RPC is not supported on this platform";
     return false;
@@ -11942,8 +11963,30 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
         return false;
     }
     std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    const bool supervisor_call = stop || reply_timeout_ms > 0;
+    if (supervisor_call) {
+        const int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            err = "unix nonblocking";
+            close(fd);
+            return false;
+        }
+    }
+    const int connected = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    bool ready = connected == 0;
+    if (!ready && supervisor_call && errno == EINPROGRESS &&
+        WaitFd(fd, true, 1000, stop, err)) {
+        int socket_error = 0;
+        socklen_t len = sizeof(socket_error);
+        ready = getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &len) == 0 && socket_error == 0;
+    }
+    if (!ready) {
         err = "helper unix connect failed (btx-modeld not running)";
+        close(fd);
+        return false;
+    }
+    if ((expected_peer_pid > 0 && !UnixConnectedPeerMatchesPid(fd, expected_peer_pid, err)) ||
+        (check_peer && !UnixConnectedPeerIsSelf(fd, err))) {
         close(fd);
         return false;
     }
@@ -11953,13 +11996,33 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
     req.pushKV("method", method);
     req.pushKV("params", params);
     const std::string wire = req.write() + "\n";
-    if (::send(fd, wire.data(), wire.size(), 0) < 0) {
+    if (supervisor_call) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        size_t sent = 0;
+        while (sent < wire.size()) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (left.count() <= 0 || !WaitFd(fd, true, static_cast<int>(left.count()), stop, err)) {
+                close(fd);
+                return false;
+            }
+            const ssize_t n = ::send(fd, wire.data() + sent, wire.size() - sent, 0);
+            if (n > 0) {
+                sent += static_cast<size_t>(n);
+            } else if (n == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                err = "unix write";
+                close(fd);
+                return false;
+            }
+        }
+    } else if (::send(fd, wire.data(), wire.size(), 0) < 0) {
         err = "unix write";
         close(fd);
         return false;
     }
     ::shutdown(fd, SHUT_WR);
-    const std::string raw = RecvUntil(fd, MAX_RPC_BODY, nullptr, UnixRpcReplyTimeoutMs(method));
+    const int timeout_ms = reply_timeout_ms > 0 ? reply_timeout_ms : UnixRpcReplyTimeoutMs(method);
+    const std::string raw = RecvUntil(fd, MAX_RPC_BODY, stop, timeout_ms);
     close(fd);
     UniValue reply;
     if (!reply.read(raw) || !reply.isObject()) {

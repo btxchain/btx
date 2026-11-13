@@ -528,7 +528,8 @@ class TestNode():
         # Check that stderr is as expected
         self.stderr.seek(0)
         stderr = self.stderr.read().decode('utf-8').strip()
-        if stderr != expected_stderr:
+        allowed_stderr = expected_stderr if isinstance(expected_stderr, tuple) else (expected_stderr,)
+        if stderr not in allowed_stderr:
             raise AssertionError("Unexpected stderr {} != {}".format(stderr, expected_stderr))
 
         self.stdout.close()
