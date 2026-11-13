@@ -817,6 +817,41 @@ class ArchiveContentGateTest(unittest.TestCase):
             self.mod.verify_archive(archive, launch=False)
         self.assertIn("btx-qt: unreadable Mach-O: symbol table past the end of the file", str(caught.exception))
 
+    def test_archive_checks_nested_macho_load_paths(self) -> None:
+        def image(command, name):
+            raw = name.encode() + b"\0"
+            offset = 12 if command == 0x8000001C else 24
+            size = (offset + len(raw) + 7) & ~7
+            header = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 6, 1, size, 0, 0)
+            load = struct.pack("<III", command, size, offset)
+            return header + load.ljust(offset, b"\0") + raw.ljust(size - offset, b"\0")
+
+        def universal(first, second):
+            # The first slice is x86-64 and the second is arm64.
+            first = first[:4] + struct.pack("<II", 0x01000007, 3) + first[12:]
+            start = 48
+            return (struct.pack(">12I", 0xCAFEBABE, 2, 0x01000007, 3, start, len(first), 0,
+                                0x0100000C, 0, start + len(first), len(second), 0)
+                    + first + second)
+
+        archive = self.root / "macos.tar.gz"
+        plugin = "btx/btx-qt.app/Contents/PlugIns/platforms/libprobe.dylib"
+        daemon = {"btx/bin/btxd": make_macho(extra=ZMQ_HELP)}
+        clean = image(0xC, "/usr/lib/libSystem.B.dylib")
+        with mock.patch.object(self.mod, "verify_macos_signature"):
+            write_tar(archive, {**daemon, plugin: universal(clean, image(0x8000001C, "@loader_path/../Frameworks"))})
+            self.mod.verify_archive(archive, launch=False)
+            for payload, message in (
+                (image(0xC, "/opt/homebrew/lib/libprobe.dylib"), "library dependency"),
+                (universal(clean, image(0x8000001F, "/usr/local/lib/libprobe.dylib")), "library dependency"),
+                (image(0x8000001C, "/opt/homebrew/lib"), "runpath"),
+                (image(0x18, "@rpath/libprobe.dylib")[:-1], "unreadable Mach-O"),
+            ):
+                with self.subTest(message=message):
+                    write_tar(archive, {**daemon, plugin: payload})
+                    with self.assertRaisesRegex(self.mod.VerifyError, f"{plugin}: .*{message}"):
+                        self.mod.verify_archive(archive, launch=False)
+
     def test_v0_34_15_macos_archive_fails_the_randombytes_checks(self) -> None:
         archive = V0_34_15_DIR / "btx-0.34.15-arm64-apple-darwin.tar.gz"
         if not archive.is_file():
