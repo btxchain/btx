@@ -1375,7 +1375,12 @@ RPCHelpMan estimateconsolidationfee()
                     o.pushKV("would_broadcast", false);
                     return o;
                 } catch (const UniValue&) {
-                    // Fall through to an unsigned plan when change/omnibus cannot be priced.
+                    // Without change_address or destination the omnibus may not be
+                    // priceable: fall through to an unsigned plan (this still hides any
+                    // other error on that path). With either option the error
+                    // (fee_ceiling, funds, a locked wallet) is the answer, as in
+                    // createconsolidationtx.
+                    if (options.exists("change_address") || options.exists("destination")) throw;
                 }
             }
             return PlanCoins(*pwallet, options, /*create_tx=*/false);
