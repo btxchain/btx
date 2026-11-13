@@ -86,6 +86,13 @@ class WalletBCP1ConsolidationTargetTest(BitcoinTestFramework):
         five.planconsolidation({"min_confirmations": 1, "target_utxo_count": 0,
                                 "inputs": [{"txid": own["txid"], "vout": own["vout"]}]})
 
+        self.log.info("max_inputs and batch_size must be at least 1")
+        for key in ("max_inputs", "batch_size"):
+            for value in (-1, 0):
+                assert_raises_rpc_error(-8, f"{key} must be at least 1", five.planconsolidation,
+                                        {"min_confirmations": 1, key: value})
+        assert_equal(len(five.planconsolidation({"min_confirmations": 1, "max_inputs": 2})["inputs"]), 2)
+
 
 if __name__ == '__main__':
     WalletBCP1ConsolidationTargetTest(__file__).main()
