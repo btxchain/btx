@@ -832,6 +832,40 @@ class BundleQtGuiTest(unittest.TestCase):
         result, _ = self._mac_deploy_fixture("WARNING: informational message\n")
         self.assertTrue(result.is_file())
 
+    def test_macos_deployment_removes_builder_rpath_before_signing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            binary = root / "btx-qt"
+            binary.write_bytes(b"fixture")
+            app = root / "release/btx-qt.app"
+            jpeg = app / "Contents/Frameworks/libjpeg.8.dylib"
+
+            def deploy(args, **kwargs):
+                jpeg.parent.mkdir(parents=True)
+                jpeg.write_bytes(b"\xcf\xfa\xed\xfe")
+                (jpeg.parent / "libjpeg.dylib").symlink_to(jpeg.name)
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+            def otool(args, **kwargs):
+                if args[1] == "-l":
+                    return ("Load command 1\n          cmd LC_RPATH\n      cmdsize 56\n"
+                            "         path /opt/homebrew/Cellar/jpeg-turbo/3.2.1/lib (offset 12)\n"
+                            "Load command 2\n          cmd LC_RPATH\n      cmdsize 48\n"
+                            "         path @loader_path/../Frameworks (offset 12)\n")
+                return ""
+
+            with mock.patch.object(self.module, "_macdeployqt", return_value=pathlib.Path("/qt/bin/macdeployqt")), \
+                 mock.patch.object(self.module.subprocess, "run", side_effect=deploy), \
+                 mock.patch.object(self.module.subprocess, "check_output", side_effect=otool), \
+                 mock.patch.object(self.module.subprocess, "check_call") as edit, \
+                 mock.patch.object(self.module.shutil, "which", return_value="/usr/bin/codesign"):
+                self.module.deploy_macos_qt_app(binary, root / "release", "test")
+
+            self.assertEqual([call.args[0] for call in edit.call_args_list], [
+                ["install_name_tool", "-delete_rpath", "/opt/homebrew/Cellar/jpeg-turbo/3.2.1/lib", str(jpeg)],
+                ["codesign", "--force", "--deep", "--sign", "-", str(app)],
+            ])
+
     def _plugin_dependency_recovery_fixture(self, tool_removed_path=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

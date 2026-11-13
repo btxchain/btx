@@ -331,6 +331,25 @@ def _rewrite_homebrew_ids(app: Path) -> None:
         subprocess.check_call(["install_name_tool", "-id", f"@rpath/{path.name}", str(path)])
 
 
+def _remove_homebrew_rpaths(app: Path) -> None:
+    """Drop builder-only search paths after deployment and before signing."""
+    for path in app.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open("rb") as image:
+            magic = image.read(4)
+        if magic not in (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+            continue
+        loads = subprocess.check_output(["otool", "-l", str(path)], text=True)
+        rpaths = re.findall(
+            r"^\s*cmd LC_RPATH\s*\n\s*cmdsize \d+\s*\n\s*path (.+) \(offset \d+\)$",
+            loads, re.MULTILINE,
+        )
+        for rpath in dict.fromkeys(rpaths):
+            if _is_homebrew(rpath):
+                subprocess.check_call(["install_name_tool", "-delete_rpath", rpath, str(path)])
+
+
 def _macho_homebrew_loads(path: Path) -> list[str]:
     if path.stat().st_size < 4 or path.read_bytes()[:4] != b"\xcf\xfa\xed\xfe":
         return []
@@ -402,6 +421,7 @@ def deploy_macos_qt_app(source_binary: Path, release_root: Path, version: str) -
                 if f"path {search_path} (offset" in loads:
                     subprocess.check_call(["install_name_tool", "-delete_rpath", search_path, str(plugin)])
     _rewrite_homebrew_ids(app)
+    _remove_homebrew_rpaths(app)
     if shutil.which("codesign"):
         subprocess.check_call(["codesign", "--force", "--deep", "--sign", "-", str(app)])
     offenders: list[str] = []
