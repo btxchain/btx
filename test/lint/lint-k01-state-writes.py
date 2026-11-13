@@ -33,9 +33,7 @@ EXCEPTIONS = {
     "src/modelnet/obs01/obs01.cpp": (
         'std::ofstream out(PathToString(dir / "lab.json"), std::ios::binary);',  # Deliberate corruption fixture.
     ),
-    "src/modelnet/package_channel.cpp": (
-        "std::ofstream out(p, std::ios::binary | std::ios::trunc);",  # Current callers are tests.
-    ),
+    "src/modelnet/package_channel.cpp": (),
     "src/modelnet/realm_channel.cpp": (
         "std::ofstream out(destination, std::ios::binary | std::ios::trunc);",  # Test archive writer.
     ),
