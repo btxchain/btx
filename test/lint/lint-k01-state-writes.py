@@ -25,6 +25,7 @@ EXCEPTIONS = {
         "std::ofstream file(present);",  # Disposable acceptance fixture.
     ),
     "src/modelnet/capability_bytes.cpp": (),
+    "src/modelnet/compute_economy.cpp": (),
     "src/modelnet/import_coordinator.cpp": (
         "std::ofstream out(marker);",  # Job-local status markers.
         "std::ofstream out(marker);",
