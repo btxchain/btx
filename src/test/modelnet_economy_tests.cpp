@@ -991,4 +991,36 @@ BOOST_AUTO_TEST_CASE(own_models_are_not_held_by_the_publisher_quota)
     BOOST_CHECK_EQUAL(restarted.All().size(), static_cast<size_t>(MODELS));
 }
 
+// getmodeldirectory, searchpublishers, getfundablemodels and the getmodelfeed
+// filters dropped the result of ParseSearchQuery: a malformed query gave an
+// unfiltered or default-sorted answer with success, while searchmodels and
+// browsemodels refuse the same input.
+BOOST_AUTO_TEST_CASE(malformed_search_query_is_refused)
+{
+    const fs::path dir = m_path_root / "economy-bad-query";
+    fs::create_directories(dir);
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    auto refused = [&](const std::string& method, const std::string& json, const std::string& want_code = "INVALID_PARAMETER") {
+        UniValue arg;
+        BOOST_REQUIRE(arg.read(json));
+        UniValue params(UniValue::VARR);
+        params.push_back(arg);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        UniValue result;
+        std::string code, err;
+        const bool ok = modelnet::DispatchHelperRpc(cat, req, result, code, err);
+        BOOST_CHECK_MESSAGE(!ok, method << " accepted " << json);
+        if (!ok) BOOST_CHECK_EQUAL(code, want_code);
+    };
+    refused("getfundablemodels", R"({"sort":"nearly-funded","limit":1})");
+    refused("getfundablemodels", R"({"filters":{"min_funded_percent":"50"}})");
+    refused("getmodeldirectory", R"({"filters":{"tags":"x"}})");
+    refused("searchpublishers", R"({"sort":"bogus"})");
+    refused("getmodelfeed", R"({"filters":{"family":7}})");
+    // The same input is refused by browsemodels already (with its own code).
+    refused("browsemodels", R"({"sort":"nearly-funded"})", "INVALID_PARAMS");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

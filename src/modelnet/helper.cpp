@@ -8093,7 +8093,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         IngestCatalogIntoSearch(cat);
         if (method == "getmodeldirectory") {
             SearchQuery q;
-            if (Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
+            if (Arg(0).isObject() && !ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             q.scope = SearchScope::ALL;
             const auto hits = g_search_idx.Search(q, ConnNowMs());
             UniValue arr(UniValue::VARR);
@@ -8224,8 +8227,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         UniValue arr(UniValue::VARR);
         SearchQuery q;
-        if (method == "searchpublishers" && Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
-        else if (method == "searchpublishers" && Arg(0).isStr()) q.text = Arg(0).get_str();
+        if (method == "searchpublishers" && Arg(0).isObject()) {
+            if (!ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
+        } else if (method == "searchpublishers" && Arg(0).isStr()) q.text = Arg(0).get_str();
         const auto hits = g_search_idx.Search(q, ConnNowMs());
         std::map<std::string, int> pubs;
         for (const auto& h : hits) {
@@ -10565,7 +10572,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         if (method == "getfundablemodels") {
             SearchQuery q;
-            if (Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
+            if (Arg(0).isObject() && !ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             q.filters.fundable_only = true;
             if (!Arg(0).isObject() || !Arg(0).exists("sort")) q.sort = SearchSort::NEARLY_FUNDED;
             std::vector<ModelEconomyEntry> camp;
@@ -10715,7 +10725,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 UniValue wrap(UniValue::VOBJ);
                 wrap.pushKV("filters", Arg(0)["filters"]);
                 SearchQuery sq;
-                ParseSearchQuery(wrap, sq, err);
+                if (!ParseSearchQuery(wrap, sq, err)) {
+                    err_code = "INVALID_PARAMETER";
+                    return false;
+                }
                 fq.filters = sq.filters;
             }
         }
