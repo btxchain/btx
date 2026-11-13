@@ -1191,10 +1191,33 @@ else:
                 if launcher.is_file() and os.access(executable, os.X_OK):
                     packaged = executable
     if mode != "--packaged-executable":
-        cmd = subprocess.check_output(["ps", "-ww", "-o", "command=", "-p", pid], text=True).strip()
-        if packaged is not None and cmd.startswith(str(packaged) + " "):
-            tokens = [str(packaged), *shlex.split(cmd[len(str(packaged)):])]
+        if sys.platform == "darwin":
+            import struct
+
+            # ps renders argv as text and loses boundaries for paths with spaces.
+            # Darwin's KERN_PROCARGS2 returns argc and the original NUL-delimited argv.
+            sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+            sysctl.argtypes = (ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                               ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
+            sysctl.restype = ctypes.c_int
+            mib = (ctypes.c_int * 3)(1, 49, int(pid))  # CTL_KERN, KERN_PROCARGS2
+            size = ctypes.c_size_t()
+            if sysctl(mib, len(mib), None, ctypes.byref(size), None, 0) != 0:
+                raise OSError(ctypes.get_errno(), "cannot size Darwin process arguments")
+            buffer = ctypes.create_string_buffer(size.value)
+            if sysctl(mib, len(mib), buffer, ctypes.byref(size), None, 0) != 0:
+                raise OSError(ctypes.get_errno(), "cannot read Darwin process arguments")
+            data = buffer.raw[:size.value]
+            argc = struct.unpack_from("=i", data)[0]
+            start = data.index(b"\0", struct.calcsize("=i")) + 1
+            while start < len(data) and data[start] == 0:
+                start += 1
+            argv = data[start:].split(b"\0", argc)
+            if argc <= 0 or len(argv) != argc + 1:
+                raise SystemExit(1)
+            tokens = [os.fsdecode(arg) for arg in argv[:argc]]
         else:
+            cmd = subprocess.check_output(["ps", "-ww", "-o", "command=", "-p", pid], text=True).strip()
             tokens = shlex.split(cmd)
 
 if mode == "--packaged-executable":
