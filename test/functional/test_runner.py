@@ -358,6 +358,7 @@ BASE_SCRIPTS = [
     'p2p_addrfetch.py',
     'rpc_net.py --v1transport',
     'rpc_net.py --v2transport',
+    'rpc_mining_peer_mesh.py',
     'wallet_keypool.py --descriptors',
     'wallet_descriptor.py --descriptors',
     'p2p_nobloomfilter_messages.py',
