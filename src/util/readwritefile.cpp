@@ -52,6 +52,11 @@ bool WriteBinaryFile(const fs::path &filename, const std::string &data)
     return true;
 }
 
+bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data)
+{
+    return WriteBinaryFileAtomically(filename, data, {});
+}
+
 bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data, const fs::path& staging_dir)
 {
     return WriteBinaryFileAtomically(filename, [data](std::FILE* file) {
