@@ -627,6 +627,73 @@ def test_failed_activation_restarts_previous_release():
             _kill_datadir_daemon(scenario.target_datadir)
 
 
+
+def test_unusable_previous_release_leaves_running_node_untouched():
+    with Scenario("broken-rollback", {"BTX_AUTO_RESTART": "1"}) as scenario:
+        install = scenario.tmp / "install"
+        previous = install / "releases" / "broken"
+        (previous / "bin").mkdir(parents=True)
+        for tool in ("btxd", "btx-cli"):
+            write_executable(previous / "bin" / tool, '#!/bin/sh\nexec "$0.real" "$@"\n')
+        (previous / "manifest.json").write_text('{"git_commit": "old"}', encoding="utf8")
+        current = install / "current"
+        current.symlink_to(previous)
+        links = scenario.tmp / "links"
+        links.mkdir()
+        launcher = links / "btx-cli"
+        write_executable(launcher, PREBUILT_BTXCLI)
+        original = launcher.read_bytes()
+        _add_prebuilt_to_manifest(scenario)
+        try:
+            result = scenario.run_installer()
+            if scenario.target.poll() is not None or (scenario.target_datadir / "term.received").exists():
+                raise AssertionError("installer stopped the node without a usable rollback release")
+            assert_failure(result)
+            output = result.stdout + result.stderr
+            if "could not prepare release activation" not in output:
+                raise AssertionError(f"unexpected activation failure:\n{output}")
+            if current.resolve() != previous.resolve() or launcher.is_symlink() or launcher.read_bytes() != original:
+                raise AssertionError("failed preparation changed the active release or public launcher")
+            if scenario.distractor.poll() is not None:
+                raise AssertionError("activation touched the distractor process")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+
+
+
+def test_macos_packaged_daemon_identity():
+    with tempfile.TemporaryDirectory(prefix="btx-packaged-pid-") as tmp:
+        root = Path(tmp).resolve()
+        package = root / "with spaces"
+        (package / "bin").mkdir(parents=True)
+        (package / "libexec").mkdir()
+        write_executable(package / "bin" / "btxd", "#!/bin/sh\nexit 0\n")
+        executable = package / "libexec" / "btxd.real"
+        source = root / "probe.c"
+        source.write_text("#include <unistd.h>\nint main(void) { for (;;) pause(); }\n", encoding="utf8")
+        run(["cc", str(source), "-o", str(executable)], timeout=20)
+        unrelated = root / "btxd.real"
+        shutil.copy2(executable, unrelated)
+        node = subprocess.Popen([str(executable), "-regtest"])
+        other = subprocess.Popen([str(unrelated), "-regtest"])
+        try:
+            result = subprocess.run([
+                "bash", "-c", """
+set -eu
+source "$1"
+[[ "$(extract_runtime_flags "$2" --packaged-executable)" == "$4" ]]
+require_btxd_like_process "$2"
+if require_btxd_like_process "$3" >/dev/null 2>&1; then
+    exit 2
+fi
+""", "packaged-identity", str(INSTALLER), str(node.pid), str(other.pid), str(executable),
+            ], capture_output=True, text=True, timeout=10)
+            assert_success(result)
+        finally:
+            stop_process(node)
+            stop_process(other)
+
+
 def _prebuilt_manifest_entry(scenario, name, *, bad_btxd=False, with_sha256=True):
     tar_path = scenario.origin / f"{name}.tar.gz"
     build_prebuilt_tarball(scenario.tmp, tar_path, bad_btxd=bad_btxd)
@@ -985,6 +1052,7 @@ def main():
         test_healthy_restart_passes_health_probe,
         test_unhealthy_restart_triggers_rollback_path,
         test_failed_activation_restarts_previous_release,
+        test_unusable_previous_release_leaves_running_node_untouched,
         test_prebuilt_binary_is_used_without_source_build,
         test_cuda13_prebuilt_is_preferred_over_generic_linux,
         test_cuda12_prebuilt_is_preferred_over_generic_linux,
@@ -998,6 +1066,8 @@ def main():
         test_unpinned_manifest_must_match_verified_version,
         test_python_module_in_working_directory_is_not_imported,
     ]
+    if platform.system() == "Darwin" and shutil.which("cc"):
+        tests.append(test_macos_packaged_daemon_identity)
     for test in tests:
         test()
         print(f"PASS {test.__name__}")
