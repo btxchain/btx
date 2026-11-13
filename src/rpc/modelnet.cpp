@@ -442,7 +442,7 @@ static RPCHelpMan searchmodels()
 {
     return ProxyOrLocal("searchmodels",
                         "Bounded decentralized model search. Coverage is always incomplete (current network view, not a global directory).\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "query object or text string", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "query object or text string", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "query", .type_str = {"", "string or json object"}}}});
 }
 
 static RPCHelpMan getmodelsearchrecord()
@@ -454,13 +454,13 @@ static RPCHelpMan publishmodelsearchrecord()
 {
     return ProxyOrLocal("publishmodelsearchrecord", "Sign and announce ModelSearchRecord. Creates a local research identity if none exists. Not a wallet spend.\n",
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "model_id or btx://"},
-                         {"metadata", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "searchable metadata object", RPCArgOptions{.skip_type_check = true}}});
+                         {"metadata", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "searchable metadata object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan updatemodelsearchrecord()
 {
     return ProxyOrLocal("updatemodelsearchrecord", "Publish next sequence of ModelSearchRecord. Does not mutate in place.\n",
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "model_id or btx://"},
-                         {"patch", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "metadata patch object", RPCArgOptions{.skip_type_check = true}}});
+                         {"patch", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "metadata patch object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan removemodelsearchrecord()
 {
@@ -470,7 +470,7 @@ static RPCHelpMan removemodelsearchrecord()
 static RPCHelpMan listmodelsearchrecords()
 {
     return ProxyOrLocal("listmodelsearchrecords", "Paginated local search index.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "cursor/limit/updated_after", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "cursor/limit/updated_after", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodeldirectoryentry()
 {
@@ -480,7 +480,7 @@ static RPCHelpMan getmodeldirectoryentry()
 static RPCHelpMan getmodeldirectory()
 {
     return ProxyOrLocal("getmodeldirectory", "Browse directory view (current network view).\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "filters/sort/cursor", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "filters/sort/cursor", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodelproviders()
 {
@@ -509,7 +509,7 @@ static RPCHelpMan getmodelaliases()
 static RPCHelpMan searchpublishers()
 {
     return ProxyOrLocal("searchpublishers", "Search publisher/research identities in the local index.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "text/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "text/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "query", .type_str = {"", "string or json object"}}}});
 }
 static RPCHelpMan getpublisher()
 {
@@ -519,7 +519,7 @@ static RPCHelpMan getpublisher()
 static RPCHelpMan searchcollections()
 {
     return ProxyOrLocal("searchcollections", "Search signed collections.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "text/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "text/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "query", .type_str = {"", "string or json object"}}}});
 }
 static RPCHelpMan getcollection()
 {
@@ -529,27 +529,27 @@ static RPCHelpMan getcollection()
 static RPCHelpMan browsemodels()
 {
     return ProxyOrLocal("browsemodels", "Directory browse without requiring a text query. Popularity is local observation, not global truth.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "sort/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "sort/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan gettrendingmodels()
 {
     return ProxyOrLocal("gettrendingmodels", "Local/network-sample trend. No user telemetry.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getsimilarmodels()
 {
     return ProxyOrLocal("getsimilarmodels", "Metadata similarity only (family/tags/arch). No remote embeddings.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "family/tags", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "family/tags", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getnewmodels()
 {
     return ProxyOrLocal("getnewmodels", "Recently published models from this node's index.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "since/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "since/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getrecentreleases()
 {
     return ProxyOrLocal("getrecentreleases", "Public release-campaign coordination data. scope=NETWORK uses the current decentralized view; scope=LOCAL is local campaigns.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "limit/scope", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "limit/scope", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodeleconomyentry()
 {
@@ -559,7 +559,7 @@ static RPCHelpMan getmodeleconomyentry()
 static RPCHelpMan getmodelfeed()
 {
     return ProxyOrLocal("getmodelfeed", "Decentralized current-network model/campaign feed. Not a global chronology. Default scope NETWORK.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "scope/mode/since/limit/cursor/filters", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "scope/mode/since/limit/cursor/filters", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodelfeedstatus()
 {
@@ -572,7 +572,7 @@ static RPCHelpMan getmodelfeedsequence()
 static RPCHelpMan getfundablemodels()
 {
     return ProxyOrLocal("getfundablemodels", "Campaigns that can still accept a meaningful contribution. Pledged is not funded.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "sort/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "sort/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodelreleaseeconomics()
 {
@@ -582,12 +582,12 @@ static RPCHelpMan getmodelreleaseeconomics()
 static RPCHelpMan getrecentlyunlockedmodels()
 {
     return ProxyOrLocal("getrecentlyunlockedmodels", "Models whose campaign secret was recently disclosed (network-capable feed).\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "since/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "since/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getreleasefeed()
 {
     return ProxyOrLocal("getreleasefeed", "Convenience wrapper over getmodelfeed for release campaigns.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "mode/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "mode/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan preparemodelfunding();
 
@@ -600,7 +600,7 @@ static RPCHelpMan preparefundmodelrelease()
         "The legacy release-id / amount form remains a helper preview and does not authorize wallet funding.\n",
         {
             {"release_id", RPCArg::Type::STR, RPCArg::Optional::NO, "Campaign or objective release id"},
-            {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Canonical amount (legacy preview) or explicit wallet funding options object", RPCArgOptions{.skip_type_check = true}},
+            {"amount_atoms", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Canonical amount (legacy preview) or explicit wallet funding options object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "amount_atoms", .type_str = {"", "string, number or json object"}}},
         },
         RPCResult{RPCResult::Type::OBJ, "", "Funding plan or legacy helper preview", {
             {RPCResult::Type::ELISION, "", "Unsigned wallet quote or helper preview fields"},
@@ -667,12 +667,12 @@ static RPCHelpMan removemodelindex()
 static RPCHelpMan exportmodelindex()
 {
     return ProxyOrLocal("exportmodelindex", "Export public signed search records. No secrets.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "since/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "since/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan importmodelindex()
 {
     return ProxyOrLocal("importmodelindex", "Import signed records; every signature is revalidated.\n",
-                        {{"snapshot", RPCArg::Type::STR, RPCArg::Optional::NO, "records snapshot object", RPCArgOptions{.skip_type_check = true}}});
+                        {{"snapshot", RPCArg::Type::OBJ, RPCArg::Optional::NO, "records snapshot object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan hidesearchmodel()
 {
@@ -2430,8 +2430,8 @@ static RPCHelpMan submitbountyrefund() { return NamedBountySubmit("submitbountyr
     static RPCHelpMan fn()                                                                \
     {                                                                                     \
         return ProxyOrLocal(#fn, help "\n",                                               \
-                            {{"request", RPCArg::Type::STR, RPCArg::Optional::OMITTED,    \
-                              "Pay With Compute request object",                          \
+                            {{"request", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED,    \
+                              "Pay With Compute request object", std::vector<RPCArg>{},   \
                               RPCArgOptions{.skip_type_check = true}}});                 \
     }
 
@@ -2511,7 +2511,7 @@ static RPCHelpMan lab035()
         "Dispatch one local lab035 method. Research authority does not spend a wallet.\n",
         {
             {"method", RPCArg::Type::STR, RPCArg::Optional::NO, "lab035 method name"},
-            {"request", RPCArg::Type::STR, RPCArg::Optional::NO, "request object or JSON string", RPCArgOptions{.skip_type_check = true}},
+            {"request", RPCArg::Type::OBJ, RPCArg::Optional::NO, "request object or JSON string", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "request", .type_str = {"", "string or json object"}}},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "method result"}}},
         RPCExamples{HelpExampleCli("lab035", "lab035.git.digest '{\"kind\":\"blob\",\"content\":\"a\"}'")},
