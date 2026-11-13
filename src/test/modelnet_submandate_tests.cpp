@@ -8,10 +8,12 @@
 #include <modelnet/subscription_mandate.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
+#include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <atomic>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -289,6 +291,33 @@ BOOST_AUTO_TEST_CASE(mandate_sub_06_revoke_blocks_new_signatures)
     BOOST_CHECK(!EvaluateAndReserve(budget, ev, t, r, kNow, err));
     BOOST_CHECK_EQUAL(err, "revoked");
     BOOST_CHECK_EQUAL(budget.UsedPrincipal(), 0);
+}
+
+// A subscription-mandates.json that is there but empty, or has no mandates
+// array, loaded as an empty store: the spent budget and the revocations were
+// gone and the next save replaced the file. Only a missing file is empty.
+BOOST_AUTO_TEST_CASE(mandate_sub_04c_empty_state_file_is_refused)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "submandate-empty-file";
+    fs::create_directories(dir);
+    std::string err;
+    {
+        SubscriptionStore store;
+        BOOST_CHECK_MESSAGE(store.SetPersistPath(dir / "absent.json", err), err);
+    }
+    const fs::path empty = dir / "empty.json";
+    { std::ofstream out(empty, std::ios::binary | std::ios::trunc); }
+    const fs::path no_array = dir / "no-array.json";
+    { std::ofstream out(no_array, std::ios::binary | std::ios::trunc); out << "{\"schema_version\":1}\n"; }
+    const fs::path empty_object = dir / "empty-object.json";
+    { std::ofstream out(empty_object, std::ios::binary | std::ios::trunc); out << "{}\n"; }
+    for (const fs::path& path : {empty, no_array, empty_object}) {
+        const auto size_before = fs::file_size(path);
+        SubscriptionStore store;
+        BOOST_CHECK_MESSAGE(!store.SetPersistPath(path, err), fs::PathToString(path) << " loaded as an empty store");
+        BOOST_CHECK_EQUAL(fs::file_size(path), size_before);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(mandate_sub_07_broadcast_transactions_remain_real)
