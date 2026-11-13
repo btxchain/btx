@@ -651,6 +651,40 @@ BOOST_AUTO_TEST_CASE(fund_with_mandate_watch_drain_unsigned)
     BOOST_CHECK(saw);
 }
 
+// cancelmodeljob answered cancelled:true for any known job, also one that had
+// already ended; only the status of a queued or running job changes.
+BOOST_AUTO_TEST_CASE(cancelmodeljob_reports_only_a_real_cancel)
+{
+    const fs::path tmp = m_path_root / "first-run-cancel-ended";
+    fs::create_directories(tmp);
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    UniValue job(UniValue::VOBJ);
+    job.pushKV("job_id", "cancel-ended-aa11");
+    job.pushKV("model_id", std::string(96, 'f'));
+    job.pushKV("status", "queued");
+    job.pushKV("created_ms", 42);
+    UniValue jobs(UniValue::VARR);
+    jobs.push_back(job);
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("schema_version", 1);
+    root.pushKV("jobs", jobs);
+    {
+        std::ofstream out(tmp / "retrieve_jobs.json");
+        out << root.write() << "\n";
+    }
+    UniValue p(UniValue::VARR);
+    p.push_back("cancel-ended-aa11");
+    const UniValue first = Dispatch(cat, Rpc("cancelmodeljob", p));
+    BOOST_CHECK(first["cancelled"].get_bool());
+    BOOST_REQUIRE_EQUAL(first["jobs"].size(), 1U);
+    BOOST_CHECK_EQUAL(first["jobs"][0]["status"].get_str(), "cancelled");
+    // The job has ended now; a second cancel changes nothing and must say so.
+    const UniValue second = Dispatch(cat, Rpc("cancelmodeljob", p));
+    BOOST_CHECK_MESSAGE(!second["cancelled"].get_bool(), "cancelled:true for a job that had already ended");
+    BOOST_REQUIRE_EQUAL(second["jobs"].size(), 1U);
+    BOOST_CHECK_EQUAL(second["jobs"][0]["status"].get_str(), "cancelled");
+}
+
 BOOST_AUTO_TEST_CASE(retrieve_jobs_persist_reload_without_worker)
 {
     const fs::path tmp = m_path_root / "first-run-retrieve-persist";
