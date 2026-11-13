@@ -490,6 +490,34 @@ BOOST_AUTO_TEST_CASE(leaf_pubkey_mismatch_rejected)
     BOOST_CHECK(err.find("CORRUPT") != std::string::npos || err == bcp1::ERR_CORRUPT_SIGNATURE);
 }
 
+// A signature with one byte appended passed the package check, which dropped
+// that byte, and went into the witness whole. Consensus reads the byte as the
+// hash type: 0x00 signs the package digest (SIGHASH_DEFAULT), any other value
+// signs another digest. The package check must accept exactly what consensus
+// accepts, so a transaction it reports as complete can be mined.
+BOOST_AUTO_TEST_CASE(trailing_hashtype_byte_follows_consensus)
+{
+    const auto seed = MasterSeedFromDerivation();
+    const Bcp1Spend spend = MakeSpend(seed);
+    std::vector<unsigned char> sig;
+    BOOST_REQUIRE(spend.deposit_key.Sign(spend.digest, sig));
+    for (const unsigned char hashtype : {0x00, 0x01, 0x02, 0x03, 0x81}) {
+        bcp1::Package pkg = PackageFromSpend(spend);
+        std::vector<unsigned char> with_byte = sig;
+        with_byte.push_back(hashtype);
+        CScriptWitness wit;
+        wit.stack = {with_byte, spend.leaf, spend.control};
+        const bool consensus_ok{VerifyP2MRWitness(spend.unsigned_tx, spend.prev_txout, wit)};
+        BOOST_CHECK_EQUAL(consensus_ok, hashtype == 0x00);
+        std::string err;
+        BOOST_CHECK_MESSAGE(bcp1::InsertSignature(pkg, 0, with_byte, err) == consensus_ok,
+                            "InsertSignature disagrees with consensus for trailing byte " << int{hashtype});
+        CMutableTransaction tx;
+        BOOST_CHECK_MESSAGE(bcp1::TryExtractSignedTx(pkg, tx, err) == consensus_ok,
+                            "TryExtractSignedTx disagrees with consensus for trailing byte " << int{hashtype});
+    }
+}
+
 BOOST_AUTO_TEST_CASE(wrong_prevout_rejected)
 {
     const UniValue wrong_v = ReadBcp1Json("negative-wrong-prevout.json");
