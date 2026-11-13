@@ -703,6 +703,11 @@ public:
 
     /** Automatically shield mature coinbase outputs into the shielded pool. */
     void MaybeAutoShieldCoinbase() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /** After an unlock, load the shielded keys and notes that a locked load or
+     *  scan left out, and go over the mempool again when that happened. Used by
+     *  walletpassphrase and by the wallet interface (Qt). Returns true when the
+     *  shielded state was rehydrated. */
+    bool RehydrateShieldedStateAfterUnlock() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     bool LoadPendingBridgeOperation(const BridgePendingOperation& operation) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void MaybeRecoverPendingBridgeOperations();
 
