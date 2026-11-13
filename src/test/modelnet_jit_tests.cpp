@@ -870,6 +870,24 @@ BOOST_AUTO_TEST_CASE(jit_map_range_mat_load)
         BOOST_REQUIRE(modelnet::MaterializeCompleteFile(pieces, fs::PathToString(dest), modelnet::NewGeneration(), code, err));
         BOOST_CHECK(!modelnet::MaterializeCompleteFile(pieces, fs::PathToString(dest), modelnet::NewGeneration(), code, err));
         BOOST_CHECK_EQUAL(code, "OVERWRITE_REFUSED");
+        const fs::path occupied = m_path_root / "mat.sidecar";
+        const fs::path sidecar = fs::PathFromString(fs::PathToString(occupied) + ".gen");
+        {
+            std::ofstream old(sidecar);
+            old << "existing generation";
+            BOOST_REQUIRE(old.good());
+        }
+        BOOST_CHECK(!modelnet::MaterializeCompleteFile(pieces, fs::PathToString(occupied), modelnet::NewGeneration(), code, err));
+        BOOST_CHECK_EQUAL(code, "IO_ERROR");
+        BOOST_CHECK(!fs::exists(occupied));
+        {
+            std::ifstream old(sidecar);
+            std::string existing;
+            BOOST_REQUIRE(std::getline(old, existing));
+            BOOST_CHECK_EQUAL(existing, "existing generation");
+        }
+        BOOST_REQUIRE(fs::remove(sidecar));
+        BOOST_CHECK(modelnet::MaterializeCompleteFile(pieces, fs::PathToString(occupied), modelnet::NewGeneration(), code, err));
         std::vector<std::vector<unsigned char>> holey{{'a'}, {}};
         const fs::path dest_hole = m_path_root / "mat.hole";
         BOOST_CHECK(!modelnet::MaterializeCompleteFile(holey, fs::PathToString(dest_hole), modelnet::NewGeneration(), code, err));
