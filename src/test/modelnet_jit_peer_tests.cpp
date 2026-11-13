@@ -30,6 +30,7 @@
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -350,7 +351,11 @@ BOOST_AUTO_TEST_CASE(JIT_PEER_06)
         BOOST_CHECK_EQUAL(std::string(modelnet::TransportAssuranceName(off.assurance)), "HOST_BUFFER");
         BOOST_TEST_MESSAGE("JIT-PEER-06 Apple: Linux NIXL is not a macOS path (NOT_RUN)");
 #else
-        test::SetEnv("BTX_NIXL_LIB", "/proc/self/exe");
+        const fs::path present = m_path_root / "nixl-presence-fixture";
+        std::FILE* fixture = fsbridge::fopen(present, "wb");
+        BOOST_REQUIRE(fixture != nullptr);
+        BOOST_REQUIRE_EQUAL(std::fclose(fixture), 0);
+        test::SetEnv("BTX_NIXL_LIB", fs::PathToString(present).c_str());
         modelnet::PeerTransferOffer off;
         BOOST_REQUIRE(modelnet::ProbePeerBackends(off));
         AssertProbeHonesty(off);
