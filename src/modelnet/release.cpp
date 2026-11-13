@@ -307,33 +307,42 @@ bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err)
     return true;
 }
 
-bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err)
+bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err,
+                   std::vector<std::string>* skipped_release_ids)
 {
     out.clear();
     const fs::path path = dir / "campaigns.json";
     if (!fs::exists(path)) return true;
+    // A file that is there but is not a campaign list is an error, not an
+    // empty list: the caller must not treat its campaigns as gone.
     std::ifstream in(path);
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     UniValue o;
-    if (!o.read(raw) || !o.isObject() || !o.exists("campaigns")) return true;
-    if (!o["campaigns"].isArray()) {
-        LogSkippedCampaign("campaigns type");
-        return true;
+    if (!in.is_open() || !o.read(raw) || !o.isObject() || !o.exists("campaigns") || !o["campaigns"].isArray()) {
+        err = "campaigns.json cannot be read";
+        LogSkippedCampaign(err);
+        return false;
     }
+    const auto skipped = [&](const UniValue& cj, const std::string& why) {
+        LogSkippedCampaign(why);
+        if (skipped_release_ids && cj.isObject() && cj.exists("release_id") && cj["release_id"].isStr()) {
+            skipped_release_ids->push_back(ToLower(cj["release_id"].get_str()));
+        }
+    };
     try {
         for (const auto& cj : o["campaigns"].getValues()) {
             ReleaseCampaign c;
             std::string ierr;
             try {
                 if (!CampaignFromJson(cj, c, ierr)) {
-                    LogSkippedCampaign(ierr.empty() ? "campaign" : ierr);
+                    skipped(cj, ierr.empty() ? "campaign" : ierr);
                     continue;
                 }
             } catch (const std::exception& ex) {
-                LogSkippedCampaign(ex.what());
+                skipped(cj, ex.what());
                 continue;
             } catch (...) {
-                LogSkippedCampaign("campaign");
+                skipped(cj, "campaign");
                 continue;
             }
             out.push_back(std::move(c));
@@ -341,11 +350,11 @@ bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::
     } catch (const std::exception& ex) {
         LogSkippedCampaign(ex.what());
         err = ex.what();
-        return true;
+        return false;
     } catch (...) {
         err = "campaigns";
         LogSkippedCampaign(err);
-        return true;
+        return false;
     }
     return true;
 }

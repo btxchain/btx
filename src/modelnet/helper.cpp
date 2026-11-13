@@ -2430,6 +2430,9 @@ static std::set<std::string> g_local_releases;
  *  local-release filter existed. The damaged file is left in place for the
  *  operator and is not overwritten. Guarded by g_campaign_mu. */
 static bool g_local_releases_untrusted{false};
+//! campaigns.json is there but could not be read, or an entry of a local release
+//! in it was skipped. Plaintext is withheld and the file is not overwritten.
+static bool g_campaigns_unreadable{false};
 
 fs::path LocalReleasesPath(const fs::path& dir) { return dir / "local_releases.json"; }
 
@@ -2558,7 +2561,8 @@ void EnsureEconomy(ModelCatalog& cat)
     }
     (void)g_feed.Load(ConnNowMs(), err);
     std::vector<ReleaseCampaign> local;
-    const bool loaded_campaigns = LoadCampaigns(dir, local, err);
+    std::vector<std::string> skipped;
+    const bool loaded_campaigns = LoadCampaigns(dir, local, err, &skipped);
     {
         std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
         g_campaigns.Clear();
@@ -2566,7 +2570,26 @@ void EnsureEconomy(ModelCatalog& cat)
             for (const auto& c : local) g_campaigns.Put(c, err);
         }
         LoadLocalReleases(dir, local);
+        // Without the campaign of a local release this node cannot tell which
+        // model it gates, so it withholds plaintext until the file is repaired.
+        g_campaigns_unreadable = !loaded_campaigns;
+        for (const auto& rid : skipped) {
+            if (g_local_releases_untrusted || g_local_releases.count(rid)) g_campaigns_unreadable = true;
+        }
+        if (g_campaigns_unreadable) {
+            LogPrintf("btx-modeld: %s cannot be read in full; withholding plaintext and keeping the file until it is repaired\n",
+                      fs::PathToString(dir / "campaigns.json"));
+        }
     }
+}
+
+//! False while campaigns.json could not be read: saving now would replace it
+//! with the campaigns that were readable. g_campaign_mu must be held.
+static bool CampaignFileWritable(std::string& err)
+{
+    if (!g_campaigns_unreadable) return true;
+    err = "campaigns.json cannot be read; repair it before changing campaigns";
+    return false;
 }
 
 // g_search_mu must be held: Save() walks the index that Put() rewrites on
@@ -2579,6 +2602,7 @@ static void PersistEconomyLocked(ModelCatalog& cat)
     // Save under g_campaign_mu, as the RPCs that change a campaign do. A copy
     // saved after letting go could replace a change saved in between.
     std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+    if (!CampaignFileWritable(err)) return;
     (void)SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
 }
 
@@ -2595,6 +2619,7 @@ void PersistEconomy(ModelCatalog& cat)
 // release id order, so the file is the one the RPC wrote before. g_campaign_mu must be held.
 static bool SaveCampaignsWith(ModelCatalog& cat, const ReleaseCampaign& changed, std::string& err)
 {
+    if (!CampaignFileWritable(err)) return false;
     std::vector<ReleaseCampaign> next = g_campaigns.List();
     const std::string changed_hex = changed.release_id.Hex();
     auto it = std::find_if(next.begin(), next.end(),
@@ -2866,6 +2891,7 @@ bool PlaintextServeAllowed(ModelCatalog& cat, const CatalogEntry& entry)
     const ReleaseCampaign* c = nullptr;
     {
         std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+        if (g_campaigns_unreadable) return false;
         c = CampaignForEntry(entry);
         if (!c) return true;
         if (DistinctCiphertextObject(*c, entry)) return true;
@@ -9423,7 +9449,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 live->secret_disclosed = true;
                 if (plaintext_verified) live->plaintext_verified = true;
                 camp = *live;
-                SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+                if (CampaignFileWritable(err)) SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
             };
             CatalogEntry local;
             Digest48 cid = camp.ciphertext_artifact_id.IsNull() ? camp.artifact_id : camp.ciphertext_artifact_id;
