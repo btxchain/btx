@@ -9,6 +9,7 @@
 #include <interfaces/chain.h>
 #include <kernel/chain.h>
 #include <hash.h>
+#include <interfaces/wallet.h>
 #include <noui.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -25,6 +26,7 @@
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/smile2_placeholder_utils.h>
 #include <test/util/shielded_v2_egress_fixture.h>
+#include <wallet/context.h>
 #include <wallet/crypter.h>
 #include <wallet/shielded_coins.h>
 #include <wallet/shielded_wallet.h>
@@ -948,6 +950,42 @@ BOOST_AUTO_TEST_CASE(locked_scan_owned_note_rehydrates_to_spendable_on_unlock)
         BOOST_CHECK_EQUAL(summary.spendable, value);
         BOOST_CHECK_EQUAL(summary.watchonly, 0);
         BOOST_CHECK_EQUAL(shielded_wallet->GetShieldedBalance(/*min_depth=*/0), value);
+        BOOST_REQUIRE_EQUAL(shielded_wallet->GetSpendableNotes(/*min_depth=*/0).size(), 1U);
+    }
+}
+
+// The Qt unlock goes through interfaces::Wallet::unlock. It used to call only
+// CWallet::Unlock, so a note scanned while the wallet was locked stayed
+// watch-only after a GUI unlock (#587); walletpassphrase also rehydrates.
+BOOST_AUTO_TEST_CASE(interface_unlock_rehydrates_shielded_state)
+{
+    const CAmount value = 43 * COIN / 100;
+    const CTransaction tx =
+        BuildMinimalV2SendTransaction(owned_addr.pk_hash, owned_kem_pk, value, 0xf7);
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(tx));
+
+    BOOST_REQUIRE(wallet.Lock());
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        shielded_wallet->ScanBlock(block, /*height=*/1);
+        const auto summary = shielded_wallet->GetShieldedBalanceSummary(/*min_depth=*/0);
+        BOOST_CHECK_EQUAL(summary.spendable, 0);
+        BOOST_CHECK_EQUAL(summary.watchonly, value);
+    }
+
+    wallet::WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    // The fixture owns the wallet; the interface gets a non-owning pointer.
+    const std::shared_ptr<wallet::CWallet> alias{std::shared_ptr<void>{}, &wallet};
+    BOOST_REQUIRE(interfaces::MakeWallet(context, alias)->unlock(passphrase));
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        const auto summary = shielded_wallet->GetShieldedBalanceSummary(/*min_depth=*/0);
+        BOOST_CHECK_EQUAL(summary.spendable, value);
+        BOOST_CHECK_EQUAL(summary.watchonly, 0);
         BOOST_REQUIRE_EQUAL(shielded_wallet->GetSpendableNotes(/*min_depth=*/0).size(), 1U);
     }
 }
