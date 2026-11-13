@@ -3509,26 +3509,36 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_progress_child_when_best_header_is_com
     other.MakeNewKey(/*fCompressed=*/true);
     const CScript script_alt = GetScriptForDestination(PKHash(other.GetPubKey()));
 
-    CBlockIndex* original_tip{
+    CBlockIndex* const original_tip{
         WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
-    BOOST_REQUIRE(original_tip != nullptr);
+    BOOST_REQUIRE(original_tip != nullptr && original_tip->pprev != nullptr);
     const uint256 original_hash{original_tip->GetBlockHash()};
     const int original_height{original_tip->nHeight};
 
-    BlockValidationState state;
-    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_tip));
-    CBlockIndex* fork_tip{nullptr};
-    for (int i = 0; i < 2; ++i) {
-        const CBlock block{CreateAndProcessBlock({}, script)};
-        LOCK(::cs_main);
-        fork_tip = chainman.m_blockman.LookupBlockIndex(block.GetHash());
-    }
-    BOOST_REQUIRE(fork_tip != nullptr);
-    BOOST_REQUIRE_EQUAL(fork_tip->nHeight, original_height + 1);
+    // The live tower: heavier unattested headers that fork below the
+    // attested tip and never get bodies. The tip stays where it is.
+    const CBlock header_template{CreateBlock({}, script, chainstate)};
+    const auto index_child_header{[&](const CBlockIndex* parent) {
+        CBlockHeader header{header_template.GetBlockHeader()};
+        header.hashPrevBlock = parent->GetBlockHash();
+        header.nTime = parent->nTime + 2;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            header, parent->nHeight + 1, chainman.GetConsensus(), 5'000'000,
+            parent->GetMedianTimePast()));
+        BlockValidationState header_state;
+        const CBlockIndex* index{nullptr};
+        BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+            {{header}}, /*min_pow_checked=*/true, header_state, &index));
+        BOOST_REQUIRE(index != nullptr);
+        return const_cast<CBlockIndex*>(index);
+    }};
+    CBlockIndex* const tower_base{index_child_header(original_tip->pprev)};
+    CBlockIndex* const fork_tip{index_child_header(tower_base)};
     {
         LOCK(::cs_main);
-        chainstate.ResetBlockFailureFlags(original_tip);
-        BOOST_REQUIRE(original_tip->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE_EQUAL(tower_base->nHeight, original_height);
+        BOOST_REQUIRE_EQUAL(fork_tip->nHeight, original_height + 1);
+        BOOST_REQUIRE(!(fork_tip->nStatus & BLOCK_HAVE_DATA));
         BOOST_REQUIRE(fork_tip->nChainWork > original_tip->nChainWork);
     }
 
@@ -3551,11 +3561,12 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_progress_child_when_best_header_is_com
         std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
         std::chrono::milliseconds{50}, error));
     BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    // A is the connected tip when it is signed, as on a live signer.
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       original_hash, original_height) ==
                   matmul::trusted::AddResult::Accepted);
 
-    state = BlockValidationState{};
+    BlockValidationState state;
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) ==
                   original_tip);
@@ -3580,18 +3591,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_progress_child_when_best_header_is_com
             original_tip, ours_index));
         const CBlockIndex* most_work{chainstate.FindMostWorkChainForTest()};
         BOOST_REQUIRE(most_work != nullptr);
-        // Gold standard: consensus FMWC is most authenticated work, not the
-        // pin. A heavier unattested HAVE_DATA fork may win here; trusted
-        // mirrors still skip that tower. The 190376 stall was GETDATA
-        // follow (IndexIsFollowedTipChild vs IndexIsAttestedChainTipChild),
-        // not pin-steered FindMostWorkChain.
-        BOOST_CHECK(most_work == fork_tip || most_work == original_tip ||
-                    most_work == ours_index);
+        // The tower has no bodies, so it cannot win FindMostWorkChain. The
+        // 190376 stall was GETDATA follow (IndexIsFollowedTipChild vs
+        // IndexIsAttestedChainTipChild), not pin-steered FindMostWorkChain.
+        BOOST_CHECK(most_work == original_tip);
         BOOST_CHECK(chainman.FindUniqueCompetingAttestedIndex() == nullptr);
-        BOOST_REQUIRE(fork_tip->pprev != nullptr);
         BOOST_CHECK_EQUAL(
             node::matmul_trusted::SignAuthoritative(
-                fork_tip->pprev->GetBlockHash(), original_height),
+                tower_base->GetBlockHash(), original_height),
             matmul::trusted::AddResult::HeightOccupied);
     }
     chainman.CheckBlockIndex();
