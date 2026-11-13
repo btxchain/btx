@@ -435,7 +435,11 @@ static RPCHelpMan getmodel()
 
 static RPCHelpMan listmodels()
 {
-    return ProxyOrLocal("listmodels", "List locally known models. Remote coverage is always incomplete.\n", {});
+    return ProxyOrLocal("listmodels", "List locally known models. Remote coverage is always incomplete.\n",
+                        {{"filter", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "list only models with these states", {
+                            {"pinned", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "pinned state"},
+                            {"seeded", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "seeded state"},
+                        }}});
 }
 
 static RPCHelpMan searchmodels()
@@ -744,7 +748,11 @@ static RPCHelpMan getmodelsharecard()
 
 static RPCHelpMan getmodeltransfers()
 {
-    return ProxyOrLocal("getmodeltransfers", "Local torrent-style transfer list: state, ratio, seeded, pinned.\n", {});
+    return ProxyOrLocal("getmodeltransfers", "Local torrent-style transfer list: state, ratio, seeded, pinned.\n",
+                        {{"filter", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "list only models with these states", {
+                            {"pinned", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "pinned state"},
+                            {"seeded", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "seeded state"},
+                        }}});
 }
 
 static RPCHelpMan setmodelalias()
@@ -991,12 +999,17 @@ static RPCHelpMan getmodelrelease()
 
 static RPCHelpMan claimmodelrelease()
 {
-    return ProxyOrLocal("claimmodelrelease", "Local campaign pointer; monetary claim is buildmodelhtlcclaim (0.34.6 htlc_sha256).\n", {});
+    return ProxyOrLocal("claimmodelrelease", "Local campaign pointer; monetary claim is buildmodelhtlcclaim (0.34.6 htlc_sha256).\n",
+                        {
+                            {"release_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "release id or model id (digest48 hex)"},
+                            {"secret32_hex", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "32-byte release secret hex; must match the campaign key_hash"},
+                        });
 }
 
 static RPCHelpMan refundmodelrelease()
 {
-    return ProxyOrLocal("refundmodelrelease", "Local campaign pointer; monetary refund is buildmodelhtlcrefund (0.34.6 htlc_sha256). HASH160 htlc_tx is recovery-only.\n", {});
+    return ProxyOrLocal("refundmodelrelease", "Local campaign pointer; monetary refund is buildmodelhtlcrefund (0.34.6 htlc_sha256). HASH160 htlc_tx is recovery-only.\n",
+                        {{"release_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "release id or model id (digest48 hex)"}});
 }
 
 static RPCHelpMan decoderesourceuri()
