@@ -168,7 +168,7 @@ bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err);
 /** SO_PEERCRED uid matches this process. Platforms without SO_PEERCRED return true. */
 bool UnixConnectedPeerIsSelf(int fd, std::string& err);
 
-bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err);
+bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err, std::atomic<bool>* stop = nullptr, int reply_timeout_ms = 0, bool check_peer = false, int64_t expected_peer_pid = 0);
 
 /** True when `err` is a helper application refusal (`{"code","message"}`).
  *  Transport failures (connect, write, non-JSON reply) return false. */
