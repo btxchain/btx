@@ -66,6 +66,22 @@ Individual tests can be run by directly calling the test script, e.g.:
 test/lint/lint-files.py
 ```
 
+POSIX portability
+=================
+
+`lint-posix-portability.py` checks new direct POSIX includes and calls, and
+explicit `long` stdio offsets in tracked C and C++ sources. It checks whether
+preprocessor guards exclude both MSVC-compatible and MinGW builds. The check
+does not expand macros or infer which files CMake builds for a given target.
+
+Set `COMMIT_RANGE=BASE..TIP` in CI, or use `--range BASE..TIP` locally.
+Without a range the check uses `HEAD^..HEAD`. It compares findings across
+the two committed trees, including when a guard changes on a different
+line from the call. Run with `--all` from a full checkout to inspect all
+sites, including those already present on the base.
+
+Run the controls with `python3 test/lint/test_posix_portability.py`.
+
 check-doc.py
 ============
 Check for missing documentation of command line options.
