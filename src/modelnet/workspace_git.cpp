@@ -6,7 +6,7 @@
 
 #include <modelnet/git_snapshot.h>
 
-#include <fstream>
+#include <util/readwritefile.h>
 #include <sstream>
 #include <system_error>
 #include <utility>
@@ -69,16 +69,10 @@ bool WorkspaceGit::Materialize(const fs::path& tree, const std::string& path,
         err = "BTX035_WORKSPACE";
         return false;
     }
-    std::ofstream out(dest, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        err = "BTX035_WORKSPACE";
-        return false;
-    }
-    if (!bytes.empty()) {
-        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    }
-    out.close();
-    if (!out) {
+    const std::string_view contents = bytes.empty()
+        ? std::string_view{}
+        : std::string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+    if (!WriteBinaryFileAtomically(dest, contents)) {
         err = "BTX035_WORKSPACE";
         return false;
     }
@@ -99,13 +93,8 @@ bool WorkspaceGit::Write(const std::string& name, uint64_t generation, const std
         err = "BTX035_GENERATION";
         return false;
     }
-    if (!m_book.Put(name, generation, path, bytes, err)) return false;
-    std::vector<unsigned char> stored;
-    if (!m_book.Read(name, path, stored)) {
-        err = "BTX035_WORKSPACE";
-        return false;
-    }
-    return Materialize(m_root / name.c_str(), path, stored, err);
+    if (!Materialize(m_root / name.c_str(), path, bytes, err)) return false;
+    return m_book.Put(name, generation, path, bytes, err);
 }
 
 bool WorkspaceGit::Publish(const std::string& name, uint64_t generation, std::string& err)

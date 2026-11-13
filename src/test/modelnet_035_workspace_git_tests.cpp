@@ -126,4 +126,27 @@ BOOST_AUTO_TEST_CASE(workspace_git_writes_current_generation_and_omits_private_n
     fs::remove(outside, ec);
 }
 
+BOOST_AUTO_TEST_CASE(workspace_git_failed_materialization_keeps_book)
+{
+    TempTree tmp{m_path_root / "workspace-failed-write"};
+    modelnet::WorkspaceGit workspace(tmp.path);
+    std::string err;
+    BOOST_REQUIRE(workspace.Create("alpha", err));
+    BOOST_REQUIRE(workspace.Write("alpha", 1, "existing.txt", Bytes("old"), err));
+    const std::string before = workspace.ExportPublic("alpha");
+    const fs::path occupied = tmp.path / "alpha" / "occupied";
+    BOOST_REQUIRE(fs::create_directory(occupied));
+
+    BOOST_CHECK(!workspace.Write("alpha", 1, "occupied", Bytes("new"), err));
+    BOOST_CHECK_EQUAL(err, "BTX035_WORKSPACE");
+    BOOST_CHECK(fs::is_directory(occupied));
+    BOOST_CHECK_EQUAL(workspace.ExportPublic("alpha"), before);
+    BOOST_CHECK_EQUAL(ReadFile(tmp.path / "alpha" / "existing.txt"), "old");
+
+    BOOST_REQUIRE(fs::remove(occupied));
+    BOOST_REQUIRE(workspace.Write("alpha", 1, "occupied", Bytes("new"), err));
+    BOOST_CHECK_EQUAL(ReadFile(occupied), "new");
+    BOOST_CHECK_NE(workspace.ExportPublic("alpha"), before);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
