@@ -683,6 +683,52 @@ BOOST_AUTO_TEST_CASE(retrieve_jobs_persist_reload_without_worker)
     BOOST_CHECK_EQUAL(listed["jobs"][0]["model_id"].get_str(), mid);
 }
 
+// getpublisher reported model_count_observed 1 for a publisher with three models,
+// and answered an unknown id with the whole publisher list and success.
+BOOST_AUTO_TEST_CASE(getpublisher_counts_all_models_and_refuses_unknown_ids)
+{
+    const fs::path root = m_path_root / "first-run-getpublisher";
+    modelnet::ModelCatalog cat{root, 8 << 20};
+    for (int i = 0; i < 3; ++i) {
+        const fs::path dir = root / fs::PathFromString("m" + std::to_string(i));
+        fs::create_directories(dir);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(dir / "toy.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue hp(UniValue::VARR);
+        hp.push_back(fs::PathToString(dir));
+        const UniValue hosted = Dispatch(cat, Rpc("hostmodel", hp));
+        UniValue ap(UniValue::VARR);
+        ap.push_back(hosted["uri"].get_str());
+        ap.push_back("publisher-alias-" + std::to_string(i));
+        Dispatch(cat, Rpc("setmodelalias", ap));
+    }
+    const UniValue pubs = Dispatch(cat, Rpc("searchpublishers"));
+    BOOST_REQUIRE(pubs["publishers"].isArray());
+    BOOST_REQUIRE_EQUAL(pubs["publishers"].size(), 1U);
+    const std::string pid = pubs["publishers"][0]["id"].get_str();
+    BOOST_REQUIRE_EQUAL(pubs["publishers"][0]["model_count_observed"].getInt<int>(), 3);
+
+    UniValue gp(UniValue::VARR);
+    gp.push_back(pid);
+    const UniValue one = Dispatch(cat, Rpc("getpublisher", gp));
+    BOOST_CHECK_EQUAL(one["id"].get_str(), pid);
+    BOOST_CHECK_EQUAL(one["model_count_observed"].getInt<int>(), 3);
+
+    UniValue unknown(UniValue::VARR);
+    unknown.push_back(std::string(96, 'a'));
+    UniValue result;
+    std::string code, err;
+    BOOST_CHECK_MESSAGE(!modelnet::DispatchHelperRpc(cat, Rpc("getpublisher", unknown), result, code, err),
+                        "getpublisher answered an unknown id: " << result.write());
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
+}
+
 BOOST_AUTO_TEST_CASE(retrieve_jobs_reload_progress_index_not_wrapped)
 {
     const fs::path tmp = m_path_root / "first-run-retrieve-progress-range";
