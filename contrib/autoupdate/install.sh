@@ -1177,8 +1177,25 @@ if raw_argv is not None:
                 if packaged is not None:
                     tokens = tokens[3:]
 else:
-    cmd = subprocess.check_output(["ps", "-ww", "-o", "command=", "-p", pid], text=True).strip()
-    tokens = shlex.split(cmd)
+    if sys.platform == "darwin":
+        import ctypes
+
+        proc_pidpath = ctypes.CDLL("/usr/lib/libproc.dylib").proc_pidpath
+        proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+        proc_pidpath.restype = ctypes.c_int
+        path = ctypes.create_string_buffer(4096)
+        if proc_pidpath(int(pid), path, len(path)) > 0:
+            executable = Path(os.fsdecode(path.value))
+            if executable.name == "btxd.real" and executable.parent.name == "libexec":
+                launcher = executable.parent.parent / "bin" / "btxd"
+                if launcher.is_file() and os.access(executable, os.X_OK):
+                    packaged = executable
+    if mode != "--packaged-executable":
+        cmd = subprocess.check_output(["ps", "-ww", "-o", "command=", "-p", pid], text=True).strip()
+        if packaged is not None and cmd.startswith(str(packaged) + " "):
+            tokens = [str(packaged), *shlex.split(cmd[len(str(packaged)):])]
+        else:
+            tokens = shlex.split(cmd)
 
 if mode == "--packaged-executable":
     if packaged is None:
@@ -1474,7 +1491,7 @@ prepare_release_activation() {
   local previous=""
   if [[ -d "$target_root/current" ]]; then
     previous=$(cd -- "$target_root/current" && pwd -P) || return 1
-    if [[ -x "$previous/bin/btxd" && -x "$previous/bin/btx-cli" ]]; then
+    if check_binaries "$previous/bin" >/dev/null; then
       prepare_release_dispatch "$previous" || return 1
     elif [[ "$require_previous" == 1 ]]; then
       return 1
