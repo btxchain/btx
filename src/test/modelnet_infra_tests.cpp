@@ -446,6 +446,39 @@ BOOST_AUTO_TEST_CASE(infra_12_profile_restart_persist)
     BOOST_CHECK(!p2.preserve_rare);
 }
 
+#ifdef _WIN32
+BOOST_AUTO_TEST_CASE(profile_refuses_invalid_windows_path)
+{
+    using namespace modelnet;
+    const auto path = m_path_root / "invalid<profile>.json";
+    const auto policy = ResolveProfile(OperatorProfile::PERSONAL, {});
+    std::string err;
+    BOOST_CHECK(!SaveOperatorProfile(path, OperatorProfile::PERSONAL, policy, err));
+    BOOST_CHECK_MESSAGE(err.find("cannot inspect operator profile path: ") == 0, err);
+}
+#endif
+
+#ifndef __MINGW64__
+BOOST_AUTO_TEST_CASE(profile_refuses_destination_and_temporary_symlinks)
+{
+    using namespace modelnet;
+    const auto target = m_path_root / "profile-link-target";
+    fs::create_directory(target);
+    const auto path = OperatorProfilePath(m_path_root);
+    const auto temporary = m_path_root / "operator_profile.json.tmp";
+    const auto policy = ResolveProfile(OperatorProfile::PERSONAL, {});
+    for (const auto& link : {path, temporary}) {
+        fs::create_directory_symlink(target, link);
+        std::string err;
+        BOOST_CHECK(!SaveOperatorProfile(path, OperatorProfile::PERSONAL, policy, err));
+        BOOST_CHECK_EQUAL(err, "operator profile paths must not be symbolic links");
+        BOOST_CHECK(fs::is_empty(target));
+        BOOST_REQUIRE(fs::remove(link));
+    }
+    BOOST_CHECK(!fs::exists(path));
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(operator_rpc_overrides_reach_resolved_policy)
 {
     using namespace modelnet;
