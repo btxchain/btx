@@ -1,0 +1,824 @@
+{
+  "version": 2,
+  "methods": [
+    {
+      "live_execution": "qualification_required",
+      "name": "getswapnetworkinfo",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "listswapassets",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "listswapproviders",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "buy": {
+            "anyOf": [
+              {
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sell": {
+            "anyOf": [
+              {
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "searchswaps",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "buy": {
+            "anyOf": [
+              {
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sell": {
+            "anyOf": [
+              {
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "requestswapquote",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "buy_asset": {
+            "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+            "type": "string"
+          },
+          "nonce": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "sell_asset": {
+            "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+            "type": "string"
+          },
+          "sell_atoms": {
+            "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+            "pattern": "^(0|[1-9][0-9]{0,77})$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sell_asset",
+          "buy_asset",
+          "sell_atoms"
+        ],
+        "type": "object"
+      },
+      "scope": "quote",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "getswapquotes",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "acceptswapquote",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "mandate_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "max_local_fee_atoms": {
+            "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+            "pattern": "^(0|[1-9][0-9]{0,77})$",
+            "type": "string"
+          },
+          "quote_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "refund_fee_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,77})$"
+          },
+          "claim_fee_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,77})$"
+          }
+        },
+        "required": [
+          "quote_id",
+          "mandate_id",
+          "max_local_fee_atoms"
+        ],
+        "type": "object"
+      },
+      "scope": "trade",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "listswaps",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "getswap",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "swap_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "swap_id"
+        ],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "cancelswap",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "swap_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "swap_id"
+        ],
+        "type": "object"
+      },
+      "scope": "trade",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "getswaptranscript",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "swap_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "swap_id"
+        ],
+        "type": "object"
+      },
+      "scope": "audit",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "listswapmandates",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "createswapmandate",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "mandate": {
+            "additionalProperties": false,
+            "properties": {
+              "asset": {
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+                "type": "string"
+              },
+              "expires_at": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "max_fee_atoms": {
+                "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+                "pattern": "^(0|[1-9][0-9]{0,77})$",
+                "type": "string"
+              },
+              "max_total_atoms": {
+                "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+                "pattern": "^(0|[1-9][0-9]{0,77})$",
+                "type": "string"
+              },
+              "max_trade_atoms": {
+                "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+                "pattern": "^(0|[1-9][0-9]{0,77})$",
+                "type": "string"
+              },
+              "nonce": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "principal": {
+                "maxLength": 16384,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "principal",
+              "asset",
+              "max_total_atoms",
+              "max_trade_atoms",
+              "max_fee_atoms",
+              "expires_at",
+              "nonce"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "mandate"
+        ],
+        "type": "object"
+      },
+      "scope": "owner",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "revokeswapmandate",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "mandate_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mandate_id"
+        ],
+        "type": "object"
+      },
+      "scope": "owner",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "getswapcapabilities",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "resumeswap",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "swap_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "swap_id"
+        ],
+        "type": "object"
+      },
+      "scope": "trade",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "refundswap",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "swap_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "swap_id"
+        ],
+        "type": "object"
+      },
+      "scope": "trade",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "listswapoperations",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "swap_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "swap_id"
+        ],
+        "type": "object"
+      },
+      "scope": "audit",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "getswaphealth",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "publishswapprovider",
+      "native_registration": "source_provided",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "scope": "maker",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "withdrawswapprovider",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "scope": "maker",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "getswapbootstrapinfo",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "live_execution": "qualification_required",
+      "name": "getswaprecoveryinfo",
+      "native_registration": "source_provided",
+      "params": {
+        "additionalProperties": false,
+        "properties": {
+          "swap_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "swap_id"
+        ],
+        "type": "object"
+      },
+      "scope": "read",
+      "handler": "native_embedded_application"
+    },
+    {
+      "name": "setswapmarket",
+      "scope": "owner",
+      "params": {
+        "type": "object",
+        "properties": {
+          "market": {
+            "type": "object",
+            "properties": {
+              "sell_asset": {
+                "type": "string",
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$"
+              },
+              "buy_asset": {
+                "type": "string",
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$"
+              },
+              "numerator": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,77})$"
+              },
+              "denominator": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,77})$"
+              },
+              "maker_fee_atoms": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,77})$"
+              },
+              "max_receive_network_fee_atoms": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,77})$"
+              },
+              "max_input_atoms": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,77})$"
+              },
+              "expires_at": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "sell_asset",
+              "buy_asset",
+              "numerator",
+              "denominator",
+              "maker_fee_atoms",
+              "max_receive_network_fee_atoms",
+              "max_input_atoms",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          },
+          "mandate_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "max_local_fee_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,77})$"
+          },
+          "refund_fee_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,77})$"
+          },
+          "claim_fee_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,77})$"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "market",
+          "mandate_id",
+          "max_local_fee_atoms",
+          "refund_fee_atoms",
+          "claim_fee_atoms"
+        ],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "listswapmarkets",
+      "scope": "read",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "getswapwalletinfo",
+      "scope": "read",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "setswapassetpolicy",
+      "scope": "owner",
+      "params": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "type": "object",
+            "properties": {
+              "asset": {
+                "type": "string",
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$"
+              },
+              "rpc_url": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "cookie_path": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "wallet": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "fee_rate": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+              },
+              "confirmations": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "contract": {
+                "type": "string",
+                "pattern": "^0x[0-9a-fA-F]{40}$"
+              },
+              "runtime_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "asset",
+              "rpc_url"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "policy"
+        ],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "listswapassetpolicies",
+      "scope": "read",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "getswaprouteinfo",
+      "scope": "read",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "exportswaprecovery",
+      "scope": "owner",
+      "params": {
+        "type": "object",
+        "properties": {
+          "passphrase": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "passphrase"
+        ],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "bumpswapfee",
+      "scope": "trade",
+      "params": {
+        "type": "object",
+        "properties": {
+          "swap_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "kind": {
+            "enum": [
+              "claim",
+              "refund"
+            ]
+          },
+          "new_fee_atoms": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]{0,77})$"
+          }
+        },
+        "required": [
+          "swap_id",
+          "kind",
+          "new_fee_atoms"
+        ],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "getswapevents",
+      "scope": "audit",
+      "params": {
+        "type": "object",
+        "properties": {
+          "after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    },
+    {
+      "name": "getswapvalidationinfo",
+      "scope": "read",
+      "params": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "handler": "native_embedded_application",
+      "native_registration": "source_provided",
+      "live_execution": "qualification_required"
+    }
+  ],
+  "authentication": "out-of-band native JSONRPCRequest principal; never JSON authority flags"
+}

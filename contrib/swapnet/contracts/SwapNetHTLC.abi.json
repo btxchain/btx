@@ -1,0 +1,387 @@
+[
+  {
+    "type": "function",
+    "name": "lockNative",
+    "stateMutability": "payable",
+    "inputs": [
+      {
+        "name": "salt",
+        "type": "bytes32"
+      },
+      {
+        "name": "hashlock",
+        "type": "bytes32"
+      },
+      {
+        "name": "claimTo",
+        "type": "address"
+      },
+      {
+        "name": "refundAt",
+        "type": "uint64"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "id",
+        "type": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "lockToken",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "salt",
+        "type": "bytes32"
+      },
+      {
+        "name": "hashlock",
+        "type": "bytes32"
+      },
+      {
+        "name": "claimTo",
+        "type": "address"
+      },
+      {
+        "name": "refundAt",
+        "type": "uint64"
+      },
+      {
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "id",
+        "type": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "computeId",
+    "stateMutability": "view",
+    "inputs": [
+      {
+        "name": "funder",
+        "type": "address"
+      },
+      {
+        "name": "salt",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "claim",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32"
+      },
+      {
+        "name": "preimage",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "refund",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "withdrawTo",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "name": "to",
+        "type": "address"
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "withdrawAmount",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "credits",
+    "stateMutability": "view",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address"
+      },
+      {
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "getSwap",
+    "stateMutability": "view",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32"
+      },
+      {
+        "name": "",
+        "type": "address"
+      },
+      {
+        "name": "",
+        "type": "address"
+      },
+      {
+        "name": "",
+        "type": "address"
+      },
+      {
+        "name": "",
+        "type": "uint256"
+      },
+      {
+        "name": "",
+        "type": "uint64"
+      },
+      {
+        "name": "",
+        "type": "uint8"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "MIN_LOCK",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "MAX_LOCK",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Reentrant",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidTerms",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "AlreadyExists",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotLocked",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidPreimage",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TooLate",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TooEarly",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "TransferFailed",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "UnsupportedToken",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NoCredit",
+    "inputs": []
+  },
+  {
+    "type": "event",
+    "name": "Locked",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "hashlock",
+        "type": "bytes32",
+        "indexed": false
+      },
+      {
+        "name": "refundTo",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "claimTo",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "refundAt",
+        "type": "uint64",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Claimed",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "preimage",
+        "type": "bytes32",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Refunded",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "indexed": true
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Withdrawn",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  }
+]

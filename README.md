@@ -2166,3 +2166,11 @@ Released under the [MIT License](COPYING).
 
 Copyright (c) 2009-2025 The Bitcoin Core developers
 Copyright (c) 2026 The BTX developers
+
+<!-- SWAPNET-INTEGRATION-BEGIN -->
+## SwapNet: native peer-to-peer asset exchange
+
+SwapNet discovers signed swap providers over existing BTX peers and coordinates bilateral SHA-256 HTLC exchanges using separate native and external-chain wallets. Enable it with `-swapnet=1`. No separate SwapNet daemon or hosted exchange account is required. Spending requires explicit owner-issued budget mandates and exact signed terms.
+
+Start with `btx-cli getswapnetworkinfo`, `getswapbootstrapinfo`, and `listswapassets`. Read [the specification](doc/swapnet/SPECIFICATION.md), [operations](doc/swapnet/OPERATIONS.md), [RPC reference](doc/swapnet/RPC.md), and [release qualification](doc/swapnet/TESTING_AND_RELEASE.md) before authorizing funds. Provider advertisements do not certify reserves. A local source build is not automatically a mainnet-qualified release.
+<!-- SWAPNET-INTEGRATION-END -->

@@ -151,6 +151,8 @@
 #endif
 
 #include <boost/signals2/signal.hpp>
+#include <swapnet/node.h>
+#include <swapnet/wallet_bridge.h>
 
 #ifdef ENABLE_ZMQ
 #include <zmq/zmqabstractnotifier.h>
@@ -362,6 +364,9 @@ void Interrupt(NodeContext& node)
 
 void Shutdown(NodeContext& node)
 {
+    // SWAPNET-STOP-BEFORE-WALLET
+    swapnet::StopNode();
+
     static Mutex g_shutdown_mutex;
     TRY_LOCK(g_shutdown_mutex, lock_shutdown);
     if (!lock_shutdown) return;
@@ -611,6 +616,9 @@ static constexpr std::string_view BIP14_EXAMPLE_UA{"/Name:Version/Name:Version/.
 
 void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
 {
+    // SWAPNET-ARGUMENTS
+    swapnet::SetupArgs(argsman);
+
     SetupHelpOptions(argsman);
     argsman.AddArg("-help-debug", "Print help message with debugging options and exit", ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST); // server-only for now
 
@@ -4384,12 +4392,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     // ********************************************************* Step 13: finished
 
-    // At this point, the RPC is "started", but still in warmup, which means it
-    // cannot yet be called. Before we make it callable, we need to make sure
-    // that the RPC's view of the best block is valid and consistent with
-    // ChainstateManager's active tip.
-    SetRPCWarmupFinished();
-
+    // The best block is consistent with ChainstateManager here. RPC stays in
+    // warmup until SwapNet startup below finishes, so callers do not observe a
+    // node whose discovery runtime is still loading.
     uiInterface.InitMessage(_("Done loading"));
 
     if (g_software_expiry) {
@@ -4631,6 +4636,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 #endif
 
+    // SWAPNET-START-AFTER-WALLET
+#ifdef SWAPNET_WITH_WALLET
+    swapnet::InstallWalletBridge();
+#endif
+    // SwapNet is off unless -swapnet is set. An explicit enable that fails to
+    // start stops the node; StartNode has already logged the reason.
+    if (!swapnet::StartNode(node)) return false;
+    SetRPCWarmupFinished();
     return true;
 }
 

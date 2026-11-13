@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "body": {
+      "additionalProperties": false,
+      "properties": {
+        "expires_at": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "identity": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "issued_at": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "pairs": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "buy": {
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+                "type": "string"
+              },
+              "sell": {
+                "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "sell",
+              "buy"
+            ],
+            "type": "object"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "settlement": {
+          "const": [
+            "sha256-htlc-v1"
+          ]
+        },
+        "version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "version",
+        "network",
+        "identity",
+        "sequence",
+        "issued_at",
+        "expires_at",
+        "pairs",
+        "settlement"
+      ],
+      "type": "object"
+    },
+    "signature": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "body",
+    "signature"
+  ],
+  "title": "SwapNet provider",
+  "type": "object"
+}

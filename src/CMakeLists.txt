@@ -2435,3 +2435,6 @@ endif()
 if(BUILD_FUZZ_BINARY)
   add_subdirectory(test/fuzz)
 endif()
+
+# SWAPNET-CMAKE
+include(${PROJECT_SOURCE_DIR}/cmake/SwapNet.cmake)

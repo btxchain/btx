@@ -94,6 +94,7 @@
 #include <vector>
 #include <typeinfo>
 #include <utility>
+#include <swapnet/node.h>
 
 using namespace util::hex_literals;
 
@@ -8160,6 +8161,9 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
+    // SWAPNET-DISCONNECT
+    swapnet::PeerClosed(node.GetId());
+
     if (const auto chunk_hash{DropInboundBlockChunks(node.GetId())}) {
         LogDebug(BCLog::NET,
                  "Dropped incomplete chunked block %s on peer=%d disconnect\n",
@@ -17820,6 +17824,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                      const std::chrono::microseconds time_received,
                                      const std::atomic<bool>& interruptMsgProc)
 {
+    // SWAPNET-RECEIVE
+    if (swapnet::Transport::KnownCommand(msg_type)) {
+        if (pfrom.fSuccessfullyConnected && vRecv.size() <= swapnet::Transport::MAX_FRAME) {
+            swapnet::PeerReady(pfrom.GetId());
+            swapnet::Receive(pfrom.GetId(), msg_type,
+                std::string(reinterpret_cast<const char*>(vRecv.data()), vRecv.size()));
+        }
+        return;
+    }
+
     AssertLockHeld(g_msgproc_mutex);
 
     LogDebug(BCLog::NET, "received: %s (%u bytes) peer=%d\n", SanitizeString(msg_type), vRecv.size(), pfrom.GetId());
@@ -23817,6 +23831,17 @@ bool PeerManagerImpl::SetupAddressRelay(const CNode& node, Peer& peer)
 
 bool PeerManagerImpl::SendMessages(CNode* pto)
 {
+    // SWAPNET-SEND
+    if (pto->fSuccessfullyConnected) {
+        swapnet::PeerReady(pto->GetId());
+        for (auto& frame : swapnet::Drain(pto->GetId())) {
+            CSerializedNetMsg msg;
+            msg.m_type = frame.command;
+            msg.data.assign(frame.payload.begin(), frame.payload.end());
+            m_connman.PushMessage(pto, std::move(msg));
+        }
+    }
+
     // Note: MaybeRotateEpoch() is called from the scheduler every MONITOR_INTERVAL;
     // no need to call it here on every SendMessages() invocation.
     AssertLockNotHeld(m_tx_download_mutex);
