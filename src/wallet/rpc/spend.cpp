@@ -1057,10 +1057,12 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
         throw JSONRPCError(RPC_INVALID_PARAMETER, "TX must have at least one output");
 
     LOCK(wallet.cs_wallet);
-    auto txr = FundTransaction(wallet, tx, recipients, change_position, lockUnspents, coinControl);
+    bool inputs_failed{false};
+    auto txr = FundTransaction(wallet, tx, recipients, change_position, lockUnspents, coinControl, &inputs_failed);
     if (!txr) {
-        // The failure says nothing about the coins the lock hid: ask for the unlock instead.
-        if (LockedWalletLeftOutOwnCoins(wallet, coinControl)) EnsureWalletIsUnlocked(wallet);
+        // Only a failure to fetch, select or size the inputs can come from the
+        // coins the lock hid: ask for the unlock then, and keep any other error.
+        if (inputs_failed && LockedWalletLeftOutOwnCoins(wallet, coinControl)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, ErrorString(txr).original);
     }
     return *txr;
