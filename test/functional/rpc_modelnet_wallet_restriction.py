@@ -289,6 +289,87 @@ class ModelnetWalletRestrictionTest(BitcoinTestFramework):
             assert_equal((refund_height, card.get("refund_status")), (refund_height, status))
         self.helper.refund_height = None
 
+        self.test_server_path_methods()
+
+    def server_path_calls(self, p):
+        """One call per model RPC whose request names a server path.
+
+        The params only have to pass btxd's own argument check; the stub
+        helper answers every one of them with {}."""
+        pkg = {"path": p}
+        return [
+            ("importmodel", [p]),
+            ("hostmodel", [p]),
+            ("previewmodelimport", [p]),
+            ("exportmodellink", ["ab" * 48, p]),
+            ("qualifymodel", [p]),
+            ("scanmodelwatch", [p]),
+            ("executemodelimport", [{"source": {"kind": "LOCAL", "locator": p, "snapshot_token": "t"}, "idempotency_key": "k"}]),
+            ("resumemodelimport", [{"plan_id": "x"}]),
+            ("createbtxpackage", [{"path": p, "idempotency_key": "k"}]),
+            ("exportbtxbundle", [{"path": p, "idempotency_key": "k"}]),
+            ("exportbtxpackage", [{"path": p, "idempotency_key": "k"}]),
+            ("inspectbtxpackage", [pkg]),
+            ("verifybtxpackage", [pkg]),
+            ("importbtxpackage", [pkg]),
+            ("getbtxpackagedocument", [pkg]),
+            ("planbtxacquisition", [{"path": p, "local_policy": {"destination": p}}]),
+            ("planbtxclientinstall", [pkg]),
+            ("planbtxruntime", [pkg]),
+            ("executebtxacquisition", [{"plan_id": "x", "verified_local_files": [{"path": "a", "sha384": "00" * 48, "source_path": p}]}]),
+            ("setcloudstorage", [{"endpoint": "https://s3.invalid", "bucket": "b", "credential_ref": p, "idempotency_key": "k"}]),
+            ("addmodelstorage", [{"endpoint": "https://s3.invalid", "bucket": "b", "credential_ref": p, "idempotency_key": "k"}]),
+            ("preparebountyevaluation", [{"artifact_dir": p}]),
+            ("runbountyevaluation", [{"plan_id": "x", "approval": True}]),
+            ("ensurebtxcapability", [{"typed_params": {"checkout_dir": p}}]),
+        ]
+
+    def test_server_path_methods(self):
+        node = self.nodes[0]
+        refused = "Method not available for wallet-restricted RPC users"
+        p = os.path.join(self.options.tmpdir, "no-such-dir", "target")
+        calls = self.server_path_calls(p)
+
+        def forwarded(start, method):
+            return [call for call in self.helper.requests[start:]
+                    if call[0] == method or (call[0] == "getrestrictedmodelview" and call[1] and call[1][0] == method)]
+
+        self.log.info("Model RPCs that name a server path refuse wallet-restricted users before the helper")
+        for method, params in calls:
+            for user in USERS:
+                before = len(self.helper.requests)
+                status, out = self.call_as(user, method, params)
+                assert_equal((method, user, status), (method, user, 404))
+                assert_equal(out["error"]["code"], -32601)
+                assert_equal(out["error"]["message"], refused)
+                assert_equal(forwarded(before, method), [])
+            before = len(self.helper.requests)
+            assert_equal(getattr(node, method)(*params), {})
+            assert_equal(len(forwarded(before, method)), 1)
+        assert not os.path.exists(p)
+
+        self.log.info("Model RPCs without a server path still reach the helper for restricted users")
+        for user in USERS:
+            before = len(self.helper.requests)
+            status, out = self.call_as(user, "listmodels")
+            assert_equal(status, 200)
+            assert_equal(len(forwarded(before, "listmodels")), 1)
+
+        self.log.info("Every model RPC with a path or dir argument is in the list")
+        listed = {method for method, _ in calls}
+        names, in_modelnet = [], False
+        for line in node.help().splitlines():
+            if line.startswith("=="):
+                in_modelnet = line.strip("= ").lower() == "modelnet"
+            elif in_modelnet and line.strip():
+                names.append(line.split()[0])
+        assert names
+        for name in names:
+            args = [line.split()[1] for line in node.help(name).splitlines()
+                    if line[:1].isdigit() and ". " in line and len(line.split()) > 1]
+            if set(args) & {"path", "dir"}:
+                assert name in listed, name
+
 
 
 if __name__ == "__main__":

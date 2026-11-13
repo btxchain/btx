@@ -167,6 +167,7 @@ wallet::FrozenFundingQuote QuoteFromRequest(const std::string& release_id, const
 }
 #endif
 
+// A method whose request names a server path belongs in modelnet::IsServerPathMethod.
 RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::vector<RPCArg> args)
 {
     return RPCHelpMan{
@@ -179,6 +180,9 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
         RPCExamples{HelpExampleCli(name, "")},
         [name](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
+            // A server path is outside any wallet: refuse it before the helper
+            // sees the request, like the wallet file RPCs.
+            if (modelnet::IsServerPathMethod(name)) EnsureNotWalletRestricted(request);
             UniValue params(UniValue::VARR);
             for (size_t i = 0; i < request.params.size(); ++i) params.push_back(request.params[i]);
             UniValue req(UniValue::VOBJ);
@@ -1863,6 +1867,7 @@ static RPCHelpMan buildmodelhtlcrefund()
                         });
 }
 
+// A method whose request names a server path belongs in modelnet::IsServerPathMethod.
 #define BOUNTY_PROXY(n, h) \
     static RPCHelpMan n() \
     { \
