@@ -20,7 +20,7 @@ from pathlib import Path
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import get_datadir_path
+from test_framework.util import assert_raises_rpc_error, get_datadir_path
 
 MATMUL_OFF_ARGS = [
     "-regtestmatmulbindingheight=2147483647",
@@ -810,9 +810,14 @@ class ModelNet0348OpsTest(BitcoinTestFramework):
             unseeded = self._rpc_or_skip(node.unseedmodel, uri)
             if isinstance(unseeded, dict):
                 self._zero_spend(unseeded, "unseedmodel")
-            seeded = self._rpc_or_skip(node.seedmodel, uri)
-            if isinstance(seeded, dict):
-                self._zero_spend(seeded, "seedmodel")
+            if isinstance(rel, dict):
+                # The release created above is still funding, so its plaintext
+                # is not downloadable and seedmodel refuses it (bca3ea11).
+                assert_raises_rpc_error(-8, "NOT_DOWNLOADABLE", node.seedmodel, uri)
+            else:
+                seeded = self._rpc_or_skip(node.seedmodel, uri)
+                if isinstance(seeded, dict):
+                    self._zero_spend(seeded, "seedmodel")
             jobs = self._rpc_or_skip(node.getmodeljob)
             if isinstance(jobs, dict):
                 self._zero_spend(jobs, "getmodeljob")
