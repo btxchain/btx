@@ -4442,18 +4442,21 @@ void LoadRetrieveJobs(ModelCatalog& cat)
         job->model_id = mid;
         job->modeldir = HelperDir(cat);
         job->automatic = j["automatic"].isTrue();
+        // A value that is not an integer of the field's type is treated as
+        // absent: ToIntegral does not throw, so one bad entry cannot stop the
+        // helper at startup or every helper RPC (this loader runs before each).
         if (j.exists("created_ms") && j["created_ms"].isNum()) {
-            job->created_ms = j["created_ms"].getInt<int64_t>();
+            if (const auto v{ToIntegral<int64_t>(j["created_ms"].getValStr())}) job->created_ms = *v;
         }
         {
             std::lock_guard<std::mutex> jlock(job->mu);
             job->status = "queued";
         }
         if (j.exists("bytes_committed") && j["bytes_committed"].isNum()) {
-            job->progress.bytes_committed.store(j["bytes_committed"].getInt<uint64_t>());
+            if (const auto v{ToIntegral<uint64_t>(j["bytes_committed"].getValStr())}) job->progress.bytes_committed.store(*v);
         }
         if (j.exists("pieces_committed") && j["pieces_committed"].isNum()) {
-            job->progress.pieces_committed.store(j["pieces_committed"].getInt<uint64_t>());
+            if (const auto v{ToIntegral<uint64_t>(j["pieces_committed"].getValStr())}) job->progress.pieces_committed.store(*v);
         }
         // Display-only progress. A value outside uint32 is treated as absent;
         // ToIntegral does not throw, so one bad entry cannot stop every helper RPC.

@@ -726,6 +726,63 @@ BOOST_AUTO_TEST_CASE(retrieve_jobs_reload_progress_index_not_wrapped)
     BOOST_CHECK_EQUAL(neg["piece_index"].getInt<int64_t>(), 7);
 }
 
+BOOST_AUTO_TEST_CASE(retrieve_jobs_reload_counters_do_not_throw)
+{
+    // created_ms, bytes_committed and pieces_committed were read with getInt,
+    // which throws on a negative, fractional or too large number. The loader
+    // runs when the helper starts and before every helper RPC.
+    const fs::path tmp = m_path_root / "first-run-retrieve-counters-range";
+    fs::create_directories(tmp);
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    UniValue too_big;
+    too_big.setNumStr("18446744073709551616"); // 2^64
+    UniValue jobs(UniValue::VARR);
+    auto add_job = [&](const std::string& id, const UniValue& created, const UniValue& bytes, const UniValue& pieces) {
+        UniValue job(UniValue::VOBJ);
+        job.pushKV("job_id", id);
+        job.pushKV("model_id", std::string(96, 'e'));
+        job.pushKV("status", "queued");
+        job.pushKV("created_ms", created);
+        job.pushKV("bytes_committed", bytes);
+        job.pushKV("pieces_committed", pieces);
+        jobs.push_back(job);
+    };
+    add_job("counters-neg", UniValue(int64_t{42}), UniValue(int64_t{-1}), UniValue(int64_t{5}));
+    UniValue frac;
+    frac.setNumStr("2.5");
+    add_job("counters-frac", frac, UniValue(int64_t{7}), frac);
+    add_job("counters-big", UniValue(int64_t{42}), too_big, UniValue(int64_t{3}));
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("schema_version", 1);
+    root.pushKV("jobs", jobs);
+    {
+        std::ofstream out(tmp / "retrieve_jobs.json");
+        out << root.write() << "\n";
+    }
+    // A job without a usable created_ms keeps the time it was loaded at.
+    const int64_t before_load_ms{std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count()};
+    auto job_of = [&](const std::string& id) {
+        UniValue p(UniValue::VARR);
+        p.push_back(id);
+        const UniValue listed = Dispatch(cat, Rpc("getmodeljob", p));
+        BOOST_REQUIRE(listed["jobs"].isArray());
+        BOOST_REQUIRE_EQUAL(listed["jobs"].size(), 1);
+        return listed["jobs"][0];
+    };
+    const UniValue neg = job_of("counters-neg");
+    BOOST_CHECK_EQUAL(neg["bytes_committed"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(neg["pieces_committed"].getInt<int64_t>(), 5);
+    BOOST_CHECK_EQUAL(neg["created_ms"].getInt<int64_t>(), 42);
+    const UniValue fr = job_of("counters-frac");
+    BOOST_CHECK_GE(fr["created_ms"].getInt<int64_t>(), before_load_ms);
+    BOOST_CHECK_EQUAL(fr["bytes_committed"].getInt<int64_t>(), 7);
+    BOOST_CHECK_EQUAL(fr["pieces_committed"].getInt<int64_t>(), 0);
+    const UniValue big = job_of("counters-big");
+    BOOST_CHECK_EQUAL(big["bytes_committed"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(big["pieces_committed"].getInt<int64_t>(), 3);
+}
+
 BOOST_AUTO_TEST_CASE(unix_rpc_timeout_is_short_except_long_methods)
 {
     BOOST_CHECK_EQUAL(modelnet::UnixRpcReplyTimeoutMs("getmodelnetworkinfo"), 120 * 1000);
