@@ -5899,6 +5899,7 @@ void EnsureCloudLoaded(ModelCatalog& cat)
     CloudStoreConfig cfg;
     if (!CloudConfigFromJson(stored, cfg, err)) return;
     cfg.budget_state_path = dir / "cloud-budget.json";
+    cfg.s3.fake_store_dir = dir;
     auto store = std::make_unique<S3PieceStore>(cfg);
     if (!store->Init(err)) {
         // Keep the reason for getcloudstorageinfo: a refused origin must not
@@ -6097,6 +6098,7 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
             return false;
         }
         cfg.budget_state_path = HelperDir(cat) / "cloud-budget.json";
+        cfg.s3.fake_store_dir = HelperDir(cat);
         std::string perr;
         const fs::path cloud_path = HelperDir(cat) / "cloud.json";
         if (!WriteJsonFile(cloud_path, CloudConfigPersistJson(cfg), perr)) {
