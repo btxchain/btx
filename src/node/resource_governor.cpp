@@ -155,6 +155,7 @@ void ResetGlobalResourceGovernorForTest()
 
 void ResourceGovernor::SetMode(GovernorMode m)
 {
+    LOCK(m_mutex);
     if (m_mode == m) return;
     m_mode = m;
     ++m_generation;
@@ -165,6 +166,7 @@ void ResourceGovernor::SetMode(GovernorMode m)
 
 void ResourceGovernor::SetPolicy(const GovernorPolicy& p)
 {
+    LOCK(m_mutex);
     GovernorPolicy n = p;
     n.idle_gpu_threshold = ClampInt(n.idle_gpu_threshold, 0, 90);
     n.pause_gpu_threshold = ClampInt(n.pause_gpu_threshold, n.idle_gpu_threshold + 1, 100);
@@ -182,11 +184,13 @@ void ResourceGovernor::SetPolicy(const GovernorPolicy& p)
 
 void ResourceGovernor::ResetPolicy()
 {
+    LOCK(m_mutex);
     SetPolicy(GovernorPolicy{});
 }
 
 void ResourceGovernor::SetMiningConsent(bool on)
 {
+    LOCK(m_mutex);
     if (m_mining_consent == on) return;
     m_mining_consent = on;
     ++m_generation;
@@ -196,6 +200,7 @@ void ResourceGovernor::SetMiningConsent(bool on)
 
 void ResourceGovernor::SetUnavailable(bool on)
 {
+    LOCK(m_mutex);
     if (m_unavailable == on) return;
     m_unavailable = on;
     ++m_generation;
@@ -206,6 +211,7 @@ void ResourceGovernor::SetUnavailable(bool on)
 
 void ResourceGovernor::BeginForegroundAiWork()
 {
+    LOCK(m_mutex);
     if (m_foreground_ai) return;
     m_foreground_ai = true;
     ++m_generation;
@@ -215,6 +221,7 @@ void ResourceGovernor::BeginForegroundAiWork()
 
 void ResourceGovernor::EndForegroundAiWork()
 {
+    LOCK(m_mutex);
     if (!m_foreground_ai) return;
     m_foreground_ai = false;
     ++m_generation;
@@ -224,6 +231,7 @@ void ResourceGovernor::EndForegroundAiWork()
 
 void ResourceGovernor::BeginValidationWork()
 {
+    LOCK(m_mutex);
     if (m_validation) return;
     m_validation = true;
     ++m_generation;
@@ -233,6 +241,7 @@ void ResourceGovernor::BeginValidationWork()
 
 void ResourceGovernor::EndValidationWork()
 {
+    LOCK(m_mutex);
     if (!m_validation) return;
     m_validation = false;
     ++m_generation;
@@ -242,6 +251,7 @@ void ResourceGovernor::EndValidationWork()
 
 void ResourceGovernor::SetUserRetrievalActive(bool on)
 {
+    LOCK(m_mutex);
     if (m_user_retrieval == on) return;
     m_user_retrieval = on;
     ++m_generation;
@@ -251,6 +261,7 @@ void ResourceGovernor::SetUserRetrievalActive(bool on)
 
 void ResourceGovernor::PauseBackground(int64_t now_ms, int64_t duration_ms)
 {
+    LOCK(m_mutex);
     m_user_pause = true;
     m_user_pause_until_ms = duration_ms > 0 ? now_ms + duration_ms : 0;
     ++m_generation;
@@ -261,6 +272,7 @@ void ResourceGovernor::PauseBackground(int64_t now_ms, int64_t duration_ms)
 
 void ResourceGovernor::ResumeBackground()
 {
+    LOCK(m_mutex);
     m_user_pause = false;
     m_user_pause_until_ms = 0;
     ++m_generation;
@@ -271,6 +283,7 @@ void ResourceGovernor::ResumeBackground()
 
 void ResourceGovernor::MaybeTransition(int64_t now_ms)
 {
+    AssertLockHeld(m_mutex);
     const GovernorPolicy& p = m_policy;
     const SystemSignals& s = m_sig;
     const PauseReason prev_mine = m_mining_reason;
@@ -467,6 +480,7 @@ void ResourceGovernor::MaybeTransition(int64_t now_ms)
 
 void ResourceGovernor::Observe(const SystemSignals& s, int64_t now_ms)
 {
+    LOCK(m_mutex);
     m_sig = s;
     m_have_sample = true;
     MaybeTransition(now_ms);
@@ -474,6 +488,7 @@ void ResourceGovernor::Observe(const SystemSignals& s, int64_t now_ms)
 
 BackgroundPermit ResourceGovernor::Permit(GovernorJob job) const
 {
+    LOCK(m_mutex);
     BackgroundPermit out;
     out.generation = m_generation;
     if (m_mode == GovernorMode::OFF) {
@@ -528,6 +543,7 @@ BackgroundPermit ResourceGovernor::Permit(GovernorJob job) const
 
 bool ResourceGovernor::MiningAllowed() const
 {
+    LOCK(m_mutex);
     // OFF denies mining (and all other governed work). It is not an ungoverned
     // mining mode and must stay false here.
     if (m_unavailable || m_mode == GovernorMode::OFF || !m_mining_consent) return false;
@@ -540,6 +556,7 @@ bool ResourceGovernor::MiningAllowed() const
 
 UniValue ResourceGovernor::InfoJson() const
 {
+    LOCK(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", 1);
     o.pushKV("mode", GovernorModeName(m_mode));
@@ -597,6 +614,7 @@ UniValue ResourceGovernor::InfoJson() const
 
 UniValue ResourceGovernor::PolicyJson() const
 {
+    LOCK(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("idle_gpu_threshold", m_policy.idle_gpu_threshold);
     o.pushKV("pause_gpu_threshold", m_policy.pause_gpu_threshold);
@@ -617,6 +635,7 @@ UniValue ResourceGovernor::PolicyJson() const
 
 UniValue ResourceGovernor::JobsJson() const
 {
+    LOCK(m_mutex);
     UniValue arr(UniValue::VARR);
     const GovernorJob jobs[] = {
         GovernorJob::MINING, GovernorJob::MODEL_SEED, GovernorJob::PRESERVATION,
@@ -638,6 +657,7 @@ UniValue ResourceGovernor::JobsJson() const
 
 UniValue ResourceGovernor::MiningInfoJson() const
 {
+    LOCK(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("enabled", m_mining_consent);
     o.pushKV("automatic", m_mode == GovernorMode::AUTO);
@@ -655,6 +675,7 @@ UniValue ResourceGovernor::MiningInfoJson() const
 
 UniValue ResourceGovernor::BandwidthJson() const
 {
+    LOCK(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("current_upload", m_sig.egress_bps);
     o.pushKV("current_download", m_sig.ingress_bps);
@@ -669,6 +690,7 @@ UniValue ResourceGovernor::BandwidthJson() const
 
 bool ResourceGovernor::ApplyPolicyJson(const UniValue& o, std::string& err)
 {
+    LOCK(m_mutex);
     if (!o.isObject()) {
         err = "policy must be an object";
         return false;
@@ -733,6 +755,7 @@ bool ResourceGovernor::ApplyPolicyJson(const UniValue& o, std::string& err)
 
 bool ResourceGovernor::WritePermitFile(const std::string& path) const
 {
+    LOCK(m_mutex);
     UniValue o(UniValue::VOBJ);
     const auto seed = Permit(GovernorJob::MODEL_SEED);
     const auto pres = Permit(GovernorJob::PRESERVATION);
