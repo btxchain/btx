@@ -23,7 +23,7 @@ class ModelnetGenerationWriteTest(BitcoinTestFramework):
 
     def skip_test_if_missing_module(self):
         if sys.platform != "linux" or shutil.which("cc") is None:
-            raise SkipTest("The close-fault fixture requires Linux and cc")
+            raise SkipTest("The generation fault fixture requires Linux and cc")
         self.helper = Path(self.config["environment"]["BUILDDIR"]) / "bin" / "btx-modeld"
         if not os.access(self.helper, os.X_OK):
             raise SkipTest("btx-modeld not found")
@@ -46,6 +46,8 @@ class ModelnetGenerationWriteTest(BitcoinTestFramework):
         return reply["result"]
 
     def run_test(self):
+        import resource
+
         root = Path(self.options.tmpdir).resolve()
         self.socket_path = root / "m.sock"
         scratch = root / "scratch"
@@ -85,12 +87,13 @@ class ModelnetGenerationWriteTest(BitcoinTestFramework):
                 request = {"plan_id": plan["plan_id"], "grant": grant, "automatic_spend_atoms": 0}
                 method = "ensurebtxcapability"
                 assert self.rpc(method, request)["lease_id"]
+                original_limit = resource.prlimit(proc.pid, resource.RLIMIT_FSIZE)
                 gate.touch()
                 try:
                     response = self.rpc(method, request, allow_error=True)
                 finally:
-                    gate.unlink()
-                assert "generation fixture: EIO" in (root / "modeld.log").read_text(encoding="utf-8")
+                    resource.prlimit(proc.pid, resource.RLIMIT_FSIZE, original_limit)
+                assert not gate.exists(), "kernel file limit was not armed after payload sync"
                 error = response.get("error")
                 self.log.info("Generation fault: error=%s lease=%s",
                               error, bool((response.get("result") or {}).get("lease_id")))
