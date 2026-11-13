@@ -120,9 +120,20 @@ bcp1::Package PackageFromArg(const UniValue& raw)
 CAmount ParseAtomsOrAmount(const UniValue& o, const char* atoms_key, const char* amount_key)
 {
     if (o.exists(atoms_key) && !o[atoms_key].isNull()) {
-        if (o[atoms_key].isNum()) return o[atoms_key].getInt<int64_t>();
         int64_t v = 0;
-        if (o[atoms_key].isStr() && ParseInt64(o[atoms_key].get_str(), &v)) return v;
+        bool parsed{false};
+        if (o[atoms_key].isNum()) {
+            v = o[atoms_key].getInt<int64_t>();
+            parsed = true;
+        } else if (o[atoms_key].isStr() && ParseInt64(o[atoms_key].get_str(), &v)) {
+            parsed = true;
+        }
+        if (parsed) {
+            // As AmountFromValue does for "amount": the wallet sums the outputs
+            // and the coin selection assumes amounts within MoneyRange.
+            if (!MoneyRange(v)) throw JSONRPCError(RPC_TYPE_ERROR, "Amount out of range");
+            return v;
+        }
     }
     if (o.exists(amount_key) && !o[amount_key].isNull()) return AmountFromValue(o[amount_key]);
     throw JSONRPCError(RPC_INVALID_PARAMETER, "amount or amount_atoms required");
