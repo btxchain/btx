@@ -45,9 +45,7 @@ EXCEPTIONS = {
     "src/modelnet/swarm_evolution.cpp": (
         "std::ofstream out(to, std::ios::binary | std::ios::trunc);",  # Current callers are tests.
     ),
-    "src/modelnet/workspace_git.cpp": (
-        "std::ofstream out(dest, std::ios::binary | std::ios::trunc);",  # Current callers are tests.
-    ),
+    "src/modelnet/workspace_git.cpp": (),
     "src/node/attested_utxo_snapshot.cpp": (
         'FILE* coins_file{fsbridge::fopen(coins_tmp, "wb")};',  # Checked scratch serialization, validation scope.
     ),
