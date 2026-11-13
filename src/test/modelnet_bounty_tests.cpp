@@ -1473,6 +1473,43 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     BOOST_CHECK(!budget.Reserve("k5", 10, err));
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(evaluation_report_larger_than_the_pipe_buffer_completes)
+{
+    // The evaluation child writes its report to a pipe and exits. A report
+    // larger than the pipe buffer must still reach the parent: the run must
+    // complete with every task instead of timing out.
+    const fs::path art = m_path_root / "eval-many-files";
+    fs::create_directories(art);
+    constexpr size_t kFiles{1500};
+    UniValue files(UniValue::VARR);
+    for (size_t i = 0; i < kFiles; ++i) {
+        const std::string name = "shard-" + std::to_string(i) + ".bin";
+        std::ofstream out(art / fs::PathFromString(name), std::ios::binary);
+        out << "ok";
+        files.push_back(name);
+    }
+    UniValue spec(UniValue::VOBJ);
+    spec.pushKV("profile_id", "EXACT_CHECKS");
+    spec.pushKV("required_files", files);
+    UniValue sub(UniValue::VOBJ);
+    sub.pushKV("artifact_dir", fs::PathToString(art));
+    UniValue resources(UniValue::VOBJ);
+    resources.pushKV("timeout_ms", int64_t{10000});
+    std::string err;
+    UniValue plan;
+    BOOST_REQUIRE(modelnet::PrepareEvaluation(spec, sub, resources, plan, err));
+    UniValue job(UniValue::VOBJ);
+    job.pushKV("plan", plan);
+    BOOST_REQUIRE_MESSAGE(modelnet::RunEvaluationJob(job, err), err);
+    BOOST_CHECK_EQUAL(job["state"].get_str(), "COMPLETE");
+    BOOST_CHECK(job["pass"].get_bool());
+    BOOST_REQUIRE_EQUAL(job["report"]["tasks"].size(), kFiles);
+    // Larger than the 64 KiB a pipe holds by default on Linux and macOS.
+    BOOST_CHECK_GT(job["report"].write().size(), size_t{64 * 1024});
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(bounty_idempotency_key_reused_for_another_request_is_refused)
 {
     modelnet::BountyStore store;
