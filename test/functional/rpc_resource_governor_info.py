@@ -9,6 +9,7 @@ does by default. The call must answer instead of failing the result-doc check.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_node import ErrorMatch
 from test_framework.util import assert_equal
 
 
@@ -32,6 +33,18 @@ class ResourceGovernorInfoTest(BitcoinTestFramework):
         info = node.getresourcegovernorinfo()
         assert_equal(info["mode"], "OFF")
         assert_equal(info["enabled"], False)
+
+        self.log.info("The startup option takes the documented modes and refuses anything else")
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-resourcegovernor=off"])
+        assert_equal(node.getresourcegovernorinfo()["mode"], "OFF")
+        self.stop_node(0)
+        for bad in ("-resourcegovernor=of", "-noresourcegovernor"):
+            node.assert_start_raises_init_error(
+                extra_args=self.extra_args[0] + [bad],
+                expected_msg="Error: Invalid -resourcegovernor value",
+                match=ErrorMatch.PARTIAL_REGEX,
+            )
+        self.start_node(0)
 
 
 if __name__ == '__main__':
