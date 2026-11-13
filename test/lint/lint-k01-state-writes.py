@@ -35,11 +35,7 @@ EXCEPTIONS = {
     ),
     "src/modelnet/package_channel.cpp": (),
     "src/modelnet/realm_channel.cpp": (),
-    "src/modelnet/store.cpp": (
-        "std::ofstream out(tmp, std::ios::binary | std::ios::trunc);",  # Existing staging paths.
-        "std::ofstream out(tmp, std::ios::trunc);",
-        "std::ofstream out(tmp, std::ios::trunc);",
-    ),
+    "src/modelnet/store.cpp": (),
     "src/modelnet/swarm_evolution.cpp": (),
     "src/modelnet/workspace_git.cpp": (),
     "src/node/attested_utxo_snapshot.cpp": (

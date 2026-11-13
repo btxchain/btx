@@ -52,14 +52,14 @@ bool WriteBinaryFile(const fs::path &filename, const std::string &data)
     return true;
 }
 
-bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data)
+bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data, const fs::path& staging_dir)
 {
     return WriteBinaryFileAtomically(filename, [data](std::FILE* file) {
         return data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size();
-    });
+    }, staging_dir);
 }
 
-bool WriteBinaryFileAtomically(const fs::path& filename, const std::function<bool(std::FILE*)>& write)
+bool WriteBinaryFileAtomically(const fs::path& filename, const std::function<bool(std::FILE*)>& write, const fs::path& staging_dir)
 {
     std::error_code ec;
     const auto status = fs::symlink_status(filename, ec);
@@ -67,7 +67,8 @@ bool WriteBinaryFileAtomically(const fs::path& filename, const std::function<boo
     if (fs::exists(status) && !fs::is_regular_file(status)) return false;
 
     FastRandomContext rng;
-    const fs::path tmp = filename.parent_path() / fs::PathFromString(".btx-export-" + std::to_string(rng.rand64()) + ".tmp");
+    const fs::path tmp_dir = staging_dir.empty() ? filename.parent_path() : staging_dir;
+    const fs::path tmp = tmp_dir / fs::PathFromString(".btx-export-" + std::to_string(rng.rand64()) + ".tmp");
     FILE* file = fsbridge::fopen(tmp, "wbx");
     if (!file) return false;
     bool committed;
