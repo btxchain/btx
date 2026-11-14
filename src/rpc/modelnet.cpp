@@ -366,6 +366,7 @@ static RPCHelpMan decoderesource()
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "", {
+                {RPCResult::Type::NUM, "schema_version", "2"},
                 {RPCResult::Type::STR, "uri", "canonical URI"},
                 {RPCResult::Type::STR, "kind", "resource class"},
                 {RPCResult::Type::STR, "digest", "SHA-384 hex"},
