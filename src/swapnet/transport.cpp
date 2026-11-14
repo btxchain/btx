@@ -48,6 +48,10 @@ bool Transport::Receive(PeerId id,const std::string& command,const std::string& 
     p.tokens-=cost;
     if (command=="swhello") {
         if (p.admitted||payload!="2:"+m_network)return fail();
+        // The peer may have missed our initial hello while its runtime started.
+        // Queue one reply before admission; duplicate hellos never generate replies.
+        if (m_out.size()>=MAX_QUEUE)return fail();
+        m_out.push_back({id,"swhello","2:"+m_network});
         p.admitted=true;return true;
     }
     if (!p.admitted||p.queued>=16||m_in.size()>=MAX_QUEUE)return fail();

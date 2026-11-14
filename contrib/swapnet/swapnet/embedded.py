@@ -24,7 +24,7 @@ from .rpcclient import LocalRPC,discover_bitcoin
 from .recovery import export_bundle
 
 NATIVE_METHODS=frozenset({'getblockchaininfo','getblockhash','getblockcount','getbestblockhash','getblockheader','getblock',
- 'getrawtransaction','gettxout','getmempoolentry','gettxspendingprevout','getdescriptorinfo','deriveaddresses','validateaddress',
+ 'getrawtransaction','gettxout','scantxoutset','getmempoolentry','gettxspendingprevout','getdescriptorinfo','deriveaddresses','validateaddress',
  'decodescript','decodepsbt','decoderawtransaction','createpsbt','finalizepsbt','sendrawtransaction','testmempoolaccept',
  'listwallets','getwalletinfo','getnewaddress','getaddressinfo','listunspent','lockunspent','gettransaction','listtransactions',
  'exportpqkey','walletcreatefundedpsbt','walletprocesspsbt','importdescriptors','signmessage','verifymessage','_swapnet_import_htlc'})

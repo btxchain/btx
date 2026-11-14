@@ -240,29 +240,52 @@ class Coordinator:
         # signed transaction was committed but before its session pointer was saved.
         prior=[o for o in self.journal.operations(sid,private=True) if o['kind']=='fund' and o['asset']==own.asset]
         require(len(prior)<=1,'RECOVERY_CONFLICT','Multiple prepared funding records; refuse alternate spend')
+        adopted=None
         if prior:
             from .drivers import Prepared
             op=prior[0];m=op['metadata']
             funded=Prepared(op['txid'],op['raw'],m['reference'],m['fee_atoms'],m)
         else:
-            funded=driver.prepare_funding(sid,own,s['keys']['refund'],s['reservation_id'],s['max_local_fee_atoms'])
+            from .funding_scan import find_funding_output
+            # A committed restore has no funding record. Adopt an exact unspent
+            # lock instead of building a second one. A failed lookup raises.
+            adopted=find_funding_output(driver,own)
+            if adopted:
+                ref={'txid':adopted['txid'],'vout':adopted['vout']}
+                if adopted.get('raw'):
+                    from .drivers import Prepared
+                    funded=Prepared(adopted['txid'],adopted['raw'],ref,'0',{'adopted_output':True})
+                else:
+                    funded=None
+            else:
+                funded=driver.prepare_funding(sid,own,s['keys']['refund'],s['reservation_id'],s['max_local_fee_atoms'])
         # No broadcast until BOTH immutable funding and refund records are durable.
-        s['fund_op']=self._persist_prepared(sid,own.asset,'fund',funded)
-        s['refs'][own_name]=funded.reference
+        # An adopted output has no new funding transaction to persist or broadcast.
+        if funded is not None:
+            s['fund_op']=self._persist_prepared(sid,own.asset,'fund',funded)
+            s['refs'][own_name]=funded.reference
+        else:
+            s['refs'][own_name]={'txid':adopted['txid'],'vout':adopted['vout']}
+        funding_fee=funded.fee_atoms if funded is not None else '0'
         self.authority.check(s['grant_id'],agr.id,kind='refund',asset=own.asset,
                              fee_atoms=own.max_refund_fee_atoms,destination=own.refund_payout)
         if driver.family=='evm':
-            s['evm_refund_plan']=driver.refund_plan(sid,own,funded.reference,s['keys']['refund'],str(atoms(s['max_local_fee_atoms'])-atoms(funded.fee_atoms)))
+            s['evm_refund_plan']=driver.refund_plan(sid,own,s['refs'][own_name],s['keys']['refund'],str(atoms(s['max_local_fee_atoms'])-atoms(funding_fee)))
         else:
             previous=[o for o in self.journal.operations(sid,private=True) if o['kind']=='refund' and o['asset']==own.asset]
             if previous:
                 from .drivers import Prepared
                 op=previous[-1];m=op['metadata'];refund=Prepared(op['txid'],op['raw'],m['reference'],m['fee_atoms'],m)
-            else:refund=driver.prepare_refund(sid,own,funded.reference,s['keys']['refund'])
-            require(atoms(funded.fee_atoms)+atoms(refund.fee_atoms)<=atoms(s['max_local_fee_atoms']),
+            else:refund=driver.prepare_refund(sid,own,s['refs'][own_name],s['keys']['refund'])
+            require(atoms(funding_fee)+atoms(refund.fee_atoms)<=atoms(s['max_local_fee_atoms']),
                     'FEE_CAP','Combined funding/refund exposure exceeds local fee budget')
             s['refund_op']=self._persist_prepared(sid,own.asset,'refund',refund)
         s.update(funding_prepared=True,recovery_ready=True,stage='prepared',updated_at=self.now())
+        if adopted:
+            s['funding_broadcast']=True
+            s['stage']='funded'
+            self.authority.mark_consumed(s['grant_id'])
+            self.emit(s['peer'],'funded',sid,{'agreement_id':agr.id,'leg':own_name,'reference':s['refs'][own_name]})
         rev=self._save(sid,s,rev);self.journal.checkpoint();return rev
     def _fund(self,sid,s,rev,agr):
         own_name,own,_,_=self._own(s,agr)

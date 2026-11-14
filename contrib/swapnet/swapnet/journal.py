@@ -107,7 +107,13 @@ class Journal:
                 if loads(body)['body']['expires_at']<now:db.execute('DELETE FROM sn_outbox WHERE id=?',(mid,))
     def ensure_capacity(self):
         with self.store.lock:
-            require(self.store.db.execute('SELECT count(*) FROM sn_negotiations').fetchone()[0]<4096,
+            # Junk proposals that never signed an operation must not fill the
+            # journal. Complete and refunded sessions stay counted and are not deleted.
+            counted=self.store.db.execute(
+                "SELECT count(*) FROM sn_negotiations AS n WHERE NOT ("
+                "n.stage IN ('cancelled','rejected') AND NOT EXISTS ("
+                "SELECT 1 FROM sn_operations AS o WHERE o.swap_id=n.id))").fetchone()[0]
+            require(counted<4096,
                     'SESSION_LIMIT','Journal session capacity reached; preserve recovery state before offline archival')
             require(self.store.db.execute("SELECT count(*) FROM sn_negotiations WHERE stage NOT IN ('complete','refunded','cancelled','rejected')").fetchone()[0]<128,
                     'ACTIVE_LIMIT','At most 128 active settlements per native node')
