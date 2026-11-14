@@ -125,6 +125,7 @@ void BanMan::ClearBanned()
     {
         LOCK(m_banned_mutex);
         m_banned.clear();
+        m_automatic.clear();
         m_is_dirty = true;
     }
     DumpBanlist(); //store banlist to disk
@@ -197,14 +198,9 @@ void BanMan::Ban(const CSubNet& sub_net, int64_t ban_time_offset, bool since_uni
         LOCK(m_banned_mutex);
         if (m_banned[sub_net].nBanUntil < ban_entry.nBanUntil) {
             m_banned[sub_net] = ban_entry;
+            m_automatic.erase(sub_net);
             m_is_dirty = true;
-            if (m_sweep_started && ban_entry.nBanUntil < m_next_sweep_time) {
-                m_next_sweep_time = ban_entry.nBanUntil;
-                const uint64_t seq = ++m_sweep_seq;
-                const int64_t now = GetTime();
-                const auto delay = std::chrono::seconds(std::max<int64_t>(0, m_next_sweep_time - now));
-                m_scheduler->scheduleFromNow([this, seq] { SweepBannedAndSchedule(seq); }, delay);
-            }
+            ScheduleSweepFor(ban_entry.nBanUntil);
         } else
             return;
     }
@@ -212,6 +208,50 @@ void BanMan::Ban(const CSubNet& sub_net, int64_t ban_time_offset, bool since_uni
 
     //store banlist to disk immediately
     DumpBanlist();
+}
+
+void BanMan::BanAutomatic(const CNetAddr& net_addr)
+{
+    const CSubNet sub_net(net_addr);
+    CBanEntry ban_entry(GetTime());
+    ban_entry.nBanUntil = SaturatingAdd(GetTime(), m_default_ban_time);
+
+    {
+        LOCK(m_banned_mutex);
+        const auto it{m_banned.find(sub_net)};
+        if (it != m_banned.end()) {
+            if (it->second.nBanUntil >= ban_entry.nBanUntil) return;
+            it->second = ban_entry;
+            // An ordinary ban that is extended stays an ordinary ban.
+            if (const auto a{m_automatic.find(sub_net)}; a != m_automatic.end()) a->second = ban_entry.nBanUntil;
+        } else {
+            if (m_automatic.size() >= MAX_AUTOMATIC_BANS) {
+                const auto first_end{std::min_element(m_automatic.begin(), m_automatic.end(),
+                    [](const auto& a, const auto& b) { return a.second < b.second; })};
+                m_banned.erase(first_end->first);
+                m_automatic.erase(first_end);
+            }
+            m_banned.emplace(sub_net, ban_entry);
+            m_automatic.emplace(sub_net, ban_entry.nBanUntil);
+        }
+        m_is_dirty = true;
+        ScheduleSweepFor(ban_entry.nBanUntil);
+    }
+    if (m_client_interface) m_client_interface->BannedListChanged();
+    // No DumpBanlist() here: the periodic dump (DUMP_BANS_INTERVAL) and
+    // shutdown write it. Writing the whole list on every automatic ban made
+    // each one cost time in proportion to the size of the list.
+}
+
+void BanMan::ScheduleSweepFor(int64_t ban_until)
+{
+    AssertLockHeld(m_banned_mutex);
+    if (!m_sweep_started || ban_until >= m_next_sweep_time) return;
+    m_next_sweep_time = ban_until;
+    const uint64_t seq = ++m_sweep_seq;
+    const int64_t now = GetTime();
+    const auto delay = std::chrono::seconds(std::max<int64_t>(0, m_next_sweep_time - now));
+    m_scheduler->scheduleFromNow([this, seq] { SweepBannedAndSchedule(seq); }, delay);
 }
 
 bool BanMan::Unban(const CNetAddr& net_addr)
@@ -225,6 +265,7 @@ bool BanMan::Unban(const CSubNet& sub_net)
     {
         LOCK(m_banned_mutex);
         if (m_banned.erase(sub_net) == 0) return false;
+        m_automatic.erase(sub_net);
         m_is_dirty = true;
     }
     if (m_client_interface) m_client_interface->BannedListChanged();
@@ -251,6 +292,7 @@ void BanMan::SweepBanned()
         CSubNet sub_net = (*it).first;
         CBanEntry ban_entry = (*it).second;
         if (!sub_net.IsValid() || now >= ban_entry.nBanUntil) {
+            m_automatic.erase(sub_net);
             m_banned.erase(it++);
             m_is_dirty = true;
             notify_ui = true;
