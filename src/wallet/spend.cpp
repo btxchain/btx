@@ -19,6 +19,7 @@
 #include <script/solver.h>
 #include <util/check.h>
 #include <util/moneystr.h>
+#include <util/overflow.h>
 #include <util/rbf.h>
 #include <util/trace.h>
 #include <util/translation.h>
@@ -1669,6 +1670,21 @@ util::Result<CreatedTransactionResult> CreateTransaction(
 
     if (std::any_of(vecSend.cbegin(), vecSend.cend(), [](const auto& recipient){ return recipient.nAmount < 0; })) {
         return util::Error{_("Transaction amounts must not be negative")};
+    }
+
+    // CreateTransactionInternal adds the amounts into recipients_sum and the
+    // coin selection works with that sum. The values of a raw transaction
+    // (fundrawtransaction) are not range checked, and many outputs that are
+    // each in range (createexchangebatch) can still add up past MAX_MONEY or
+    // past the range of CAmount. The amounts are not negative here, so a sum
+    // within MoneyRange after each output also keeps each amount in range.
+    CAmount recipients_sum{0};
+    for (const auto& recipient : vecSend) {
+        const auto sum{CheckedAdd(recipients_sum, recipient.nAmount)};
+        if (!sum || !MoneyRange(*sum)) {
+            return util::Error{_("Transaction amounts out of range")};
+        }
+        recipients_sum = *sum;
     }
 
     // The grouped comparison is discarded unless its fee is within
