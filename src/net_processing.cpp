@@ -23386,7 +23386,16 @@ void PeerManagerImpl::BanHammeringPeer(CNode& pnode, Peer& peer, std::string_vie
         pnode.fDisconnect = true;
         return;
     }
-    if (m_banman) m_banman->Ban(pnode.addr);
+    // A forged MatMul proof keeps the ordinary ban. The attestation P2P reasons
+    // can be reached by any inbound peer, so they use the bounded automatic
+    // ban, which does not write the whole ban list on each ban.
+    if (m_banman) {
+        if (forged_proof) {
+            m_banman->Ban(pnode.addr);
+        } else {
+            m_banman->BanAutomatic(pnode.addr);
+        }
+    }
     m_connman.DisconnectNode(pnode.addr);
 }
 
