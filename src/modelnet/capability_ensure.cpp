@@ -20,10 +20,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <fcntl.h>
 #include <map>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -116,6 +118,30 @@ bool FailResult(UniValue& result, std::string& err_code, std::string& err, const
     Fail(err_code, err, code, msg);
     FillError(result, err_code, err, stage);
     return false;
+}
+
+//! Create dir with mode 0700, or use it if it is already a directory of this
+//! user; then only this user may reach it. A fixed name under a shared temp
+//! directory can be created first by another local account, which could then
+//! choose where files written below it go. Refuse a symlink or a directory of
+//! another user there.
+bool EnsurePrivateDir(const fs::path& dir, std::string& err)
+{
+    const std::string path{fs::PathToString(dir)};
+    if (::mkdir(path.c_str(), 0700) != 0 && errno != EEXIST) {
+        err = "cannot create " + path;
+        return false;
+    }
+    struct stat st {};
+    if (::lstat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != ::geteuid()) {
+        err = "not a directory of this user: " + path;
+        return false;
+    }
+    if ((st.st_mode & 077) != 0 && ::chmod(path.c_str(), 0700) != 0) {
+        err = "cannot make private: " + path;
+        return false;
+    }
+    return true;
 }
 
 int64_t ParseI64(const UniValue& v, int64_t fallback = 0)
@@ -677,7 +703,8 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
     }
 
     const fs::path dest_dir{fs::temp_directory_path() / "btx-capability-ensure"};
-    fs::create_directories(dest_dir);
+    std::string dir_err;
+    if (!EnsurePrivateDir(dest_dir, dir_err)) return FailResult(result, err_code, err, "IO", dir_err, "materialize");
     const Generation16 file_gen = NewGeneration();
     static std::atomic<uint64_t> dest_seq{0};
     const std::string dest_name = std::to_string(::getpid()) + "-" + std::to_string(dest_seq.fetch_add(1)) + "-" +
@@ -778,9 +805,12 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
     }
     bool used_catalog = false;
     if (have_catalog && runtime_id != "synthetic-cpu-fixture") {
-        fs::path checkout = fs::temp_directory_path();
-        checkout /= fs::PathFromString(std::string("btx-ensure-") + catalog_e.artifact_id.Hex().substr(0, 24));
+        // Check out below the helper's own directory, not under the shared temp
+        // directory, where another local account could create the folder first.
+        const fs::path checkout_root{cat.Store().Root().parent_path() / "capability-checkout"};
         std::string merr;
+        if (!EnsurePrivateDir(checkout_root, merr)) return FailResult(result, err_code, err, "IO", merr, "materialize");
+        const fs::path checkout{checkout_root / fs::PathFromString(catalog_e.artifact_id.Hex().substr(0, 24))};
         if (!cat.MaterializeCheckout(catalog_e.model_id, checkout, merr)) {
             return FailResult(result, err_code, err, "IO", merr, "materialize");
         }

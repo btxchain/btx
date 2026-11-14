@@ -948,6 +948,47 @@ BOOST_AUTO_TEST_CASE(materialize_checkout_rebuilds_original_bytes)
     BOOST_CHECK(got == expect);
 }
 
+BOOST_AUTO_TEST_CASE(materialize_checkout_does_not_follow_a_symlinked_directory)
+{
+    // A directory of the checkout that is a symlink would put the model file
+    // outside the checkout and replace a file there. The checkout must refuse
+    // it, whether the bytes come from the source file or from the store.
+    const fs::path tmp = m_path_root / "materialize-checkout-symlink";
+    const fs::path src = tmp / "src";
+    fs::create_directories(src / "sub");
+    const auto bytes = TinySafeTensors(0x83);
+    {
+        std::ofstream out(src / "sub" / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    modelnet::ModelCatalog cat{tmp / "cat", 8 << 20};
+    modelnet::CatalogEntry e;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), /*pin=*/true, e, err), err);
+    const fs::path outside = tmp / "outside";
+    fs::create_directories(outside);
+    const std::string other{"OTHER FILE"};
+    {
+        std::ofstream out(outside / "model.safetensors", std::ios::binary);
+        out << other;
+    }
+    for (const bool source_kept : {true, false}) {
+        if (!source_kept) fs::rename(src, tmp / "src-moved");
+        const fs::path dest = tmp / (source_kept ? "checkout-source" : "checkout-store");
+        fs::create_directories(dest);
+        fs::create_directory_symlink(outside, dest / "sub");
+        err.clear();
+        BOOST_CHECK(!cat.MaterializeCheckout(e.model_id, dest, err));
+        BOOST_CHECK_MESSAGE(err.find("symlink") != std::string::npos, err);
+        const auto kept = ReadFileBytes(outside / "model.safetensors");
+        BOOST_CHECK(std::string(kept.begin(), kept.end()) == other);
+    }
+    // Without the symlink the same checkout works.
+    const fs::path clean = tmp / "checkout-clean";
+    BOOST_REQUIRE_MESSAGE(cat.MaterializeCheckout(e.model_id, clean, err), err);
+    BOOST_CHECK(ReadFileBytes(clean / "sub" / "model.safetensors") == bytes);
+}
+
 BOOST_AUTO_TEST_CASE(exportmodelpath_returns_usable_runtime_root_from_pieces)
 {
     const fs::path tmp = m_path_root / "export-runtime-root";
