@@ -2412,7 +2412,6 @@ std::vector<ProviderObservation> CurrentProviderObservations(ModelCatalog& cat, 
 }
 
 static QueryDedupe g_search_dedupe;
-static bool g_search_bound{false};
 static FeedStore g_feed;
 static CampaignIndex g_campaigns;
 static std::recursive_mutex g_campaign_mu;
@@ -2537,19 +2536,25 @@ bool AllowModelSeedBytes(const ModelCatalog& cat, size_t n);
 
 void EnsureSearchBound()
 {
-    if (!g_search_bound) {
-        g_search_rt.Bind(&g_search_idx);
-        g_search_bound = true;
-    }
+    // Called by every RPC worker without a lock: bind once.
+    static std::once_flag bound;
+    std::call_once(bound, [] { g_search_rt.Bind(&g_search_idx); });
 }
+
+//! Taken by EnsureEconomy before g_search_mu and g_campaign_mu. The RPC workers
+//! call it at the same time; no caller holds either of those locks there.
+static std::mutex g_econ_mu;
 
 void EnsureEconomy(ModelCatalog& cat)
 {
     EnsureSearchBound();
     const fs::path dir = HelperDir(cat);
+    // Another worker may be loading: g_feed_loaded is set before the index, the
+    // feed and the campaigns are read, so check and load under one lock.
+    std::lock_guard<std::mutex> econ_lock(g_econ_mu);
     if (g_feed_loaded && dir == g_econ_dir) return;
     g_chain_obs.clear();
-    g_feed = FeedStore();
+    g_feed.Reset();
     g_econ_dir = dir;
     g_feed_loaded = true;
     g_feed.SetPath(dir / "feed.json");
@@ -4468,18 +4473,21 @@ void LoadRetrieveJobs(ModelCatalog& cat)
         job->model_id = mid;
         job->modeldir = HelperDir(cat);
         job->automatic = j["automatic"].isTrue();
+        // A value that is not an integer of the field's type is treated as
+        // absent: ToIntegral does not throw, so one bad entry cannot stop the
+        // helper at startup or every helper RPC (this loader runs before each).
         if (j.exists("created_ms") && j["created_ms"].isNum()) {
-            job->created_ms = j["created_ms"].getInt<int64_t>();
+            if (const auto v{ToIntegral<int64_t>(j["created_ms"].getValStr())}) job->created_ms = *v;
         }
         {
             std::lock_guard<std::mutex> jlock(job->mu);
             job->status = "queued";
         }
         if (j.exists("bytes_committed") && j["bytes_committed"].isNum()) {
-            job->progress.bytes_committed.store(j["bytes_committed"].getInt<uint64_t>());
+            if (const auto v{ToIntegral<uint64_t>(j["bytes_committed"].getValStr())}) job->progress.bytes_committed.store(*v);
         }
         if (j.exists("pieces_committed") && j["pieces_committed"].isNum()) {
-            job->progress.pieces_committed.store(j["pieces_committed"].getInt<uint64_t>());
+            if (const auto v{ToIntegral<uint64_t>(j["pieces_committed"].getValStr())}) job->progress.pieces_committed.store(*v);
         }
         // Display-only progress. A value outside uint32 is treated as absent;
         // ToIntegral does not throw, so one bad entry cannot stop every helper RPC.
@@ -7516,6 +7524,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             AfterIndexPut(rec, ConnNowMs());
+            // Aliases live only in the search index; save it as hidesearchmodel does,
+            // or the change is gone after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7660,6 +7672,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             AfterIndexPut(rec, ConnNowMs());
+            // Aliases live only in the search index; save it as hidesearchmodel does,
+            // or the change is gone after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7986,6 +8002,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         if (!existing->signed_ok) {
             g_search_idx.Hide(id, true);
+            // Saved as hidesearchmodel does, or the record comes back after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
             result.pushKV("schema_version", 2);
             result.pushKV("tombstone", false);
             result.pushKV("hidden_local", true);
@@ -8015,6 +8034,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err_code = "REJECTED";
             return false;
         }
+        std::string save_err;
+        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         result.pushKV("schema_version", 2);
         result.pushKV("tombstone", true);
         result.pushKV("guaranteed_global_delete", false);
@@ -8055,6 +8076,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 ++ok;
             }
         }
+        if (ok > 0) {
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
+        }
         result.pushKV("schema_version", 2);
         result.pushKV("imported", ok);
         result.pushKV("rejected", bad);
@@ -8068,7 +8093,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         IngestCatalogIntoSearch(cat);
         if (method == "getmodeldirectory") {
             SearchQuery q;
-            if (Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
+            if (Arg(0).isObject() && !ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             q.scope = SearchScope::ALL;
             const auto hits = g_search_idx.Search(q, ConnNowMs());
             UniValue arr(UniValue::VARR);
@@ -8172,23 +8200,45 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "searchpublishers" || method == "getpublisher" || method == "getmodelpublishers") {
         EnsureSearchBound();
         std::lock_guard<std::mutex> lock(g_search_mu);
+        if (method == "getpublisher") {
+            // One publisher: count all of its visible records (Search() stops at
+            // q.limit, 50 by default) and refuse an id the index does not know,
+            // as getcollection does.
+            const std::string want = Arg(0).isStr() ? ToLower(Arg(0).get_str()) : std::string{};
+            SearchQuery all;
+            all.limit = static_cast<int>(std::max<size_t>(g_search_idx.Size(), 1));
+            int count{0};
+            std::string display_name;
+            for (const auto& h : g_search_idx.Search(all, ConnNowMs())) {
+                // The all-zero id is "no publisher", as searchpublishers skips it.
+                if (want.empty() || want == std::string(96, '0') || h.rec.publisher_identity.Hex() != want) continue;
+                if (count++ == 0) display_name = h.rec.publisher_display_name;
+            }
+            if (count == 0) {
+                err_code = "NOT_FOUND";
+                err = "unknown publisher";
+                return false;
+            }
+            result.pushKV("schema_version", 2);
+            result.pushKV("id", want);
+            result.pushKV("display_name", display_name);
+            result.pushKV("model_count_observed", count);
+            return true;
+        }
         UniValue arr(UniValue::VARR);
         SearchQuery q;
-        if (method == "searchpublishers" && Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
-        else if (method == "searchpublishers" && Arg(0).isStr()) q.text = Arg(0).get_str();
+        if (method == "searchpublishers" && Arg(0).isObject()) {
+            if (!ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
+        } else if (method == "searchpublishers" && Arg(0).isStr()) q.text = Arg(0).get_str();
         const auto hits = g_search_idx.Search(q, ConnNowMs());
         std::map<std::string, int> pubs;
         for (const auto& h : hits) {
             const std::string pid = h.rec.publisher_identity.Hex();
             if (pid.empty() || pid == std::string(96, '0')) continue;
             pubs[pid] += 1;
-            if (method == "getpublisher" && Arg(0).isStr() && Arg(0).get_str() == pid) {
-                result.pushKV("schema_version", 2);
-                result.pushKV("id", pid);
-                result.pushKV("display_name", h.rec.publisher_display_name);
-                result.pushKV("model_count_observed", 1);
-                return true;
-            }
         }
         for (const auto& kv : pubs) {
             UniValue o(UniValue::VOBJ);
@@ -9014,15 +9064,21 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (method == "cancelmodeljob" && !want.empty()) {
                 const auto it = g_retrieve_jobs.find(want);
                 if (it != g_retrieve_jobs.end()) {
-                    it->second->cancel.store(true);
+                    // Only a queued or running job is cancelled; a job that is done,
+                    // failed or already cancelled keeps its status and says so.
+                    bool cancelled{false};
                     {
                         std::lock_guard<std::mutex> jlock(it->second->mu);
                         if (it->second->status == "running" || it->second->status == "queued") {
                             it->second->status = "cancelled";
+                            cancelled = true;
                         }
                     }
-                    PersistRetrieveJobsLocked();
-                    result.pushKV("cancelled", true);
+                    if (cancelled) {
+                        it->second->cancel.store(true);
+                        PersistRetrieveJobsLocked();
+                    }
+                    result.pushKV("cancelled", cancelled);
                     result.pushKV("job_id", want);
                 } else {
                     result.pushKV("cancelled", false);
@@ -9075,6 +9131,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             refund_height = Arg(2).getInt<int64_t>();
             if (params.isArray() && params.size() > 4 && Arg(4).isObject()) options = Arg(4);
             else if (params.isArray() && params.size() > 3 && Arg(3).isObject()) options = Arg(3);
+        }
+        // refund_height is a CLTV block height and is stored as uint32. A value
+        // outside uint32 would wrap to another height, and one from 500000000 on
+        // is a Unix time, which the funding path refuses (transfer.cpp). Refuse
+        // both here, before anything is imported or stored.
+        if (refund_height < 0 || refund_height >= int64_t{500'000'000}) {
+            err_code = "INVALID_PARAMETER";
+            err = "refund_height must be a block height below 500000000";
+            return false;
         }
         Resource r;
         if (!DecodeResource(uri, r, err) || r.kind != ResourceKind::MODEL) {
@@ -10513,7 +10578,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         if (method == "getfundablemodels") {
             SearchQuery q;
-            if (Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
+            if (Arg(0).isObject() && !ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             q.filters.fundable_only = true;
             if (!Arg(0).isObject() || !Arg(0).exists("sort")) q.sort = SearchSort::NEARLY_FUNDED;
             std::vector<ModelEconomyEntry> camp;
@@ -10663,7 +10731,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 UniValue wrap(UniValue::VOBJ);
                 wrap.pushKV("filters", Arg(0)["filters"]);
                 SearchQuery sq;
-                ParseSearchQuery(wrap, sq, err);
+                if (!ParseSearchQuery(wrap, sq, err)) {
+                    err_code = "INVALID_PARAMETER";
+                    return false;
+                }
                 fq.filters = sq.filters;
             }
         }

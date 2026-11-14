@@ -8,10 +8,12 @@
 #include <modelnet/subscription_mandate.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
+#include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <atomic>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -253,6 +255,33 @@ BOOST_AUTO_TEST_CASE(mandate_sub_04_duplicate_event_cannot_double_spend)
     BOOST_CHECK_EQUAL(budget.UsedPrincipal(), 40);
 }
 
+// SaveStateJson keeps no mandate_id per reservation, and LoadStateJson did not
+// set it: after a restart the activity rows and a replayed reservation showed an
+// empty mandate_id.
+BOOST_AUTO_TEST_CASE(mandate_sub_04b_reloaded_reservation_keeps_mandate_id)
+{
+    using namespace modelnet;
+    SubscriptionBudget budget;
+    BoundBudget(budget, BaseMandateJson());
+    SubscriptionEvent ev = FundEvent("e-reload", HexN(96, 'b'), "mid-1");
+    SignedTerms t = KnownTerms(HexN(96, 'b'), 40, 2);
+    Reservation r1;
+    std::string err;
+    BOOST_REQUIRE(EvaluateAndReserve(budget, ev, t, r1, kNow, err));
+    BOOST_REQUIRE_EQUAL(r1.mandate_id, "mid-1");
+
+    SubscriptionBudget reloaded;
+    BOOST_REQUIRE_MESSAGE(reloaded.LoadStateJson(budget.SaveStateJson(), err), err);
+    const UniValue page = reloaded.ActivityPage("", 10);
+    BOOST_REQUIRE(page["actions"].isArray());
+    BOOST_REQUIRE_EQUAL(page["actions"].size(), 1U);
+    BOOST_CHECK_EQUAL(page["actions"][0]["mandate_id"].get_str(), "mid-1");
+    Reservation replay;
+    BOOST_REQUIRE(EvaluateAndReserve(reloaded, ev, t, replay, kNow, err));
+    BOOST_CHECK_EQUAL(replay.reservation_id, r1.reservation_id);
+    BOOST_CHECK_EQUAL(replay.mandate_id, "mid-1");
+}
+
 BOOST_AUTO_TEST_CASE(mandate_sub_05_reorg_does_not_refund_spend_budget)
 {
     using namespace modelnet;
@@ -289,6 +318,33 @@ BOOST_AUTO_TEST_CASE(mandate_sub_06_revoke_blocks_new_signatures)
     BOOST_CHECK(!EvaluateAndReserve(budget, ev, t, r, kNow, err));
     BOOST_CHECK_EQUAL(err, "revoked");
     BOOST_CHECK_EQUAL(budget.UsedPrincipal(), 0);
+}
+
+// A subscription-mandates.json that is there but empty, or has no mandates
+// array, loaded as an empty store: the spent budget and the revocations were
+// gone and the next save replaced the file. Only a missing file is empty.
+BOOST_AUTO_TEST_CASE(mandate_sub_04c_empty_state_file_is_refused)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "submandate-empty-file";
+    fs::create_directories(dir);
+    std::string err;
+    {
+        SubscriptionStore store;
+        BOOST_CHECK_MESSAGE(store.SetPersistPath(dir / "absent.json", err), err);
+    }
+    const fs::path empty = dir / "empty.json";
+    { std::ofstream out(empty, std::ios::binary | std::ios::trunc); }
+    const fs::path no_array = dir / "no-array.json";
+    { std::ofstream out(no_array, std::ios::binary | std::ios::trunc); out << "{\"schema_version\":1}\n"; }
+    const fs::path empty_object = dir / "empty-object.json";
+    { std::ofstream out(empty_object, std::ios::binary | std::ios::trunc); out << "{}\n"; }
+    for (const fs::path& path : {empty, no_array, empty_object}) {
+        const auto size_before = fs::file_size(path);
+        SubscriptionStore store;
+        BOOST_CHECK_MESSAGE(!store.SetPersistPath(path, err), fs::PathToString(path) << " loaded as an empty store");
+        BOOST_CHECK_EQUAL(fs::file_size(path), size_before);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(mandate_sub_07_broadcast_transactions_remain_real)

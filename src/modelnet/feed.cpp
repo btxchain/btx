@@ -104,8 +104,21 @@ std::string MakeFeedEventId(FeedEventType t, const Digest48& model_id, const std
     return h.Hex();
 }
 
+void FeedStore::Reset()
+{
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_by_id.clear();
+    m_seq = 0;
+    m_cap = FEED_CAP_DEFAULT;
+    m_ttl_ms = FEED_TTL_DEFAULT_MS;
+    m_last_refresh = 0;
+    m_publisher_models.clear();
+    m_path.clear();
+}
+
 bool FeedStore::Note(FeedEvent ev, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     Expire(now_ms);
     if (ev.event_id.empty()) {
         ev.event_id = MakeFeedEventId(ev.event_type, ev.model_id, ev.release_id, ev.rec.metadata_sequence, "");
@@ -143,6 +156,7 @@ FeedEventType SearchRecordEventType(const ModelSearchRecord& r)
 
 bool FeedStore::RefreshSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     // Expire first, as Note does: the re-read is often the only feed write on a
     // quiet node, and records that left the index must still age out.
     Expire(now_ms);
@@ -160,6 +174,7 @@ bool FeedStore::RefreshSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 
 bool FeedStore::NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (r.tombstone || r.model_id.IsNull()) return false;
     FeedEvent ev;
     ev.event_type = SearchRecordEventType(r);
@@ -195,6 +210,7 @@ bool FeedStore::NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 
 bool FeedStore::NoteCampaign(const ReleaseCampaign& c, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     FeedEvent ev;
     ev.event_type = FeedEventType::RELEASE_CAMPAIGN_CREATED;
     ev.model_id = c.model_id;
@@ -208,6 +224,7 @@ bool FeedStore::NoteCampaign(const ReleaseCampaign& c, int64_t now_ms)
 
 bool FeedStore::NoteUnlock(const Digest48& model_id, const std::string& release_id, const ModelSearchRecord& r, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     FeedEvent ev;
     ev.event_type = FeedEventType::MODEL_UNLOCKED;
     ev.model_id = model_id;
@@ -240,6 +257,7 @@ std::pair<FeedEventType, std::string> FundingStep(const ReleaseCampaign& c)
 
 bool FeedStore::NotedFundingEvent(const ReleaseCampaign& c, FeedEvent& out) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     const auto it = m_by_id.find(FundingStep(c).second);
     if (it == m_by_id.end()) return false;
     out = it->second;
@@ -248,6 +266,7 @@ bool FeedStore::NotedFundingEvent(const ReleaseCampaign& c, FeedEvent& out) cons
 
 bool FeedStore::NoteFundingChanged(const ReleaseCampaign& c, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     FeedEvent ev;
     std::tie(ev.event_type, ev.event_id) = FundingStep(c);
     ev.model_id = c.model_id;
@@ -260,6 +279,7 @@ bool FeedStore::NoteFundingChanged(const ReleaseCampaign& c, int64_t now_ms)
 
 void FeedStore::Expire(int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_ttl_ms <= 0) return;
     for (auto it = m_by_id.begin(); it != m_by_id.end();) {
         if (it->second.observed_at > 0 && now_ms - it->second.observed_at > m_ttl_ms) {
@@ -272,6 +292,7 @@ void FeedStore::Expire(int64_t now_ms)
 
 std::vector<FeedEvent> FeedStore::Query(const FeedQuery& q, int64_t now_ms, std::string& next_cursor) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     std::vector<FeedEvent> all;
     all.reserve(m_by_id.size());
     for (const auto& kv : m_by_id) {
@@ -367,6 +388,7 @@ std::vector<FeedEvent> FeedStore::Query(const FeedQuery& q, int64_t now_ms, std:
 
 UniValue FeedStore::StatusJson(int public_models, int campaigns, int unreleased, int unlocked, const FeedCoverage& cov) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", FEED_SCHEMA_VERSION);
     o.pushKV("feed_sequence", static_cast<int64_t>(m_seq));
@@ -387,6 +409,7 @@ UniValue FeedStore::StatusJson(int public_models, int campaigns, int unreleased,
 
 UniValue FeedStore::EventToJson(const FeedEvent& ev, const ModelEconomyEntry* entry) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("event_id", ev.event_id);
     o.pushKV("event_type", FeedEventTypeName(ev.event_type));
@@ -407,6 +430,7 @@ UniValue FeedStore::EventToJson(const FeedEvent& ev, const ModelEconomyEntry* en
 
 bool FeedStore::Save(std::string& err) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_path.empty()) return true;
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", FEED_SCHEMA_VERSION);
@@ -557,6 +581,7 @@ bool FeedEventFromJson(const UniValue& ej, FeedEvent& ev, std::string& err)
 
 bool FeedStore::Load(int64_t now_ms, std::string& err)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_path.empty() || !fs::exists(m_path)) return true;
     m_by_id.clear();
     m_seq = 0;

@@ -17,11 +17,44 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_economy_tests, BasicTestingSetup)
+
+// The helper's two unix workers both call EnsureEconomy, which loads the feed,
+// the search index and the campaigns the first time a directory is used. It
+// read and set its flags without a lock; under -fsanitize=thread this case
+// showed the race before it was locked. btx-modeld binds the event layer at
+// start, before the workers run, so the first call here does that on one thread.
+BOOST_AUTO_TEST_CASE(economy_loads_from_two_workers)
+{
+    using namespace modelnet;
+    auto call = [](ModelCatalog& cat) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "getmodelrelease");
+        req.pushKV("params", UniValue(UniValue::VARR));
+        UniValue result;
+        std::string code, err;
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    const fs::path first_dir = m_args.GetDataDirBase() / "econ-first";
+    const fs::path dir = m_args.GetDataDirBase() / "econ-two-workers";
+    fs::create_directories(first_dir);
+    fs::create_directories(dir);
+    ModelCatalog first{first_dir, 8 << 20};
+    BOOST_REQUIRE(call(first));
+    // A directory the economy has not loaded yet: both workers reach the load.
+    ModelCatalog cat{dir, 8 << 20};
+    std::atomic<int> ok{0};
+    std::thread worker([&] { for (int i = 0; i < 20; ++i) ok += call(cat) ? 1 : 0; });
+    for (int i = 0; i < 20; ++i) ok += call(cat) ? 1 : 0;
+    worker.join();
+    BOOST_CHECK_EQUAL(ok.load(), 40);
+}
 
 BOOST_AUTO_TEST_CASE(econ_fund_01_card_math)
 {
@@ -956,6 +989,38 @@ BOOST_AUTO_TEST_CASE(own_models_are_not_held_by_the_publisher_quota)
                                              std::chrono::system_clock::now().time_since_epoch()).count(),
                                          err), err);
     BOOST_CHECK_EQUAL(restarted.All().size(), static_cast<size_t>(MODELS));
+}
+
+// getmodeldirectory, searchpublishers, getfundablemodels and the getmodelfeed
+// filters dropped the result of ParseSearchQuery: a malformed query gave an
+// unfiltered or default-sorted answer with success, while searchmodels and
+// browsemodels refuse the same input.
+BOOST_AUTO_TEST_CASE(malformed_search_query_is_refused)
+{
+    const fs::path dir = m_path_root / "economy-bad-query";
+    fs::create_directories(dir);
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    auto refused = [&](const std::string& method, const std::string& json, const std::string& want_code = "INVALID_PARAMETER") {
+        UniValue arg;
+        BOOST_REQUIRE(arg.read(json));
+        UniValue params(UniValue::VARR);
+        params.push_back(arg);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        UniValue result;
+        std::string code, err;
+        const bool ok = modelnet::DispatchHelperRpc(cat, req, result, code, err);
+        BOOST_CHECK_MESSAGE(!ok, method << " accepted " << json);
+        if (!ok) BOOST_CHECK_EQUAL(code, want_code);
+    };
+    refused("getfundablemodels", R"({"sort":"nearly-funded","limit":1})");
+    refused("getfundablemodels", R"({"filters":{"min_funded_percent":"50"}})");
+    refused("getmodeldirectory", R"({"filters":{"tags":"x"}})");
+    refused("searchpublishers", R"({"sort":"bogus"})");
+    refused("getmodelfeed", R"({"filters":{"family":7}})");
+    // The same input is refused by browsemodels already (with its own code).
+    refused("browsemodels", R"({"sort":"nearly-funded"})", "INVALID_PARAMS");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -748,6 +748,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "listmempooltransactions", 1, "verbose"},
     { "setresourcegovernorpolicy", 0, "policy" },
     { "pausebackgroundwork", 0, "duration" },
+    { "listmodels", 0, "filter", /*also_string=*/false, /*json_object=*/true },
+    { "getmodeltransfers", 0, "filter", /*also_string=*/false, /*json_object=*/true },
     { "searchmodels", 0, "query", /*also_string=*/false, /*json_object=*/true },
     { "publishmodelsearchrecord", 1, "metadata" },
     { "updatemodelsearchrecord", 1, "patch" },
