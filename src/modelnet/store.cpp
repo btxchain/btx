@@ -240,12 +240,12 @@ void ModelStore::RecountUsed()
     }
 }
 
-bool ModelStore::RemoveArtifact(const Digest48& artifact, std::string& err)
+uint64_t ModelStore::ArtifactBytes(const Digest48& artifact) const
 {
     const fs::path dir = ArtifactDir(m_root, artifact);
-    if (!fs::exists(dir)) return true;
+    if (!fs::exists(dir)) return 0;
     std::error_code ec;
-    uint64_t drop = 0;
+    uint64_t bytes = 0;
     for (auto it = std::filesystem::recursive_directory_iterator(dir, ec),
          end = std::filesystem::recursive_directory_iterator();
          it != end && !ec; it.increment(ec)) {
@@ -253,9 +253,18 @@ bool ModelStore::RemoveArtifact(const Digest48& artifact, std::string& err)
         const std::string name = fs::PathToString(it->path().filename());
         if (name.size() >= 6 && name.compare(name.size() - 6, 6, ".piece") == 0) {
             const auto sz = std::filesystem::file_size(it->path(), ec);
-            if (!ec) drop += sz;
+            if (!ec) bytes += sz;
         }
     }
+    return bytes;
+}
+
+bool ModelStore::RemoveArtifact(const Digest48& artifact, std::string& err)
+{
+    const fs::path dir = ArtifactDir(m_root, artifact);
+    if (!fs::exists(dir)) return true;
+    const uint64_t drop = ArtifactBytes(artifact);
+    std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     if (ec) {
         err = "artifact remove failed";
