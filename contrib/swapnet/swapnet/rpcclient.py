@@ -51,7 +51,10 @@ class LocalRPC:
             require(len(raw)<=4_194_304,'RPC_RESPONSE_LIMIT','RPC response too large')
             obj=json.loads(raw,parse_float=Decimal)
             require(obj.get('id')=='swapnet','RPC_RESPONSE_ID','Unexpected RPC response ID')
-            if obj.get('error') is not None:raise SwapError('CHAIN_RPC','Chain RPC rejected operation')
+            err=obj.get('error')
+            if err is not None:
+                detail=err.get('message') if type(err) is dict else None
+                raise SwapError('CHAIN_RPC', detail[:300] if type(detail) is str and detail else 'Chain RPC rejected operation')
             require('result' in obj,'RPC_RESPONSE','Missing RPC result')
             return obj['result']
         except SwapError:raise

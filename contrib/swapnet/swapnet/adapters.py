@@ -7,11 +7,28 @@ from dataclasses import dataclass
 from decimal import Decimal
 import re
 from .canonical import hex32,integer,hashlock
-from .errors import require
+from .errors import SwapError, require
 from .bitcoin import htlc_script,p2wsh,p2wsh_address,Transaction
 from .machine import LegObservation
 
 COIN=100_000_000
+
+def create_funded_psbt(caller, inputs, outputs, locktime, options, bip32derivs, *, request_v0):
+    """Ask for PSBT v0 when the wallet understands that option.
+
+    Bitcoin Core 32 defaults to v2, whose decode has no tx. Core 30.4 and this
+    node's wallet reject the key before any coin is locked. Their default
+    PSBT is already v0, so the same call is repeated without the option.
+    """
+    requested=dict(options)
+    if request_v0:
+        requested['psbt_version']=0
+    try:
+        return caller('walletcreatefundedpsbt', inputs, outputs, locktime, requested, bip32derivs)
+    except SwapError as error:
+        if not request_v0 or 'psbt_version' not in error.message.lower():
+            raise
+        return caller('walletcreatefundedpsbt', inputs, outputs, locktime, options, bip32derivs)
 
 def to_atoms(value):
     require(type(value) in {str,int,Decimal},'RPC_AMOUNT','RPC amount must not pass through binary floating point')
@@ -56,8 +73,8 @@ class UtxoAdapter:
     def prepare_funding(self,address,amount_atoms,fee_rate,max_fee_atoms,minconf):
         self.check_chain()
         integer(minconf,lo=1);integer(fee_rate,lo=1,hi=10000)
-        options={'lockUnspents':False,'replaceable':False,'include_unsafe':False,'fee_rate':fee_rate,'minconf':minconf,'psbt_version':0}
-        result=self.wallet('walletcreatefundedpsbt',[],[{address:coin_string(amount_atoms)}],0,options,True)
+        options={'lockUnspents':False,'replaceable':False,'include_unsafe':False,'fee_rate':fee_rate,'minconf':minconf}
+        result=create_funded_psbt(self.wallet,[],[{address:coin_string(amount_atoms)}],0,options,True,request_v0=True)
         require(to_atoms(result['fee'])<=max_fee_atoms,'FEE_CAP','Funding fee exceeds approved cap')
         return result
     def sign_funding(self,psbt,*,approved_plan,is_owned_change):

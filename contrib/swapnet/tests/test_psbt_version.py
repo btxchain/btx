@@ -2,7 +2,7 @@
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.serialization import Encoding,PublicFormat
 import pytest
-from swapnet.adapters import BitcoinAdapter
+from swapnet.adapters import BitcoinAdapter, create_funded_psbt
 from swapnet.bitcoin import htlc_script,p2wsh
 from swapnet.canonical import hashlock
 from swapnet.drivers import UTXODriver
@@ -63,3 +63,24 @@ def test_funding_requests_psbt_v0_and_stops_when_tx_missing():
     with pytest.raises(SwapError,match='PSBT_VERSION'):
         adapter.sign_funding('cHNidA',approved_plan=None,is_owned_change=lambda s:False)
     assert 'walletprocesspsbt' not in calls
+
+def test_rejected_psbt_version_is_retried_without_the_option():
+    seen=[]
+    def caller(method, *args):
+        assert method=='walletcreatefundedpsbt'
+        seen.append(dict(args[3]))
+        if 'psbt_version' in args[3]:
+            raise SwapError('CHAIN_RPC', 'Unexpected key psbt_version')
+        return {'psbt':'cHNidA','fee':'0.00001000'}
+    result=create_funded_psbt(caller,[],[],0,{'fee_rate':2},True,request_v0=True)
+    assert result['psbt']=='cHNidA'
+    assert seen==[{'fee_rate':2,'psbt_version':0},{'fee_rate':2}]
+
+def test_other_funding_rejection_is_not_retried():
+    calls=[]
+    def caller(method, *args):
+        calls.append(args[3])
+        raise SwapError('CHAIN_RPC', 'Insufficient funds')
+    with pytest.raises(SwapError, match='Insufficient funds'):
+        create_funded_psbt(caller,[],[],0,{'fee_rate':2},True,request_v0=True)
+    assert len(calls)==1

@@ -12,7 +12,7 @@ import math
 import statistics
 import time
 from .assets import Asset
-from .adapters import BTXAdapter,BitcoinAdapter,UtxoLock,to_atoms,coin_string
+from .adapters import BTXAdapter,BitcoinAdapter,UtxoLock,create_funded_psbt,to_atoms,coin_string
 from .bitcoin import Transaction,build_spend,sign_digest,TxInput,TxOutput,parse_htlc_script
 from .canonical import atoms,hex32,integer,hashlock,digest
 from .errors import require,SwapError
@@ -114,9 +114,10 @@ class UTXODriver:
         return bool(a and self._owned(script,a))
     def prepare_funding(self,sid,terms,local_key,reservation_id,max_fee_atoms):
         c=self.watch_terms(terms,local_key);self.ready()
-        result=self.wallet('walletcreatefundedpsbt',[],[{c['address']:coin_string(atoms(terms.amount_atoms))}],0,
+        result=create_funded_psbt(self.wallet,[],[{c['address']:coin_string(atoms(terms.amount_atoms))}],0,
                            {'lockUnspents':True,'replaceable':False,'include_unsafe':False,
-                            'fee_rate':self.fee_rate,'minconf':self.confirmations,'psbt_version':0},True)
+                            'fee_rate':self.fee_rate,'minconf':self.confirmations},True,
+                           request_v0=self.family=='btc')
         fee=to_atoms(result['fee']);require(0<=fee<=atoms(max_fee_atoms),'FEE_CAP','Funding fee exceeds authorization')
         psbt=self.rpc('decodepsbt',result['psbt'])
         decoded=psbt.get('tx') if type(psbt) is dict else None
