@@ -10615,6 +10615,14 @@ std::optional<uint256> PeerManagerImpl::ExpireInboundBlockChunks(
 PeerManagerImpl::GetBlockDataOutcome PeerManagerImpl::ProcessGetBlockData(
     CNode& pfrom, Peer& peer, const CInv& inv, bool try_cs_main, bool hold_g_msgproc)
 {
+    // First perform the stateless checks:
+    // A filtered block can only ever be requested if we offer NODE_BLOOM.
+    // Check before looking up the block, to avoid an unnecessary disk read.
+    if ((inv.IsMsgFilteredBlk() || inv.IsMsgFilteredWitnessBlk()) && !(peer.m_our_services & NODE_BLOOM)) {
+        LogDebug(BCLog::NET, "filtered block request received when NODE_BLOOM service disabled, %s\n", pfrom.DisconnectMsg(fLogIPs));
+        pfrom.fDisconnect = true;
+        return GetBlockDataOutcome::Done;
+    }
     if (m_chainman.IsDiscoveryRelay()) {
         return GetBlockDataOutcome::Done;
     }
@@ -19578,6 +19586,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         vRecv >> req;
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after getblocktxn = %u bytes", vRecv.size()));
+            return;
+        }
+
+        // No legitimate reason to send indexes empty: a getblocktxn is only
+        // needed when at least one transaction of a compact block is missing.
+        if (req.indexes.empty()) {
+            LogDebug(BCLog::NET, "getblocktxn received with no transaction indexes, %s\n", pfrom.DisconnectMsg(fLogIPs));
+            pfrom.fDisconnect = true;
             return;
         }
 
