@@ -71,7 +71,7 @@ static constexpr size_t SHIELDED_ADDRESS_BASE_PAYLOAD_SIZE{66};
 static constexpr size_t SHIELDED_ADDRESS_EXTENDED_PAYLOAD_SIZE{
     SHIELDED_ADDRESS_BASE_PAYLOAD_SIZE + mlkem::PUBLICKEYBYTES};
 static constexpr int SHIELDED_ADDRESS_CHAR_LIMIT{3000};
-static constexpr uint32_t SHIELDED_STATE_VERSION{4};
+static constexpr uint32_t SHIELDED_STATE_VERSION{5};
 static constexpr uint8_t SHIELDED_ADDRESS_LIFECYCLE_VERSION{1};
 static constexpr size_t MAX_V2_SEND_BUILDER_PROOF_ATTEMPTS{4};
 static constexpr const char* SHIELDED_ENCRYPTION_REQUIRED_ERROR{
@@ -1463,6 +1463,8 @@ struct PersistedShieldedState
     std::vector<PersistedShieldedNoteClassEntry> note_classes;
     std::vector<std::pair<uint256, shielded::ShieldedMerkleWitness>> witnesses;
     std::vector<uint64_t> recent_ring_exclusions;
+    // Written only for version >= 5. Version 4 blobs leave this false.
+    bool empty_gap_search_done{false};
 
     SERIALIZE_METHODS(PersistedShieldedState, obj)
     {
@@ -1483,6 +1485,9 @@ struct PersistedShieldedState
         }
         if (obj.version >= 4) {
             READWRITE(obj.note_classes);
+        }
+        if (obj.version >= 5) {
+            READWRITE(obj.empty_gap_search_done);
         }
     }
 };
@@ -1581,6 +1586,11 @@ void LogPersistedShieldedIdentitySalvage(const PersistedShieldedState& state,
             }
             if (salvaged.version >= 3) {
                 ss >> salvaged.address_lifecycles;
+            }
+            if (salvaged.version >= 5) {
+                std::vector<PersistedShieldedNoteClassEntry> ignored_note_classes;
+                ss >> ignored_note_classes;
+                ss >> salvaged.empty_gap_search_done;
             }
         } catch (const std::exception& e) {
             diagnostic = strprintf("salvaged key metadata only; failed to skip scan cache: %s", e.what());
@@ -7267,6 +7277,7 @@ bool CShieldedWallet::PersistState()
     PersistedShieldedState state;
     state.next_spending_index = m_next_spending_index;
     state.next_kem_index = m_next_kem_index;
+    state.empty_gap_search_done = m_empty_gap_search_done;
     state.last_scanned_height = m_last_scanned_height;
     state.last_scanned_hash = m_last_scanned_hash;
     state.tree = m_tree;
@@ -7339,6 +7350,7 @@ bool CShieldedWallet::PersistState()
         PersistedShieldedState tree_only;
         tree_only.next_spending_index = state.next_spending_index;
         tree_only.next_kem_index = state.next_kem_index;
+        tree_only.empty_gap_search_done = state.empty_gap_search_done;
         tree_only.last_scanned_height = state.last_scanned_height;
         tree_only.last_scanned_hash = state.last_scanned_hash;
         tree_only.tree = state.tree;
@@ -7376,6 +7388,7 @@ bool CShieldedWallet::PersistState()
             PersistedShieldedState tree_only;
             tree_only.next_spending_index = state.next_spending_index;
             tree_only.next_kem_index = state.next_kem_index;
+            tree_only.empty_gap_search_done = state.empty_gap_search_done;
             tree_only.last_scanned_height = state.last_scanned_height;
             tree_only.last_scanned_hash = state.last_scanned_hash;
             tree_only.tree = state.tree;
@@ -7394,7 +7407,10 @@ bool CShieldedWallet::PersistState()
         // operation like Rescan() calls PersistState() before keys have been
         // rehydrated.  Overwriting in that situation would permanently destroy
         // the keys and notes, requiring a full chain rescan to recover.
-        if (state.key_sets.empty()) {
+        // A completed empty gap search is the exception: its key set is empty
+        // on purpose, and the flag has to replace a keyless encrypted blob
+        // migrated from tree-only plaintext during this same unlock.
+        if (state.key_sets.empty() && !state.empty_gap_search_done) {
             uint256 existing_iv;
             std::vector<unsigned char> existing_encrypted;
             if (batch.ReadCryptedShieldedState(existing_iv, existing_encrypted) && !existing_encrypted.empty()) {
@@ -7585,6 +7601,7 @@ void CShieldedWallet::LoadPersistedState()
     m_tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     m_next_spending_index = 0;
     m_next_kem_index = 0;
+    m_empty_gap_search_done = false;
     m_last_scanned_height = -1;
     m_last_scanned_hash.SetNull();
 
@@ -7745,6 +7762,7 @@ void CShieldedWallet::LoadPersistedState()
 
     m_next_spending_index = state.next_spending_index;
     m_next_kem_index = state.next_kem_index;
+    m_empty_gap_search_done = state.empty_gap_search_done;
     m_last_scanned_height = state.last_scanned_height;
     m_last_scanned_hash = state.last_scanned_hash;
     m_recent_ring_exclusions = state.recent_ring_exclusions;
@@ -7825,15 +7843,19 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
         }
     }
 
-    // If the persisted state lost its key_sets AND indices (e.g. tree-only
-    // fallback was later overwritten by an unlocked PersistState with empty
-    // state), recover by re-deriving keys from the master seed. The search
-    // still covers m_next_spending_index + GAP_LIMIT indices. After the chain
-    // scan, keep keys only through the highest index that decrypted a note.
-    // With no notes, keep none and leave the next spending index at 0. A new
-    // encrypted wallet has a PQ seed from descriptor creation and an empty key
-    // set, so this path also runs on its first unlock; do not skip it for that.
-    if (m_key_sets.empty()) {
+    // If the persisted state lost its key_sets, recover by re-deriving keys
+    // from the master seed. The search still covers m_next_spending_index +
+    // GAP_LIMIT indices. issued is that next index before the search. After a
+    // complete scan, keep every derived key below max(one past the highest
+    // note, or 0 when no note exists, issued) and set both next indexes to
+    // that bound. Search keys past the bound are dropped. An incomplete scan,
+    // or a note with no derived key, keeps the whole search set. A finished
+    // search that finds no note and had issued 0 is recorded so the next
+    // unlock does not derive the gap again. The first unlock of a new
+    // encrypted wallet still runs the search.
+    if (m_key_sets.empty() && m_empty_gap_search_done && m_next_spending_index == 0 && m_notes.empty()) {
+        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys empty gap search already completed; not deriving keys\n");
+    } else if (m_key_sets.empty()) {
         std::vector<unsigned char> master_seed = GetMasterSeed();
         ScopedByteVectorCleanse master_seed_cleanse_rederive(master_seed);
         if (!master_seed.empty()) {
@@ -7843,8 +7865,9 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
             uint32_t max_used_index = 0;
             bool found_any{false};
 
-            // Derive up to m_next_spending_index (if known) plus GAP_LIMIT
-            // additional indices to discover keys whose indices were lost.
+            // Remember addresses already handed out. The search limit stays
+            // m_next_spending_index + GAP_LIMIT.
+            const uint32_t issued = m_next_spending_index;
             const uint32_t search_limit = m_next_spending_index + GAP_LIMIT;
 
             for (uint32_t i = 0; i < search_limit; ++i) {
@@ -7922,35 +7945,37 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
 
                 if (m_scan_incomplete || note_without_key) {
                     // A missing block, or a note we cannot tie to a derived
-                    // index, means the search keys have to stay.
+                    // index, means the search keys have to stay. Do not record
+                    // an empty gap search for an incomplete scan.
                     m_next_spending_index = max_used_index + 1;
                     m_next_kem_index = max_used_index + 1;
                     LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys keeping %u search key(s) (scan_incomplete=%d unmatched_note=%d)\n",
                               static_cast<unsigned int>(m_key_sets.size()),
                               m_scan_incomplete ? 1 : 0,
                               note_without_key ? 1 : 0);
-                } else if (!highest_note_index.has_value()) {
-                    for (const auto& [addr, _] : m_key_sets) {
-                        m_address_lifecycles.erase(addr);
-                    }
-                    m_key_sets.clear();
-                    m_next_spending_index = 0;
-                    m_next_kem_index = 0;
-                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys no decrypted note; dropped search keys and reset next spending index to 0\n");
                 } else {
+                    const uint32_t note_bound = highest_note_index.has_value() ? (*highest_note_index + 1) : 0;
+                    const uint32_t keep_bound = std::max(note_bound, issued);
                     for (auto it = m_key_sets.begin(); it != m_key_sets.end();) {
-                        if (it->second.index > *highest_note_index) {
+                        if (it->second.index >= keep_bound) {
                             m_address_lifecycles.erase(it->first);
                             it = m_key_sets.erase(it);
                         } else {
                             ++it;
                         }
                     }
-                    m_next_spending_index = *highest_note_index + 1;
-                    m_next_kem_index = *highest_note_index + 1;
-                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys kept %u key(s) through note index %u\n",
-                              static_cast<unsigned int>(m_key_sets.size()),
-                              *highest_note_index);
+                    m_next_spending_index = keep_bound;
+                    m_next_kem_index = keep_bound;
+                    if (!highest_note_index.has_value() && issued == 0) {
+                        m_empty_gap_search_done = true;
+                        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys no decrypted note; dropped search keys, reset next spending index to 0, and recorded empty gap search\n");
+                    } else {
+                        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys kept %u key(s) below index %u (note_bound=%u issued=%u)\n",
+                                  static_cast<unsigned int>(m_key_sets.size()),
+                                  keep_bound,
+                                  note_bound,
+                                  issued);
+                    }
                 }
 
                 m_locked_state_incomplete = false;
