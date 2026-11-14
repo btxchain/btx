@@ -115,7 +115,7 @@ class UTXODriver:
     def prepare_funding(self,sid,terms,local_key,reservation_id,max_fee_atoms):
         c=self.watch_terms(terms,local_key);self.ready()
         result=create_funded_psbt(self.wallet,[],[{c['address']:coin_string(atoms(terms.amount_atoms))}],0,
-                           {'lockUnspents':True,'replaceable':False,'include_unsafe':False,
+                           {'lockUnspents':False,'replaceable':False,'include_unsafe':False,
                             'fee_rate':self.fee_rate,'minconf':self.confirmations},True,
                            request_v0=self.family=='btc')
         fee=to_atoms(result['fee']);require(0<=fee<=atoms(max_fee_atoms),'FEE_CAP','Funding fee exceeds authorization')
@@ -139,13 +139,27 @@ class UTXODriver:
         require(input_total-sum(int(o[1]) for o in expected)==fee,'FEE_MISMATCH','Wallet fee does not match chain inputs')
         plan=FundingPlan(self.network,sid,reservation_id,self.asset.id,
                          tuple(f"{v['txid']}:{v['vout']}" for v in decoded['vin']),str(input_total),tuple(expected),max_fee_atoms)
-        self.journal.store.lock_coins(reservation_id,self.asset.id,list(plan.inputs))
-        owned={o[0] for o in expected if o[2]=='change'}
-        raw=self.adapter.sign_funding(result['psbt'],approved_plan=plan,is_owned_change=lambda x:x in owned)
-        tx=self.rpc('decoderawtransaction',raw)
-        require(tx['txid']==decoded['txid'],'FUNDING_MALLEATED','Witness signing changed the funding txid')
-        ref={'txid':tx['txid'],'vout':match[0]}
-        return Prepared(tx['txid'],raw,ref,str(fee),{'plan_id':plan.id,'inputs':list(plan.inputs)})
+        coins=[{'txid':v['txid'],'vout':v['vout']} for v in decoded['vin']]
+        # Native lockunspent rejects already-locked inputs. Until this point,
+        # decoding and all fee/output checks have no wallet-lock side effects.
+        require(self.wallet('lockunspent',False,coins) is True,'COINLOCK','Wallet could not reserve selected inputs')
+        try:
+            owned={o[0] for o in expected if o[2]=='change'}
+            raw=self.adapter.sign_funding(result['psbt'],approved_plan=plan,is_owned_change=lambda x:x in owned)
+            tx=self.rpc('decoderawtransaction',raw)
+            require(tx['txid']==decoded['txid'],'FUNDING_MALLEATED','Witness signing changed the funding txid')
+            ref={'txid':tx['txid'],'vout':match[0]}
+            prepared=Prepared(tx['txid'],raw,ref,str(fee),{'plan_id':plan.id,'inputs':list(plan.inputs)})
+            self.journal.store.lock_coins(reservation_id,self.asset.id,list(plan.inputs))
+            return prepared
+        except Exception as error:
+            # Only these successfully acquired inputs belong to this attempt.
+            # Never unlock every wallet coin or an earlier reservation.
+            try:
+                require(self.wallet('lockunspent',True,coins) is True,'COINLOCK_CLEANUP','Wallet could not release failed preparation inputs')
+            except Exception as cleanup:
+                raise SwapError('COINLOCK_CLEANUP','Failed preparation input cleanup needs attention') from cleanup
+            raise
     def _dest_script(self,address):
         valid=self.rpc('validateaddress',address)
         require(valid.get('isvalid') is True,'PAYOUT','Invalid payout')

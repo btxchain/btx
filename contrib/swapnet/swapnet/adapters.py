@@ -14,21 +14,15 @@ from .machine import LegObservation
 COIN=100_000_000
 
 def create_funded_psbt(caller, inputs, outputs, locktime, options, bip32derivs, *, request_v0):
-    """Ask for PSBT v0 when the wallet understands that option.
-
-    Bitcoin Core 32 defaults to v2, whose decode has no tx. Core 30.4 and this
-    node's wallet reject the key before any coin is locked. Their default
-    PSBT is already v0, so the same call is repeated without the option.
-    """
-    requested=dict(options)
+    """Use the wallet's RPC argument contract without guessing its PSBT default."""
+    args=[inputs,outputs,locktime,dict(options),bip32derivs]
     if request_v0:
-        requested['psbt_version']=0
-    try:
-        return caller('walletcreatefundedpsbt', inputs, outputs, locktime, requested, bip32derivs)
-    except SwapError as error:
-        if not request_v0 or 'psbt_version' not in error.message.lower():
-            raise
-        return caller('walletcreatefundedpsbt', inputs, outputs, locktime, options, bip32derivs)
+        help_text=caller('help','walletcreatefundedpsbt')
+        require(type(help_text) is str,'PSBT_VERSION','Wallet PSBT argument contract is unavailable')
+        if re.search(r'\bpsbt_version\b',help_text):
+            # Core32's version is argument6, after transaction version (default).
+            args.extend([None,0])
+    return caller('walletcreatefundedpsbt',*args)
 
 def to_atoms(value):
     require(type(value) in {str,int,Decimal},'RPC_AMOUNT','RPC amount must not pass through binary floating point')
