@@ -626,6 +626,10 @@ private:
      *  tree-only fallback state and full note/key accounting is unavailable
      *  until the shielded state is rehydrated after unlock. */
     bool m_locked_state_incomplete GUARDED_BY(cs_shielded){false};
+    /** A finished gap search found no note and no address had been issued.
+     *  Later unlocks must not derive that gap again. Persisted with shielded
+     *  state version 5. */
+    bool m_empty_gap_search_done GUARDED_BY(cs_shielded){false};
 
     [[nodiscard]] std::vector<unsigned char> GetMasterSeed() const;
     [[nodiscard]] int GetChainTipHeight() const;
