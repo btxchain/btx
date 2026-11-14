@@ -7952,9 +7952,10 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 }
                 // A body evicted moments ago under capacity pressure is not
                 // missing. Asking for it again makes the store evict another
-                // one to take it. The progress body is never evicted, so it
-                // is never held back here.
-                if (m_matmul_block_lifecycle.WasEvictedRecently(
+                // one to take it. A body evicted before it was the tip-child
+                // is still requested once it is the direct child of the active tip.
+                if ((activeChain == nullptr || pindex->pprev != activeChain->Tip()) &&
+                    m_matmul_block_lifecycle.WasEvictedRecently(
                         deferred_hash, MATMUL_BUDGET_DEFER_COOLDOWN)) {
                     continue;
                 }
