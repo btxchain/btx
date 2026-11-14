@@ -399,8 +399,9 @@ not the proof. Native `btx-modeld` never terminates this TLS edge.
 
 ### 10. CUDA qualification (optional, isolated)
 
-Static `btx-modelcheck` never launches kernels. `QualifyRuntime` with
-`-modelruntimecheck=1` posix_spawns `BTX_CUDA_QUAL_WORKER` or PATH
+Static `btx-modelcheck` never launches kernels. No `btxd` or `btx-modeld`
+option turns runtime qualification on (both refuse `-modelruntimecheck`).
+In library and test code, `QualifyRuntime` posix_spawns `BTX_CUDA_QUAL_WORKER` or PATH
 `cuda_qual_worker` with `--gpu=N` and optional `--allow-shared-gpu` from
 `BTX_ALLOW_SHARED_GPU`. `btxd` never `cudaSetDevice` for model qualification.
 
@@ -413,7 +414,7 @@ CUDA_HOST=<cuda-workstation> contrib/modelnet/cuda-isolated-e2e.sh
 # GPU-01/03/04/05/06: kernel, isolation, 8s alarm, crash isolation, backend hash
 ```
 
-Default `-modelruntimecheck=0` remains `NOT_RUN_CUDA_ISOLATION`.
+The node result remains `NOT_RUN_CUDA_ISOLATION`.
 `capabilities.cuda_qualification=true` because the isolated worker exists;
 a live `GPU-01 RUNTIME_OBSERVED` is the e2e above. See
 `planning/acceptance-matrix.csv`.

@@ -163,7 +163,7 @@ Facts the node *does* expose:
 - Confirmation **depth** and **block hash/height** via `getdepositstatus` and wallet transaction metadata.
 - Disconnects (`sequence` `D`, `block.disconnected`) and status transitions to `REORGED` / `CONFLICTED`.
 - Wallet **reorg hold** flags (service policy, not consensus): after a block disconnect the wallet can report `settlement_safe=false` and zero settlement-safe balances until hold clears — `-walletreorgsafetydepth` (minimum confirmations for settlement-safe reporting), `-walletreorgholdblocks`, and `-walletreorgholdseconds` (`src/wallet/init.cpp`). Use these together with `getdepositstatus` so crediting pauses after a reorg without requiring a node restart.
-- Local reorg **protection** (not a BCP/1 finality gadget): optional PARK/warn profiles via `-parkdeepreorg` / `-maxreorgdepthpark`; `getreorgprotectionstatus` reports the active profile. This affects how the **local** node treats deep competing chains; it does not make any confirmation depth irreversible for deposits.
+- Local reorg **protection** (not a BCP/1 finality gadget): optional PARK/warn profiles via `-parkdeepreorg` / `-maxreorgdepthpark`; `getdifficultyhealth` reports the active profile under `reorg_protection`. This affects how the **local** node treats deep competing chains; it does not make any confirmation depth irreversible for deposits.
 
 ### How deep a reorg has BTX historically experienced?
 
