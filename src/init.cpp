@@ -3179,7 +3179,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     {
         node::GovernorMode gm = node::GovernorMode::AUTO;
-        (void)node::ParseGovernorMode(args.GetArg("-resourcegovernor", "auto"), gm);
+        // A value the governor does not know (a typo, or "0" from
+        // -noresourcegovernor) used to run AUTO without a word.
+        const std::string governor_arg{args.GetArg("-resourcegovernor", "auto")};
+        if (!node::ParseGovernorMode(governor_arg, gm)) {
+            return InitError(strprintf(_("Invalid -resourcegovernor value '%s': use auto, performance, balanced, eco, manual or off."), governor_arg));
+        }
         if (gm == node::GovernorMode::OFF &&
             (args.GetBoolArg("-gen", false) || args.GetBoolArg("-automining", false))) {
             InitWarning(_("-resourcegovernor=off denies all governed work including mining; there is no ungoverned mining mode. Mining requested by -gen or -automining will be deferred."));
