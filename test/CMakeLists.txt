@@ -49,6 +49,7 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/util)
 # successful test as failed.
 file(GLOB_RECURSE functional_tests CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
   functional/*.py
+  functional/*.c
   functional/*.json
   functional/*.csv
   functional/*.md

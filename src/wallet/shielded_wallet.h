@@ -501,6 +501,12 @@ public:
     [[nodiscard]] std::optional<ShieldedTxView> GetCachedTransactionView(const uint256& txid) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** Cached view, or the view rebuilt from the note's already-scanned block.
+     *  The rebuilt row is kept in memory only; the persisted shielded state is
+     *  not rewritten. */
+    [[nodiscard]] std::optional<ShieldedTxView> GetTransactionView(const uint256& txid)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Return KEM public key for a local address. */
     [[nodiscard]] bool GetKEMPublicKey(const ShieldedAddress& addr, mlkem::PublicKey& out_pk) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
@@ -682,6 +688,23 @@ private:
                              const std::vector<unsigned char>& master_seed,
                              ShieldedTxView& tx_view,
                              bool& tx_has_local_visibility)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    /** Fill one output row of a rebuilt view. Does not append to the tree or notes. */
+    void AppendRebuiltOutputView(const uint256& commitment,
+                                 const shielded::EncryptedNote& enc_note,
+                                 const std::optional<smile2::CompactPublicAccount>& smile_account,
+                                 ShieldedTxView& tx_view,
+                                 bool& tx_has_local_visibility) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    void AppendRebuiltOutputView(const shielded::v2::OutputDescription& output,
+                                 ShieldedTxView& tx_view,
+                                 bool& tx_has_local_visibility) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    [[nodiscard]] std::optional<ShieldedTxView> BuildLocalTransactionView(const CTransaction& tx) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    /** On a cache miss, rebuild one transaction from a block this wallet already
+     *  scanned: the block hash stored on a note from that transaction. */
+    [[nodiscard]] std::optional<ShieldedTxView> RebuildTransactionViewFromNoteAnchor(const uint256& txid)
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     [[nodiscard]] std::vector<ShieldedCoin> SelectNotes(CAmount target,
                                                         CAmount fee,

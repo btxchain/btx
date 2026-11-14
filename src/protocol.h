@@ -58,6 +58,15 @@ public:
  * to update ALL_NET_MESSAGE_TYPES below.
  */
 namespace NetMsgType {
+// SWAPNET-MESSAGE-NAMES
+inline constexpr const char* SWHELLO{"swhello"};
+inline constexpr const char* SWGET{"swget"};
+inline constexpr const char* SWPROV{"swprov"};
+inline constexpr const char* SWRFQ{"swrfq"};
+inline constexpr const char* SWQUOTE{"swquote"};
+inline constexpr const char* SWTERMS{"swterms"};
+inline constexpr const char* SWRECEIPT{"swreceipt"};
+
 /** Minimum protocol version that guarantees shielded relay support. */
 static constexpr int SHIELDED_VERSION{800001};
 /**
@@ -416,6 +425,15 @@ inline constexpr const char* MDPEERS{"mdpeers"};
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
 inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
+    // SWAPNET-MESSAGE-LIST
+    NetMsgType::SWHELLO,
+    NetMsgType::SWGET,
+    NetMsgType::SWPROV,
+    NetMsgType::SWRFQ,
+    NetMsgType::SWQUOTE,
+    NetMsgType::SWTERMS,
+    NetMsgType::SWRECEIPT,
+
     NetMsgType::VERSION,
     NetMsgType::VERACK,
     NetMsgType::ADDR,

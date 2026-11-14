@@ -2,8 +2,9 @@
 
 GPU runtime qualification is **not** a proof of model usefulness or safety.
 `capabilities.cuda_qualification=true` means an **isolated worker** exists
-(`QualifyFile` never `cudaSetDevice`). Default `-modelruntimecheck=0` is
-still `NOT_RUN_CUDA_ISOLATION`. A live `GPU-01 RUNTIME_OBSERVED` is
+(`QualifyFile` never `cudaSetDevice`). No `btxd` or `btx-modeld` option turns
+runtime qualification on, so the result is `NOT_RUN_CUDA_ISOLATION`. A live
+`GPU-01 RUNTIME_OBSERVED` is
 `contrib/modelnet/cuda-isolated-e2e.sh`. The packaged bar is
 `planning/acceptance-matrix.csv`.
 
@@ -12,9 +13,10 @@ still `NOT_RUN_CUDA_ISOLATION`. A live `GPU-01 RUNTIME_OBSERVED` is
 - Static qualification (`btx-modelcheck` / `QualifyFile`) never launches
   CUDA kernels. It reads SafeTensors/GGUF **headers** vs filesystem size.
 - Pickle / `.pt` / Python / `.so` are rejected before any runtime.
-- Default `-modelruntimecheck=0` returns `NOT_RUN_CUDA_ISOLATION` and does
-  not load libcuda.
-- When `-modelruntimecheck=1`, `QualifyRuntime` posix_spawns
+- Runtime qualification is library and test code in this tree: no `btxd` or
+  `btx-modeld` option enables it (both refuse `-modelruntimecheck`). The result
+  is `NOT_RUN_CUDA_ISOLATION`, and libcuda is not loaded.
+- When the library is asked for it, `QualifyRuntime` posix_spawns
   `BTX_CUDA_QUAL_WORKER` or PATH `cuda_qual_worker` with `--gpu=N` and
   optional `--allow-shared-gpu` from `BTX_ALLOW_SHARED_GPU`. `btxd` never
   `cudaSetDevice` for model qualification.

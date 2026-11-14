@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <vector>
@@ -651,6 +652,40 @@ BOOST_AUTO_TEST_CASE(fund_with_mandate_watch_drain_unsigned)
     BOOST_CHECK(saw);
 }
 
+// cancelmodeljob answered cancelled:true for any known job, also one that had
+// already ended; only the status of a queued or running job changes.
+BOOST_AUTO_TEST_CASE(cancelmodeljob_reports_only_a_real_cancel)
+{
+    const fs::path tmp = m_path_root / "first-run-cancel-ended";
+    fs::create_directories(tmp);
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    UniValue job(UniValue::VOBJ);
+    job.pushKV("job_id", "cancel-ended-aa11");
+    job.pushKV("model_id", std::string(96, 'f'));
+    job.pushKV("status", "queued");
+    job.pushKV("created_ms", 42);
+    UniValue jobs(UniValue::VARR);
+    jobs.push_back(job);
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("schema_version", 1);
+    root.pushKV("jobs", jobs);
+    {
+        std::ofstream out(tmp / "retrieve_jobs.json");
+        out << root.write() << "\n";
+    }
+    UniValue p(UniValue::VARR);
+    p.push_back("cancel-ended-aa11");
+    const UniValue first = Dispatch(cat, Rpc("cancelmodeljob", p));
+    BOOST_CHECK(first["cancelled"].get_bool());
+    BOOST_REQUIRE_EQUAL(first["jobs"].size(), 1U);
+    BOOST_CHECK_EQUAL(first["jobs"][0]["status"].get_str(), "cancelled");
+    // The job has ended now; a second cancel changes nothing and must say so.
+    const UniValue second = Dispatch(cat, Rpc("cancelmodeljob", p));
+    BOOST_CHECK_MESSAGE(!second["cancelled"].get_bool(), "cancelled:true for a job that had already ended");
+    BOOST_REQUIRE_EQUAL(second["jobs"].size(), 1U);
+    BOOST_CHECK_EQUAL(second["jobs"][0]["status"].get_str(), "cancelled");
+}
+
 BOOST_AUTO_TEST_CASE(retrieve_jobs_persist_reload_without_worker)
 {
     const fs::path tmp = m_path_root / "first-run-retrieve-persist";
@@ -680,6 +715,52 @@ BOOST_AUTO_TEST_CASE(retrieve_jobs_persist_reload_without_worker)
     BOOST_CHECK_EQUAL(listed["jobs"][0]["job_id"].get_str(), "persist-job-aa11");
     BOOST_CHECK_EQUAL(listed["jobs"][0]["status"].get_str(), "queued");
     BOOST_CHECK_EQUAL(listed["jobs"][0]["model_id"].get_str(), mid);
+}
+
+// getpublisher reported model_count_observed 1 for a publisher with three models,
+// and answered an unknown id with the whole publisher list and success.
+BOOST_AUTO_TEST_CASE(getpublisher_counts_all_models_and_refuses_unknown_ids)
+{
+    const fs::path root = m_path_root / "first-run-getpublisher";
+    modelnet::ModelCatalog cat{root, 8 << 20};
+    for (int i = 0; i < 3; ++i) {
+        const fs::path dir = root / fs::PathFromString("m" + std::to_string(i));
+        fs::create_directories(dir);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(dir / "toy.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue hp(UniValue::VARR);
+        hp.push_back(fs::PathToString(dir));
+        const UniValue hosted = Dispatch(cat, Rpc("hostmodel", hp));
+        UniValue ap(UniValue::VARR);
+        ap.push_back(hosted["uri"].get_str());
+        ap.push_back("publisher-alias-" + std::to_string(i));
+        Dispatch(cat, Rpc("setmodelalias", ap));
+    }
+    const UniValue pubs = Dispatch(cat, Rpc("searchpublishers"));
+    BOOST_REQUIRE(pubs["publishers"].isArray());
+    BOOST_REQUIRE_EQUAL(pubs["publishers"].size(), 1U);
+    const std::string pid = pubs["publishers"][0]["id"].get_str();
+    BOOST_REQUIRE_EQUAL(pubs["publishers"][0]["model_count_observed"].getInt<int>(), 3);
+
+    UniValue gp(UniValue::VARR);
+    gp.push_back(pid);
+    const UniValue one = Dispatch(cat, Rpc("getpublisher", gp));
+    BOOST_CHECK_EQUAL(one["id"].get_str(), pid);
+    BOOST_CHECK_EQUAL(one["model_count_observed"].getInt<int>(), 3);
+
+    UniValue unknown(UniValue::VARR);
+    unknown.push_back(std::string(96, 'a'));
+    UniValue result;
+    std::string code, err;
+    BOOST_CHECK_MESSAGE(!modelnet::DispatchHelperRpc(cat, Rpc("getpublisher", unknown), result, code, err),
+                        "getpublisher answered an unknown id: " << result.write());
+    BOOST_CHECK_EQUAL(code, "NOT_FOUND");
 }
 
 BOOST_AUTO_TEST_CASE(retrieve_jobs_reload_progress_index_not_wrapped)
@@ -724,6 +805,63 @@ BOOST_AUTO_TEST_CASE(retrieve_jobs_reload_progress_index_not_wrapped)
     const UniValue neg = job_of("progress-range-neg");
     BOOST_CHECK_EQUAL(neg["file_index"].getInt<int64_t>(), 0);
     BOOST_CHECK_EQUAL(neg["piece_index"].getInt<int64_t>(), 7);
+}
+
+BOOST_AUTO_TEST_CASE(retrieve_jobs_reload_counters_do_not_throw)
+{
+    // created_ms, bytes_committed and pieces_committed were read with getInt,
+    // which throws on a negative, fractional or too large number. The loader
+    // runs when the helper starts and before every helper RPC.
+    const fs::path tmp = m_path_root / "first-run-retrieve-counters-range";
+    fs::create_directories(tmp);
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    UniValue too_big;
+    too_big.setNumStr("18446744073709551616"); // 2^64
+    UniValue jobs(UniValue::VARR);
+    auto add_job = [&](const std::string& id, const UniValue& created, const UniValue& bytes, const UniValue& pieces) {
+        UniValue job(UniValue::VOBJ);
+        job.pushKV("job_id", id);
+        job.pushKV("model_id", std::string(96, 'e'));
+        job.pushKV("status", "queued");
+        job.pushKV("created_ms", created);
+        job.pushKV("bytes_committed", bytes);
+        job.pushKV("pieces_committed", pieces);
+        jobs.push_back(job);
+    };
+    add_job("counters-neg", UniValue(int64_t{42}), UniValue(int64_t{-1}), UniValue(int64_t{5}));
+    UniValue frac;
+    frac.setNumStr("2.5");
+    add_job("counters-frac", frac, UniValue(int64_t{7}), frac);
+    add_job("counters-big", UniValue(int64_t{42}), too_big, UniValue(int64_t{3}));
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("schema_version", 1);
+    root.pushKV("jobs", jobs);
+    {
+        std::ofstream out(tmp / "retrieve_jobs.json");
+        out << root.write() << "\n";
+    }
+    // A job without a usable created_ms keeps the time it was loaded at.
+    const int64_t before_load_ms{std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count()};
+    auto job_of = [&](const std::string& id) {
+        UniValue p(UniValue::VARR);
+        p.push_back(id);
+        const UniValue listed = Dispatch(cat, Rpc("getmodeljob", p));
+        BOOST_REQUIRE(listed["jobs"].isArray());
+        BOOST_REQUIRE_EQUAL(listed["jobs"].size(), 1);
+        return listed["jobs"][0];
+    };
+    const UniValue neg = job_of("counters-neg");
+    BOOST_CHECK_EQUAL(neg["bytes_committed"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(neg["pieces_committed"].getInt<int64_t>(), 5);
+    BOOST_CHECK_EQUAL(neg["created_ms"].getInt<int64_t>(), 42);
+    const UniValue fr = job_of("counters-frac");
+    BOOST_CHECK_GE(fr["created_ms"].getInt<int64_t>(), before_load_ms);
+    BOOST_CHECK_EQUAL(fr["bytes_committed"].getInt<int64_t>(), 7);
+    BOOST_CHECK_EQUAL(fr["pieces_committed"].getInt<int64_t>(), 0);
+    const UniValue big = job_of("counters-big");
+    BOOST_CHECK_EQUAL(big["bytes_committed"].getInt<int64_t>(), 0);
+    BOOST_CHECK_EQUAL(big["pieces_committed"].getInt<int64_t>(), 3);
 }
 
 BOOST_AUTO_TEST_CASE(unix_rpc_timeout_is_short_except_long_methods)
@@ -1371,6 +1509,86 @@ BOOST_AUTO_TEST_CASE(remaining_identity_policy_circle_release_ops)
             }
         }
     }
+}
+
+// setmodelalias, removemodelalias, removemodelsearchrecord and importmodelindex
+// changed the search index in memory only. search-index.json is what the helper
+// loads after a restart, so each change must be in that file.
+BOOST_AUTO_TEST_CASE(search_index_changes_are_saved)
+{
+    auto saved_record = [](const fs::path& helper_dir, const std::string& model_id) {
+        std::ifstream in(helper_dir / "search-index.json");
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue snap;
+        if (snap.read(text) && snap["records"].isArray()) {
+            for (const auto& r : snap["records"].getValues()) {
+                if (r["model_id"].isStr() && r["model_id"].get_str() == model_id) return r;
+            }
+        }
+        return UniValue{};
+    };
+    auto has_alias = [](const UniValue& rec, const std::string& alias) {
+        if (!rec.isObject() || !rec["aliases"].isArray()) return false;
+        for (const auto& a : rec["aliases"].getValues()) {
+            if (a.isStr() && a.get_str() == alias) return true;
+        }
+        return false;
+    };
+
+    const fs::path root_b = m_path_root / "search-save-b";
+    fs::create_directories(root_b / "m");
+    {
+        const auto st = MinimalSafeTensors();
+        std::ofstream out(root_b / "m" / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    modelnet::ModelCatalog cat_b{root_b, 8 << 20};
+    const fs::path dir_b = cat_b.Store().Root().parent_path();
+    UniValue hp(UniValue::VARR);
+    hp.push_back(fs::PathToString(root_b / "m"));
+    const UniValue hosted = Dispatch(cat_b, Rpc("hostmodel", hp));
+    const std::string uri = hosted["uri"].get_str();
+    const std::string model_id = hosted["model_id"].get_str();
+
+    UniValue ap(UniValue::VARR);
+    ap.push_back(uri);
+    ap.push_back("r16-saved-alias");
+    Dispatch(cat_b, Rpc("setmodelalias", ap));
+    BOOST_CHECK_MESSAGE(has_alias(saved_record(dir_b, model_id), "r16-saved-alias"), "setmodelalias not saved");
+    const UniValue exported = Dispatch(cat_b, Rpc("exportmodelindex"));
+
+    // hidesearchmodel saves the whole index (#553): from here on the alias is in
+    // the file whether setmodelalias saved it or not, so the next check shows
+    // whether removemodelalias saves.
+    UniValue hide(UniValue::VARR);
+    hide.push_back(uri);
+    Dispatch(cat_b, Rpc("hidesearchmodel", hide));
+    Dispatch(cat_b, Rpc("unhidesearchmodel", hide));
+    BOOST_REQUIRE(has_alias(saved_record(dir_b, model_id), "r16-saved-alias"));
+    Dispatch(cat_b, Rpc("removemodelalias", ap));
+    BOOST_CHECK_MESSAGE(!has_alias(saved_record(dir_b, model_id), "r16-saved-alias"), "removemodelalias not saved");
+
+    UniValue rp(UniValue::VARR);
+    rp.push_back(uri);
+    const UniValue removed = Dispatch(cat_b, Rpc("removemodelsearchrecord", rp));
+    BOOST_REQUIRE(removed["tombstone"].isTrue());
+    const UniValue tomb = saved_record(dir_b, model_id);
+    BOOST_CHECK_MESSAGE(tomb.isObject() && tomb["tombstone"].isTrue(), "removemodelsearchrecord not saved");
+
+    // A fresh helper directory: getmodelfeedstatus binds the economy (and the
+    // index) to it, then the exported record is imported there.
+    const fs::path root_a = m_path_root / "search-save-a";
+    fs::create_directories(root_a);
+    modelnet::ModelCatalog cat_a{root_a, 8 << 20};
+    const fs::path dir_a = cat_a.Store().Root().parent_path();
+    Dispatch(cat_a, Rpc("getmodelfeedstatus"));
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("records", exported["records"]);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(body);
+    const UniValue imported = Dispatch(cat_a, Rpc("importmodelindex", ip));
+    BOOST_REQUIRE_GE(imported["imported"].getInt<int>(), 1);
+    BOOST_CHECK_MESSAGE(has_alias(saved_record(dir_a, model_id), "r16-saved-alias"), "importmodelindex not saved");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

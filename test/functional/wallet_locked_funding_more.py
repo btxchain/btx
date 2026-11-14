@@ -81,6 +81,8 @@ class WalletLockedFundingMoreTest(BitcoinTestFramework):
         # The plan lists the coin; building the consolidation needs its size.
         assert_equal([(i["txid"], i["vout"]) for i in wallet.planconsolidation()["inputs"]], [outpoint])
         assert_raises_rpc_error(-13, UNLOCK_NEEDED, wallet.createconsolidationtx, change)
+        # An error that unlocking cannot fix keeps its own answer.
+        assert_raises_rpc_error(-4, "Transaction amount too small", wallet.createexchangebatch, [{"address": dest, "amount_atoms": 1}])
 
         self.log.info("The shielding plan asks for the passphrase")
         assert_raises_rpc_error(-13, UNLOCK_NEEDED, wallet.z_planshieldfunds, 1, zaddr)

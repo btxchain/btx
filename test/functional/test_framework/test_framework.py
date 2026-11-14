@@ -563,6 +563,20 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         assert_equal(len(binary_cli), num_nodes)
         for i in range(num_nodes):
             args = list(extra_args[i])
+            # Product regtest defaults to -matmulvalidation=consensus, and
+            # ConnectTip then defers height 100 until ExactReplay, so a test
+            # that mines its own chain stops at 99. Match the cache miner:
+            # economic still runs EncDr/RC in ContextualCheckBlock and only
+            # skips that verified-bit gate; cpu-diagnostic keeps RC off a
+            # failed device canary. A test opts back into consensus (or any
+            # other mode) by passing the matching argument itself. Do not add
+            # -regtestrcheight: that would mine block 100 as RC while the
+            # product height is still EncDr.
+            if self.chain == 'regtest':
+                if not any(arg.startswith('-matmulvalidation') for arg in args):
+                    args.append('-matmulvalidation=economic')
+                if not any(arg.startswith('-matmulrcexecution') for arg in args):
+                    args.append('-matmulrcexecution=cpu-diagnostic')
             test_node_i = TestNode(
                 i,
                 get_datadir_path(self.options.tmpdir, i),

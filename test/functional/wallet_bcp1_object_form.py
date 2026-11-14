@@ -16,7 +16,7 @@ from decimal import Decimal
 from test_framework.blocktools import COINBASE_MATURITY, REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.messages import COIN
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 
 class BCP1ObjectFormTest(BitcoinTestFramework):
@@ -63,6 +63,16 @@ class BCP1ObjectFormTest(BitcoinTestFramework):
 
         self.log.info("finalizeexternalsign with {package: ...}")
         assert_equal(node.finalizeexternalsign({"package": batch}), node.finalizeexternalsign(batch))
+
+        self.log.info("amount_atoms outside MoneyRange is refused as amount is")
+        too_big = [[{"address": a, "amount_atoms": 2**63 - 1}],
+                   [{"address": a, "amount_atoms": 2**62}, {"address": b, "amount_atoms": 2**62}],
+                   [{"address": a, "amount_atoms": 21_000_000 * COIN + 1}],
+                   [{"address": a, "amount_atoms": -1}]]
+        for outs_bad in too_big:
+            assert_raises_rpc_error(-3, "Amount out of range", node.createexchangebatch, outs_bad, {"change_address": change})
+            assert_raises_rpc_error(-3, "Amount out of range", node.prepareexternalsign, {"recipients": outs_bad}, {"change_address": change})
+        assert_equal(recipients(node.createexchangebatch(outs, {"change_address": change})), atoms(outs))
 
 
 if __name__ == '__main__':

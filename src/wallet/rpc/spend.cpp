@@ -1057,10 +1057,12 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
         throw JSONRPCError(RPC_INVALID_PARAMETER, "TX must have at least one output");
 
     LOCK(wallet.cs_wallet);
-    auto txr = FundTransaction(wallet, tx, recipients, change_position, lockUnspents, coinControl);
+    bool inputs_failed{false};
+    auto txr = FundTransaction(wallet, tx, recipients, change_position, lockUnspents, coinControl, &inputs_failed);
     if (!txr) {
-        // The failure says nothing about the coins the lock hid: ask for the unlock instead.
-        if (LockedWalletLeftOutOwnCoins(wallet, coinControl)) EnsureWalletIsUnlocked(wallet);
+        // Only a failure to fetch, select or size the inputs can come from the
+        // coins the lock hid: ask for the unlock then, and keep any other error.
+        if (inputs_failed && LockedWalletLeftOutOwnCoins(wallet, coinControl)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, ErrorString(txr).original);
     }
     return *txr;
@@ -1898,8 +1900,11 @@ RPCHelpMan sendall()
                 outpoints_spent.push_back(tx_in.prevout);
             }
 
-            // estimate final size of tx
-            const TxSize tx_size{CalculateMaximumSignedTxSize(CTransaction(rawTx), pwallet.get())};
+            // Use watch-only sizing when requested. Keep the default algorithm
+            // for sizing because FinishTransaction signs through FillPSBT.
+            CCoinControl sizing_control;
+            sizing_control.fAllowWatchOnly = coin_control.fAllowWatchOnly;
+            const TxSize tx_size{CalculateMaximumSignedTxSize(CTransaction(rawTx), pwallet.get(), &sizing_control)};
             if (tx_size.vsize == -1) {
                 // An own P2MR input given in "inputs" cannot be sized while the wallet is locked.
                 if (LockedWalletLeftOutOwnCoins(*pwallet, coin_control)) EnsureWalletIsUnlocked(*pwallet);

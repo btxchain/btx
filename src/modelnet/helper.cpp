@@ -2412,7 +2412,6 @@ std::vector<ProviderObservation> CurrentProviderObservations(ModelCatalog& cat, 
 }
 
 static QueryDedupe g_search_dedupe;
-static bool g_search_bound{false};
 static FeedStore g_feed;
 static CampaignIndex g_campaigns;
 static std::recursive_mutex g_campaign_mu;
@@ -2430,6 +2429,9 @@ static std::set<std::string> g_local_releases;
  *  local-release filter existed. The damaged file is left in place for the
  *  operator and is not overwritten. Guarded by g_campaign_mu. */
 static bool g_local_releases_untrusted{false};
+//! campaigns.json is there but could not be read, or an entry of a local release
+//! in it was skipped. Plaintext is withheld and the file is not overwritten.
+static bool g_campaigns_unreadable{false};
 
 fs::path LocalReleasesPath(const fs::path& dir) { return dir / "local_releases.json"; }
 
@@ -2534,19 +2536,25 @@ bool AllowModelSeedBytes(const ModelCatalog& cat, size_t n);
 
 void EnsureSearchBound()
 {
-    if (!g_search_bound) {
-        g_search_rt.Bind(&g_search_idx);
-        g_search_bound = true;
-    }
+    // Called by every RPC worker without a lock: bind once.
+    static std::once_flag bound;
+    std::call_once(bound, [] { g_search_rt.Bind(&g_search_idx); });
 }
+
+//! Taken by EnsureEconomy before g_search_mu and g_campaign_mu. The RPC workers
+//! call it at the same time; no caller holds either of those locks there.
+static std::mutex g_econ_mu;
 
 void EnsureEconomy(ModelCatalog& cat)
 {
     EnsureSearchBound();
     const fs::path dir = HelperDir(cat);
+    // Another worker may be loading: g_feed_loaded is set before the index, the
+    // feed and the campaigns are read, so check and load under one lock.
+    std::lock_guard<std::mutex> econ_lock(g_econ_mu);
     if (g_feed_loaded && dir == g_econ_dir) return;
     g_chain_obs.clear();
-    g_feed = FeedStore();
+    g_feed.Reset();
     g_econ_dir = dir;
     g_feed_loaded = true;
     g_feed.SetPath(dir / "feed.json");
@@ -2558,7 +2566,8 @@ void EnsureEconomy(ModelCatalog& cat)
     }
     (void)g_feed.Load(ConnNowMs(), err);
     std::vector<ReleaseCampaign> local;
-    const bool loaded_campaigns = LoadCampaigns(dir, local, err);
+    std::vector<std::string> skipped;
+    const bool loaded_campaigns = LoadCampaigns(dir, local, err, &skipped);
     {
         std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
         g_campaigns.Clear();
@@ -2566,7 +2575,26 @@ void EnsureEconomy(ModelCatalog& cat)
             for (const auto& c : local) g_campaigns.Put(c, err);
         }
         LoadLocalReleases(dir, local);
+        // Without the campaign of a local release this node cannot tell which
+        // model it gates, so it withholds plaintext until the file is repaired.
+        g_campaigns_unreadable = !loaded_campaigns;
+        for (const auto& rid : skipped) {
+            if (g_local_releases_untrusted || g_local_releases.count(rid)) g_campaigns_unreadable = true;
+        }
+        if (g_campaigns_unreadable) {
+            LogPrintf("btx-modeld: %s cannot be read in full; withholding plaintext and keeping the file until it is repaired\n",
+                      fs::PathToString(dir / "campaigns.json"));
+        }
     }
+}
+
+//! False while campaigns.json could not be read: saving now would replace it
+//! with the campaigns that were readable. g_campaign_mu must be held.
+static bool CampaignFileWritable(std::string& err)
+{
+    if (!g_campaigns_unreadable) return true;
+    err = "campaigns.json cannot be read; repair it before changing campaigns";
+    return false;
 }
 
 // g_search_mu must be held: Save() walks the index that Put() rewrites on
@@ -2579,6 +2607,7 @@ static void PersistEconomyLocked(ModelCatalog& cat)
     // Save under g_campaign_mu, as the RPCs that change a campaign do. A copy
     // saved after letting go could replace a change saved in between.
     std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+    if (!CampaignFileWritable(err)) return;
     (void)SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
 }
 
@@ -2595,6 +2624,7 @@ void PersistEconomy(ModelCatalog& cat)
 // release id order, so the file is the one the RPC wrote before. g_campaign_mu must be held.
 static bool SaveCampaignsWith(ModelCatalog& cat, const ReleaseCampaign& changed, std::string& err)
 {
+    if (!CampaignFileWritable(err)) return false;
     std::vector<ReleaseCampaign> next = g_campaigns.List();
     const std::string changed_hex = changed.release_id.Hex();
     auto it = std::find_if(next.begin(), next.end(),
@@ -2866,6 +2896,7 @@ bool PlaintextServeAllowed(ModelCatalog& cat, const CatalogEntry& entry)
     const ReleaseCampaign* c = nullptr;
     {
         std::lock_guard<std::recursive_mutex> lock(g_campaign_mu);
+        if (g_campaigns_unreadable) return false;
         c = CampaignForEntry(entry);
         if (!c) return true;
         if (DistinctCiphertextObject(*c, entry)) return true;
@@ -4442,18 +4473,21 @@ void LoadRetrieveJobs(ModelCatalog& cat)
         job->model_id = mid;
         job->modeldir = HelperDir(cat);
         job->automatic = j["automatic"].isTrue();
+        // A value that is not an integer of the field's type is treated as
+        // absent: ToIntegral does not throw, so one bad entry cannot stop the
+        // helper at startup or every helper RPC (this loader runs before each).
         if (j.exists("created_ms") && j["created_ms"].isNum()) {
-            job->created_ms = j["created_ms"].getInt<int64_t>();
+            if (const auto v{ToIntegral<int64_t>(j["created_ms"].getValStr())}) job->created_ms = *v;
         }
         {
             std::lock_guard<std::mutex> jlock(job->mu);
             job->status = "queued";
         }
         if (j.exists("bytes_committed") && j["bytes_committed"].isNum()) {
-            job->progress.bytes_committed.store(j["bytes_committed"].getInt<uint64_t>());
+            if (const auto v{ToIntegral<uint64_t>(j["bytes_committed"].getValStr())}) job->progress.bytes_committed.store(*v);
         }
         if (j.exists("pieces_committed") && j["pieces_committed"].isNum()) {
-            job->progress.pieces_committed.store(j["pieces_committed"].getInt<uint64_t>());
+            if (const auto v{ToIntegral<uint64_t>(j["pieces_committed"].getValStr())}) job->progress.pieces_committed.store(*v);
         }
         // Display-only progress. A value outside uint32 is treated as absent;
         // ToIntegral does not throw, so one bad entry cannot stop every helper RPC.
@@ -5873,6 +5907,7 @@ void EnsureCloudLoaded(ModelCatalog& cat)
     CloudStoreConfig cfg;
     if (!CloudConfigFromJson(stored, cfg, err)) return;
     cfg.budget_state_path = dir / "cloud-budget.json";
+    cfg.s3.fake_store_dir = dir;
     auto store = std::make_unique<S3PieceStore>(cfg);
     if (!store->Init(err)) {
         // Keep the reason for getcloudstorageinfo: a refused origin must not
@@ -6071,6 +6106,7 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
             return false;
         }
         cfg.budget_state_path = HelperDir(cat) / "cloud-budget.json";
+        cfg.s3.fake_store_dir = HelperDir(cat);
         std::string perr;
         const fs::path cloud_path = HelperDir(cat) / "cloud.json";
         if (!WriteJsonFile(cloud_path, CloudConfigPersistJson(cfg), perr)) {
@@ -7488,6 +7524,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             AfterIndexPut(rec, ConnNowMs());
+            // Aliases live only in the search index; save it as hidesearchmodel does,
+            // or the change is gone after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7632,6 +7672,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             AfterIndexPut(rec, ConnNowMs());
+            // Aliases live only in the search index; save it as hidesearchmodel does,
+            // or the change is gone after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         }
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
@@ -7958,6 +8002,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         if (!existing->signed_ok) {
             g_search_idx.Hide(id, true);
+            // Saved as hidesearchmodel does, or the record comes back after a restart.
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
             result.pushKV("schema_version", 2);
             result.pushKV("tombstone", false);
             result.pushKV("hidden_local", true);
@@ -7987,6 +8034,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err_code = "REJECTED";
             return false;
         }
+        std::string save_err;
+        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
         result.pushKV("schema_version", 2);
         result.pushKV("tombstone", true);
         result.pushKV("guaranteed_global_delete", false);
@@ -8027,6 +8076,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 ++ok;
             }
         }
+        if (ok > 0) {
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
+        }
         result.pushKV("schema_version", 2);
         result.pushKV("imported", ok);
         result.pushKV("rejected", bad);
@@ -8040,7 +8093,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         IngestCatalogIntoSearch(cat);
         if (method == "getmodeldirectory") {
             SearchQuery q;
-            if (Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
+            if (Arg(0).isObject() && !ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             q.scope = SearchScope::ALL;
             const auto hits = g_search_idx.Search(q, ConnNowMs());
             UniValue arr(UniValue::VARR);
@@ -8144,23 +8200,45 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "searchpublishers" || method == "getpublisher" || method == "getmodelpublishers") {
         EnsureSearchBound();
         std::lock_guard<std::mutex> lock(g_search_mu);
+        if (method == "getpublisher") {
+            // One publisher: count all of its visible records (Search() stops at
+            // q.limit, 50 by default) and refuse an id the index does not know,
+            // as getcollection does.
+            const std::string want = Arg(0).isStr() ? ToLower(Arg(0).get_str()) : std::string{};
+            SearchQuery all;
+            all.limit = static_cast<int>(std::max<size_t>(g_search_idx.Size(), 1));
+            int count{0};
+            std::string display_name;
+            for (const auto& h : g_search_idx.Search(all, ConnNowMs())) {
+                // The all-zero id is "no publisher", as searchpublishers skips it.
+                if (want.empty() || want == std::string(96, '0') || h.rec.publisher_identity.Hex() != want) continue;
+                if (count++ == 0) display_name = h.rec.publisher_display_name;
+            }
+            if (count == 0) {
+                err_code = "NOT_FOUND";
+                err = "unknown publisher";
+                return false;
+            }
+            result.pushKV("schema_version", 2);
+            result.pushKV("id", want);
+            result.pushKV("display_name", display_name);
+            result.pushKV("model_count_observed", count);
+            return true;
+        }
         UniValue arr(UniValue::VARR);
         SearchQuery q;
-        if (method == "searchpublishers" && Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
-        else if (method == "searchpublishers" && Arg(0).isStr()) q.text = Arg(0).get_str();
+        if (method == "searchpublishers" && Arg(0).isObject()) {
+            if (!ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
+        } else if (method == "searchpublishers" && Arg(0).isStr()) q.text = Arg(0).get_str();
         const auto hits = g_search_idx.Search(q, ConnNowMs());
         std::map<std::string, int> pubs;
         for (const auto& h : hits) {
             const std::string pid = h.rec.publisher_identity.Hex();
             if (pid.empty() || pid == std::string(96, '0')) continue;
             pubs[pid] += 1;
-            if (method == "getpublisher" && Arg(0).isStr() && Arg(0).get_str() == pid) {
-                result.pushKV("schema_version", 2);
-                result.pushKV("id", pid);
-                result.pushKV("display_name", h.rec.publisher_display_name);
-                result.pushKV("model_count_observed", 1);
-                return true;
-            }
         }
         for (const auto& kv : pubs) {
             UniValue o(UniValue::VOBJ);
@@ -8714,7 +8792,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         if (cat.Find(r.digest, local)) {
             if (local.incomplete) {
                 std::string herr;
-                (void)TryHydrateFromCloud(cat, local, result, herr);
+                if (!TryHydrateFromCloud(cat, local, result, herr) && !herr.empty()) {
+                    result.pushKV("cloud_hydrate_error", herr);
+                }
                 cat.Find(r.digest, local);
             }
             if (!local.incomplete) {
@@ -8984,15 +9064,21 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (method == "cancelmodeljob" && !want.empty()) {
                 const auto it = g_retrieve_jobs.find(want);
                 if (it != g_retrieve_jobs.end()) {
-                    it->second->cancel.store(true);
+                    // Only a queued or running job is cancelled; a job that is done,
+                    // failed or already cancelled keeps its status and says so.
+                    bool cancelled{false};
                     {
                         std::lock_guard<std::mutex> jlock(it->second->mu);
                         if (it->second->status == "running" || it->second->status == "queued") {
                             it->second->status = "cancelled";
+                            cancelled = true;
                         }
                     }
-                    PersistRetrieveJobsLocked();
-                    result.pushKV("cancelled", true);
+                    if (cancelled) {
+                        it->second->cancel.store(true);
+                        PersistRetrieveJobsLocked();
+                    }
+                    result.pushKV("cancelled", cancelled);
                     result.pushKV("job_id", want);
                 } else {
                     result.pushKV("cancelled", false);
@@ -9045,6 +9131,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             refund_height = Arg(2).getInt<int64_t>();
             if (params.isArray() && params.size() > 4 && Arg(4).isObject()) options = Arg(4);
             else if (params.isArray() && params.size() > 3 && Arg(3).isObject()) options = Arg(3);
+        }
+        // refund_height is a CLTV block height and is stored as uint32. A value
+        // outside uint32 would wrap to another height, and one from 500000000 on
+        // is a Unix time, which the funding path refuses (transfer.cpp). Refuse
+        // both here, before anything is imported or stored.
+        if (refund_height < 0 || refund_height >= int64_t{500'000'000}) {
+            err_code = "INVALID_PARAMETER";
+            err = "refund_height must be a block height below 500000000";
+            return false;
         }
         Resource r;
         if (!DecodeResource(uri, r, err) || r.kind != ResourceKind::MODEL) {
@@ -9423,7 +9518,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 live->secret_disclosed = true;
                 if (plaintext_verified) live->plaintext_verified = true;
                 camp = *live;
-                SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
+                if (CampaignFileWritable(err)) SaveCampaigns(HelperDir(cat), g_campaigns.List(), err);
             };
             CatalogEntry local;
             Digest48 cid = camp.ciphertext_artifact_id.IsNull() ? camp.artifact_id : camp.ciphertext_artifact_id;
@@ -10483,7 +10578,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         if (method == "getfundablemodels") {
             SearchQuery q;
-            if (Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
+            if (Arg(0).isObject() && !ParseSearchQuery(Arg(0), q, err)) {
+                err_code = "INVALID_PARAMETER";
+                return false;
+            }
             q.filters.fundable_only = true;
             if (!Arg(0).isObject() || !Arg(0).exists("sort")) q.sort = SearchSort::NEARLY_FUNDED;
             std::vector<ModelEconomyEntry> camp;
@@ -10633,7 +10731,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 UniValue wrap(UniValue::VOBJ);
                 wrap.pushKV("filters", Arg(0)["filters"]);
                 SearchQuery sq;
-                ParseSearchQuery(wrap, sq, err);
+                if (!ParseSearchQuery(wrap, sq, err)) {
+                    err_code = "INVALID_PARAMETER";
+                    return false;
+                }
                 fq.filters = sq.filters;
             }
         }
@@ -11921,9 +12022,30 @@ bool HelperRefusalFromError(const std::string& err, std::string& code, std::stri
     return !code.empty();
 }
 
-bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err)
+static bool UnixConnectedPeerMatchesPid(int fd, int64_t expected_pid, std::string& err)
+{
+#ifndef _WIN32
+#if defined(__linux__) && defined(SO_PEERCRED)
+    struct ucred peer {};
+    socklen_t len = sizeof(peer);
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &len) == 0 &&
+        len == sizeof(peer) && peer.pid == expected_pid &&
+        peer.uid == ::getuid()) return true;
+#elif defined(__APPLE__) && defined(LOCAL_PEERPID)
+    pid_t peer = 0;
+    socklen_t len = sizeof(peer);
+    if (::getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &len) == 0 &&
+        len == sizeof(peer) && peer == expected_pid) return true;
+#endif
+#endif
+    err = "helper Unix RPC peer is not the owned child";
+    return false;
+}
+
+bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err, std::atomic<bool>* stop, int reply_timeout_ms, bool check_peer, int64_t expected_peer_pid)
 {
 #ifdef _WIN32
+    (void)stop; (void)reply_timeout_ms; (void)check_peer; (void)expected_peer_pid;
     (void)socket_path; (void)method; (void)params; (void)result;
     err = "helper Unix RPC is not supported on this platform";
     return false;
@@ -11942,8 +12064,30 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
         return false;
     }
     std::strncpy(addr.sun_path, p.c_str(), sizeof(addr.sun_path) - 1);
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    const bool supervisor_call = stop || reply_timeout_ms > 0;
+    if (supervisor_call) {
+        const int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            err = "unix nonblocking";
+            close(fd);
+            return false;
+        }
+    }
+    const int connected = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    bool ready = connected == 0;
+    if (!ready && supervisor_call && errno == EINPROGRESS &&
+        WaitFd(fd, true, 1000, stop, err)) {
+        int socket_error = 0;
+        socklen_t len = sizeof(socket_error);
+        ready = getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &len) == 0 && socket_error == 0;
+    }
+    if (!ready) {
         err = "helper unix connect failed (btx-modeld not running)";
+        close(fd);
+        return false;
+    }
+    if ((expected_peer_pid > 0 && !UnixConnectedPeerMatchesPid(fd, expected_peer_pid, err)) ||
+        (check_peer && !UnixConnectedPeerIsSelf(fd, err))) {
         close(fd);
         return false;
     }
@@ -11953,13 +12097,33 @@ bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const U
     req.pushKV("method", method);
     req.pushKV("params", params);
     const std::string wire = req.write() + "\n";
-    if (::send(fd, wire.data(), wire.size(), 0) < 0) {
+    if (supervisor_call) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        size_t sent = 0;
+        while (sent < wire.size()) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (left.count() <= 0 || !WaitFd(fd, true, static_cast<int>(left.count()), stop, err)) {
+                close(fd);
+                return false;
+            }
+            const ssize_t n = ::send(fd, wire.data() + sent, wire.size() - sent, 0);
+            if (n > 0) {
+                sent += static_cast<size_t>(n);
+            } else if (n == 0 || (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                err = "unix write";
+                close(fd);
+                return false;
+            }
+        }
+    } else if (::send(fd, wire.data(), wire.size(), 0) < 0) {
         err = "unix write";
         close(fd);
         return false;
     }
     ::shutdown(fd, SHUT_WR);
-    const std::string raw = RecvUntil(fd, MAX_RPC_BODY, nullptr, UnixRpcReplyTimeoutMs(method));
+    const int timeout_ms = reply_timeout_ms > 0 ? reply_timeout_ms : UnixRpcReplyTimeoutMs(method);
+    const std::string raw = RecvUntil(fd, MAX_RPC_BODY, stop, timeout_ms);
     close(fd);
     UniValue reply;
     if (!reply.read(raw) || !reply.isObject()) {
@@ -13021,7 +13185,13 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
             std::chrono::steady_clock::now() - last_watch >= std::chrono::seconds(5)) {
             UniValue wres;
             std::string werr;
-            ScanWatchDir(cat, wres, werr, {}, stop);
+            // A file in the watch folder must not end the helper; the RPC path
+            // (scanmodelwatch) is already covered by DispatchHelperRpc.
+            try {
+                ScanWatchDir(cat, wres, werr, {}, stop);
+            } catch (const std::exception& e) {
+                LogPrintf("btx-modeld: watch folder scan failed: %s\n", e.what());
+            }
             last_watch = std::chrono::steady_clock::now();
         }
         if (std::chrono::steady_clock::now() - last_records_save >= std::chrono::seconds(RECORDS_SAVE_INTERVAL_S)) {

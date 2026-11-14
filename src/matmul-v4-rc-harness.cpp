@@ -548,30 +548,27 @@ bool ApplyBackendDispatch(const std::string& backend, std::string& err)
 {
     const char* env = std::getenv("BTX_MATMUL_V4_BACKEND");
     const std::string env_s = (env != nullptr) ? std::string(env) : std::string{};
-    auto conflict = [&](const std::string& want) {
-        if (!env_s.empty() && env_s != want && env_s != "auto") {
-            err = "conflict: --backend " + backend + " vs BTX_MATMUL_V4_BACKEND=" + env_s +
-                  " (set them equal, or unset the env)";
-            return true;
-        }
+    if (backend == "auto") return true;
+    if (backend != "cpu" && backend != "cuda" && backend != "hip" &&
+        backend != "metal" && backend != "ascend") {
+        err = "unknown --backend " + backend + " (want cpu|cuda|hip|metal|ascend|auto)";
         return false;
-    };
-    if (backend == "cpu") {
-        if (conflict("cpu")) return false;
-        setenv("BTX_MATMUL_V4_BACKEND", "cpu", 1);
-        return true;
     }
-    if (backend == "auto") {
-        // Leave env untouched; ResolveBackend picks default/cert registry.
-        return true;
+    if (!env_s.empty() && env_s != backend && env_s != "auto") {
+        err = "conflict: --backend " + backend + " vs BTX_MATMUL_V4_BACKEND=" + env_s +
+              " (set them equal, or unset the env)";
+        return false;
     }
-    if (backend == "cuda" || backend == "hip" || backend == "metal" || backend == "ascend") {
-        if (conflict(backend)) return false;
-        setenv("BTX_MATMUL_V4_BACKEND", backend.c_str(), 1);
-        return true;
+#if defined(_WIN32)
+    const int status = _putenv_s("BTX_MATMUL_V4_BACKEND", backend.c_str());
+#else
+    const int status = setenv("BTX_MATMUL_V4_BACKEND", backend.c_str(), 1);
+#endif
+    if (status != 0) {
+        err = "could not set BTX_MATMUL_V4_BACKEND";
+        return false;
     }
-    err = "unknown --backend " + backend + " (want cpu|cuda|hip|metal|ascend|auto)";
-    return false;
+    return true;
 }
 
 int RunCoupledHarness(const Args& args)

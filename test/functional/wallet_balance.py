@@ -217,15 +217,25 @@ class WalletTest(BitcoinTestFramework):
             change_node0 = coinbase_reward - send_amount_0 - Decimal("0.01")
             change_node1 = coinbase_reward + send_amount_0 - send_amount_1 - fee_node_1
             # getbalances
+            # Caught-up regtest: tip and best header are the same chain, so
+            # behind_best_header is 0 and neither staleness flag is set.
+            # getbalances also always reports the balance-watch position.
+            caught_up = {'chain_stale': False,
+                         'behind_best_header': 0,
+                         'competing_heavier_header': False,
+                         'watch_ready': True,
+                         'blocks_behind': 0}
             expected_balances_0 = {'mine':      {'immature':          Decimal('0E-8'),
                                                  'trusted':           change_node0,  # change from node 0's send
                                                  'untrusted_pending': send_amount_1},
                                    'watchonly': {'immature':          coinbase_reward * COINBASE_MATURITY,
                                                  'trusted':           coinbase_reward,
-                                                 'untrusted_pending': Decimal('0E-8')}}
+                                                 'untrusted_pending': Decimal('0E-8')},
+                                   **caught_up}
             expected_balances_1 = {'mine':      {'immature':          Decimal('0E-8'),
                                                  'trusted':           Decimal('0E-8'),  # node 1's send had an unsafe input
-                                                 'untrusted_pending': change_node1}}  # Doesn't include output of node 0's send since it was spent
+                                                 'untrusted_pending': change_node1},  # Doesn't include output of node 0's send since it was spent
+                                   **caught_up}
             if self.options.descriptors:
                 del expected_balances_0["watchonly"]
             balances_0 = legacy_balance_shape(self.nodes[0].getbalances())

@@ -699,16 +699,27 @@ bool PersistDurable(std::string& err)
     return SaveModelPieces(State(), err);
 }
 
-void RevertStore(LabDiskImage prior, std::map<std::string, std::vector<unsigned char>> secrets, bool recovery, uint64_t generation)
+// Restrictions are process-local and deliberately absent from LabDiskImage.
+// Keep their pre-operation state without reviving volatile one-use permits.
+struct RuntimeRestrictions {
+    std::map<std::string, std::string> identities;
+    IdentityChain chain;
+    std::set<std::string> paused_bindings;
+};
+
+void RevertStore(LabDiskImage prior, std::map<std::string, std::vector<unsigned char>> secrets,
+                 RuntimeRestrictions restrictions, bool recovery, uint64_t generation)
 {
     Store& store = State();
     for (auto& item : store.identity_sk) memory_cleanse(item.second.data(), item.second.size());
     store = Store{};
     ImageToStore(prior, store);
-    for (const auto& item : store.identity_pk) {
-        Digest48 root;
-        std::string chain_err;
-        (void)store.chain.CreateRoot(Span<const unsigned char>{item.second.data(), item.second.size()}, root, chain_err);
+    store.identities = std::move(restrictions.identities);
+    store.chain = std::move(restrictions.chain);
+    store.paused_bindings = std::move(restrictions.paused_bindings);
+    if (!store.paused_bindings.empty()) {
+        store.gate->Pause();
+        store.guards.Pause();
     }
     for (auto& item : secrets) {
         if (store.identity_pk.count(item.first) == 0) {
@@ -3674,10 +3685,12 @@ bool DispatchLabApi(const std::string& method, const std::string& request_json, 
     }
     LabDiskImage prior_image;
     SecretCopy prior_secrets;
+    RuntimeRestrictions prior_restrictions;
     // Only a durable write can roll back, so a read does not copy the store.
     if (!DurableRead(method)) {
         ImageFromStore(State(), prior_image);
         prior_secrets.keys = State().identity_sk;
+        prior_restrictions = {State().identities, State().chain, State().paused_bindings};
     }
     const bool prior_recovery = State().recovery_required;
     const uint64_t prior_generation = State().commit_generation;
@@ -3710,7 +3723,7 @@ bool DispatchLabApi(const std::string& method, const std::string& request_json, 
                 std::string rollback_err;
                 (void)SaveLabDisk(prior_image, rollback_err);
             }
-            RevertStore(std::move(prior_image), std::move(prior_secrets.keys), recovery, prior_generation);
+            RevertStore(std::move(prior_image), std::move(prior_secrets.keys), std::move(prior_restrictions), recovery, prior_generation);
             response_json.clear();
             return false;
         }
@@ -3723,7 +3736,7 @@ bool DispatchLabApi(const std::string& method, const std::string& request_json, 
         if (!published) {
             std::string rollback_err;
             const bool rolled_back = SaveLabDisk(prior_image, rollback_err);
-            RevertStore(std::move(prior_image), std::move(prior_secrets.keys), !rolled_back, prior_generation);
+            RevertStore(std::move(prior_image), std::move(prior_secrets.keys), std::move(prior_restrictions), !rolled_back, prior_generation);
             response_json.clear();
             if (!rolled_back) err = "BTX035_RECOVERY_REQUIRED";
             return false;

@@ -44,7 +44,13 @@ class ModelHelperAfterKillTest(BitcoinTestFramework):
         old_pid = self.managed_helper(node)
 
         self.log.info("After a kill -9 of btxd, a restart binds the P2P port again")
-        node.kill_process()
+        # The helper inherits the daemon's stderr and can report parent death
+        # before or after the test collects the daemon's exit status.
+        node.process.kill()
+        node.wait_until_stopped(
+            expected_ret_code=-9,
+            expected_stderr=("", "btx-modeld: parent exited, stopping"),
+        )
         self.start_node(0)
 
         self.log.info("The old helper exits on its own and the new btxd manages a new one")

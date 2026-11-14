@@ -461,13 +461,14 @@ publishes). Do **not** invent a council. Every bounty mutation returns
 `next_actions` and `automatic_spend_atoms=0`.
 
 **Request:** `listbountydrafts` — none. `getbountydraft` — `draft_id`.
-`updatebountydraft` — `(draft_id, patch)` or a single object with `draft_id`
-plus fields to overlay (Gitcoin save-in-place). Never publishes.
+`updatebountydraft` — a single object with `draft_id` plus fields to overlay
+(Gitcoin save-in-place). btxd declares one argument; the helper socket and
+`btx-model bounty-draft --update` also take `(draft_id, patch)`. Never publishes.
 `deletebountydraft` — `draft_id`; response `deleted: true`, `local_only`,
 `one_liner`, `next_actions`.
 
 ```bash
-btx-cli updatebountydraft '<draft_id>' '{"summary":"local save-in-place"}'
+btx-cli updatebountydraft '{"draft_id":"<draft_id>","summary":"local save-in-place"}'
 btx-cli deletebountydraft '<draft_id>'
 contrib/modelnet/btx-model bounty-draft --validate '<draft_id>'
 contrib/modelnet/btx-model bounty-draft --update '<draft_id>' '{"summary":"…"}'

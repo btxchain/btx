@@ -9,6 +9,7 @@
 #include <crypto/hmac_sha256.h>
 #include <crypto/sha256.h>
 #include <support/cleanse.h>
+#include <util/readwritefile.h>
 #include <util/strencodings.h>
 #include <util/string.h>
 
@@ -1239,7 +1240,221 @@ bool S3HttpsTransportAvailable()
     return true;
 }
 
-FakeS3::FakeS3() = default;
+namespace {
+
+constexpr uint32_t kFakeStoreMaxKey = 8192;
+constexpr uint32_t kFakeStoreMaxMetaName = 256;
+constexpr uint32_t kFakeStoreMaxMetaValue = 4096;
+constexpr uint32_t kFakeStoreMaxMeta = 64;
+constexpr uint64_t kFakeStoreMaxObject = uint64_t{1} << 30;
+constexpr uint64_t kFakeStoreMaxFile = uint64_t{1} << 30;
+constexpr char kFakeStoreFile[] = "fakes3-objects.bin";
+
+// One file under the helper directory. Little-endian:
+//   "BTXFKS3" u8 version=1
+//   u32 count
+//   repeated: u32 key_len, key, u64 body_len, body,
+//             u32 meta_count, repeated u32 name_len, name, u32 value_len, value
+
+void AppendU32(std::string& out, uint32_t v)
+{
+    const unsigned char b[4] = {
+        static_cast<unsigned char>(v & 0xff),
+        static_cast<unsigned char>((v >> 8) & 0xff),
+        static_cast<unsigned char>((v >> 16) & 0xff),
+        static_cast<unsigned char>((v >> 24) & 0xff),
+    };
+    out.append(reinterpret_cast<const char*>(b), 4);
+}
+
+void AppendU64(std::string& out, uint64_t v)
+{
+    unsigned char b[8];
+    for (int i = 0; i < 8; ++i) b[i] = static_cast<unsigned char>((v >> (8 * i)) & 0xff);
+    out.append(reinterpret_cast<const char*>(b), 8);
+}
+
+bool Take(const unsigned char*& p, const unsigned char* end, size_t n, const unsigned char*& out)
+{
+    if (n > static_cast<size_t>(end - p)) return false;
+    out = p;
+    p += n;
+    return true;
+}
+
+bool TakeU32(const unsigned char*& p, const unsigned char* end, uint32_t& v)
+{
+    const unsigned char* b = nullptr;
+    if (!Take(p, end, 4, b)) return false;
+    v = uint32_t(b[0]) | (uint32_t(b[1]) << 8) | (uint32_t(b[2]) << 16) | (uint32_t(b[3]) << 24);
+    return true;
+}
+
+bool TakeU64(const unsigned char*& p, const unsigned char* end, uint64_t& v)
+{
+    const unsigned char* b = nullptr;
+    if (!Take(p, end, 8, b)) return false;
+    v = 0;
+    for (int i = 0; i < 8; ++i) v |= uint64_t(b[i]) << (8 * i);
+    return true;
+}
+
+bool DecodeFakeStore(const std::vector<unsigned char>& raw,
+                     std::map<std::string, std::vector<unsigned char>>& objects,
+                     std::map<std::string, std::map<std::string, std::string>>& meta)
+{
+    if (raw.size() < 12) return false;
+    const unsigned char* p = raw.data();
+    const unsigned char* end = p + raw.size();
+    if (std::memcmp(p, "BTXFKS3", 7) != 0 || p[7] != 1) return false;
+    p += 8;
+    uint32_t count = 0;
+    if (!TakeU32(p, end, count)) return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t key_len = 0;
+        if (!TakeU32(p, end, key_len) || key_len > kFakeStoreMaxKey) return false;
+        const unsigned char* key_b = nullptr;
+        if (!Take(p, end, key_len, key_b)) return false;
+        uint64_t body_len = 0;
+        if (!TakeU64(p, end, body_len) || body_len > kFakeStoreMaxObject) return false;
+        const unsigned char* body_b = nullptr;
+        if (!Take(p, end, static_cast<size_t>(body_len), body_b)) return false;
+        std::string key(reinterpret_cast<const char*>(key_b), key_len);
+        if (!objects.emplace(key, std::vector<unsigned char>(body_b, body_b + static_cast<size_t>(body_len))).second) {
+            return false;
+        }
+        uint32_t nmeta = 0;
+        if (!TakeU32(p, end, nmeta) || nmeta > kFakeStoreMaxMeta) return false;
+        if (nmeta == 0) continue;
+        auto& slot = meta[key];
+        for (uint32_t m = 0; m < nmeta; ++m) {
+            uint32_t name_len = 0;
+            if (!TakeU32(p, end, name_len) || name_len > kFakeStoreMaxMetaName) return false;
+            const unsigned char* name_b = nullptr;
+            if (!Take(p, end, name_len, name_b)) return false;
+            uint32_t value_len = 0;
+            if (!TakeU32(p, end, value_len) || value_len > kFakeStoreMaxMetaValue) return false;
+            const unsigned char* value_b = nullptr;
+            if (!Take(p, end, value_len, value_b)) return false;
+            if (!slot.emplace(std::string(reinterpret_cast<const char*>(name_b), name_len),
+                              std::string(reinterpret_cast<const char*>(value_b), value_len))
+                     .second) {
+                return false;
+            }
+        }
+    }
+    return p == end;
+}
+
+} // namespace
+
+FakeS3::FakeS3(fs::path dir) : m_dir(std::move(dir))
+{
+    if (!m_dir.empty()) LoadStore();
+}
+
+void FakeS3::LoadStore()
+{
+    const fs::path path = m_dir / kFakeStoreFile;
+    std::error_code ec;
+    const auto st = fs::symlink_status(path, ec);
+    if (ec) {
+        if (ec == std::errc::no_such_file_or_directory) return;
+        m_load_error = "fake s3 store unreadable";
+        return;
+    }
+    if (!fs::exists(st)) return;
+    if (!fs::is_regular_file(st)) {
+        m_load_error = "fake s3 store is not a regular file";
+        return;
+    }
+    const auto sz = fs::file_size(path, ec);
+    if (ec || sz > kFakeStoreMaxFile) {
+        m_load_error = "fake s3 store unreadable";
+        return;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        m_load_error = "fake s3 store unreadable";
+        return;
+    }
+    std::vector<unsigned char> raw(static_cast<size_t>(sz));
+    if (sz > 0) {
+        in.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(sz));
+        if (!in || static_cast<uint64_t>(in.gcount()) != sz) {
+            m_load_error = "fake s3 store unreadable";
+            return;
+        }
+    }
+    std::map<std::string, std::vector<unsigned char>> objects;
+    std::map<std::string, std::map<std::string, std::string>> meta;
+    if (!DecodeFakeStore(raw, objects, meta)) {
+        m_load_error = "fake s3 store is corrupt";
+        return;
+    }
+    m_objects = std::move(objects);
+    m_meta = std::move(meta);
+}
+
+bool FakeS3::PersistLocked(std::string& err)
+{
+    if (m_objects.size() > std::numeric_limits<uint32_t>::max()) {
+        err = "fake s3 store write failed";
+        return false;
+    }
+    std::string blob;
+    blob.append("BTXFKS3", 7);
+    blob.push_back(static_cast<char>(1));
+    AppendU32(blob, static_cast<uint32_t>(m_objects.size()));
+    for (const auto& kv : m_objects) {
+        if (kv.first.size() > kFakeStoreMaxKey || kv.second.size() > kFakeStoreMaxObject) {
+            err = "fake s3 store write failed";
+            return false;
+        }
+        AppendU32(blob, static_cast<uint32_t>(kv.first.size()));
+        blob.append(kv.first);
+        AppendU64(blob, kv.second.size());
+        if (!kv.second.empty()) {
+            blob.append(reinterpret_cast<const char*>(kv.second.data()), kv.second.size());
+        }
+        const auto mit = m_meta.find(kv.first);
+        const size_t nmeta = mit == m_meta.end() ? 0 : mit->second.size();
+        if (nmeta > kFakeStoreMaxMeta) {
+            err = "fake s3 store write failed";
+            return false;
+        }
+        AppendU32(blob, static_cast<uint32_t>(nmeta));
+        if (mit == m_meta.end()) continue;
+        for (const auto& mv : mit->second) {
+            if (mv.first.size() > kFakeStoreMaxMetaName || mv.second.size() > kFakeStoreMaxMetaValue) {
+                err = "fake s3 store write failed";
+                return false;
+            }
+            AppendU32(blob, static_cast<uint32_t>(mv.first.size()));
+            blob.append(mv.first);
+            AppendU32(blob, static_cast<uint32_t>(mv.second.size()));
+            blob.append(mv.second);
+        }
+    }
+    if (blob.size() > kFakeStoreMaxFile) {
+        err = "fake s3 store write failed";
+        return false;
+    }
+    std::error_code dir_ec;
+    fs::create_directories(m_dir);
+    if (!fs::is_directory(m_dir, dir_ec)) {
+        err = "fake s3 store write failed";
+        return false;
+    }
+    const fs::path path = m_dir / kFakeStoreFile;
+    if (!WriteBinaryFileAtomically(path, blob)) {
+        err = "fake s3 store write failed";
+        return false;
+    }
+    std::error_code ec;
+    fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+    return true;
+}
 
 FakeS3::~FakeS3()
 {
@@ -1327,6 +1542,10 @@ void FakeS3::SetMeta(const std::string& key, const std::string& name, const std:
 {
     std::lock_guard<std::mutex> lock(m_mu);
     m_meta[key][name] = value;
+    if (!m_dir.empty()) {
+        std::string err;
+        (void)PersistLocked(err);
+    }
 }
 
 bool FakeS3::Put(const std::string& key, Span<const unsigned char> body, const SigV4Request& signed_req,
@@ -1336,7 +1555,16 @@ bool FakeS3::Put(const std::string& key, Span<const unsigned char> body, const S
     if (!VerifyAgainstFake(m_access_key_id, m_secret_access_key, m_region, signed_req, signature, body, err)) {
         return false;
     }
+    auto existing = m_objects.find(key);
+    const bool existed = existing != m_objects.end();
+    std::vector<unsigned char> previous;
+    if (existed) previous = std::move(existing->second);
     m_objects[key] = std::vector<unsigned char>(body.begin(), body.end());
+    if (!m_dir.empty() && !PersistLocked(err)) {
+        if (existed) m_objects[key] = std::move(previous);
+        else m_objects.erase(key);
+        return false;
+    }
     ++m_put;
     return true;
 }
@@ -1406,8 +1634,26 @@ bool FakeS3::Delete(const std::string& key, const SigV4Request& signed_req, cons
     if (!VerifyAgainstFake(m_access_key_id, m_secret_access_key, m_region, signed_req, signature, {}, err)) {
         return false;
     }
-    m_objects.erase(key);
-    m_meta.erase(key);
+    auto existing = m_objects.find(key);
+    auto existing_meta = m_meta.find(key);
+    if (existing == m_objects.end() && existing_meta == m_meta.end()) return true;
+    std::vector<unsigned char> previous;
+    const bool had_object = existing != m_objects.end();
+    if (had_object) {
+        previous = std::move(existing->second);
+        m_objects.erase(existing);
+    }
+    std::map<std::string, std::string> previous_meta;
+    const bool had_meta = existing_meta != m_meta.end();
+    if (had_meta) {
+        previous_meta = std::move(existing_meta->second);
+        m_meta.erase(existing_meta);
+    }
+    if (!m_dir.empty() && !PersistLocked(err)) {
+        if (had_object) m_objects.emplace(key, std::move(previous));
+        if (had_meta) m_meta.emplace(key, std::move(previous_meta));
+        return false;
+    }
     return true;
 }
 
@@ -1452,8 +1698,20 @@ bool FakeS3::CompleteMultipart(const std::string& upload_id, std::string& err)
     for (const auto& part : it->second.parts) {
         assembled.insert(assembled.end(), part.second.begin(), part.second.end());
     }
-    m_objects[it->second.key] = std::move(assembled);
+    const std::string key = it->second.key;
+    Multipart saved = std::move(it->second);
     m_uploads.erase(it);
+    auto existing = m_objects.find(key);
+    const bool existed = existing != m_objects.end();
+    std::vector<unsigned char> previous;
+    if (existed) previous = std::move(existing->second);
+    m_objects[key] = std::move(assembled);
+    if (!m_dir.empty() && !PersistLocked(err)) {
+        if (existed) m_objects[key] = std::move(previous);
+        else m_objects.erase(key);
+        m_uploads.emplace(upload_id, std::move(saved));
+        return false;
+    }
     ++m_multipart;
     ++m_put;
     return true;
@@ -1619,7 +1877,12 @@ bool S3Client::Init(const S3ClientConfig& cfg, std::string& err)
     }
     if (m_cfg.region.empty()) m_cfg.region = "us-east-1";
     if (m_cfg.use_fake) {
-        m_fake = std::make_unique<FakeS3>();
+        m_fake = std::make_unique<FakeS3>(m_cfg.fake_store_dir);
+        if (!m_fake->LoadError().empty()) {
+            err = m_fake->LoadError();
+            m_fake.reset();
+            return false;
+        }
         m_fake->SetSigningContext(m_access, m_secret, m_cfg.region, m_cfg.bucket);
     }
     m_ready = true;
