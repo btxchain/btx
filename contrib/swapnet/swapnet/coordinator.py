@@ -361,7 +361,7 @@ class Coordinator:
         s['last_action']=action;s['last_error']=None;s['observations']={'a':asdict(ra.observation),'b':asdict(rb.observation)}
         s['updated_at']=self.now()
         if (action == 'wait_for_chain' and s['role'] == 'responder' and s['stage'] == 'committed'
-                and agr.long_leg.lock_domain == 'height' and not rb.observation.present
+                and not rb.observation.present
                 and ra.observation.refunded
                 and ra.observation.settled(ra.clock.family, self.policy, self.now())
                 and self.journal.close_unfunded_responder(sid, s, rev)):
