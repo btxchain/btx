@@ -3,10 +3,35 @@
 #include <Python.h>
 #include <swapnet/embed.h>
 #include <swapnet/frozen_sources.h>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <filesystem>
+#include <system_error>
+#endif
 namespace swapnet {
 namespace {
+#if defined(__linux__)
+// The Linux release archive ships the libpython btxd links as lib/libpythonX.Y.so.1.0
+// and that interpreter's standard library in lib/pythonX.Y (package_release_archive.py).
+// The isolated configuration ignores PYTHONHOME, and CPython otherwise derives its
+// prefix from a python3 found on PATH or from the build host's prefix. Use the
+// directory above the loaded libpython only when that layout is there.
+std::optional<std::string> PackagedPythonHome() {
+    Dl_info info{};
+    if(dladdr(reinterpret_cast<void*>(&Py_InitializeFromConfig),&info)==0||!info.dli_fname)return std::nullopt;
+    std::error_code ec;
+    const std::filesystem::path library=std::filesystem::canonical(info.dli_fname,ec);
+    if(ec||library.parent_path().filename()!="lib")return std::nullopt;
+    const std::filesystem::path home=library.parent_path().parent_path();
+    const std::filesystem::path stdlib=home/"lib"/("python"+std::to_string(PY_MAJOR_VERSION)+"."+std::to_string(PY_MINOR_VERSION));
+    if(!std::filesystem::is_regular_file(stdlib/"os.py",ec)||!std::filesystem::is_directory(stdlib/"lib-dynload",ec))return std::nullopt;
+    return home.string();
+}
+#endif
 struct PyRef {
     PyObject* p{}; explicit PyRef(PyObject* v=nullptr):p(v){} ~PyRef(){Py_XDECREF(p);}
     PyRef(const PyRef&)=delete;PyRef& operator=(const PyRef&)=delete;
@@ -76,6 +101,13 @@ Engine::Engine(const std::string& config,Callbacks callbacks):m(std::make_unique
     PyConfig cfg;PyConfig_InitIsolatedConfig(&cfg);
     cfg.install_signal_handlers=0;cfg.use_environment=0;cfg.user_site_directory=0;
     cfg.write_bytecode=0;cfg.safe_path=1;
+#if defined(__linux__)
+    if(const auto home=PackagedPythonHome()){
+        PyStatus homestatus=PyConfig_SetBytesString(&cfg,&cfg.home,home->c_str());
+        if(!PyStatus_Exception(homestatus))homestatus=PyConfig_SetBytesString(&cfg,&cfg.platlibdir,"lib");
+        if(PyStatus_Exception(homestatus)){PyConfig_Clear(&cfg);throw std::runtime_error("SwapNet Python initialization failed");}
+    }
+#endif
     PyStatus status=Py_InitializeFromConfig(&cfg);PyConfig_Clear(&cfg);
     if(PyStatus_Exception(status))throw std::runtime_error("SwapNet Python initialization failed");
     m->initialized=true;
