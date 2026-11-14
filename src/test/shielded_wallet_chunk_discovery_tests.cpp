@@ -1894,4 +1894,150 @@ BOOST_FIXTURE_TEST_CASE(wallet_built_spend_path_recovery_tx_is_mempool_valid,
     }
 }
 
+// The view cache is not persisted. After a restart the note is still in the
+// balance, and z_viewtransaction must rebuild that one transaction from the
+// block the wallet already scanned.
+BOOST_AUTO_TEST_CASE(view_rebuilds_from_note_anchor_after_cache_is_cleared)
+{
+    mineBlocks(COINBASE_MATURITY);
+    const ShieldedNote owned_note = MakeNote(owned_addr.pk_hash, 1 * COIN, 0x663);
+    uint256 legacy_anchor;
+    {
+        LOCK(cs_main);
+        legacy_anchor = Assert(m_node.chainman)->GetShieldedMerkleTree().Root();
+    }
+    BOOST_REQUIRE(!legacy_anchor.IsNull());
+
+    const CMutableTransaction mtx = BuildLegacyShieldOnlyTransaction(*this,
+                                                                     m_coinbase_txns[1],
+                                                                     legacy_anchor,
+                                                                     owned_note,
+                                                                     owned_kem_pk,
+                                                                     0x6631);
+    const uint256 txid = mtx.GetHash();
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock accepted_block = CreateAndProcessBlock({mtx}, script_pub_key);
+    const int block_height = m_node.chain->getHeight().value_or(0);
+    BOOST_REQUIRE_GT(block_height, 0);
+
+    size_t notes_after_load{0};
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        shielded_wallet->ScanBlock(accepted_block, block_height);
+        BOOST_REQUIRE(shielded_wallet->GetCachedTransactionView(txid).has_value());
+        BOOST_REQUIRE(!shielded_wallet->GetUnspentNotes(/*min_depth=*/0).empty());
+    }
+
+    wallet.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(wallet);
+    shielded_wallet = wallet.m_shielded_wallet;
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        notes_after_load = shielded_wallet->GetUnspentNotes(/*min_depth=*/0).size();
+        BOOST_REQUIRE_GT(notes_after_load, 0U);
+        BOOST_CHECK(!shielded_wallet->GetCachedTransactionView(txid).has_value());
+
+        const auto view = shielded_wallet->GetTransactionView(txid);
+        BOOST_REQUIRE(view.has_value());
+        bool owned_output{false};
+        for (const auto& output : view->outputs) {
+            if (output.is_ours && output.amount == owned_note.value) {
+                owned_output = true;
+            }
+        }
+        BOOST_CHECK(owned_output);
+        BOOST_CHECK_EQUAL(shielded_wallet->GetUnspentNotes(/*min_depth=*/0).size(), notes_after_load);
+        BOOST_CHECK(shielded_wallet->GetCachedTransactionView(txid).has_value());
+    }
+}
+
+// The gap search derives GAP_LIMIT keys, then keeps only those that received a
+// note. A new encrypted wallet has a PQ seed and no notes, so the first unlock
+// must not leave those search keys behind, and the next index stays 0.
+BOOST_AUTO_TEST_CASE(rehydrate_drops_gap_keys_that_never_received_a_note)
+{
+    wallet::CWallet fresh(m_node.chain.get(), "", wallet::CreateMockableWalletDatabase());
+    BOOST_REQUIRE(fresh.LoadWallet() == wallet::DBErrors::LOAD_OK);
+    BOOST_REQUIRE(fresh.EncryptWallet(passphrase));
+    BOOST_REQUIRE(fresh.Unlock(passphrase));
+    fresh.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(fresh);
+
+    wallet::ShieldedAddress first;
+    {
+        LOCK2(fresh.cs_wallet, fresh.m_shielded_wallet->cs_shielded);
+        first = fresh.m_shielded_wallet->GenerateNewAddress();
+        BOOST_CHECK_EQUAL(fresh.m_shielded_wallet->GetAddresses().size(), 1U);
+    }
+
+    {
+        wallet::WalletBatch batch(fresh.GetDatabase());
+        batch.EraseCryptedShieldedState();
+        batch.EraseShieldedState();
+    }
+    fresh.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(fresh);
+    {
+        LOCK2(fresh.cs_wallet, fresh.m_shielded_wallet->cs_shielded);
+        BOOST_REQUIRE(fresh.m_shielded_wallet->GetAddresses().empty());
+        BOOST_REQUIRE(fresh.m_shielded_wallet->MaybeRehydrateSpendingKeys());
+        BOOST_CHECK(fresh.m_shielded_wallet->GetAddresses().empty());
+        const auto second = fresh.m_shielded_wallet->GenerateNewAddress();
+        const auto addrs = fresh.m_shielded_wallet->GetAddresses();
+        BOOST_REQUIRE_EQUAL(addrs.size(), 1U);
+        BOOST_CHECK(second == first);
+    }
+}
+
+// A wallet whose key set was lost still recovers the index that decrypted a
+// note already on the chain, and does not keep the rest of the gap search.
+BOOST_AUTO_TEST_CASE(rehydrate_keeps_spending_index_that_received_a_note)
+{
+    mineBlocks(COINBASE_MATURITY);
+    const ShieldedNote owned_note = MakeNote(owned_addr.pk_hash, 2 * COIN, 0x664);
+    uint256 legacy_anchor;
+    {
+        LOCK(cs_main);
+        legacy_anchor = Assert(m_node.chainman)->GetShieldedMerkleTree().Root();
+    }
+    BOOST_REQUIRE(!legacy_anchor.IsNull());
+
+    const CMutableTransaction mtx = BuildLegacyShieldOnlyTransaction(*this,
+                                                                     m_coinbase_txns[1],
+                                                                     legacy_anchor,
+                                                                     owned_note,
+                                                                     owned_kem_pk,
+                                                                     0x6641);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock accepted_block = CreateAndProcessBlock({mtx}, script_pub_key);
+    BOOST_REQUIRE_GT(accepted_block.vtx.size(), 1U);
+
+    {
+        wallet::WalletBatch batch(wallet.GetDatabase());
+        batch.EraseCryptedShieldedState();
+        batch.EraseShieldedState();
+    }
+    wallet.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(wallet);
+    shielded_wallet = wallet.m_shielded_wallet;
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        BOOST_REQUIRE(shielded_wallet->GetAddresses().empty());
+        BOOST_REQUIRE(shielded_wallet->MaybeRehydrateSpendingKeys());
+        const auto addrs = shielded_wallet->GetAddresses();
+        BOOST_REQUIRE_EQUAL(addrs.size(), 1U);
+        BOOST_CHECK(addrs.front() == owned_addr);
+        mlkem::PublicKey rehydrated_pk{};
+        BOOST_REQUIRE(shielded_wallet->GetKEMPublicKey(owned_addr, rehydrated_pk));
+        BOOST_CHECK_EQUAL_COLLECTIONS(rehydrated_pk.begin(),
+                                      rehydrated_pk.end(),
+                                      owned_kem_pk.begin(),
+                                      owned_kem_pk.end());
+        bool found_note{false};
+        for (const auto& note : shielded_wallet->GetUnspentNotes(/*min_depth=*/0)) {
+            if (note.note.value == owned_note.value &&
+                note.note.recipient_pk_hash == owned_addr.pk_hash) {
+                found_note = true;
+            }
+        }
+        BOOST_CHECK(found_note);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
