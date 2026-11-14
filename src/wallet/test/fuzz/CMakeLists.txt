@@ -4,6 +4,7 @@
 
 target_sources(fuzz
   PRIVATE
+    bcp1_package.cpp
     coincontrol.cpp
     coinselection.cpp
     crypter.cpp

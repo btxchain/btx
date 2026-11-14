@@ -3,9 +3,11 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <dandelion.h>
+#include <addrman.h>
 #include <chainparams.h>
 #include <consensus/amount.h>
 #include <netaddress.h>
+#include <netgroup.h>
 #include <node/connection_types.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -20,7 +22,9 @@
 #include <arpa/inet.h>
 
 #include <map>
+#include <memory>
 #include <set>
+#include <vector>
 
 namespace {
 
@@ -87,7 +91,25 @@ static bool RotateUntilFluffMode(Dandelion::DandelionManager& manager, int attem
 
 } // anonymous namespace
 
-BOOST_FIXTURE_TEST_SUITE(dandelion_tests, BasicTestingSetup)
+// The relay tests build a ConnmanTestMsg from m_node.addrman and
+// m_node.netgroupman, which BasicTestingSetup does not create. Create them the
+// same way TestingSetup does, without loading a chainstate.
+struct DandelionTestingSetup : public BasicTestingSetup {
+    DandelionTestingSetup()
+    {
+        m_node.netgroupman = std::make_unique<NetGroupManager>(/*asmap=*/std::vector<bool>());
+        m_node.addrman = std::make_unique<AddrMan>(*m_node.netgroupman,
+                                                   /*deterministic=*/false,
+                                                   m_node.args->GetIntArg("-checkaddrman", 0));
+    }
+    ~DandelionTestingSetup()
+    {
+        m_node.addrman.reset();
+        m_node.netgroupman.reset();
+    }
+};
+
+BOOST_FIXTURE_TEST_SUITE(dandelion_tests, DandelionTestingSetup)
 
 BOOST_AUTO_TEST_CASE(activation_height)
 {
