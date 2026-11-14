@@ -13,9 +13,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <fstream>
 #include <set>
 #include <string>
+#include <thread>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_feed_tests, BasicTestingSetup)
 
@@ -39,6 +41,37 @@ BOOST_AUTO_TEST_CASE(econ_feed_01_dedupe_unlock)
         if (ev.event_type == FeedEventType::MODEL_UNLOCKED) ++unlocks;
     }
     BOOST_CHECK_EQUAL(unlocks, 1);
+}
+
+// The helper's RPC workers note feed events and read the feed at the same time,
+// under different helper locks (g_campaign_mu for a pledge, g_search_mu for a
+// feed read). The store locks itself; under -fsanitize=thread this case showed
+// the race before it did.
+BOOST_AUTO_TEST_CASE(feed_store_notes_and_reads_from_two_threads)
+{
+    using namespace modelnet;
+    FeedStore feed;
+    std::atomic<bool> stop{false};
+    std::thread reader([&] {
+        FeedQuery q;
+        std::string next;
+        while (!stop.load()) {
+            (void)feed.Query(q, 5'000, next);
+            (void)feed.Sequence();
+        }
+    });
+    for (int i = 0; i < 500; ++i) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = static_cast<unsigned char>(i & 0xff);
+        r.model_id.data[1] = static_cast<unsigned char>(i >> 8);
+        r.display_name = "Concurrent";
+        r.canonical_name = "Concurrent";
+        r.published_at = 100 + i;
+        (void)feed.NoteSearchRecord(r, 1'000 + i);
+    }
+    stop = true;
+    reader.join();
+    BOOST_CHECK_GT(feed.Size(), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(econ_feed_05_persist)
