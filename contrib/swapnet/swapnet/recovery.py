@@ -76,6 +76,11 @@ def restore_bundle(bundle,destination,passphrase,expected_network):
             require(db.db.execute('PRAGMA integrity_check').fetchone()[0]=='ok','DATABASE_CORRUPT','SQLite integrity check failed')
             require(db.verify_audit()==body['audit_head'],'AUDIT_CORRUPT','Audit head mismatch')
             ForeignKeyVault(stage/'foreign-vault.json',decoded['vault.key'])
+            # Persist the restore boundary before any runnable destination is published.
+            from .journal import Journal
+            journal = Journal(db)
+            for (sid,) in db.db.execute('SELECT id FROM sn_negotiations').fetchall():
+                journal.set_setting('restored_session:'+sid, True)
         finally:db.close()
         dest.mkdir(mode=0o700,exist_ok=True)
         for name in decoded:atomic_private_write(dest/name,(stage/name).read_bytes())

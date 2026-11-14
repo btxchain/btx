@@ -253,7 +253,8 @@ class Coordinator:
             # A committed restore has no funding record. Adopt an exact unspent
             # lock, or the EVM lock already stored under its deterministic id,
             # instead of building a second one. A failed lookup raises.
-            adopted=find_funding_output(driver,own,sid)
+            adopted=find_funding_output(driver,own,sid, recover_history=(
+                driver.family == 'btc' and self.journal.setting('restored_session:'+sid, False)))
             if adopted:
                 if 'lock_id' in adopted:
                     ref={'txid':adopted['txid'],'lock_id':adopted['lock_id'],'salt':adopted['salt']}
