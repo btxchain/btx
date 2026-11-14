@@ -129,12 +129,17 @@ def test_terminal_journal_keeps_meaningful_changes(terminal_pair, change):
             journal.save(pair.sid, candidate, rev + 1)
 
 
-def test_active_journal_revision_contract_is_unchanged(pair):
+def test_active_poll_timestamps_do_not_bump_revision(pair):
     pair.start()
     journal = pair.nodes['alice'][1]
     rev, state = journal.load(pair.sid)
     assert state['stage'] == 'proposed'
-    assert journal.save(pair.sid, state, rev) == rev + 1
+    poll = deepcopy(state)
+    poll['updated_at'] = state['updated_at'] + 1
+    assert journal.save(pair.sid, poll, rev) == rev
+    changed = deepcopy(poll)
+    changed['last_error'] = {'code': 'RPC', 'message': 'Observation unavailable'}
+    assert journal.save(pair.sid, changed, rev) == rev + 1
 
 
 def test_terminal_poll_still_checks_evm_withdrawal(pair, monkeypatch):

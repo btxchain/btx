@@ -128,9 +128,10 @@ class Journal:
                 require(previous['principal']==body['principal'] and previous['peer']==body['peer'],'SESSION_BINDING','Immutable session owner changed')
                 if previous.get('agreement_id'):
                     require(previous['agreement_id']==body.get('agreement_id'),'AGREEMENT_CHANGED','Accepted agreement is immutable')
-            if old and previous['stage'] in {'complete','refunded'} and body['stage']==previous['stage']:
+            if old:
                 # Decisions still use fresh driver observations on every tick.
-                # Persist a terminal snapshot only when more than its poll times changed.
+                # Every unchanged stage, including committed, skips a write when
+                # only updated_at and observation observed_at moved.
                 snapshots = (deepcopy(previous), deepcopy(body))
                 for snapshot in snapshots:
                     snapshot.pop('updated_at', None)
