@@ -6536,6 +6536,217 @@ std::optional<ShieldedTxView> CShieldedWallet::GetCachedTransactionView(const ui
     return it->second;
 }
 
+void CShieldedWallet::AppendRebuiltOutputView(const uint256& commitment,
+                                              const shielded::EncryptedNote& enc_note,
+                                              const std::optional<smile2::CompactPublicAccount>& smile_account,
+                                              ShieldedTxView& tx_view,
+                                              bool& tx_has_local_visibility) const
+{
+    AssertLockHeld(cs_shielded);
+    ShieldedTxViewOutput output_view;
+    output_view.commitment = commitment;
+    auto decrypted = TryDecryptNoteFull(enc_note);
+    if (decrypted.has_value() &&
+        smile_account.has_value() &&
+        !DecryptedNoteMatchesSmileAccount(decrypted->first, *smile_account)) {
+        decrypted.reset();
+    }
+    if (decrypted.has_value()) {
+        output_view.amount = decrypted->first.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    } else if (const auto coin = GetCoinByCommitment(commitment)) {
+        // The note is already in the balance from the scan that stored this anchor.
+        output_view.amount = coin->note.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    }
+    tx_view.outputs.push_back(std::move(output_view));
+}
+
+void CShieldedWallet::AppendRebuiltOutputView(const shielded::v2::OutputDescription& output,
+                                              ShieldedTxView& tx_view,
+                                              bool& tx_has_local_visibility) const
+{
+    AssertLockHeld(cs_shielded);
+    ShieldedTxViewOutput output_view;
+    output_view.commitment = output.note_commitment;
+    auto decrypted = TryDecryptNoteFull(output.encrypted_note);
+    if (decrypted.has_value() &&
+        output.smile_account.has_value() &&
+        !DecryptedNoteMatchesSmileAccount(decrypted->first, *output.smile_account)) {
+        decrypted.reset();
+    }
+    if (decrypted.has_value()) {
+        output_view.amount = decrypted->first.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    } else if (const auto coin = GetCoinByCommitment(output.note_commitment)) {
+        output_view.amount = coin->note.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    }
+    tx_view.outputs.push_back(std::move(output_view));
+}
+
+std::optional<ShieldedTxView> CShieldedWallet::BuildLocalTransactionView(const CTransaction& tx) const
+{
+    AssertLockHeld(cs_shielded);
+    if (!tx.HasShieldedBundle()) return std::nullopt;
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    ShieldedTxView tx_view;
+    tx_view.value_balance = GetShieldedStateValueBalance(bundle);
+    tx_view.family = DescribeShieldedBundleFamily(bundle);
+    bool tx_has_local_visibility{false};
+
+    for (const Nullifier& nullifier : CollectShieldedNullifiers(bundle)) {
+        ShieldedTxViewSpend spend_view;
+        spend_view.nullifier = nullifier;
+        const auto note_it = m_notes.find(nullifier);
+        if (note_it != m_notes.end()) {
+            spend_view.amount = note_it->second.note.value;
+            spend_view.is_ours = true;
+            tx_has_local_visibility = true;
+        }
+        tx_view.spends.push_back(std::move(spend_view));
+    }
+    if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+        ShieldedTxViewSpend spend_view;
+        spend_view.nullifier = recovery_spend->nullifier;
+        spend_view.amount = recovery_spend->amount;
+        const auto note_it = FindNoteByRecoveryExitSpend(m_notes, *recovery_spend);
+        if (note_it != m_notes.end()) {
+            spend_view.amount = note_it->second.note.value;
+            spend_view.is_ours = true;
+            tx_has_local_visibility = true;
+        }
+        tx_view.spends.push_back(std::move(spend_view));
+    }
+
+    if (bundle.HasV2Bundle()) {
+        const auto* v2_bundle = bundle.GetV2Bundle();
+        if (v2_bundle != nullptr) {
+            switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
+            case shielded::v2::TransactionFamily::V2_SEND: {
+                const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+                for (const auto& output : payload.outputs) {
+                    AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY: {
+                const auto& payload = std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+                for (const auto& output : payload.outputs) {
+                    AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_LIFECYCLE:
+                break;
+            case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
+                const auto& payload = std::get<shielded::v2::IngressBatchPayload>(v2_bundle->payload);
+                for (const auto& output : payload.reserve_outputs) {
+                    AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_EGRESS_BATCH: {
+                const auto& payload = std::get<shielded::v2::EgressBatchPayload>(v2_bundle->payload);
+                const bool recorded = RecordCanonicalOutputChunks(
+                    *v2_bundle,
+                    {payload.outputs.data(), payload.outputs.size()},
+                    "CShieldedWallet::BuildLocalTransactionView",
+                    [&](const shielded::v2::OutputDescription& output) NO_THREAD_SAFETY_ANALYSIS {
+                        AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                    });
+                if (recorded) {
+                    AppendOutputChunkViews(tx_view,
+                                           {v2_bundle->output_chunks.data(), v2_bundle->output_chunks.size()},
+                                           "CShieldedWallet::BuildLocalTransactionView");
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_REBALANCE: {
+                const auto& payload = std::get<shielded::v2::RebalancePayload>(v2_bundle->payload);
+                if (!v2_bundle->output_chunks.empty()) {
+                    const bool recorded = RecordCanonicalOutputChunks(
+                        *v2_bundle,
+                        {payload.reserve_outputs.data(), payload.reserve_outputs.size()},
+                        "CShieldedWallet::BuildLocalTransactionView",
+                        [&](const shielded::v2::OutputDescription& output) NO_THREAD_SAFETY_ANALYSIS {
+                            AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                        });
+                    if (recorded) {
+                        AppendOutputChunkViews(tx_view,
+                                               {v2_bundle->output_chunks.data(), v2_bundle->output_chunks.size()},
+                                               "CShieldedWallet::BuildLocalTransactionView");
+                    }
+                } else {
+                    for (const auto& output : payload.reserve_outputs) {
+                        AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                    }
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+            case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
+            case shielded::v2::TransactionFamily::V2_GENERIC:
+                break;
+            }
+        }
+    } else {
+        for (const auto& output : bundle.shielded_outputs) {
+            AppendRebuiltOutputView(output.note_commitment,
+                                    output.encrypted_note,
+                                    std::nullopt,
+                                    tx_view,
+                                    tx_has_local_visibility);
+        }
+    }
+
+    if (!tx_has_local_visibility) return std::nullopt;
+    return tx_view;
+}
+
+std::optional<ShieldedTxView> CShieldedWallet::RebuildTransactionViewFromNoteAnchor(const uint256& txid)
+{
+    AssertLockHeld(cs_shielded);
+    const auto tip_height = m_parent_wallet.chain().getHeight();
+    if (!tip_height.has_value() || m_last_scanned_height < 0) return std::nullopt;
+
+    std::set<uint256> seen_blocks;
+    for (const auto& [_, coin] : m_notes) {
+        if (coin.confirmation_height < 0 || coin.block_hash.IsNull()) continue;
+        if (coin.confirmation_height > m_last_scanned_height || coin.confirmation_height > *tip_height) continue;
+        if (!seen_blocks.insert(coin.block_hash).second) continue;
+        if (!m_parent_wallet.chain().haveBlockOnDisk(coin.confirmation_height)) continue;
+        if (m_parent_wallet.chain().getBlockHash(coin.confirmation_height) != coin.block_hash) continue;
+
+        CBlock block;
+        if (!m_parent_wallet.chain().findBlock(coin.block_hash, interfaces::FoundBlock().data(block)) || block.IsNull()) {
+            continue;
+        }
+        for (const auto& txref : block.vtx) {
+            if (txref->GetHash() != txid) continue;
+            auto view = BuildLocalTransactionView(*txref);
+            if (!view.has_value()) return std::nullopt;
+            m_tx_view_cache[txid] = *view;
+            while (m_tx_view_cache.size() > TX_VIEW_CACHE_MAX) {
+                m_tx_view_cache.erase(m_tx_view_cache.begin());
+            }
+            return view;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<ShieldedTxView> CShieldedWallet::GetTransactionView(const uint256& txid)
+{
+    AssertLockHeld(cs_shielded);
+    if (auto cached = GetCachedTransactionView(txid)) return cached;
+    return RebuildTransactionViewFromNoteAnchor(txid);
+}
+
 bool CShieldedWallet::GetKEMPublicKey(const ShieldedAddress& addr, mlkem::PublicKey& out_pk) const
 {
     AssertLockHeld(cs_shielded);

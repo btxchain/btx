@@ -1894,4 +1894,60 @@ BOOST_FIXTURE_TEST_CASE(wallet_built_spend_path_recovery_tx_is_mempool_valid,
     }
 }
 
+// The view cache is not persisted. After a restart the note is still in the
+// balance, and z_viewtransaction must rebuild that one transaction from the
+// block the wallet already scanned.
+BOOST_AUTO_TEST_CASE(view_rebuilds_from_note_anchor_after_cache_is_cleared)
+{
+    mineBlocks(COINBASE_MATURITY);
+    const ShieldedNote owned_note = MakeNote(owned_addr.pk_hash, 1 * COIN, 0x663);
+    uint256 legacy_anchor;
+    {
+        LOCK(cs_main);
+        legacy_anchor = Assert(m_node.chainman)->GetShieldedMerkleTree().Root();
+    }
+    BOOST_REQUIRE(!legacy_anchor.IsNull());
+
+    const CMutableTransaction mtx = BuildLegacyShieldOnlyTransaction(*this,
+                                                                     m_coinbase_txns[1],
+                                                                     legacy_anchor,
+                                                                     owned_note,
+                                                                     owned_kem_pk,
+                                                                     0x6631);
+    const uint256 txid = mtx.GetHash();
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock accepted_block = CreateAndProcessBlock({mtx}, script_pub_key);
+    const int block_height = m_node.chain->getHeight().value_or(0);
+    BOOST_REQUIRE_GT(block_height, 0);
+
+    size_t notes_after_load{0};
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        shielded_wallet->ScanBlock(accepted_block, block_height);
+        BOOST_REQUIRE(shielded_wallet->GetCachedTransactionView(txid).has_value());
+        BOOST_REQUIRE(!shielded_wallet->GetUnspentNotes(/*min_depth=*/0).empty());
+    }
+
+    wallet.m_shielded_wallet = std::make_shared<wallet::CShieldedWallet>(wallet);
+    shielded_wallet = wallet.m_shielded_wallet;
+    {
+        LOCK2(wallet.cs_wallet, shielded_wallet->cs_shielded);
+        notes_after_load = shielded_wallet->GetUnspentNotes(/*min_depth=*/0).size();
+        BOOST_REQUIRE_GT(notes_after_load, 0U);
+        BOOST_CHECK(!shielded_wallet->GetCachedTransactionView(txid).has_value());
+
+        const auto view = shielded_wallet->GetTransactionView(txid);
+        BOOST_REQUIRE(view.has_value());
+        bool owned_output{false};
+        for (const auto& output : view->outputs) {
+            if (output.is_ours && output.amount == owned_note.value) {
+                owned_output = true;
+            }
+        }
+        BOOST_CHECK(owned_output);
+        BOOST_CHECK_EQUAL(shielded_wallet->GetUnspentNotes(/*min_depth=*/0).size(), notes_after_load);
+        BOOST_CHECK(shielded_wallet->GetCachedTransactionView(txid).has_value());
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

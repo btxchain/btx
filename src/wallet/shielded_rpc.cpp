@@ -10611,7 +10611,10 @@ RPCHelpMan z_viewtransaction()
                 return out;
             }
 
-            auto cached_view = pwallet->m_shielded_wallet->GetCachedTransactionView(txid);
+            // An incoming shielded transaction is not a wallet tx, and the view
+            // cache is not persisted. Rebuild this one transaction from the
+            // block the wallet already scanned (the note's anchor).
+            auto cached_view = pwallet->m_shielded_wallet->GetTransactionView(txid);
             if (!cached_view.has_value()) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not found or no shielded bundle");
             }
