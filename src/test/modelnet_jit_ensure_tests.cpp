@@ -33,6 +33,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <vector>
@@ -869,6 +870,45 @@ BOOST_AUTO_TEST_CASE(remaining_capability_rpc_surface)
         BOOST_CHECK_EQUAL(released["automatic_spend_atoms"].getInt<int>(), 0);
     } else {
         BOOST_CHECK_EQUAL(code, "LEASE_HOLD");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(ensure_staging_dir_is_private)
+{
+    BOOST_TEST_MESSAGE("The fixed staging directory under the temp directory must be private to this user");
+    const char* old_tmpdir = std::getenv("TMPDIR");
+    const std::string saved_tmpdir{old_tmpdir ? old_tmpdir : ""};
+    modelnet::ModelCatalog cat{m_path_root / "ensure-cat", 1 << 20};
+    const auto plan = StorePlan();
+    const fs::path base = m_path_root / "ensure-tmpdir";
+    UniValue got;
+    std::string code, err;
+
+    // A symlink in its place is refused, and nothing is written where it points.
+    const fs::path link_tmp = base / "link";
+    const fs::path elsewhere = base / "elsewhere";
+    fs::create_directories(link_tmp);
+    fs::create_directories(elsewhere);
+    fs::create_directory_symlink(elsewhere, link_tmp / "btx-capability-ensure");
+    ::setenv("TMPDIR", fs::PathToString(link_tmp).c_str(), 1);
+    BOOST_CHECK(!modelnet::EnsureCapability(cat, EnsureReq(plan), got, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(fs::is_empty(elsewhere));
+
+    // A directory of this user that others may enter is made private and used.
+    const fs::path open_tmp = base / "open";
+    const fs::path staging = open_tmp / "btx-capability-ensure";
+    fs::create_directories(staging);
+    fs::permissions(staging, fs::perms::all);
+    ::setenv("TMPDIR", fs::PathToString(open_tmp).c_str(), 1);
+    got = UniValue{};
+    BOOST_CHECK_MESSAGE(modelnet::EnsureCapability(cat, EnsureReq(plan), got, code, err), err);
+    BOOST_CHECK((fs::status(staging).permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+
+    if (old_tmpdir) {
+        ::setenv("TMPDIR", saved_tmpdir.c_str(), 1);
+    } else {
+        ::unsetenv("TMPDIR");
     }
 }
 

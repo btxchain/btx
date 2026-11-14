@@ -1512,7 +1512,18 @@ bool ModelCatalog::MaterializeCheckout(const Digest48& model_or_artifact, const 
     for (uint32_t i = 0; i < e.core.files.size(); ++i) {
         const CoreFile& f = e.core.files[i];
         if (!IsPortableRelPath(f.path, err)) return false;
-        const fs::path outp = dest / fs::PathFromString(f.path);
+        const fs::path rel{fs::PathFromString(f.path)};
+        // A directory of the checkout that is a symlink would put the file,
+        // and replace one, outside dest.
+        fs::path dir{dest};
+        for (const auto& part : rel.parent_path()) {
+            dir = dir / fs::path{part};
+            if (fs::is_symlink(dir, ec)) {
+                err = "checkout directory is a symlink";
+                return false;
+            }
+        }
+        const fs::path outp = dest / rel;
         fs::path prefer;
         if (!src_root.empty()) {
             std::error_code sec;
