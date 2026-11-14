@@ -231,10 +231,13 @@ void MixButterflyAscending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, b
                 s[pi] = static_cast<int64_t>(a + b);
                 s[pj] = static_cast<int64_t>(a - b);
             } else {
-                const int64_t a = s[pi];
-                const int64_t b = s[pj];
-                s[pi] = a + b;
-                s[pj] = a - b;
+                // Same values as exact int64 arithmetic whenever it does not
+                // overflow; computed in uint64 so an out-of-range lane wraps
+                // instead of being undefined behaviour.
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(a - b);
             }
         }
     }
@@ -268,11 +271,12 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, 
                 s[pi] = static_cast<int64_t>(a + b);
                 s[pj] = static_cast<int64_t>(b - a);
             } else {
-                const int64_t a = s[pi];
-                const int64_t b = s[pj];
-                // Distinct linear form from pattern 0 (still exact integer).
-                s[pi] = a + b;
-                s[pj] = b - a;
+                // Distinct linear form from pattern 0 (still exact integer
+                // when in range; computed in uint64 so it never overflows).
+                const uint64_t a = static_cast<uint64_t>(s[pi]);
+                const uint64_t b = static_cast<uint64_t>(s[pj]);
+                s[pi] = static_cast<int64_t>(a + b);
+                s[pj] = static_cast<int64_t>(b - a);
             }
         }
     }
