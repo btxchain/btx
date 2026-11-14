@@ -1092,13 +1092,8 @@ BOOST_AUTO_TEST_CASE(discovery_relay_inbound_gossip_uses_listen_port_not_source_
         ConnmanTestMsg& connman;
         CNode& miner;
         CNode& inbound;
-        CNode* requester{nullptr};
         ~FinalizeNodes()
         {
-            if (requester) {
-                peerman.FinalizeNode(*requester);
-                connman.RemoveTestNode(*requester);
-            }
             peerman.FinalizeNode(inbound);
             connman.RemoveTestNode(inbound);
             peerman.FinalizeNode(miner);
@@ -1154,7 +1149,18 @@ BOOST_AUTO_TEST_CASE(discovery_relay_inbound_gossip_uses_listen_port_not_source_
     BOOST_REQUIRE(!requester.fDisconnect);
     connman.AddTestNode(requester);
     connman.FlushSendBuffer(requester);
-    finalize.requester = &requester;
+    // requester is declared after `finalize`, so it is destroyed first: give it
+    // its own guard so FinalizeNode never runs on a CNode that is out of scope.
+    struct FinalizeRequester {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& node;
+        ~FinalizeRequester()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize_requester{peerman, connman, requester};
 
     requester.fPauseSend = false;
     BOOST_REQUIRE(connman.ReceiveMsgFrom(
