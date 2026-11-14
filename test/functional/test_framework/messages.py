@@ -555,6 +555,7 @@ class CInv:
         MSG_TX | MSG_WITNESS_FLAG: "WitnessTx",
         MSG_BLOCK | MSG_WITNESS_FLAG: "WitnessBlock",
         MSG_FILTERED_BLOCK: "filtered Block",
+        MSG_FILTERED_BLOCK | MSG_WITNESS_FLAG: "filtered WitnessBlock",
         MSG_CMPCT_BLOCK: "CompactBlock",
         MSG_WTX: "WTX",
     }

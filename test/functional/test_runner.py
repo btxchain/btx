@@ -366,6 +366,7 @@ BASE_SCRIPTS = [
     'wallet_keypool.py --descriptors',
     'wallet_descriptor.py --descriptors',
     'p2p_nobloomfilter_messages.py',
+    'p2p_getblocktxn_empty.py',
     TEST_FRAMEWORK_UNIT_TESTS,
     'p2p_filter.py',
     'rpc_setban.py --v1transport',
