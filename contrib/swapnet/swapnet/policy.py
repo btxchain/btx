@@ -47,10 +47,11 @@ class SafetyPolicy:
     reveal_margin_seconds: int = 3600
     max_observation_age_seconds: int = 60
     quote_ttl_seconds: int = 120
+    planning_headroom_seconds: int = 600
     require_evm_finalized: bool = True
 
     def __post_init__(self):
-        for name in ("btx_confirmations", "btc_confirmations", "settlement_margin_seconds", "reveal_margin_seconds", "max_observation_age_seconds", "quote_ttl_seconds"):
+        for name in ("btx_confirmations", "btc_confirmations", "settlement_margin_seconds", "reveal_margin_seconds", "max_observation_age_seconds", "quote_ttl_seconds", "planning_headroom_seconds"):
             integer(getattr(self, name), lo=1)
         require(type(self.require_evm_finalized) is bool, "POLICY", "Invalid finality policy")
 

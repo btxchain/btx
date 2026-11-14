@@ -56,8 +56,11 @@ class Coordinator:
         short=(Deadline('timestamp',cb.timestamp+target) if b.family=='evm' else
                Deadline('height',cb.height+math.ceil(target/cb.fastest_block_seconds)))
         _,worst=short.remaining(cb)
-        long=(Deadline('timestamp',ca.timestamp+worst+self.policy.settlement_margin_seconds) if a.family=='evm' else
-              Deadline('height',ca.height+math.ceil((worst+self.policy.settlement_margin_seconds)/ca.fastest_block_seconds)))
+        # Headroom is planned into the long leg only. Validation stays a strict
+        # settlement margin, so a later clock reading still has to clear it.
+        span=self.policy.settlement_margin_seconds+self.policy.planning_headroom_seconds
+        long=(Deadline('timestamp',ca.timestamp+worst+span) if a.family=='evm' else
+              Deadline('height',ca.height+math.ceil((worst+span)/ca.fastest_block_seconds)))
         self.policy.validate_deadlines(long,short,ca,cb,now)
         if a.family=='evm':require(long.value-ca.timestamp<30*86400,'TIMEOUT_RANGE','Long lock exceeds contract duration')
         return long,short
