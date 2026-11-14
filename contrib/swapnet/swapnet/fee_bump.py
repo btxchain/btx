@@ -11,7 +11,9 @@ from .terms import Agreement
 
 def bump(coordinator,ctx,swap_id,kind,new_fee_atoms):
     require(kind in {'claim','refund'},'REPLACEMENT_KIND','Only claim/refund replacements are supported')
-    rev,s=coordinator._owned(ctx,swap_id);agr=Agreement.parse(s['agreement'])
+    rev,s=coordinator._owned(ctx,swap_id)
+    coordinator._require_effect(swap_id,s)
+    agr=Agreement.parse(s['agreement'])
     own_name,own,in_name,incoming=coordinator._own(s,agr)
     leg=own if kind=='refund' else incoming;name=own_name if kind=='refund' else in_name
     key=s['keys']['refund' if kind=='refund' else 'claim'];driver=coordinator._driver(leg.asset)
