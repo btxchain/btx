@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,10 @@ std::string MakeFeedEventId(FeedEventType t, const Digest48& model_id, const std
                             uint64_t metadata_sequence, const std::string& extra);
 
 class FeedStore {
+    //! The helper's RPC workers note events and read the feed at the same time,
+    //! under different helper locks (g_campaign_mu, g_search_mu). Every method
+    //! takes this one; it is the last lock taken and calls nothing outside.
+    mutable std::recursive_mutex m_mutex;
     std::map<std::string, FeedEvent> m_by_id;
     uint64_t m_seq{0};
     size_t m_cap{FEED_CAP_DEFAULT};
@@ -106,13 +111,15 @@ class FeedStore {
     fs::path m_path;
 
 public:
-    void SetPath(const fs::path& p) { m_path = p; }
-    void SetCap(size_t cap) { m_cap = cap; }
-    void SetTtlMs(int64_t ttl) { m_ttl_ms = ttl; }
-    uint64_t Sequence() const { return m_seq; }
-    size_t Size() const { return m_by_id.size(); }
-    int64_t LastRefresh() const { return m_last_refresh; }
-    void NoteRefresh(int64_t now_ms) { m_last_refresh = now_ms; }
+    void SetPath(const fs::path& p) { std::lock_guard<std::recursive_mutex> lock(m_mutex); m_path = p; }
+    void SetCap(size_t cap) { std::lock_guard<std::recursive_mutex> lock(m_mutex); m_cap = cap; }
+    void SetTtlMs(int64_t ttl) { std::lock_guard<std::recursive_mutex> lock(m_mutex); m_ttl_ms = ttl; }
+    uint64_t Sequence() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_seq; }
+    size_t Size() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_by_id.size(); }
+    int64_t LastRefresh() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_last_refresh; }
+    void NoteRefresh(int64_t now_ms) { std::lock_guard<std::recursive_mutex> lock(m_mutex); m_last_refresh = now_ms; }
+    //! Drop all events and settings, as a new store would have them.
+    void Reset();
 
     bool Note(FeedEvent ev, int64_t now_ms);
     bool NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms);
