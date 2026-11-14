@@ -6001,7 +6001,7 @@ bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, s
                             hyd.ApplyRecord(rec, jerr);
         if (layout == CloudObjectLayout::PIECE_OBJECTS) {
             const uint32_t n = cf.size == 0 ? 1u : static_cast<uint32_t>((cf.size + PIECE_SIZE - 1) / PIECE_SIZE);
-            for (uint32_t p = 0; p < n; ++p) {
+            for (uint32_t p = hyd.Progress().next_piece; p < n; ++p) {
                 std::vector<unsigned char> piece;
                 if (!g_cloud->GetPieceObject(e.artifact_id, fi, p, piece, err)) {
                     GlobalOriginStampede().NoteError("cloud-origin", ConnNowMs());
