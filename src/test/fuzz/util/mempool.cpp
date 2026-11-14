@@ -52,11 +52,18 @@ bool SanityCheckForConsumeTxMemPoolEntry(const CTransaction& tx) noexcept
 }
 
 // NOTE: Transaction must pass SanityCheckForConsumeTxMemPoolEntry first
-CTxMemPoolEntry ConsumeTxMemPoolEntry(FuzzedDataProvider& fuzzed_data_provider, const CTransaction& tx) noexcept
+CAmount ConsumeTxMemPoolEntryFee(FuzzedDataProvider& fuzzed_data_provider, const CTransaction& tx) noexcept
 {
     const auto [fee_lo, fee_hi]{*Assert(EntryFeeRange(tx))};
     const CAmount fee{fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(fee_lo, fee_hi)};
     assert(MoneyRange(fee));
+    return fee;
+}
+
+// NOTE: Transaction must pass SanityCheckForConsumeTxMemPoolEntry first
+CTxMemPoolEntry ConsumeTxMemPoolEntry(FuzzedDataProvider& fuzzed_data_provider, const CTransaction& tx) noexcept
+{
+    const CAmount fee{ConsumeTxMemPoolEntryFee(fuzzed_data_provider, tx)};
     const int64_t time = fuzzed_data_provider.ConsumeIntegral<int64_t>();
     const uint64_t entry_sequence{fuzzed_data_provider.ConsumeIntegral<uint64_t>()};
     const double coin_age = fuzzed_data_provider.ConsumeFloatingPoint<double>();
