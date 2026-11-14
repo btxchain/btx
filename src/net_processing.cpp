@@ -1914,13 +1914,12 @@ private:
     /**
      * Reconsider orphan transactions after a parent has been accepted to the mempool.
      *
-     * @peer[in]  peer     The peer whose orphan transactions we will reconsider. Generally only
+     * @peer[in]  peer     The peer whose orphan transactions we will reconsider. At most
      *                     one orphan will be reconsidered on each call of this function. If an
      *                     accepted orphan has orphaned children, those will need to be
      *                     reconsidered, creating more work, possibly for other peers.
-     * @return             True if meaningful work was done (an orphan was accepted/rejected).
-     *                     If no meaningful work was done, then the work set for this peer
-     *                     will be empty.
+     * @return             True if an orphan was reconsidered. If not, the work set for this
+     *                     peer is empty.
      */
     bool ProcessOrphanTx(Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex);
@@ -10615,6 +10614,14 @@ std::optional<uint256> PeerManagerImpl::ExpireInboundBlockChunks(
 PeerManagerImpl::GetBlockDataOutcome PeerManagerImpl::ProcessGetBlockData(
     CNode& pfrom, Peer& peer, const CInv& inv, bool try_cs_main, bool hold_g_msgproc)
 {
+    // First perform the stateless checks:
+    // A filtered block can only ever be requested if we offer NODE_BLOOM.
+    // Check before looking up the block, to avoid an unnecessary disk read.
+    if ((inv.IsMsgFilteredBlk() || inv.IsMsgFilteredWitnessBlk()) && !(peer.m_our_services & NODE_BLOOM)) {
+        LogDebug(BCLog::NET, "filtered block request received when NODE_BLOOM service disabled, %s\n", pfrom.DisconnectMsg(fLogIPs));
+        pfrom.fDisconnect = true;
+        return GetBlockDataOutcome::Done;
+    }
     if (m_chainman.IsDiscoveryRelay()) {
         return GetBlockDataOutcome::Done;
     }
@@ -15239,9 +15246,7 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
     AssertLockHeld(g_msgproc_mutex);
     LOCK2(::cs_main, m_tx_download_mutex);
 
-    CTransactionRef porphanTx = nullptr;
-
-    while (CTransactionRef porphanTx = m_txdownloadman.GetTxToReconsider(peer.m_id)) {
+    if (CTransactionRef porphanTx = m_txdownloadman.GetTxToReconsider(peer.m_id)) {
         const MempoolAcceptResult result = m_chainman.ProcessTransaction(porphanTx);
         const TxValidationState& state = result.m_state;
         const Txid& orphanHash = porphanTx->GetHash();
@@ -15250,7 +15255,6 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             LogDebug(BCLog::TXPACKAGES, "   accepted orphan tx %s (wtxid=%s)\n", orphanHash.ToString(), orphan_wtxid.ToString());
             ProcessValidTx(peer.m_id, porphanTx, result.m_replaced_transactions);
-            return true;
         } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
             LogDebug(BCLog::TXPACKAGES, "   invalid orphan tx %s (wtxid=%s) from peer=%d. %s\n",
                 orphanHash.ToString(),
@@ -15264,8 +15268,8 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
                        state.GetResult() != TxValidationResult::TX_RESULT_UNSET)) {
                 ProcessInvalidTx(peer.m_id, porphanTx, state, /*first_time_failure=*/false);
             }
-            return true;
         }
+        return true;
     }
 
     return false;
@@ -19581,6 +19585,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
+        // No legitimate reason to send indexes empty: a getblocktxn is only
+        // needed when at least one transaction of a compact block is missing.
+        if (req.indexes.empty()) {
+            LogDebug(BCLog::NET, "getblocktxn received with no transaction indexes, %s\n", pfrom.DisconnectMsg(fLogIPs));
+            pfrom.fDisconnect = true;
+            return;
+        }
+
         if (m_chainman.IsDiscoveryRelay()) {
             return;
         }
@@ -23386,7 +23398,16 @@ void PeerManagerImpl::BanHammeringPeer(CNode& pnode, Peer& peer, std::string_vie
         pnode.fDisconnect = true;
         return;
     }
-    if (m_banman) m_banman->Ban(pnode.addr);
+    // A forged MatMul proof keeps the ordinary ban. The attestation P2P reasons
+    // can be reached by any inbound peer, so they use the bounded automatic
+    // ban, which does not write the whole ban list on each ban.
+    if (m_banman) {
+        if (forged_proof) {
+            m_banman->Ban(pnode.addr);
+        } else {
+            m_banman->BanAutomatic(pnode.addr);
+        }
+    }
     m_connman.DisconnectNode(pnode.addr);
 }
 

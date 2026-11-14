@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 
 // NOTE: When adjusting this, update rpcnet:setban's help ("24h")
@@ -21,6 +22,10 @@ static constexpr unsigned int DEFAULT_MISBEHAVING_BANTIME = 60 * 60 * 24; // Def
 
 /// How often to dump banned addresses/subnets to disk.
 static constexpr std::chrono::minutes DUMP_BANS_INTERVAL{15};
+
+/// Most bans BanAutomatic() keeps at a time. IsBanned() and DumpBanlist() walk
+/// the whole list; at this size they stay near 0.1 ms and 20 ms.
+static constexpr size_t MAX_AUTOMATIC_BANS{10000};
 
 class CClientUIInterface;
 class CNetAddr;
@@ -64,6 +69,12 @@ public:
     BanMan(fs::path ban_file, CClientUIInterface* client_interface, int64_t default_ban_time);
     void Ban(const CNetAddr& net_addr, int64_t ban_time_offset = 0, bool since_unix_epoch = false) EXCLUSIVE_LOCKS_REQUIRED(!m_banned_mutex);
     void Ban(const CSubNet& sub_net, int64_t ban_time_offset = 0, bool since_unix_epoch = false) EXCLUSIVE_LOCKS_REQUIRED(!m_banned_mutex);
+    //! Ban net_addr for the default ban time on the node's own decision, not
+    //! the user's. Unlike Ban(), this does not write the ban list at once (the
+    //! periodic dump and shutdown write it), and it keeps at most
+    //! MAX_AUTOMATIC_BANS such bans: when full, the automatic ban that ends
+    //! first is dropped. Bans from Ban() are never dropped and do not count.
+    void BanAutomatic(const CNetAddr& net_addr) EXCLUSIVE_LOCKS_REQUIRED(!m_banned_mutex);
     void SetScheduler(CScheduler& scheduler) EXCLUSIVE_LOCKS_REQUIRED(!m_banned_mutex);
     void EnsureSweepScheduled() EXCLUSIVE_LOCKS_REQUIRED(!m_banned_mutex);
     void Discourage(const CNetAddr& net_addr) EXCLUSIVE_LOCKS_REQUIRED(!m_banned_mutex);
@@ -90,6 +101,7 @@ private:
     void SweepBannedAndSchedule() EXCLUSIVE_LOCKS_REQUIRED(m_banned_mutex);
     void SweepBannedAndSchedule(uint64_t expected_seq) EXCLUSIVE_LOCKS_REQUIRED(!m_banned_mutex);
     void ScheduleNextSweep() EXCLUSIVE_LOCKS_REQUIRED(m_banned_mutex);
+    void ScheduleSweepFor(int64_t ban_until) EXCLUSIVE_LOCKS_REQUIRED(m_banned_mutex);
 
     Mutex m_banned_mutex;
     CScheduler* m_scheduler GUARDED_BY(m_banned_mutex){nullptr};
@@ -97,6 +109,9 @@ private:
     int64_t m_next_sweep_time GUARDED_BY(m_banned_mutex){std::numeric_limits<int64_t>::max()};
     uint64_t m_sweep_seq GUARDED_BY(m_banned_mutex){0};
     banmap_t m_banned GUARDED_BY(m_banned_mutex);
+    //! Entries of m_banned that came from BanAutomatic(), with their end time.
+    //! Loaded entries count as ordinary bans.
+    std::map<CSubNet, int64_t> m_automatic GUARDED_BY(m_banned_mutex);
     bool m_is_dirty GUARDED_BY(m_banned_mutex){false};
     CClientUIInterface* m_client_interface = nullptr;
     CBanDB m_ban_db;

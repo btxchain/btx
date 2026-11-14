@@ -32,6 +32,7 @@
 #include <test/util/mining.h>
 #include <test/util/net.h>
 #include <test/util/setup_common.h>
+#include <util/readwritefile.h>
 #include <validation.h>
 
 extern "C" {
@@ -9386,6 +9387,10 @@ BOOST_AUTO_TEST_CASE(getmmattest_historical_scan_ignored_then_banned)
             if (banman) banman->Unban(node.addr);
         }
     } finalize{connman, peerman, m_node.banman.get(), scanner};
+    const fs::path banlist_json{m_args.GetDataDirBase() / "banlist.json"};
+    m_node.banman->DumpBanlist();
+    const auto banlist_before{ReadBinaryFile(banlist_json)};
+    BOOST_REQUIRE(banlist_before.first);
 
     scanner.fPauseSend = false;
     BOOST_REQUIRE(connman.ReceiveMsgFrom(
@@ -9417,6 +9422,11 @@ BOOST_AUTO_TEST_CASE(getmmattest_historical_scan_ignored_then_banned)
     const int64_t remaining{bans.begin()->second.nBanUntil - GetTime()};
     BOOST_CHECK_GE(remaining, DEFAULT_MISBEHAVING_BANTIME - 5);
     BOOST_CHECK_LE(remaining, DEFAULT_MISBEHAVING_BANTIME);
+    // The ban is held in memory. The ban list file is written by the periodic
+    // dump, not by each automatic ban.
+    BOOST_CHECK(ReadBinaryFile(banlist_json).second == banlist_before.second);
+    m_node.banman->DumpBanlist();
+    BOOST_CHECK(ReadBinaryFile(banlist_json).second.find(scanner.addr.ToStringAddr()) != std::string::npos);
 }
 
 static CBlockIndex* MakePeermanHeaderChild(ChainstateManager& chainman,
