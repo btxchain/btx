@@ -27,6 +27,13 @@ class Coordinator:
         require(asset in self.drivers,'ASSET_UNAVAILABLE','No qualified local chain driver for this asset')
         return self.drivers[asset]
     def _save(self,sid,s,rev):return self.journal.save(sid,s,rev)
+    def _save_new(self,sid,body,ctx,budget_quote,mandate_id,maxfee):
+        # Driver and vault setup has finished. Keep the debit, quote claim and
+        # session in one transaction so failed initialization leaves no hold.
+        with self.journal.store.transaction() as db:
+            body['reservation_id']=self.authority.reserve(ctx,budget_quote,mandate_id,maxfee,db=db)
+            self.journal.claim_quote(body['quote_id'],sid,db=db)
+            self.journal.save(sid,body,-1,db=db)
     def _owned(self,ctx,sid):
         require(type(ctx) is Principal,'AUTH','Authenticated RPC principal required')
         rev,s=self.journal.load(sid)
@@ -68,12 +75,10 @@ class Coordinator:
         self.journal.ensure_capacity()
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset)
         a.ready();b.ready()
-        rid=self.authority.reserve(ctx,q,mandate_id,max_local_fee_atoms)
-        self.journal.claim_quote(q.id,sid)
+        self.authority.reserve(ctx,q,mandate_id,max_local_fee_atoms,check_only=True)
         long,short=self._deadlines(a,b)
         ak=a.new_key('refund');bk=b.new_key('claim')
-        # A crash before session commit leaves only a non-spending held reservation;
-        # retries use the same reservation and the already-created secret.
+        # A retry after interrupted setup reuses the already-created secret.
         secret_id='secret_'+sid
         if secret_id in self.vault.entries:
             h=hashlib.sha256(bytes.fromhex(self.vault.entries[secret_id]['preimage'])).hexdigest()
@@ -87,11 +92,12 @@ class Coordinator:
         require(atoms(proposal['short_claim_fee_atoms'])<=atoms(q.max_receive_network_fee_atoms),'FEE_CAP','Claim fee exceeds signed quote')
         require(atoms(refund_fee_atoms)<=atoms(max_local_fee_atoms),'FEE_CAP','Refund fee exceeds local authorization')
         s={'principal':ctx.name,'wallet':ctx.wallet,'peer':q.provider,'role':'initiator','stage':'proposed',
-           'quote_id':q.id,'quote':envelope,'proposal':proposal,'reservation_id':rid,
+           'quote_id':q.id,'quote':envelope,'proposal':proposal,
            'keys':{'refund':ak,'claim':bk},'max_local_fee_atoms':max_local_fee_atoms,
            'secret_exposed':False,'funding_prepared':False,'funding_broadcast':False,'recovery_ready':False,
            'refs':{},'created_at':now,'updated_at':now}
-        self._save(sid,s,-1);self.emit(q.provider,'proposal',sid,proposal)
+        self._save_new(sid,s,ctx,q,mandate_id,max_local_fee_atoms)
+        self.emit(q.provider,'proposal',sid,proposal)
         return self._safe_view(sid,s)
     def receive_proposal(self,sender,sid,p,market):
         exact_fields(p,{'quote','rfq','hashlock','nonce','long_refund_key','long_refund_payout',
@@ -125,8 +131,7 @@ class Coordinator:
         # bilateral agreement remains bound to the original signed quote.
         reverse=Quote(q.network,sender,digest('BTX/SWAPNET/MAKER/2',{'swap_id':sid}),q.nonce,q.sequence,
                       q.buy_asset,q.sell_asset,str(atoms(q.buy_atoms)-atoms(q.maker_fee_atoms)),q.sell_atoms,'0','0',q.issued_at,q.expires_at)
-        rid=self.authority.reserve(ctx,reverse,market['mandate_id'],maxfee)
-        self.journal.claim_quote(q.id,sid)
+        self.authority.reserve(ctx,reverse,market['mandate_id'],maxfee,check_only=True)
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset);a.ready();b.ready()
         long,short=Deadline(**p['long_deadline']),Deadline(**p['short_deadline'])
         self.policy.validate_deadlines(long,short,a.clock(),b.clock(),now)
@@ -143,11 +148,12 @@ class Coordinator:
         a.watch_terms(la,ak);b.watch_terms(lb,bk)
         sig=self.identity.sign(agr.signing_message)
         s={'principal':ctx.name,'wallet':ctx.wallet,'peer':sender,'role':'responder','stage':'offered',
-           'quote_id':q.id,'quote':p['quote'],'proposal':p,'reservation_id':rid,
+           'quote_id':q.id,'quote':p['quote'],'proposal':p,
            'keys':{'refund':bk,'claim':ak},'max_local_fee_atoms':maxfee,'agreement':asdict(agr),'agreement_id':agr.id,
            'signatures':{'responder':sig},'secret_exposed':False,'funding_prepared':False,'funding_broadcast':False,
            'recovery_ready':False,'refs':{},'created_at':now,'updated_at':now}
-        self._save(sid,s,-1);self.emit(sender,'agreement',sid,{'agreement':asdict(agr),'responder_signature':sig})
+        self._save_new(sid,s,ctx,reverse,market['mandate_id'],maxfee)
+        self.emit(sender,'agreement',sid,{'agreement':asdict(agr),'responder_signature':sig})
     def receive_agreement(self,sender,sid,body):
         exact_fields(body,{'agreement','responder_signature'});rev,s=self.journal.load(sid)
         require(s['role']=='initiator' and s['peer']==sender and s['stage'] not in TERMINAL,'SESSION_BINDING','Unexpected agreement')
@@ -304,7 +310,13 @@ class Coordinator:
         agr=Agreement.parse(s['agreement']);a,b=self._driver(agr.long_leg.asset),self._driver(agr.short_leg.asset)
         # The counterparty leg must not block a mature local refund or claim.
         ra=self._observe(a,agr.long_leg,s['refs'].get('a'),required=s['role']=='initiator')
-        rb=self._observe(b,agr.short_leg,s['refs'].get('b'),required=s['role']=='responder')
+        try:
+            rb=self._observe(b,agr.short_leg,s['refs'].get('b'),required=s['role']=='responder')
+        except SwapError as error:
+            unavailable=error.code=='RPC_COOKIE' and error.message=='RPC cookie unavailable'
+            if not unavailable or not self._refund_without_bitcoin(sid,s,rev,agr,a,ra):
+                raise
+            return
         # Valid preimages read from either local chain remain public forever,
         # even if the revealing transaction later leaves the canonical chain.
         for report in (ra,rb):
@@ -319,7 +331,16 @@ class Coordinator:
         action=decide(state,ra.observation,rb.observation,ra.clock,rb.clock,
                       Deadline(agr.long_leg.lock_domain,agr.long_leg.lock_value),Deadline(agr.short_leg.lock_domain,agr.short_leg.lock_value),self.policy,self.now())
         s['last_action']=action;s['last_error']=None;s['observations']={'a':asdict(ra.observation),'b':asdict(rb.observation)}
-        s['updated_at']=self.now();rev=self._save(sid,s,rev)
+        s['updated_at']=self.now()
+        if (action == 'wait_for_chain' and s['role'] == 'responder' and s['stage'] == 'committed'
+                and agr.long_leg.lock_domain == 'height' and not rb.observation.present
+                and ra.observation.refunded
+                and ra.observation.settled(ra.clock.family, self.policy, self.now())
+                and self.journal.close_unfunded_responder(sid, s, rev)):
+            # No local funds can need recovery. Cancelling also prevents a
+            # later remote reorg from authorizing funding on this agreement.
+            return
+        rev=self._save(sid,s,rev)
         if action in {'prepare_long_funding_and_recovery','prepare_short_funding_and_recovery'}:
             self._prepare(sid,s,rev,agr)
         elif action in {'broadcast_prepared_long_funding','broadcast_prepared_short_funding'}:
@@ -357,6 +378,48 @@ class Coordinator:
             # Continue observing terminal sessions. A deep reorg reopens recovery,
             # but does not replenish a consumed mandate or erase secret exposure.
             s['stage']='reconciling';self._save(sid,s,rev)
+    def _refund_without_bitcoin(self,sid,s,rev,agr,driver,report):
+        # Limit offline recovery to the original, authorized BTX refund before
+        # the counterparty leg was recorded or the secret was exposed.
+        own=agr.long_leg
+        if (s['role']!='initiator' or driver.family!='btx' or not agr.short_leg.asset.startswith('btc:')
+                or own.lock_domain!='height' or s['secret_exposed'] or s['refs'].get('b')
+                or s.get('observations',{}).get('b',{}).get('conflicting')
+                or not (s['funding_prepared'] and s['funding_broadcast'] and s['recovery_ready'] and s.get('refund_op'))):
+            return False
+        now=self.now()
+        self.policy.check_clocks(now,report.clock)
+        obs=report.observation
+        if (report.clock.height<own.lock_value or obs.claimed
+                or not obs.settled(driver.family,self.policy,now)):
+            return False
+        op=next((item for item in self.journal.operations(sid,private=True) if item['id']==s['refund_op']),None)
+        require(op and op['kind']=='refund' and op['asset']==own.asset
+                and op['metadata'].get('reference')==s['refs']['a'],'RECOVERY_CONFLICT','Saved refund does not match local funding')
+        if obs.refunded:
+            tx=driver.rpc('getrawtransaction',op['txid'],True)
+            if tx.get('confirmations',0)<self.policy.confirmations(driver.family):
+                return False
+            if s['stage']=='refunded':
+                return True
+            s['stage']='refunded'
+        else:
+            if s['stage']=='refund_broadcast' and driver.has_transaction(op['txid']):
+                return True
+            ref=s['refs']['a']
+            coin=driver.rpc('gettxout',ref['txid'],ref['vout'],True)
+            if not coin or coin['bestblock']!=driver.rpc('getbestblockhash'):
+                return False
+            require(coin['scriptPubKey']['hex']==own.lock_commitment,'RECOVERY_CONFLICT','Local refund output changed')
+            self.journal.broadcast(s['refund_op'],driver)
+            s['stage']='refund_broadcast'
+        s.update(last_action='refund_local_leg',last_error=None,updated_at=now)
+        s.setdefault('observations',{})['a']=asdict(obs)
+        self._save(sid,s,rev)
+        if s['stage']=='refunded':
+            self.authority.terminal(s['grant_id'])
+        return True
+
     def _observe(self,driver,terms,ref,*,required):
         try:return driver.observe(terms,ref)
         except SwapError:

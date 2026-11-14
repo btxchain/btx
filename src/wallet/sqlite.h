@@ -98,6 +98,20 @@ public:
     bool HasActiveTxn() override { return m_txn; }
 };
 
+/** Keeps the process-wide SQLite library initialized while a client uses it. */
+class SQLiteLibrary
+{
+public:
+    SQLiteLibrary();
+    ~SQLiteLibrary();
+    SQLiteLibrary(const SQLiteLibrary&) = delete;
+    SQLiteLibrary& operator=(const SQLiteLibrary&) = delete;
+
+private:
+    static Mutex g_sqlite_mutex;
+    static int g_sqlite_count GUARDED_BY(g_sqlite_mutex);
+};
+
 /** An instance of this class represents one SQLite3 database.
  **/
 class SQLiteDatabase : public WalletDatabase
@@ -109,16 +123,7 @@ private:
 
     const std::string m_file_path;
 
-    /**
-     * This mutex protects SQLite initialization and shutdown.
-     * sqlite3_config() and sqlite3_shutdown() are not thread-safe (sqlite3_initialize() is).
-     * Concurrent threads that execute SQLiteDatabase::SQLiteDatabase() should have just one
-     * of them do the init and the rest wait for it to complete before all can proceed.
-     */
-    static Mutex g_sqlite_mutex;
-    static int g_sqlite_count GUARDED_BY(g_sqlite_mutex);
-
-    void Cleanup() noexcept EXCLUSIVE_LOCKS_REQUIRED(!g_sqlite_mutex);
+    SQLiteLibrary m_sqlite;
 
 public:
     SQLiteDatabase() = delete;

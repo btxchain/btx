@@ -18,6 +18,11 @@
       "type": "string",
       "maxLength": 256
     },
+    "watch_wallet": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
     "fee_rate": {
       "type": "integer",
       "minimum": 1,

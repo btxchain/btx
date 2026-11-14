@@ -4,6 +4,8 @@ SQLite runs in WAL/FULL mode (via Store). Each externally visible operation is
 persisted before sending; repeated messages and process restarts are idempotent.
 Secrets and raw claim transactions are never returned by public read methods.
 """
+from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import json
@@ -109,9 +111,9 @@ class Journal:
                     'SESSION_LIMIT','Journal session capacity reached; preserve recovery state before offline archival')
             require(self.store.db.execute("SELECT count(*) FROM sn_negotiations WHERE stage NOT IN ('complete','refunded','cancelled','rejected')").fetchone()[0]<128,
                     'ACTIVE_LIMIT','At most 128 active settlements per native node')
-    def save(self,sid,body,expected=-1):
+    def save(self,sid,body,expected=-1,*,db=None):
         hex32(sid)
-        with self.store.transaction() as db:
+        with (self.store.transaction() if db is None else nullcontext(db)) as db:
             old=db.execute('SELECT revision,body FROM sn_negotiations WHERE id=?',(sid,)).fetchone()
             require((old[0] if old else -1)==expected,'REVISION_CONFLICT','Concurrent swap update')
             if old:
@@ -120,12 +122,58 @@ class Journal:
                 require(previous['principal']==body['principal'] and previous['peer']==body['peer'],'SESSION_BINDING','Immutable session owner changed')
                 if previous.get('agreement_id'):
                     require(previous['agreement_id']==body.get('agreement_id'),'AGREEMENT_CHANGED','Accepted agreement is immutable')
+            if old and previous['stage'] in {'complete','refunded'} and body['stage']==previous['stage']:
+                # Decisions still use fresh driver observations on every tick.
+                # Persist a terminal snapshot only when more than its poll times changed.
+                snapshots = (deepcopy(previous), deepcopy(body))
+                for snapshot in snapshots:
+                    snapshot.pop('updated_at', None)
+                    for observation in snapshot.get('observations', {}).values():
+                        observation.pop('observed_at', None)
+                if snapshots[0] == snapshots[1]:
+                    return old[0]
             if not old:self.ensure_capacity()
             rev=expected+1
             db.execute('INSERT INTO sn_negotiations VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,stage=excluded.stage,body=excluded.body',
                        (sid,rev,body['principal'],body['peer'],body['stage'],local_dump(body)))
             self.store._audit(db,{'type':'swap_v2_saved','id':sid,'revision':rev,'stage':body['stage']})
         return rev
+    def close_unfunded_responder(self, sid, body, expected):
+        """Release an unfunded responder after the caller verifies the remote refund."""
+        rid = body["reservation_id"]
+        with self.store.transaction() as db:
+            current = db.execute(
+                "SELECT revision,body FROM sn_negotiations WHERE id=?", (sid,)
+            ).fetchone()
+            require(current and current[0] == expected, "REVISION_CONFLICT", "Concurrent swap update")
+            state = local_load(current[1])
+            if state["role"] != "responder" or state["stage"] != "committed":
+                return False
+            if (state["secret_exposed"] or state["funding_prepared"] or state["funding_broadcast"]
+                    or state["recovery_ready"] or state.get("fund_op") or state["refs"].get("b")):
+                return False
+            if db.execute("SELECT 1 FROM sn_operations WHERE swap_id=?", (sid,)).fetchone():
+                return False
+            if db.execute("SELECT 1 FROM coinlocks WHERE reservation_id=?", (rid,)).fetchone():
+                return False
+            grant = db.execute(
+                "SELECT consumed,body FROM sn_grants WHERE id=? AND swap_id=?",
+                (state["grant_id"], sid),
+            ).fetchone()
+            if not grant or grant[0] or local_load(grant[1])["reservation_id"] != rid:
+                return False
+            reservation = db.execute("SELECT state FROM reservations WHERE id=?", (rid,)).fetchone()
+            if reservation != ("held",):
+                return False
+            self.store._settle_reservation(db, rid, 0)
+            db.execute("UPDATE sn_grants SET revoked=1 WHERE id=?", (state["grant_id"],))
+            closed = {**body, "stage": "cancelled", "last_action": "counterparty_refunded_unfunded"}
+            db.execute("UPDATE sn_negotiations SET revision=?,stage=?,body=? WHERE id=?",
+                       (expected+1, closed["stage"], local_dump(closed), sid))
+            self.store._audit(db, {"type":"swap_v2_saved", "id":sid, "revision":expected+1,
+                                   "stage":closed["stage"]})
+            return True
+
     def load(self,sid):
         hex32(sid)
         with self.store.lock:r=self.store.db.execute('SELECT revision,body FROM sn_negotiations WHERE id=?',(sid,)).fetchone()
@@ -137,8 +185,8 @@ class Journal:
             if principal is None:rows=self.store.db.execute('SELECT id,revision,body FROM sn_negotiations ORDER BY id LIMIT ?',(limit,)).fetchall()
             else:rows=self.store.db.execute('SELECT id,revision,body FROM sn_negotiations WHERE principal=? ORDER BY id LIMIT ?',(principal,limit)).fetchall()
         return [(r[0],r[1],local_load(r[2])) for r in rows]
-    def claim_quote(self,qid,sid):
-        with self.store.transaction() as db:
+    def claim_quote(self,qid,sid,*,db=None):
+        with (self.store.transaction() if db is None else nullcontext(db)) as db:
             row=db.execute('SELECT swap_id FROM sn_claimed_quotes WHERE quote_id=?',(qid,)).fetchone()
             require(not row or row[0]==sid,'QUOTE_ALREADY_ACCEPTED','Quote belongs to another swap')
             db.execute('INSERT OR IGNORE INTO sn_claimed_quotes VALUES(?,?)',(qid,sid))

@@ -56,7 +56,8 @@ class Maker:
                 require(row is not None and 0<=now-row[1]<=30,'INVENTORY_STALE','Fresh local inventory required')
                 held=sum(atoms(r[0]) for r in db.execute('SELECT amount FROM maker_quotes WHERE asset=?',(market.buy_asset,)))
                 # Conservative: reserve gross receive size, not size net of maker fee.
-                require(held+amount<=atoms(row[0]),'INSUFFICIENT_LIQUIDITY','Maker inventory already reserved')
+                require(held+amount<=atoms(row[0]),'INSUFFICIENT_LIQUIDITY',
+                        'Maker inventory already reserved' if held else 'Maker verified balance is below this quote')
                 sequence=int(db.execute("SELECT v FROM metadata WHERE k='maker_sequence'").fetchone()[0])+1
                 q=Quote(self.network,self.identity,rfq['requester'],digest('BTX/SWAPNET/MAKER-NONCE/1',{'rfq':rid,'sequence':sequence}),sequence,
                         market.sell_asset,market.buy_asset,rfq['sell_atoms'],str(amount),market.maker_fee_atoms,market.max_receive_network_fee_atoms,now,expires)

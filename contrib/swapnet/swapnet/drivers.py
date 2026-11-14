@@ -46,7 +46,6 @@ class UTXODriver:
         self.confirmations=confirmations or (20 if self.asset.family=='btx' else 6)
         self.adapter=(BTXAdapter(rpc,wallet,self.asset.genesis) if self.asset.family=='btx'
                       else BitcoinAdapter(rpc,wallet,self.asset.genesis,hrp or 'bc'))
-        self._clock_cache=None
     @property
     def family(self):return self.asset.family
     def ready(self):
@@ -56,17 +55,14 @@ class UTXODriver:
     def clock(self):
         now=self.now();self.adapter.check_chain();height=self.rpc('getblockcount');tip=self.rpc('getbestblockhash')
         header=self.rpc('getblockheader',tip)
-        if not self._clock_cache or now-self._clock_cache[0]>60:
-            span=min(24,height)
-            if span:
-                old=self.rpc('getblockheader',self.rpc('getblockhash',height-span))
-                spacing=max(1,(header['time']-old['time'])//span)
-            else:spacing=600 if self.family=='btc' else 60
-            self._clock_cache=(now,spacing)
-        spacing=self._clock_cache[1]
-        # These are explicit planning assumptions, not bounds on PoW randomness.
+        # Planning uses the chain's target spacing, not the last 24 headers.
+        # A stall must not shrink the long-leg height, and a one-second sample
+        # must not demand hundreds of thousands of blocks. Half the target is
+        # the fast bound; twice the target is the slow bound.
+        target=600 if self.family=='btc' else 90
+        fastest,slowest=target//2,target*2
         return ChainClock(self.family,height,header.get('mediantime',header['time']),now,
-                          max(1,spacing//4),max(4,spacing*4),now-header['time']>max(7200,spacing*12))
+                          fastest,slowest,now-header['time']>max(7200,target*12))
     def inventory(self):
         self.adapter.check_chain()
         coins=self.wallet('listunspent',self.confirmations,9999999)

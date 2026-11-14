@@ -33,7 +33,10 @@ class EVMDriver:
         return kid,key,address_from_key(key)
     def ready(self):self.adapter.check_chain();self._account();return True
     def inventory(self):
-        self.adapter.check_chain();return int(self.rpc('eth_getBalance',self._account()[2],'finalized'),16)
+        # Quotes reserve against the local latest balance. A freshly funded
+        # account is still 0 at finalized, which is not the same as a reservation.
+        # Settlement still requires the configured finality tag.
+        self.adapter.check_chain();return int(self.rpc('eth_getBalance',self._account()[2],'latest'),16)
     def new_key(self,role):
         require(role in {'claim','refund'},'KEY_ROLE','Invalid role')
         kid,key,address=self._account()

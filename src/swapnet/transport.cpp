@@ -16,8 +16,17 @@ void Transport::SetEnabled(bool enabled) {
 void Transport::PeerReady(PeerId id,std::int64_t now) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_enabled||m_peers.count(id)||m_peers.size()>=MAX_PEERS||m_out.size()>=MAX_QUEUE)return;
-    m_peers.emplace(id,Peer{false,16,now,0});
+    m_peers.emplace(id,Peer{false,16,now,now,0});
     m_out.push_back({id,"swhello","2:"+m_network});
+}
+void Transport::RetryHellos(std::int64_t now) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_enabled) return;
+    for (auto& [id, peer] : m_peers) {
+        if (peer.admitted || now - peer.hello_ms < 5000 || m_out.size() >= MAX_QUEUE) continue;
+        m_out.push_back({id, "swhello", "2:" + m_network});
+        peer.hello_ms = now;
+    }
 }
 void Transport::PeerClosed(PeerId id) {
     std::lock_guard<std::mutex> lock(m_mutex);m_peers.erase(id);

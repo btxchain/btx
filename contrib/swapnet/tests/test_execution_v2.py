@@ -3,6 +3,7 @@ from dataclasses import asdict
 import hashlib
 import os
 import json
+import sqlite3
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from swapnet.store import Store
@@ -205,3 +206,71 @@ def test_journal_outbox_and_operation_roundtrip(pair):
     assert {o['kind'] for o in ops}=={'fund','refund'}
     assert all('raw' not in o for o in journal.operations(sid))
     assert journal.store.verify_audit()
+
+
+@pytest.mark.parametrize("failure", ["watch", "session_insert"])
+def test_rejected_proposal_releases_maker_budget(pair, monkeypatch, failure):
+    sid = pair.start()
+    sender, maker, _, _, proposal = pair.queue.pop()
+    mandate_id = pair.market['mandate_id']
+    quote_id = pair.state('alice')['quote_id']
+
+    def reject_watch(*args):
+        raise SwapError('RPC', 'Watch wallet rejected descriptor import')
+
+    if failure == 'watch':
+        monkeypatch.setattr(pair.nodes[maker][3].drivers[B], 'watch_terms', reject_watch)
+        expected = SwapError
+        message = 'Watch wallet rejected descriptor import'
+    else:
+        # Abort the final SQLite write after the budget and quote writes have run.
+        pair.nodes[maker][0].db.execute("""
+            CREATE TEMP TRIGGER reject_session BEFORE INSERT ON sn_negotiations
+            BEGIN SELECT RAISE(ABORT, 'Session insert failed'); END
+        """)
+        expected = sqlite3.IntegrityError
+        message = 'Session insert failed'
+    with pytest.raises(expected, match=message):
+        pair.nodes[maker][3].receive_proposal(sender, sid, proposal, pair.market)
+
+    assert not pair.queue
+    pair.restart(maker)
+    store, journal, _, coordinator = pair.nodes[maker]
+    assert journal.all() == []
+    assert journal.operations(sid) == []
+    assert store.db.execute('SELECT held,used FROM mandates WHERE id=?', (mandate_id,)).fetchone() == ('0', '0')
+    assert store.db.execute('SELECT count(*) FROM reservations').fetchone() == (0,)
+    assert store.db.execute('SELECT count(*) FROM sn_claimed_quotes').fetchone() == (0,)
+
+    coordinator.receive_proposal(sender, sid, proposal, pair.market)
+    coordinator.receive_proposal(sender, sid, proposal, pair.market)
+    assert store.db.execute('SELECT held,used FROM mandates WHERE id=?', (mandate_id,)).fetchone() == ('20490', '0')
+    assert store.db.execute('SELECT swap_id FROM sn_claimed_quotes WHERE quote_id=?', (quote_id,)).fetchone() == (sid,)
+    for _ in range(18):
+        pair.step()
+        pair.restart(maker)
+    assert pair.state(sender)['stage'] == pair.state(maker)['stage'] == 'complete'
+    assert len(pair.a.records) == len(pair.b.records) == 1
+    store, journal, _, _ = pair.nodes[maker]
+    assert len([op for op in journal.operations(sid) if op['kind'] == 'fund']) == 1
+    assert store.verify_audit()
+
+def test_rejected_start_releases_initiator_budget(pair, monkeypatch):
+    def reject_key(*args):
+        raise SwapError('RPC', 'Refund key setup failed')
+
+    monkeypatch.setattr(pair.nodes['alice'][3].drivers[A], 'new_key', reject_key)
+    with pytest.raises(SwapError, match='Refund key setup failed'):
+        pair.start()
+    pair.restart('alice')
+    store, journal, _, _ = pair.nodes['alice']
+    assert journal.all() == []
+    assert store.db.execute('SELECT held,used FROM mandates').fetchall() == [('0', '0')]
+    assert store.db.execute('SELECT count(*) FROM sn_claimed_quotes').fetchone() == (0,)
+    assert not pair.queue
+    sid = pair.start()
+    for _ in range(18):
+        pair.step()
+    assert pair.state('alice')['stage'] == 'complete'
+    assert len(pair.a.records) == len(pair.b.records) == 1
+    assert len([op for op in journal.operations(sid) if op['kind'] == 'fund']) == 1

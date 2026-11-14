@@ -7,6 +7,8 @@ int main() {
     const std::string network(64,'a');Transport t(network);
     assert(t.GetStats().enabled);t.PeerReady(1,1000);
     assert(t.TakeOutbound()->payload=="2:"+network);
+    t.RetryHellos(2000);assert(!t.TakeOutbound());
+    t.RetryHellos(7000);assert(t.TakeOutbound()->command=="swhello");
     assert(!t.Receive(1,"swprov","{}",1000));
     assert(!t.Receive(1,"swhello","2:"+std::string(64,'b'),1000));
     assert(t.Receive(1,"swhello","2:"+network,2000));

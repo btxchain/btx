@@ -57,9 +57,9 @@ class Authority:
                 g=local_load(raw)
                 rr=db.execute('SELECT mandate_id FROM reservations WHERE id=?',(g['reservation_id'],)).fetchone()
                 if rr and rr[0]==mid and not consumed:db.execute('UPDATE sn_grants SET revoked=1 WHERE id=?',(gid,))
-    def reserve(self,ctx,quote,mandate_id,max_fee_atoms):
+    def reserve(self,ctx,quote,mandate_id,max_fee_atoms,*,db=None,check_only=False):
         require(type(ctx) is Principal,'AUTH','Peer cannot reserve wallet funds')
-        return self.store.reserve(quote,mandate_id,ctx.name,max_fee_atoms,self.clock())
+        return self.store.reserve(quote,mandate_id,ctx.name,max_fee_atoms,self.clock(),db=db,check_only=check_only)
     def reservation_expiry(self,rid):
         with self.store.lock:
             row=self.store.db.execute('SELECT m.body FROM mandates m JOIN reservations r ON r.mandate_id=m.id WHERE r.id=?',(rid,)).fetchone()

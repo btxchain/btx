@@ -6,9 +6,15 @@ Install the qualified binary with its matched Python runtime/standard library an
 
 Run `getswapnetworkinfo`, `getswapbootstrapinfo`, `listswapassets` and `getswapwalletinfo`. An empty provider list or `awaiting_compatible_peer` is an accurate state, not an error to hide. Discovery alone never spends.
 
-Load exactly one native wallet or select one with `-swapnetwallet=<name>`. The binding is persisted and cannot be switched by an unprivileged caller. Unlock the native wallet through its normal owner workflow when an authorized operation requires it. Wallet-unloaded, locked, read-only or ambiguous-wallet conditions fail rather than choosing somebody else's funds.
+Load exactly one native wallet or select one with `-swapnetwallet=<name>`. The binding is persisted and cannot be switched by an unprivileged caller. `createwallet` does not load that wallet on the next start; `loadwallet` is required, and `getswapnetworkinfo` reports `wallet_loaded` and `wallet_warning` until it is loaded. Unlock the native wallet through its normal owner workflow when an authorized operation requires it. Wallet-unloaded, locked, read-only or ambiguous-wallet conditions fail rather than choosing somebody else's funds.
+
+Deadline planning uses a fixed spacing for each chain: 90 seconds for BTX and 600 seconds for Bitcoin, with a fast bound of half that spacing and a slow bound of twice that spacing. A recent stall or a one-second sample does not change the lock. A hello that arrives before the peer's SwapNet runtime is up is retried until that peer admits. Rejected packets increment `packet_errors` and the last few codes are in `recent_packet_errors`.
+
+A maker can cancel an unfunded quote. After the taker has funded the long leg, cancellation does not release that contract; the funds stay locked until the agreed refund height or timestamp. Configure Python 3.11 or newer and the `cryptography` package before building. Both are required by the in-process worker.
 
 ## External-chain prerequisites
+
+For Bitcoin swaps, set `wallet` to the loaded funding wallet and `watch_wallet` to a separate loaded descriptor wallet with private keys disabled. Both use the same verified Bitcoin RPC endpoint. Public HTLC descriptors are imported into the watch wallet. Funding, change and signing stay with the funding wallet.
 
 The host attempts to discover an already-running same-network Bitcoin node using standard local cookie locations. It requires an appropriate loaded wallet and chain verification. Automatic discovery does not download a blockchain, install a daemon, or create funded liquidity. A configured Bitcoin policy can specify its loopback URL, local cookie path, wallet, fee rate and confirmations with `setswapassetpolicy`.
 

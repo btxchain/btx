@@ -19,6 +19,9 @@ public:
     explicit Transport(std::string network, bool enabled = true);
     void SetEnabled(bool enabled);
     void PeerReady(PeerId peer, std::int64_t monotonic_ms);
+    // A hello that arrives before the peer's runtime is up is dropped.
+    // Resend to peers that have not admitted yet.
+    void RetryHellos(std::int64_t monotonic_ms);
     void PeerClosed(PeerId peer);
     bool Receive(PeerId peer, const std::string& command, const std::string& payload, std::int64_t monotonic_ms);
     bool Send(PeerId peer, const std::string& command, const std::string& payload);
@@ -32,7 +35,7 @@ public:
     static constexpr std::size_t MAX_QUEUE = 256;
     static constexpr std::size_t MAX_PEERS = 128;
 private:
-    struct Peer { bool admitted{false}; double tokens{16}; std::int64_t last_ms{0}; std::size_t queued{0}; };
+    struct Peer { bool admitted{false}; double tokens{16}; std::int64_t last_ms{0}; std::int64_t hello_ms{0}; std::size_t queued{0}; };
     std::string m_network;
     bool m_enabled;
     mutable std::mutex m_mutex;

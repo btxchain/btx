@@ -48,11 +48,16 @@ class Application:
                  wallet_info=None,export_recovery=None):
         self.store,self.network,self.identity,self.vault,self.drivers,self.send=store,hex32(network),identity,vault,drivers,send
         self.now=clock or (lambda:int(time.time()));self.journal=Journal(store);self.authority=Authority(store,self.journal,self.now)
-        self.routes={};self.peers=set();self.relay_seen=OrderedDict();self.packet_errors=0;self.last_tick_error=None
+        self.routes={};self.peers=set();self.relay_seen=OrderedDict();self.packet_errors=0
+        self.recent_packet_errors=[];self.last_tick_error=None
         self.configure_asset,self.wallet_info,self.export_recovery=configure_asset,wallet_info,export_recovery
         self.service=Service(store,network,identity.verify,clock=self.now,enqueue=lambda *args:None)
         self.coordinator=Coordinator(self.journal,self.authority,drivers,identity,vault,self.emit,clock=self.now,policy=policy)
         self.maker=None;self._last_advertisement=0;self._last_maintenance=0
+    def note_packet_error(self,code,message):
+        self.packet_errors+=1
+        self.recent_packet_errors.append({'code':str(code),'message':str(message)[:160]})
+        del self.recent_packet_errors[:-8]
     def _identity(self):return self.identity.peek() if hasattr(self.identity,'peek') else self.identity.address()
     def _maker(self):
         if self.maker is None:
@@ -214,9 +219,12 @@ class Application:
         except TypeError as e:raise SwapError('PARAMS','Unexpected or missing named field') from e
     def rpc_getswapnetworkinfo(self,ctx):
         with self.store.lock:n=self.store.db.execute('SELECT count(*) FROM providers WHERE expires>?',(self.now(),)).fetchone()[0]
+        wallet=self.wallet_info() if self.wallet_info else {}
         return {'version':VERSION,'protocol':2,'network':self.network,'discovery_default':True,'peers':len(self.peers),
                 'providers':n,'routes':len(self.routes),'automatic_spend_atoms':'0','in_process':True,
-                'execution':'durable_htlc_coordinator','last_tick_error':self.last_tick_error,'packet_errors':self.packet_errors}
+                'execution':'durable_htlc_coordinator','last_tick_error':self.last_tick_error,'packet_errors':self.packet_errors,
+                'recent_packet_errors':self.recent_packet_errors,'wallet_loaded':wallet.get('wallet_loaded'),
+                'wallet_warning':wallet.get('wallet_warning')}
     def rpc_getswapcapabilities(self,ctx):
         return {'methods':[{'name':k,'scope':v} for k,v in METHODS.items()],
                 'assets':list(self.drivers),'settlement':['sha256-htlc-v1'],'partial_fills':False,'multihop_settlement':False}

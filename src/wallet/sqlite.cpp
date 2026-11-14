@@ -131,40 +131,50 @@ static void ConfigureDatabaseSecurity(sqlite3* db)
     SetPragma(db, "secure_delete", "ON", "Failed to enable secure_delete");
 }
 
-Mutex SQLiteDatabase::g_sqlite_mutex;
-int SQLiteDatabase::g_sqlite_count = 0;
+Mutex SQLiteLibrary::g_sqlite_mutex;
+int SQLiteLibrary::g_sqlite_count = 0;
 
-SQLiteDatabase::SQLiteDatabase(const fs::path& dir_path, const fs::path& file_path, const DatabaseOptions& options, bool mock)
-    : WalletDatabase(), m_mock(mock), m_dir_path(fs::PathToString(dir_path)), m_file_path(fs::PathToString(file_path)), m_write_semaphore(1), m_use_unsafe_sync(options.use_unsafe_sync)
+SQLiteLibrary::SQLiteLibrary()
 {
-    {
-        LOCK(g_sqlite_mutex);
-        LogPrintf("Using SQLite Version %s\n", SQLiteDatabaseVersion());
-        LogPrintf("Using wallet %s\n", m_dir_path);
-
-        if (++g_sqlite_count == 1) {
-            // Setup logging
-            int ret = sqlite3_config(SQLITE_CONFIG_LOG, ErrorLogCallback, nullptr);
-            if (ret != SQLITE_OK) {
-                throw std::runtime_error(strprintf("SQLiteDatabase: Failed to setup error log: %s\n", sqlite3_errstr(ret)));
-            }
-            // Force serialized threading mode
-            ret = sqlite3_config(SQLITE_CONFIG_SERIALIZED);
-            if (ret != SQLITE_OK) {
-                throw std::runtime_error(strprintf("SQLiteDatabase: Failed to configure serialized threading mode: %s\n", sqlite3_errstr(ret)));
-            }
+    LOCK(g_sqlite_mutex);
+    if (g_sqlite_count == 0) {
+        int ret = sqlite3_config(SQLITE_CONFIG_LOG, ErrorLogCallback, nullptr);
+        if (ret != SQLITE_OK) {
+            throw std::runtime_error(strprintf("SQLiteDatabase: Failed to setup error log: %s\n", sqlite3_errstr(ret)));
         }
-        int ret = sqlite3_initialize(); // This is a no-op if sqlite3 is already initialized
+        ret = sqlite3_config(SQLITE_CONFIG_SERIALIZED);
+        if (ret != SQLITE_OK) {
+            throw std::runtime_error(strprintf("SQLiteDatabase: Failed to configure serialized threading mode: %s\n", sqlite3_errstr(ret)));
+        }
+        ret = sqlite3_initialize();
         if (ret != SQLITE_OK) {
             throw std::runtime_error(strprintf("SQLiteDatabase: Failed to initialize SQLite: %s\n", sqlite3_errstr(ret)));
         }
     }
+    ++g_sqlite_count;
+}
+
+SQLiteLibrary::~SQLiteLibrary()
+{
+    LOCK(g_sqlite_mutex);
+    if (--g_sqlite_count == 0) {
+        const int ret = sqlite3_shutdown();
+        if (ret != SQLITE_OK) {
+            LogPrintf("SQLiteDatabase: Failed to shutdown SQLite: %s\n", sqlite3_errstr(ret));
+        }
+    }
+}
+
+SQLiteDatabase::SQLiteDatabase(const fs::path& dir_path, const fs::path& file_path, const DatabaseOptions& options, bool mock)
+    : WalletDatabase(), m_mock(mock), m_dir_path(fs::PathToString(dir_path)), m_file_path(fs::PathToString(file_path)), m_write_semaphore(1), m_use_unsafe_sync(options.use_unsafe_sync)
+{
+    LogPrintf("Using SQLite Version %s\n", SQLiteDatabaseVersion());
+    LogPrintf("Using wallet %s\n", m_dir_path);
 
     try {
         Open();
     } catch (const std::runtime_error&) {
-        // If open fails, cleanup this object and rethrow the exception
-        Cleanup();
+        Close();
         throw;
     }
 }
@@ -192,22 +202,7 @@ void SQLiteBatch::SetupSQLStatements()
 
 SQLiteDatabase::~SQLiteDatabase()
 {
-    Cleanup();
-}
-
-void SQLiteDatabase::Cleanup() noexcept
-{
-    AssertLockNotHeld(g_sqlite_mutex);
-
     Close();
-
-    LOCK(g_sqlite_mutex);
-    if (--g_sqlite_count == 0) {
-        int ret = sqlite3_shutdown();
-        if (ret != SQLITE_OK) {
-            LogPrintf("SQLiteDatabase: Failed to shutdown SQLite: %s\n", sqlite3_errstr(ret));
-        }
-    }
 }
 
 bool SQLiteDatabase::Verify(bilingual_str& error)

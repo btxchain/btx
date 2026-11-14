@@ -65,6 +65,9 @@ void Runtime::Work(std::promise<void> initialized){
             for(unsigned n=0;n<16;++n){auto frame=m_wire.TakeInbound();if(!frame)break;
                 if(admitted.count(frame->peer))peer_guard("message",[&]{engine.Message(frame->peer,frame->command,frame->payload);});}
             if(std::chrono::steady_clock::now()>=next_tick){
+                const auto hello_ms=std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                peer_guard("hello",[&]{m_wire.RetryHellos(hello_ms);});
                 peer_guard("tick",[&]{engine.Tick();});
                 next_tick=std::chrono::steady_clock::now()+std::chrono::seconds(1);}
         }

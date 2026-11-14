@@ -50,13 +50,17 @@ class Host:
         self.drivers={native_asset:UTXODriver(native_asset,self.native,self.wallet,self.wallet,self.journal,self.vault,
                            network=self.network,confirmations=self.config.get('btx_confirmations',20))}
         self.startup_errors={}
-        for asset,policy in self.journal.setting('asset_policies',{}).items():
+        policies=self.journal.setting('asset_policies',{})
+        for asset,policy in policies.items():
             try:self.drivers[asset]=self.configure_asset(policy)
             except SwapError as e:self.startup_errors[asset]=e.code
         # Discover an already-running same-network Bitcoin node without new ports,
         # installers, downloaded binaries, seeds, or assumptions about liquidity.
-        try:self.auto_bitcoin()
-        except SwapError as e:self.startup_errors['bitcoin_auto']=e.code
+        # Never substitute a discovered wallet for an explicit Bitcoin policy
+        # that failed validation during restore.
+        if not any(asset.startswith('btc:') for asset in policies):
+            try:self.auto_bitcoin()
+            except SwapError as e:self.startup_errors['bitcoin_auto']=e.code
         self.app=Application(self.store,self.network,self.identity,self.vault,self.drivers,self.send,
                              configure_asset=self.configure_asset,wallet_info=self.wallet_info,
                              export_recovery=lambda passphrase:export_bundle(self.journal,self.directory,passphrase,self.network))
@@ -90,11 +94,19 @@ class Host:
         wallets=rpc('listwallets');selected=policy.get('wallet','')
         if selected:require(selected in wallets,'WALLET_UNLOADED','Configured Bitcoin wallet is not loaded')
         else:require(len(wallets)==1,'WALLET_SELECTION','Bitcoin requires one loaded wallet or an explicit local wallet policy');selected=wallets[0]
-        # Descriptor watch import stays in the existing owner-selected wallet; it
-        # cannot import private keys or choose an endpoint supplied by a peer.
         wrpc=LocalRPC(rpc.url.rstrip('/')+'/wallet/'+quote(selected,safe=''),cookie_path=rpc.cookie_path,timeout=rpc.timeout)
+        watch=wrpc
+        if 'watch_wallet' in policy:
+            observer=policy['watch_wallet']
+            require(type(observer) is str and 0<len(observer)<=256 and observer!=selected and observer in wallets,
+                    'WATCH_WALLET','Select a separate loaded Bitcoin watch wallet')
+            watch=LocalRPC(rpc.url.rstrip('/')+'/wallet/'+quote(observer,safe=''),
+                           cookie_path=rpc.cookie_path,timeout=rpc.timeout)
+            watch_info=watch('getwalletinfo')
+            require(watch_info.get('descriptors') is True and watch_info.get('private_keys_enabled') is False,
+                    'WATCH_WALLET','Bitcoin watch wallet must use descriptors and disable private keys')
         hrp={'main':'bc','regtest':'bcrt'}.get(info['chain'],'tb')
-        return UTXODriver(asset,rpc,wrpc,wrpc,self.journal,self.vault,network=self.network,hrp=hrp,
+        return UTXODriver(asset,rpc,wrpc,watch,self.journal,self.vault,network=self.network,hrp=hrp,
                           fee_rate=policy.get('fee_rate',2),confirmations=policy.get('confirmations',6))
     def auto_bitcoin(self):
         chain=self.config.get('chain','main')
@@ -105,15 +117,25 @@ class Host:
             if driver.asset.id not in self.drivers:self.drivers[driver.asset.id]=driver
     def configure_asset(self,policy):
         require(type(policy) is dict,'ASSET_POLICY','Asset policy must be an object')
-        allowed={'asset','rpc_url','cookie_path','wallet','fee_rate','confirmations','contract','runtime_hash'}
+        allowed={'asset','rpc_url','cookie_path','wallet','watch_wallet','fee_rate','confirmations','contract','runtime_hash'}
         require(set(policy)<=allowed and {'asset','rpc_url'}<=set(policy),'ASSET_POLICY','Unsupported or missing asset policy fields')
         asset=Asset.parse(policy['asset']);require(asset.family in {'btc','evm'},'ASSET_POLICY','Native BTX binding is immutable')
         rpc=LocalRPC(policy['rpc_url'],cookie_path=policy.get('cookie_path'))
         if asset.family=='btc':return self._bitcoin(rpc,policy)
+        require('watch_wallet' not in policy,'ASSET_POLICY','Watch wallet is Bitcoin-only')
         require({'contract','runtime_hash'}<=set(policy),'ASSET_POLICY','EVM requires the deployed address and exact runtime code hash')
         return EVMDriver(asset.id,rpc,self.journal,self.vault,policy['contract'],policy['runtime_hash'])
     def wallet_info(self):
-        out={'native_wallet':self._wallet,'identity':self.identity.peek(),'foreign_keys_separate':True,
+        loaded=False;warning=None
+        try:
+            wallets=self.native('listwallets')
+            loaded=(self._wallet in wallets) if self._wallet else len(wallets)==1
+            if self._wallet and self._wallet not in wallets:
+                warning='Bound wallet is not loaded. loadwallet is required after a restart; createwallet does not reload it.'
+        except SwapError as e:
+            warning=e.code
+        out={'native_wallet':self._wallet,'wallet_loaded':loaded,'wallet_warning':warning,
+             'identity':self.identity.peek(),'foreign_keys_separate':True,
              'wrapping_key_protection':'local-owner-filesystem','startup_errors':self.startup_errors,'foreign_accounts':[]}
         for asset,driver in self.drivers.items():
             if driver.family=='evm':out['foreign_accounts'].append({'asset':asset,'address':driver._account()[2]})
@@ -140,7 +162,8 @@ class Host:
         # swprov "[]" is a list and raises AttributeError. Any peer payload
         # must be counted and dropped, not allowed to stop the worker.
         try:self.app.on_message(peer,command,payload)
-        except Exception:self.app.packet_errors+=1
+        except SwapError as e:self.app.note_packet_error(e.code,e.message)
+        except Exception:self.app.note_packet_error('PACKET','Rejected packet')
     def tick(self):
         try:self.app.tick()
         except SwapError as e:self.app.last_tick_error=e.as_dict()

@@ -1,4 +1,6 @@
 // Copyright (c) 2026 The BTX developers. MIT license.
+#include <bitcoin-build-config.h>
+
 #include <swapnet/node.h>
 #include <swapnet/runtime.h>
 #include <chainparams.h>
@@ -17,10 +19,25 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+
+#if defined(SWAPNET_WITH_WALLET) && defined(USE_SQLITE)
+#include <wallet/sqlite.h>
+#endif
+
 namespace swapnet {
 namespace {
 std::mutex g_mutex;
 std::shared_ptr<Runtime> g_runtime;
+#if defined(SWAPNET_WITH_WALLET) && defined(USE_SQLITE)
+struct SQLiteRuntime {
+    // Runtime stops and closes the Python connection before the guard releases SQLite.
+    wallet::SQLiteLibrary sqlite;
+    Runtime runtime;
+
+    SQLiteRuntime(const std::string& network, std::string config, Callbacks callbacks)
+        : runtime(network, std::move(config), std::move(callbacks)) {}
+};
+#endif
 WalletBridge g_wallet_bridge;
 std::set<std::string> g_owners;
 std::shared_ptr<Runtime> Current() { std::lock_guard<std::mutex> lock(g_mutex); return g_runtime; }
@@ -96,7 +113,12 @@ bool StartNode(node::NodeContext& node) {
         config.pushKV("datadir",fs::PathToString(args.GetDataDirNet()));config.pushKV("wallet",args.GetArg("-swapnetwallet",""));
         Callbacks callbacks;
         callbacks.core=[&node](const auto& wallet,const auto& method,const auto& params){return CoreCall(node,wallet,method,params);};
+#if defined(SWAPNET_WITH_WALLET) && defined(USE_SQLITE)
+        auto state = std::make_shared<SQLiteRuntime>(genesis, config.write(), std::move(callbacks));
+        std::shared_ptr<Runtime> runtime(state, &state->runtime);
+#else
         auto runtime=std::make_shared<Runtime>(genesis,config.write(),std::move(callbacks));
+#endif
         runtime->Start();
         {std::lock_guard<std::mutex> lock(g_mutex);g_owners.clear();for(const auto& user:args.GetArgs("-swapnetowner"))g_owners.insert(user);g_runtime=runtime;}
         LogPrintf("SwapNet: embedded runtime started; discovery enabled; no implicit spending authorization\n");return true;

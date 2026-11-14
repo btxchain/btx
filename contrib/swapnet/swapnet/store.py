@@ -3,7 +3,7 @@
 No network I/O occurs inside SQL transactions. Serialized raw transactions are
 persisted BEFORE broadcast. Retrying an ambiguous broadcast reuses the same bytes.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import hashlib
 import os
@@ -101,11 +101,11 @@ class Store:
             self._audit(db,{"type":"mandate_revoked","id":mandate_id})
         # Existing locked swaps retain recovery authority, never new funding authority.
 
-    def reserve(self, quote: Quote, mandate_id, principal, max_local_fee_atoms, now):
+    def reserve(self, quote: Quote, mandate_id, principal, max_local_fee_atoms, now, *, db=None, check_only=False):
         fee=atoms(max_local_fee_atoms)
         cost=atoms(quote.sell_atoms)+fee
         rid=digest("BTX/SWAPNET/RESERVATION/1", {"quote_id":quote.id,"principal":principal,"mandate_id":mandate_id,"fee":max_local_fee_atoms})
-        with self.transaction() as db:
+        with (self.transaction() if db is None else nullcontext(db)) as db:
             existing=db.execute("SELECT id FROM reservations WHERE quote_id=?",(quote.id,)).fetchone()
             if existing:
                 require(existing[0] == rid,"IDEMPOTENCY_CONFLICT","Quote already reserved with different parameters")
@@ -119,6 +119,8 @@ class Store:
             require(atoms(quote.sell_atoms) <= atoms(mandate.max_trade_atoms) and fee <= atoms(mandate.max_fee_atoms),"BUDGET_LIMIT","Trade or fee exceeds cap")
             held,used=atoms(row[1]),atoms(row[2])
             require(held+used+cost <= atoms(mandate.max_total_atoms),"BUDGET_LIMIT","Cumulative cap exceeded")
+            if check_only:
+                return rid
             db.execute("INSERT INTO reservations VALUES(?,?,?,?,?,'held',?)",(rid,quote.id,mandate_id,principal,str(cost),dumps(asdict(quote))))
             db.execute("UPDATE mandates SET held=? WHERE id=?",(str(held+cost),mandate_id))
             self._audit(db,{"type":"reserved","id":rid,"quote_id":quote.id,"cost_atoms":str(cost)})
@@ -143,16 +145,19 @@ class Store:
     def settle_reservation(self, reservation_id, actual_cost_atoms, *, verified_terminal=False):
         cost=atoms(actual_cost_atoms)
         with self.transaction() as db:
-            row=db.execute("SELECT mandate_id,cost,state FROM reservations WHERE id=?",(reservation_id,)).fetchone()
-            require(row is not None,"NOT_FOUND","Reservation not found")
-            require(row[2] in {'held','funded'},"RESERVATION_FINAL","Reservation already finalized")
-            require(row[2] != 'funded' or verified_terminal is True,"FUNDS_LOCKED","Do not release a funded swap before verified terminal settlement")
-            require(cost <= atoms(row[1]),"BUDGET_LIMIT","Actual cost exceeds reserved cap")
-            held,used=db.execute("SELECT held,used FROM mandates WHERE id=?",(row[0],)).fetchone()
-            db.execute("UPDATE mandates SET held=?,used=? WHERE id=?",(str(atoms(held)-atoms(row[1])),str(atoms(used)+cost),row[0]))
-            db.execute("UPDATE reservations SET state='closed' WHERE id=?",(reservation_id,))
-            db.execute("DELETE FROM coinlocks WHERE reservation_id=?",(reservation_id,))
-            self._audit(db,{"type":"reservation_closed","id":reservation_id,"actual_cost_atoms":str(cost)})
+            self._settle_reservation(db, reservation_id, cost, verified_terminal=verified_terminal)
+
+    def _settle_reservation(self, db, reservation_id, cost, *, verified_terminal=False):
+        row=db.execute("SELECT mandate_id,cost,state FROM reservations WHERE id=?",(reservation_id,)).fetchone()
+        require(row is not None,"NOT_FOUND","Reservation not found")
+        require(row[2] in {'held','funded'},"RESERVATION_FINAL","Reservation already finalized")
+        require(row[2] != 'funded' or verified_terminal is True,"FUNDS_LOCKED","Do not release a funded swap before verified terminal settlement")
+        require(cost <= atoms(row[1]),"BUDGET_LIMIT","Actual cost exceeds reserved cap")
+        held,used=db.execute("SELECT held,used FROM mandates WHERE id=?",(row[0],)).fetchone()
+        db.execute("UPDATE mandates SET held=?,used=? WHERE id=?",(str(atoms(held)-atoms(row[1])),str(atoms(used)+cost),row[0]))
+        db.execute("UPDATE reservations SET state='closed' WHERE id=?",(reservation_id,))
+        db.execute("DELETE FROM coinlocks WHERE reservation_id=?",(reservation_id,))
+        self._audit(db,{"type":"reservation_closed","id":reservation_id,"actual_cost_atoms":str(cost)})
 
     def save_session(self, sid, body, expected_revision=-1):
         hex32(sid); integer(expected_revision,lo=-1)
