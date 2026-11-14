@@ -20,7 +20,7 @@ _LOCKED_TOPIC = '0x' + keccak256(b'Locked(bytes32,bytes32,address,address,addres
 _UNKNOWN_EVM_TX = '0x' + '00' * 32
 
 
-def find_funding_output(driver, terms, sid=None):
+def find_funding_output(driver, terms, sid=None, *, recover_history=False):
     """Return an existing exact lock, or None when the lookup found nothing.
 
     A UTXO hit is {txid, vout, raw?}. An EVM hit is {txid, lock_id, salt}, the
@@ -30,7 +30,7 @@ def find_funding_output(driver, terms, sid=None):
     double alone means no output.
     """
     if isinstance(driver, UTXODriver):
-        return _reference(_scan_utxo(driver, terms))
+        return _reference(_scan_utxo_history(driver, terms) if recover_history else _scan_utxo(driver, terms))
     if _memory_test_double(driver):
         scanner = getattr(driver, 'scan_existing_funding', None)
         if not callable(scanner):
@@ -320,3 +320,76 @@ def _reference(found):
             raise SwapError('FUNDING_LOOKUP', 'Recovered funding transaction is unusable') from error
         out['raw'] = raw
     return out
+
+
+def _scan_utxo_history(driver, terms):
+    """A restored Bitcoin session cannot treat missing history as a new spend grant."""
+    try:
+        return _utxo_history(driver, terms)
+    except SwapError:
+        raise
+    except Exception as error:
+        raise SwapError('FUNDING_LOOKUP', 'Wallet history recovery is incomplete') from error
+
+
+def _utxo_history(driver, terms):
+    require(driver.family == 'btc', 'FUNDING_LOOKUP', 'Unsupported historical recovery')
+    tip = driver.rpc('getbestblockhash')
+    candidates = {}
+    live = _scan_utxo(driver, terms)
+    if live:
+        candidates[(live['txid'], live['vout'])] = live
+    wallets = []
+    for caller in (driver.wallet, driver.watch):
+        if caller not in wallets:
+            wallets.append(caller)
+    for caller in wallets:
+        before = caller('getwalletinfo')
+        require(type(before) is dict and type(before.get('txcount')) is int
+                and before.get('scanning', False) is False,
+                'FUNDING_LOOKUP', 'Wallet history is not ready')
+        seen = set()
+        for skip in range(0, 1000, 100):
+            rows = caller('listtransactions', '*', 100, skip, True)
+            require(type(rows) is list and len(rows) <= 100, 'FUNDING_LOOKUP', 'Invalid history page')
+            for row in rows:
+                require(type(row) is dict, 'FUNDING_LOOKUP', 'Invalid history row')
+                txid = hex32(row.get('txid'))
+                if txid in seen:
+                    continue
+                seen.add(txid)
+                tx = caller('gettransaction', txid, True)
+                raw = _raw_from(tx, txid)
+                require(raw, 'FUNDING_LOOKUP', 'Historical transaction bytes are unavailable')
+                decoded = driver.rpc('decoderawtransaction', raw)
+                require(type(decoded) is dict and decoded.get('txid') == txid
+                        and type(decoded.get('vout')) is list,
+                        'FUNDING_LOOKUP', 'Historical transaction cannot be decoded')
+                for output in decoded['vout']:
+                    matches = {}
+                    _consider(matches, dict(output, txid=txid, vout=output.get('n')),
+                              terms.lock_commitment.lower(), atoms(terms.amount_atoms, positive=True), 'value')
+                    for key, match in matches.items():
+                        require(type(tx.get('confirmations')) is int and tx['confirmations'] >= 0
+                                and not tx.get('abandoned', False),
+                                'FUNDING_LOOKUP', 'Historical funding is conflicted or abandoned')
+                        if tx.get('blockhash'):
+                            header = driver.rpc('getblockheader', tx['blockhash'])
+                            require(header.get('confirmations', 0) > 0,
+                                    'FUNDING_LOOKUP', 'Historical funding is not canonical')
+                        else:
+                            driver.rpc('getmempoolentry', txid)
+                        candidates[key] = match
+            if len(rows) < 100:
+                break
+        else:
+            raise SwapError('FUNDING_LOOKUP', 'Wallet history exceeds the bounded recovery scan')
+        after = caller('getwalletinfo')
+        require(type(after) is dict and after.get('scanning', False) is False
+                and after.get('txcount') == before['txcount'],
+                'FUNDING_LOOKUP', 'Wallet history changed during recovery')
+    require(driver.rpc('getbestblockhash') == tip, 'FUNDING_LOOKUP', 'Chain changed during history recovery')
+    require(len(candidates) <= 1, 'FUNDING_AMBIGUOUS', 'More than one historical output pays this contract')
+    require(candidates, 'RECOVERY_UNRESOLVED', 'No original payment found; restored session cannot fund again')
+    # Do not rebroadcast recovered funding bytes, including an already-spent tx.
+    return dict(next(iter(candidates.values())), raw='')
