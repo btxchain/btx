@@ -2731,6 +2731,35 @@ void FillKnownCatalogFields(ModelCatalog& cat, SearchHit& h)
     }
 }
 
+/** Remove what the local wallet funding flow writes into a release campaign: the
+ *  HTLC output script (setreleaseoutputscript) and the funding outpoints
+ *  (recordmodelfundingoutpoint). The funding transaction is on the chain, but
+ *  these fields tie it to a wallet of this node. A view without the local wallet
+ *  observation (a peer, a wallet-restricted RPC user) must not show them. In the
+ *  read results these keys come only from campaigns. */
+// NOLINTNEXTLINE(misc-no-recursion)
+static void DropLocalFundingFields(UniValue& v)
+{
+    if (v.isArray()) {
+        UniValue out(UniValue::VARR);
+        for (UniValue item : v.getValues()) {
+            DropLocalFundingFields(item);
+            out.push_back(std::move(item));
+        }
+        v = std::move(out);
+    } else if (v.isObject()) {
+        UniValue out(UniValue::VOBJ);
+        for (size_t i = 0; i < v.getKeys().size(); ++i) {
+            const std::string& key = v.getKeys()[i];
+            if (key == "output_script" || key == "funding_outpoints") continue;
+            UniValue item = v.getValues()[i];
+            DropLocalFundingFields(item);
+            out.pushKVEnd(key, std::move(item));
+        }
+        v = std::move(out);
+    }
+}
+
 ModelEconomyEntry EconomyForHit(const SearchHit& hit, ModelCatalog* cat = nullptr, bool include_wallet_observation = true)
 {
     // Describe the local copy the way searchmodels does, also for callers that pass
@@ -3903,6 +3932,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         }
         FeedCoverage cov;
         UniValue o = FeedPageJson(items, entries, fq, cov, g_feed.Sequence(), next);
+        DropLocalFundingFields(o);
         o.pushKV("records", recs);
         o.pushKV("authoritative", false);
         resp.body = o.write();
@@ -6621,7 +6651,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         UniValue scoped(UniValue::VOBJ);
         scoped.pushKV("method", params[0]);
         scoped.pushKV("params", params[1]);
-        return DispatchHelperRpc(cat, scoped, result, err_code, err, stop, false);
+        if (!DispatchHelperRpc(cat, scoped, result, err_code, err, stop, false)) return false;
+        DropLocalFundingFields(result);
+        return true;
     }
     if (IsSubscriptionHelperMethod(method)) {
         std::string bind_err;
