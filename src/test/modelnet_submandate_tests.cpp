@@ -253,6 +253,33 @@ BOOST_AUTO_TEST_CASE(mandate_sub_04_duplicate_event_cannot_double_spend)
     BOOST_CHECK_EQUAL(budget.UsedPrincipal(), 40);
 }
 
+// SaveStateJson keeps no mandate_id per reservation, and LoadStateJson did not
+// set it: after a restart the activity rows and a replayed reservation showed an
+// empty mandate_id.
+BOOST_AUTO_TEST_CASE(mandate_sub_04b_reloaded_reservation_keeps_mandate_id)
+{
+    using namespace modelnet;
+    SubscriptionBudget budget;
+    BoundBudget(budget, BaseMandateJson());
+    SubscriptionEvent ev = FundEvent("e-reload", HexN(96, 'b'), "mid-1");
+    SignedTerms t = KnownTerms(HexN(96, 'b'), 40, 2);
+    Reservation r1;
+    std::string err;
+    BOOST_REQUIRE(EvaluateAndReserve(budget, ev, t, r1, kNow, err));
+    BOOST_REQUIRE_EQUAL(r1.mandate_id, "mid-1");
+
+    SubscriptionBudget reloaded;
+    BOOST_REQUIRE_MESSAGE(reloaded.LoadStateJson(budget.SaveStateJson(), err), err);
+    const UniValue page = reloaded.ActivityPage("", 10);
+    BOOST_REQUIRE(page["actions"].isArray());
+    BOOST_REQUIRE_EQUAL(page["actions"].size(), 1U);
+    BOOST_CHECK_EQUAL(page["actions"][0]["mandate_id"].get_str(), "mid-1");
+    Reservation replay;
+    BOOST_REQUIRE(EvaluateAndReserve(reloaded, ev, t, replay, kNow, err));
+    BOOST_CHECK_EQUAL(replay.reservation_id, r1.reservation_id);
+    BOOST_CHECK_EQUAL(replay.mandate_id, "mid-1");
+}
+
 BOOST_AUTO_TEST_CASE(mandate_sub_05_reorg_does_not_refund_spend_budget)
 {
     using namespace modelnet;
