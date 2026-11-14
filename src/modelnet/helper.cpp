@@ -8144,6 +8144,31 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "searchpublishers" || method == "getpublisher" || method == "getmodelpublishers") {
         EnsureSearchBound();
         std::lock_guard<std::mutex> lock(g_search_mu);
+        if (method == "getpublisher") {
+            // One publisher: count all of its visible records (Search() stops at
+            // q.limit, 50 by default) and refuse an id the index does not know,
+            // as getcollection does.
+            const std::string want = Arg(0).isStr() ? ToLower(Arg(0).get_str()) : std::string{};
+            SearchQuery all;
+            all.limit = static_cast<int>(std::max<size_t>(g_search_idx.Size(), 1));
+            int count{0};
+            std::string display_name;
+            for (const auto& h : g_search_idx.Search(all, ConnNowMs())) {
+                // The all-zero id is "no publisher", as searchpublishers skips it.
+                if (want.empty() || want == std::string(96, '0') || h.rec.publisher_identity.Hex() != want) continue;
+                if (count++ == 0) display_name = h.rec.publisher_display_name;
+            }
+            if (count == 0) {
+                err_code = "NOT_FOUND";
+                err = "unknown publisher";
+                return false;
+            }
+            result.pushKV("schema_version", 2);
+            result.pushKV("id", want);
+            result.pushKV("display_name", display_name);
+            result.pushKV("model_count_observed", count);
+            return true;
+        }
         UniValue arr(UniValue::VARR);
         SearchQuery q;
         if (method == "searchpublishers" && Arg(0).isObject()) ParseSearchQuery(Arg(0), q, err);
@@ -8154,13 +8179,6 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             const std::string pid = h.rec.publisher_identity.Hex();
             if (pid.empty() || pid == std::string(96, '0')) continue;
             pubs[pid] += 1;
-            if (method == "getpublisher" && Arg(0).isStr() && Arg(0).get_str() == pid) {
-                result.pushKV("schema_version", 2);
-                result.pushKV("id", pid);
-                result.pushKV("display_name", h.rec.publisher_display_name);
-                result.pushKV("model_count_observed", 1);
-                return true;
-            }
         }
         for (const auto& kv : pubs) {
             UniValue o(UniValue::VOBJ);
