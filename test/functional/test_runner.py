@@ -319,6 +319,7 @@ BASE_SCRIPTS = [
     'interface_rest.py',
     'mempool_spend_coinbase.py',
     'wallet_avoid_mixing_output_types.py --descriptors',
+    'wallet_sendall_amount_sum.py --descriptors',
     'mempool_reorg.py',
     'mempool_reorg_bip68_stale_lockpoints.py',
     'p2p_block_sync.py --v1transport',
