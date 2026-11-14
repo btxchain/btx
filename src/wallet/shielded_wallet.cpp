@@ -7798,11 +7798,12 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
 
     // If the persisted state lost its key_sets AND indices (e.g. tree-only
     // fallback was later overwritten by an unlocked PersistState with empty
-    // state), attempt to recover by re-deriving keys from the master seed
-    // using a gap-limit scan.  We derive keys at successive indices and scan
-    // the chain; if a derived key decrypts at least one note we know the
-    // index was in use.  We stop after GAP_LIMIT consecutive indices that
-    // produce no on-chain notes.
+    // state), recover by re-deriving keys from the master seed. The search
+    // still covers m_next_spending_index + GAP_LIMIT indices. After the chain
+    // scan, keep keys only through the highest index that decrypted a note.
+    // With no notes, keep none and leave the next spending index at 0. A new
+    // encrypted wallet has a PQ seed from descriptor creation and an empty key
+    // set, so this path also runs on its first unlock; do not skip it for that.
     if (m_key_sets.empty()) {
         std::vector<unsigned char> master_seed = GetMasterSeed();
         ScopedByteVectorCleanse master_seed_cleanse_rederive(master_seed);
@@ -7864,12 +7865,69 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
                 max_used_index = i;
             }
             if (found_any) {
-                m_next_spending_index = max_used_index + 1;
-                m_next_kem_index = max_used_index + 1;
                 LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys re-derived %u key(s) from master seed (gap_limit=%u); rebuilding from active chain\n",
                           static_cast<unsigned int>(m_key_sets.size()), GAP_LIMIT);
+                // Persist only after unused search keys are dropped. Rebuild
+                // would otherwise store every derived key.
+                const bool previous_defer = m_defer_persist;
+                m_defer_persist = true;
                 RebuildFromActiveChain();
+                m_defer_persist = previous_defer;
+
+                std::optional<uint32_t> highest_note_index;
+                bool note_without_key{false};
+                if (!m_scan_incomplete) {
+                    for (const auto& [_, coin] : m_notes) {
+                        const auto key_it = std::find_if(m_key_sets.begin(), m_key_sets.end(), [&](const auto& entry) {
+                            return entry.second.spending_pk_hash == coin.note.recipient_pk_hash;
+                        });
+                        if (key_it == m_key_sets.end()) {
+                            note_without_key = true;
+                            break;
+                        }
+                        if (!highest_note_index.has_value() || key_it->second.index > *highest_note_index) {
+                            highest_note_index = key_it->second.index;
+                        }
+                    }
+                }
+
+                if (m_scan_incomplete || note_without_key) {
+                    // A missing block, or a note we cannot tie to a derived
+                    // index, means the search keys have to stay.
+                    m_next_spending_index = max_used_index + 1;
+                    m_next_kem_index = max_used_index + 1;
+                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys keeping %u search key(s) (scan_incomplete=%d unmatched_note=%d)\n",
+                              static_cast<unsigned int>(m_key_sets.size()),
+                              m_scan_incomplete ? 1 : 0,
+                              note_without_key ? 1 : 0);
+                } else if (!highest_note_index.has_value()) {
+                    for (const auto& [addr, _] : m_key_sets) {
+                        m_address_lifecycles.erase(addr);
+                    }
+                    m_key_sets.clear();
+                    m_next_spending_index = 0;
+                    m_next_kem_index = 0;
+                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys no decrypted note; dropped search keys and reset next spending index to 0\n");
+                } else {
+                    for (auto it = m_key_sets.begin(); it != m_key_sets.end();) {
+                        if (it->second.index > *highest_note_index) {
+                            m_address_lifecycles.erase(it->first);
+                            it = m_key_sets.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    m_next_spending_index = *highest_note_index + 1;
+                    m_next_kem_index = *highest_note_index + 1;
+                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys kept %u key(s) through note index %u\n",
+                              static_cast<unsigned int>(m_key_sets.size()),
+                              *highest_note_index);
+                }
+
                 m_locked_state_incomplete = false;
+                if (!m_defer_persist && !PersistState()) {
+                    LogPrintf("CShieldedWallet: failed to persist state after trimming rehydrated spending keys\n");
+                }
                 return true;
             }
         }
