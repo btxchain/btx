@@ -2412,7 +2412,6 @@ std::vector<ProviderObservation> CurrentProviderObservations(ModelCatalog& cat, 
 }
 
 static QueryDedupe g_search_dedupe;
-static bool g_search_bound{false};
 static FeedStore g_feed;
 static CampaignIndex g_campaigns;
 static std::recursive_mutex g_campaign_mu;
@@ -2534,10 +2533,9 @@ bool AllowModelSeedBytes(const ModelCatalog& cat, size_t n);
 
 void EnsureSearchBound()
 {
-    if (!g_search_bound) {
-        g_search_rt.Bind(&g_search_idx);
-        g_search_bound = true;
-    }
+    // Called by every RPC worker without a lock: bind once.
+    static std::once_flag bound;
+    std::call_once(bound, [] { g_search_rt.Bind(&g_search_idx); });
 }
 
 void EnsureEconomy(ModelCatalog& cat)
@@ -2546,7 +2544,7 @@ void EnsureEconomy(ModelCatalog& cat)
     const fs::path dir = HelperDir(cat);
     if (g_feed_loaded && dir == g_econ_dir) return;
     g_chain_obs.clear();
-    g_feed = FeedStore();
+    g_feed.Reset();
     g_econ_dir = dir;
     g_feed_loaded = true;
     g_feed.SetPath(dir / "feed.json");
