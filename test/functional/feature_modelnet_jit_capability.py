@@ -21,7 +21,7 @@ from pathlib import Path
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import get_datadir_path
+from test_framework.util import get_datadir_path, unix_socket_path
 
 MATMUL_OFF_ARGS = [
     "-regtestmatmulbindingheight=2147483647",
@@ -67,7 +67,7 @@ class ModelNetJitCapabilityTest(BitcoinTestFramework):
         datadir.mkdir(parents=True, exist_ok=True)
         self.modeldir = datadir / "modeldir"
         self.modeldir.mkdir(parents=True, exist_ok=True)
-        self.modeld_socket = self.modeldir / "modeld.sock"
+        self.modeld_socket = unix_socket_path(self.modeldir / "modeld.sock")
         if self.modeld_socket.exists():
             self.modeld_socket.unlink()
         argv = [
@@ -606,7 +606,7 @@ class ModelNetJitCapabilityTest(BitcoinTestFramework):
             raise AssertionError("btx-capabilityd missing from build-gcc13/bin")
         capdir = Path(self.options.tmpdir) / "capabilityd"
         capdir.mkdir(parents=True, exist_ok=True)
-        sock = capdir / "capabilityd.sock"
+        sock = unix_socket_path(capdir / "capabilityd.sock")
         capd_log = open(capdir / "capabilityd.log", "w", encoding="utf-8")
         capd_proc = subprocess.Popen(
             [str(capd), f"-modeldir={capdir}", f"-capabilitysocket={sock}"],

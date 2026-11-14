@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, unix_socket_path
 
 
 class ModeldSeedAliasTest(BitcoinTestFramework):
@@ -64,7 +64,7 @@ class ModeldSeedAliasTest(BitcoinTestFramework):
         """seed_mode of a btx-modeld started with flags."""
         modeldir = Path(self.options.tmpdir) / label
         modeldir.mkdir(parents=True)
-        sock_path = modeldir / "modeld.sock"
+        sock_path = unix_socket_path(modeldir / "modeld.sock")
         argv = [str(self.modeld_path()), f"-modeldir={modeldir}", "-modelstorage=8MiB", f"-modelrpcsocket={sock_path}",
                 "-modelnatpmp=0", "-modellandiscovery=0", *flags]
         with open(modeldir / "modeld.log", "w", encoding="utf-8") as log:

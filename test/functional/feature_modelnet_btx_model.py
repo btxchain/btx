@@ -116,7 +116,10 @@ class ModelNetBtxModelTest(BitcoinTestFramework):
         datadir.mkdir(parents=True, exist_ok=True)
         self.modeldir = datadir / "modeldir"
         self.modeldir.mkdir(parents=True, exist_ok=True)
-        self.modeld_socket = self.modeldir / "modeld.sock"
+        # _assert_scratch_socket refuses a socket outside the test directory, and
+        # <datadir>/modeldir/modeld.sock does not fit in sun_path under
+        # test_runner.py, so the socket sits at the top of the test directory.
+        self.modeld_socket = Path(self.options.tmpdir) / "modeld.sock"
         if self.modeld_socket.exists():
             self.modeld_socket.unlink()
         argv = [

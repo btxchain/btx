@@ -24,7 +24,7 @@ from pathlib import Path
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import get_datadir_path
+from test_framework.util import get_datadir_path, unix_socket_path
 
 MATMUL_OFF_ARGS = [
     "-regtestmatmulbindingheight=2147483647",
@@ -80,7 +80,7 @@ class ModelNetUniqueTodosTest(BitcoinTestFramework):
         datadir.mkdir(parents=True, exist_ok=True)
         self.modeldir = datadir / "modeldir"
         self.modeldir.mkdir(parents=True, exist_ok=True)
-        self.modeld_socket = self.modeldir / "modeld.sock"
+        self.modeld_socket = unix_socket_path(self.modeldir / "modeld.sock")
         argv = [
             str(self._modeld_path()),
             f"-modeldir={self.modeldir}",
