@@ -8207,6 +8207,9 @@ RPCHelpMan z_sendtoaddress()
                 explicit_fee = true;
                 fee = AmountFromValue(request.params[5]);
                 if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+                // The send rounds the fee up to the canonical bucket; report and
+                // subtract the fee the transaction pays, as z_sendmany does.
+                fee = CanonicalizeShieldingFee(*pwallet, fee);
             }
 
             const bool verbose{!request.params[6].isNull() && request.params[6].get_bool()};
@@ -9974,6 +9977,7 @@ RPCHelpMan z_recoverstrandednote()
                 explicit_fee = true;
                 fee = AmountFromValue(request.params[2]);
                 if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+                fee = CanonicalizeShieldingFee(*pwallet, fee);
             }
 
             const bool verbose = request.params[3].isNull() || request.params[3].get_bool();
