@@ -238,8 +238,11 @@ class RPCInterfaceTest(BitcoinTestFramework):
         # Not notification: has "id" field
         expect_http_rpc_status(200, None,                   self.nodes[0], "getblockcount", [],  2, False)
         block_count = self.nodes[0].getblockcount()
-        # Notification response status code: HTTP_NO_CONTENT
-        expect_http_rpc_status(204, None,                   self.nodes[0], "generatetoaddress", [1, "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202"],  2, True)
+        # Notification response status code: HTTP_NO_CONTENT.
+        # The address has to be one this chain accepts. A Bitcoin regtest
+        # address is rejected here, so the notification returns 204 and mines nothing.
+        mine_addr = self.nodes[0].getnewaddress()
+        expect_http_rpc_status(204, None,                   self.nodes[0], "generatetoaddress", [1, mine_addr],  2, True)
         # The command worked even though there was no response
         assert_equal(block_count + 1, self.nodes[0].getblockcount())
         # No error response for notifications even if they are invalid
