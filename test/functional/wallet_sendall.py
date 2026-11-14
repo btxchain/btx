@@ -45,7 +45,7 @@ class SendallTest(BitcoinTestFramework):
 
     def assert_tx_has_output(self, tx, addr, value=None):
         for output in tx["decoded"]["vout"]:
-            if addr == output["scriptPubKey"]["address"] and value is None or value == output["value"]:
+            if addr == output["scriptPubKey"]["address"] and (value is None or value == output["value"]):
                 return
         raise AssertionError("Output to {} not present or wrong amount".format(addr))
 
@@ -167,6 +167,8 @@ class SendallTest(BitcoinTestFramework):
         assert_raises_rpc_error(-6, "Dynamically assigned remainder results in dust output.", self.wallet.sendall,
                 [{self.recipient: pre_sendall_balance - fee - Decimal(0.00000010)}, self.remainder_target])
 
+    # P2MR outputs need at least 573 atoms at the default dust relay fee.
+    # 600 and 700 atoms are relayable but uneconomical at the fee rate below.
     # @cleanup not needed because different wallet used
     def sendall_negative_effective_value(self):
         self.log.info("Test that sendall fails if all UTXOs have negative effective value")
@@ -174,8 +176,8 @@ class SendallTest(BitcoinTestFramework):
         self.nodes[0].createwallet("dustwallet")
         dust_wallet = self.nodes[0].get_wallet_rpc("dustwallet")
 
-        self.def_wallet.sendtoaddress(dust_wallet.getnewaddress(), 0.00000400)
-        self.def_wallet.sendtoaddress(dust_wallet.getnewaddress(), 0.00000300)
+        self.def_wallet.sendtoaddress(dust_wallet.getnewaddress(), 0.00000700)
+        self.def_wallet.sendtoaddress(dust_wallet.getnewaddress(), 0.00000600)
         self.generate(self.nodes[0], 1)
         assert_greater_than(dust_wallet.getbalances()["mine"]["trusted"], 0)
 
@@ -188,7 +190,7 @@ class SendallTest(BitcoinTestFramework):
     @cleanup
     def sendall_with_send_max(self):
         self.log.info("Check that `send_max` option causes negative value UTXOs to be left behind")
-        self.add_utxos([0.00000400, 0.00000300, 1])
+        self.add_utxos([0.00000700, 0.00000600, 1])
 
         # sendall with send_max
         sendall_tx_receipt = self.wallet.sendall(recipients=[self.remainder_target], fee_rate=300, send_max=True)
@@ -196,7 +198,7 @@ class SendallTest(BitcoinTestFramework):
 
         assert_equal(len(tx_from_wallet["decoded"]["vin"]), 1)
         self.assert_tx_has_outputs(tx_from_wallet, [{"address": self.remainder_target, "value": 1 + tx_from_wallet["fee"]}])
-        assert_equal(self.wallet.getbalances()["mine"]["trusted"], Decimal("0.00000700"))
+        assert_equal(self.wallet.getbalances()["mine"]["trusted"], Decimal("0.00001300"))
 
         self.def_wallet.sendtoaddress(self.wallet.getnewaddress(), 1)
         self.generate(self.nodes[0], 1)
@@ -300,16 +302,20 @@ class SendallTest(BitcoinTestFramework):
         self.nodes[0].createwallet(wallet_name="watching", disable_private_keys=True)
         watchonly = self.nodes[0].get_wallet_rpc("watching")
 
-        import_req = [{
-            "desc": utxo["desc"],
+        # Import both public P2MR keys so the watch wallet can estimate
+        # the satisfaction size for the selected output.
+        address = utxo["address"]
+        mldsa = self.wallet.exportpqkey(address, "ml-dsa-44")["key"]
+        slhdsa = self.wallet.exportpqkey(address, "slh-dsa-shake-128s")["key"]
+        descriptor = self.nodes[0].getdescriptorinfo(f"mr({mldsa},{slhdsa})")["descriptor"]
+        assert_equal(self.nodes[0].deriveaddresses(descriptor), [address])
+        assert_equal(watchonly.importdescriptors([{
+            "desc": descriptor,
             "timestamp": 0,
-        }]
-        if self.options.descriptors:
-            watchonly.importdescriptors(import_req)
-        else:
-            watchonly.importmulti(import_req)
+        }]), [{"success": True}])
 
         sendall_tx_receipt = watchonly.sendall(recipients=[self.remainder_target], inputs=[utxo])
+        assert_equal(sendall_tx_receipt["complete"], False)
         psbt = sendall_tx_receipt["psbt"]
         decoded = self.nodes[0].decodepsbt(psbt)
         assert_equal(len(decoded["inputs"]), 1)
@@ -317,6 +323,11 @@ class SendallTest(BitcoinTestFramework):
         assert_equal(decoded["tx"]["vin"][0]["txid"], utxo["txid"])
         assert_equal(decoded["tx"]["vin"][0]["vout"], utxo["vout"])
         assert_equal(decoded["tx"]["vout"][0]["scriptPubKey"]["address"], self.remainder_target)
+
+        signed = self.wallet.walletprocesspsbt(psbt)
+        assert_equal(signed["complete"], True)
+        acceptance = self.nodes[0].testmempoolaccept([signed["hex"]])[0]
+        assert_equal(acceptance["allowed"], True)
 
     @cleanup
     def sendall_with_minconf(self):
@@ -462,11 +473,11 @@ class SendallTest(BitcoinTestFramework):
     def sendall_fails_with_transaction_too_large(self):
         self.log.info("Test that sendall fails if resulting transaction is too large")
 
-        # Force the wallet to bulk-generate the addresses we'll need
-        self.wallet.keypoolrefill(1600)
-
-        # create many inputs
-        outputs = {self.wallet.getnewaddress(): 0.000025 for _ in range(1600)}
+        # Each ML-DSA-44 signature is 2420 bytes. With BTX's witness
+        # scale factor of one, 512 signatures alone exceed standard weight.
+        input_count = 512
+        self.wallet.keypoolrefill(input_count)
+        outputs = {self.wallet.getnewaddress(): Decimal("0.0001") for _ in range(input_count)}
         self.def_wallet.sendmany(amounts=outputs)
         self.generate(self.nodes[0], 1)
 
@@ -474,13 +485,14 @@ class SendallTest(BitcoinTestFramework):
                 -4,
                 "Transaction too large.",
                 self.wallet.sendall,
-                recipients=[self.remainder_target])
+                recipients=[self.remainder_target], fee_rate=1)
 
     def run_test(self):
         self.nodes[0].createwallet("activewallet")
         self.wallet = self.nodes[0].get_wallet_rpc("activewallet")
         self.def_wallet = self.nodes[0].get_wallet_rpc(self.default_wallet_name)
-        self.generate(self.nodes[0], 101)
+        # Mature two 20-BTX coinbases to fund the first 21 BTX plus fees.
+        self.generate(self.nodes[0], 102)
         self.recipient = self.def_wallet.getnewaddress() # payee for a specific amount
         self.remainder_target = self.def_wallet.getnewaddress() # address that receives everything left after payments and fees
         self.split_target = self.def_wallet.getnewaddress() # 2nd target when splitting rest

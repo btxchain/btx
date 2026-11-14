@@ -1900,8 +1900,11 @@ RPCHelpMan sendall()
                 outpoints_spent.push_back(tx_in.prevout);
             }
 
-            // estimate final size of tx
-            const TxSize tx_size{CalculateMaximumSignedTxSize(CTransaction(rawTx), pwallet.get())};
+            // Use watch-only sizing when requested. Keep the default algorithm
+            // for sizing because FinishTransaction signs through FillPSBT.
+            CCoinControl sizing_control;
+            sizing_control.fAllowWatchOnly = coin_control.fAllowWatchOnly;
+            const TxSize tx_size{CalculateMaximumSignedTxSize(CTransaction(rawTx), pwallet.get(), &sizing_control)};
             if (tx_size.vsize == -1) {
                 // An own P2MR input given in "inputs" cannot be sized while the wallet is locked.
                 if (LockedWalletLeftOutOwnCoins(*pwallet, coin_control)) EnsureWalletIsUnlocked(*pwallet);
