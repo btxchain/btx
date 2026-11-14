@@ -8984,15 +8984,21 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             if (method == "cancelmodeljob" && !want.empty()) {
                 const auto it = g_retrieve_jobs.find(want);
                 if (it != g_retrieve_jobs.end()) {
-                    it->second->cancel.store(true);
+                    // Only a queued or running job is cancelled; a job that is done,
+                    // failed or already cancelled keeps its status and says so.
+                    bool cancelled{false};
                     {
                         std::lock_guard<std::mutex> jlock(it->second->mu);
                         if (it->second->status == "running" || it->second->status == "queued") {
                             it->second->status = "cancelled";
+                            cancelled = true;
                         }
                     }
-                    PersistRetrieveJobsLocked();
-                    result.pushKV("cancelled", true);
+                    if (cancelled) {
+                        it->second->cancel.store(true);
+                        PersistRetrieveJobsLocked();
+                    }
+                    result.pushKV("cancelled", cancelled);
                     result.pushKV("job_id", want);
                 } else {
                     result.pushKV("cancelled", false);
