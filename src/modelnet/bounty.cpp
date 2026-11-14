@@ -957,6 +957,77 @@ UniValue BountyChainIndex::ExportRecovery(const std::string& bounty_id, const st
     return o;
 }
 
+UniValue BountyChainIndex::SaveState() const
+{
+    UniValue facts(UniValue::VARR);
+    for (const auto& kv : m_facts) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("outpoint", kv.second.outpoint);
+        o.pushKV("amount_atoms", std::to_string(kv.second.amount_atoms));
+        o.pushKV("confirmations", kv.second.confirmations);
+        o.pushKV("height", static_cast<int64_t>(kv.second.height));
+        o.pushKV("spent", kv.second.spent);
+        o.pushKV("lot_id", kv.second.lot_id);
+        o.pushKV("bounty_id", kv.second.bounty_id);
+        facts.push_back(o);
+    }
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("height", static_cast<int64_t>(m_height));
+    o.pushKV("facts", facts);
+    return o;
+}
+
+bool BountyChainIndex::LoadState(const UniValue& state, std::string& err)
+{
+    if (!state.isObject() || !state.exists("facts") || !state["facts"].isArray()) {
+        err = "chain facts";
+        return false;
+    }
+    std::map<std::string, BountyChainFact> facts;
+    uint32_t height{0};
+    for (const UniValue& o : state["facts"].getValues()) {
+        if (!o.isObject() || !o.exists("outpoint") || !o["outpoint"].isStr() ||
+            !o.exists("amount_atoms") || !o["amount_atoms"].isStr()) {
+            err = "chain fact";
+            return false;
+        }
+        BountyChainFact f;
+        f.outpoint = o["outpoint"].get_str();
+        const auto amount{ToIntegral<int64_t>(o["amount_atoms"].get_str())};
+        const auto fact_height{o.exists("height") && o["height"].isNum() ? ToIntegral<uint32_t>(o["height"].getValStr()) : std::optional<uint32_t>{0}};
+        const auto confirmations{o.exists("confirmations") && o["confirmations"].isNum() ? ToIntegral<int>(o["confirmations"].getValStr()) : std::optional<int>{0}};
+        if (!amount || *amount < 0 || *amount > MAX_MONEY_ATOMS || !fact_height || !confirmations) {
+            err = "chain fact";
+            return false;
+        }
+        f.amount_atoms = *amount;
+        f.height = *fact_height;
+        f.confirmations = *confirmations;
+        f.spent = o.exists("spent") && o["spent"].isTrue();
+        if (o.exists("lot_id") && o["lot_id"].isStr()) f.lot_id = o["lot_id"].get_str();
+        if (o.exists("bounty_id") && o["bounty_id"].isStr()) f.bounty_id = o["bounty_id"].get_str();
+        if (f.height > height) height = f.height;
+        facts[f.outpoint] = std::move(f);
+    }
+    if (state.exists("height") && state["height"].isNum()) {
+        const auto saved{ToIntegral<uint32_t>(state["height"].getValStr())};
+        if (saved && *saved > height) height = *saved;
+    }
+    m_facts = std::move(facts);
+    m_undo.clear();
+    m_height = height;
+    ++m_epoch;
+    return true;
+}
+
+void BountyChainIndex::Clear()
+{
+    m_facts.clear();
+    m_undo.clear();
+    m_height = 0;
+    ++m_epoch;
+}
+
 bool BountyChainIndex::ImportManifest(const UniValue& manifest, std::string& err)
 {
     if (!manifest.isObject() || !manifest.exists("lots") || !manifest["lots"].isArray()) {
@@ -997,6 +1068,14 @@ void BountyStore::Bind(const fs::path& dir, const NetworkId& network)
 
 bool BountyStore::Load(std::string& err)
 {
+    // The chain facts are read once per directory. The helper binds the store
+    // before every bounty RPC; reading them again would replace the facts in
+    // memory, which every change already saved, and drop the undo stack that
+    // reorgbountychain uses.
+    const bool load_chain{m_chain_dir != m_dir};
+    m_chain_dir = m_dir;
+    // Facts of another directory must not be saved into this one.
+    if (load_chain) m_chain.Clear();
     UniValue o;
     if (!ReadJson(m_dir / "bounty-store.json", o) || !o.isObject()) return true;
     if (o.exists("epoch")) m_epoch = o["epoch"].getInt<int64_t>();
@@ -1056,6 +1135,12 @@ bool BountyStore::Load(std::string& err)
     load_envelopes("eval_reports", m_eval_reports);
     load_envelopes("challenges", m_challenges);
     load_map("eval_plans", m_eval_plans);
+    // A store written before the chain facts were saved has no "chain" entry;
+    // an unreadable one leaves the facts empty, as before.
+    if (load_chain && o.exists("chain")) {
+        std::string chain_err;
+        (void)m_chain.LoadState(o["chain"], chain_err);
+    }
     return true;
 }
 
@@ -1104,6 +1189,9 @@ bool BountyStore::PersistLocked(std::string& err) const
     dump_envelopes("eval_reports", m_eval_reports);
     dump_envelopes("challenges", m_challenges);
     dump("eval_plans", m_eval_plans);
+    // Watch-only chain facts (observebountychain, importbountyrecovery); without
+    // them getbountyfunding and exportbountyrecovery were empty after a restart.
+    o.pushKV("chain", m_chain.SaveState());
     return WriteJson(m_dir / "bounty-store.json", o, err);
 }
 
