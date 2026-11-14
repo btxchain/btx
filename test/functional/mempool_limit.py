@@ -401,7 +401,9 @@ class MempoolLimitTest(BitcoinTestFramework):
         # Deliberately try to create a tx with a fee less than the minimum mempool fee to assert that it does not get added to the mempool
         self.log.info('Create a mempool tx that will not pass mempoolminfee')
         mempoolminfee = node.getmempoolinfo()["mempoolminfee"]
-        fee_below_mempool_floor = max(relayfee + Decimal("0.00000001"), mempoolminfee - Decimal("0.00000001"))
+        # Halfway between the relay floor and mempoolminfee. MiniWallet rounds the fee up to the next
+        # satoshi, so a rate 1 sat/kvB under mempoolminfee pays the floor itself at this vsize.
+        fee_below_mempool_floor = ((relayfee + mempoolminfee) / 2).quantize(Decimal("0.00000001"))
         assert_raises_rpc_error(-26, "mempool min fee not met", miniwallet.send_self_transfer, from_node=node, fee_rate=fee_below_mempool_floor)
 
         self.log.info("Check that submitpackage allows cpfp of a parent below mempool min feerate")
