@@ -184,11 +184,13 @@ btx-cli searchbounties '{"text":"coding agent","scope":"LOCAL"}'
 # wallet: preparebountyfunding → inspect → signbountyfunding → submitbountyfunding
 # mine past award_height, then council:
 btx-cli preparebountyaward '{"outpoint":"<txid>:<vout>","destination":"<winner>","award_height":…,"refund_height":…,"council_keys":[…],"threshold":2,"refund_key":"…","principal_atoms":"…"}'
-btx-cli inspectbountyaward '{"hex":"<signed>"}'
-btx-cli submitbountyaward '{"hex":"<signed>"}'
+btx-cli signbountyaward '<the same object>'
+btx-cli inspectbountyaward '<the signbountyaward result>'
+btx-cli submitbountyaward '{"hex":"<hex from signbountyaward>"}'
 # if the lot is still unspent after refund_height, contributor only:
 btx-cli preparebountyrefund '{"outpoint":"<txid>:<vout>","destination":"<refund_addr>",…}'
-btx-cli submitbountyrefund '{"hex":"<signed>"}'
+btx-cli signbountyrefund '<the same object>'
+btx-cli submitbountyrefund '{"hex":"<hex from signbountyrefund>"}'
 # staged SHA-256 winner payout (no council):
 # preparebountyfunding with hashlock_hex+claimant_key → preparebountyclaim secret_ref
 ```
@@ -219,8 +221,8 @@ doctor
   → path → load → generate       local run if host profile matches
   → bounty-draft / publishbounty / searchbounties
   → wallet prepare/sign/submit funding (two-leaf CLTV+refund)
-  → mine past award_height → preparebountyaward → submitbountyaward
-  → or, if unspent past refund_height → preparebountyrefund → submitbountyrefund
+  → mine past award_height → preparebountyaward → signbountyaward → submitbountyaward
+  → or, if unspent past refund_height → preparebountyrefund → signbountyrefund → submitbountyrefund
 ```
 
 | Want | Command / RPC | Spends? |
@@ -236,9 +238,9 @@ doctor
 | Draft a bounty | `btx-model bounty-draft` / `createbountydraft` | no |
 | Publish / find | `publishbounty` / `searchbounties` | no |
 | Fund a lot | wallet `preparebountyfunding` / `sign` / `submit` | **yes**, only after you confirm |
-| Award after locktime | `preparebountyaward` / `inspectbountyaward` / `submitbountyaward` | **yes**, CLTV council leaf |
+| Award after locktime | `preparebountyaward` / `signbountyaward` / `inspectbountyaward` / `submitbountyaward` | **yes**, CLTV council leaf |
 | Staged HTLC claim | `preparebountyclaim` (`secret_ref` file) / `submitbountyclaim` | **yes**, SHA-256 preimage + claimant key |
-| Refund after locktime | `preparebountyrefund` / `submitbountyrefund` | **yes**, contributor `refund()` leaf; no council |
+| Refund after locktime | `preparebountyrefund` / `signbountyrefund` / `submitbountyrefund` | **yes**, contributor `refund()` leaf; no council |
 | Release-campaign HTLC | `preparemodelfunding` / `buildhtlcclaim` / `buildhtlcrefund` | **yes**, 0.34.6 `htlc_sha256` |
 
 ## Hard no
