@@ -126,6 +126,7 @@ add_executable(fuzz
   span.cpp
   string.cpp
   strprintf.cpp
+  swapnet_transport.cpp
   system.cpp
   timeoffsets.cpp
   torcontrol.cpp

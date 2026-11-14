@@ -2453,6 +2453,51 @@ class msg_sendtxrcncl:
         return "msg_sendtxrcncl(version=%lu, salt=%lu)" %\
             (self.version, self.salt)
 
+class msg_swapnet:
+    """SwapNet frame (src/swapnet/transport.h): the payload is opaque bytes."""
+    __slots__ = ("payload",)
+    msgtype = b""
+
+    def __init__(self, payload=b""):
+        self.payload = payload
+
+    def deserialize(self, f):
+        self.payload = f.read()
+
+    def serialize(self):
+        return self.payload
+
+    def __repr__(self):
+        return "%s(payload=%d bytes)" % (type(self).__name__, len(self.payload))
+
+class msg_swhello(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swhello"
+
+class msg_swget(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swget"
+
+class msg_swprov(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swprov"
+
+class msg_swrfq(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swrfq"
+
+class msg_swquote(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swquote"
+
+class msg_swterms(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swterms"
+
+class msg_swreceipt(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swreceipt"
+
 class TestFrameworkScript(unittest.TestCase):
     def test_ser_vector_preserves_order_and_alternate_serializer(self):
         calls = []

@@ -28,8 +28,6 @@
 #include <utility>
 #include <vector>
 
-#include <unistd.h>
-
 BOOST_FIXTURE_TEST_SUITE(modelnet_bridge_tests, BasicTestingSetup)
 
 static UniValue LoadVectors()
