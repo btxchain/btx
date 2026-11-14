@@ -57,10 +57,10 @@ Requester                          Contributors / creators
  challenges (optional) ──► council policy approve award
     |
     v
- wallet: preparebountyaward / submitbountyaward after award_height
+ wallet: preparebountyaward / signbountyaward / submitbountyaward after award_height
          (CLTV council leaf; helper approve is not this spend)
     |
-    +──► preparebountyrefund / submitbountyrefund after refund_height
+    +──► preparebountyrefund / signbountyrefund / submitbountyrefund after refund_height
          if the lot is still unspent (contributor key only)
 ```
 
@@ -84,7 +84,9 @@ by the contributor after the disclosed height if the output is still unspent.
 The wallet derives and checks the contributor’s refund key; the helper must not
 substitute keys or mutate outputs after `freezebountyfundinground`. Refund
 recovery does **not** require council cooperation, helper uptime, or indexers
-— only maturity, unspent UTXO, and the contributor’s signing keys.
+— only maturity, unspent UTXO, the contributor’s signing keys, and the funding
+plan (the `preparebountyfunding` result). `exportbountyrecovery` lists observed
+lots only; it does not hold the scripts or keys a refund needs.
 
 Round and lot identifiers are deterministic: terms id = SHA-384 of the signed
 terms body; round id after appointments; lot id = D384(round_id ‖ ordinal). See
@@ -146,12 +148,11 @@ Reference static client (bounties list/detail only):
 
 ## Desktop GUI
 
-The Qt client adds a **Bounties** tab parallel to Models: search and inspect
-terms, fund a lot with explicit confirmation (amount, fees, council, refund
-height/key), watch progress, export recovery material, and run recovery flows
-without requiring terminal RPC for the primary journeys. GUI actions call the
-same wallet boundaries as CLI (`prepare*` → user confirm → `sign*` →
-`submit*`).
+The Qt Models page has a **Bounties** search scope: search and inspect only.
+Its Fund Bounty button shows capabilities and search results, and the Award and
+Refund buttons show capabilities; none of them builds, signs or broadcasts a
+transaction. Funding, award, refund and the recovery export are RPC/CLI only in
+this tree (see [bounty-rpc.md](bounty-rpc.md)).
 
 ## Evaluation profiles
 
@@ -165,7 +166,8 @@ Installed profiles only:
 | `REVIEWED_RESEARCH` | Review workflow when installed |
 
 `getbountycapabilities` lists only profiles with real harness support.
-`runbountyevaluation` is asynchronous, without wallet keys or arbitrary network.
+`runbountyevaluation` runs an isolated child process and returns when it exits
+or `timeout_ms` passes, without wallet keys or arbitrary network.
 
 ## Contracts and RPCs
 

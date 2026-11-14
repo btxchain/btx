@@ -11,6 +11,7 @@ Role: **READER** · Process boundary: **MODEL** · Effect: **READ**
 
 Result: `BountyResultPage`.
 Network work is bounded and cancellable. LOCAL scope must send no network requests.
+For LOCAL scope the helper applies `limit` and does not read a cursor; the returned `cursor` is the store sequence, not a page position, so asking with it returns the first page again.
 
 ## `getmodelbounties`
 Role: **READER** · Process boundary: **MODEL** · Effect: **READ**
@@ -21,6 +22,7 @@ Role: **READER** · Process boundary: **MODEL** · Effect: **READ**
 
 Result: `BountyResultPage`.
 Network work is bounded and cancellable. LOCAL scope must send no network requests.
+For LOCAL scope the helper applies `limit` and does not read a cursor; the returned `cursor` is the store sequence, not a page position, so asking with it returns the first page again.
 
 ## `getmodelfeed`
 Role: **READER** · Process boundary: **MODEL** · Effect: **READ**
@@ -223,13 +225,20 @@ No output mutation after signatures. Nomination percentages derive from exact pr
 ## `preparebountyfunding`
 Role: **CONTRIBUTOR_SIGNER** · Process boundary: **WALLET** · Effect: **PREPARE**
 
-| Argument | Contract |
+One `options` object, the funding plan:
+
+| Field | Contract |
 |---|---|
-| `round_id` | id |
-| `lot_id` | own lot id |
-| `principal_atoms` | exact user-selected decimal amount |
-| `fee_reserve_atoms` | approved ceiling |
-| `idempotency_key` | caller-scoped |
+| `principal_atoms` | exact user-selected decimal amount (required) |
+| `council_keys` | council pubkeys |
+| `threshold` | m |
+| `award_height` | CLTV height of the council leaf |
+| `refund_height` | CLTV height of the refund leaf |
+| `refund_key` | contributor refund pubkey; omitted: this wallet generates one |
+| `fee_reserve_atoms` | fee ceiling |
+
+`round_id` and `lot_id` are carried through to the result; the wallet does not look them up.
+The staged variant (`hashlock_hex`, `claimant_key`) is described in the RPC help.
 
 Result: `FundingPlan`.
 Derive own refund key; validate full tree, all outputs, fee allocation, ownership and authorization.
@@ -239,8 +248,7 @@ Role: **CONTRIBUTOR_SIGNER|COUNCIL_TX_SIGNER|RECOVERY_SIGNER** · Process bounda
 
 | Argument | Contract |
 |---|---|
-| `proposal_id` | known proposal or plan |
-| `transaction` | PSBT/raw tx in existing BTX-supported format |
+| `options` | the plan object that `preparebountyfunding` returned, plus `hex` (or `transaction`); without either, the plan's `unsigned_hex` is inspected |
 
 Result: `TransactionInspection`.
 No signing. Returns full authorized/unauthorized diff, scripts, fee and spend branches.
@@ -250,10 +258,7 @@ Role: **CONTRIBUTOR_SIGNER** · Process boundary: **WALLET** · Effect: **SIGN**
 
 | Argument | Contract |
 |---|---|
-| `plan_id` | id |
-| `expected_transaction_id` | exact inspected transaction fingerprint |
-| `authorization_ref` | approval or finite mandate |
-| `idempotency_key` | caller-scoped |
+| `options` | the plan object that `preparebountyfunding` returned, plus `hex`; without it, the plan's `unsigned_hex` is signed |
 
 Result: `PartiallySignedTransaction`.
 Existing supported SIGHASH_ALL only; no implicit ANYONECANPAY.
@@ -293,7 +298,7 @@ Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **LOCAL_REA
 | `lot_ids` | owned lots |
 
 Result: `RecoveryManifest`.
-No seed/private keys; includes complete scripts, control data and lineage.
+No seed/private keys. Lists the lots the helper has observed (`lot_id`, `outpoint`, `amount_atoms`); it holds no scripts, control data or keys. Keep the funding plan (the `preparebountyfunding` result with descriptor, keys and heights) to rebuild a refund.
 
 ## `commitbountysubmission`
 Role: **CREATOR** · Process boundary: **MODEL_SIGNER** · Effect: **PUBLICATION**
@@ -378,7 +383,7 @@ Role: **EVALUATOR_RUNNER** · Process boundary: **EVALUATION** · Effect: **EXEC
 | `idempotency_key` | caller-scoped |
 
 Result: `EvaluationJob`.
-Asynchronous isolated process. No wallet/signing keys or arbitrary network.
+Isolated child process. The call returns when the child exits or `timeout_ms` passes (default 15000, at most 600000). No wallet/signing keys or arbitrary network.
 
 ## `getbountyevaluationjob`
 Role: **EVALUATOR_RUNNER** · Process boundary: **EVALUATION** · Effect: **LOCAL_READ**
@@ -399,7 +404,7 @@ Role: **EVALUATOR_RUNNER** · Process boundary: **EVALUATION** · Effect: **LOCA
 | `idempotency_key` | caller-scoped |
 
 Result: `EvaluationJobStatus`.
-Must cancel actual worker and descendants, not only change JSON state.
+A running job cannot be cancelled yet: its `job_id` is returned only when `runbountyevaluation` returns. On a finished job the call changes nothing.
 
 ## `publishbountyevaluation`
 Role: **EVALUATOR_REPORT_SIGNER** · Process boundary: **MODEL_SIGNER** · Effect: **PUBLICATION**
@@ -482,7 +487,7 @@ Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **LOCAL_R
 
 | Argument | Contract |
 |---|---|
-| `award_id` | id |
+| `options` | the object that `preparebountyaward` returned, plus `hex`; without it, the plan's signed or unsigned hex is inspected |
 
 Result: `AwardInspection`.
 Recompute inputs, principal, reserves, output keys, exact tree, fees and deadlines.
@@ -505,10 +510,7 @@ Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **SIGN**
 
 | Argument | Contract |
 |---|---|
-| `award_id` | id |
-| `expected_transaction_id` | exact fingerprint |
-| `authorization_ref` | council signer approval |
-| `idempotency_key` | caller-scoped |
+| `options` | the same object as `preparebountyaward`; the wallet builds the spend again and signs it |
 
 Result: `CouncilTransactionSignature`.
 Refuse before challenge/deadline/approval gates; fixed key order, actual threshold witness policy.
@@ -591,10 +593,7 @@ Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **SIGN**
 
 | Argument | Contract |
 |---|---|
-| `plan_id` | id |
-| `expected_transaction_id` | exact fingerprint |
-| `authorization_ref` | explicit approval/mandate |
-| `idempotency_key` | caller-scoped |
+| `options` | the same object as `preparebountyrefund`; the wallet builds the spend again and signs it |
 
 Result: `SignedSpend`.
 Signature release is a consequential action; no read API may call it.
@@ -677,7 +676,7 @@ Role: **OPERATOR** · Process boundary: **WALLET** · Effect: **AUTHORIZE**
 | `idempotency_key` | caller-scoped |
 
 Result: `MandateView`.
-Blocks new signatures, not already released signatures/broadcasts.
+Blocks new `reservemandate` reservations under this mandate. The wallet signing RPCs do not read mandates: an agent with wallet RPC access can still sign.
 
 ## `getagentactivity`
 Role: **OPERATOR** · Process boundary: **WALLET** · Effect: **LOCAL_READ**
