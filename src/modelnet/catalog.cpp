@@ -1190,14 +1190,35 @@ bool ModelCatalog::MarkIncomplete(const Digest48& model_or_artifact, bool incomp
     std::lock_guard<std::mutex> lock(m_mu);
     for (auto& m : m_models) {
         if (!(m.model_id == model_or_artifact || m.artifact_id == model_or_artifact)) continue;
+        // Only verified bytes may turn an incomplete entry back into a replica.
+        if (!incomplete) {
+            for (uint32_t fi = 0; fi < m.core.files.size(); ++fi) {
+                PieceIndex index;
+                const CoreFile& file = m.core.files[fi];
+                if (!m_store.LoadPieceIndex(m.artifact_id, fi, index, err)) return false;
+                if (index.file_size != file.size || index.pieces_root != file.pieces_root) {
+                    err = "recovered file metadata mismatch";
+                    return false;
+                }
+                if (!VerifyFileDigest(m.artifact_id, fi, file.sha384, err)) return false;
+            }
+        }
+        const CatalogEntry prior = m;
         m.incomplete = incomplete;
         if (incomplete) {
             m.bytes_verified = false;
             m.admission = AdmissionLevel::FETCHING;
             m.completed_at = 0;
             m.seeded = false;
+        } else {
+            m.bytes_verified = true;
+            m.admission = m.pinned ? AdmissionLevel::PINNED : AdmissionLevel::BYTES_VERIFIED;
+            m.completed_at = GetTime();
+            DemandSeedLocked(m);
         }
-        return PersistLocked(err);
+        if (PersistLocked(err)) return true;
+        m = prior;
+        return false;
     }
     err = "unknown model";
     return false;
