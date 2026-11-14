@@ -234,6 +234,13 @@ class Coordinator:
     def receive_cancel(self,sender,sid,body):
         rev,s=self.journal.load(sid);require(s['peer']==sender,'SESSION_BINDING','Wrong cancelling peer')
         if not s['funding_prepared'] and s['stage'] not in TERMINAL:self.cancel(Principal(s['principal']),sid)
+    def receive_decline(self,sender,sid,body):
+        try:rev,s=self.journal.load(sid)
+        except SwapError:return
+        if s['peer']!=sender or s['funding_prepared'] or s['funding_broadcast'] or s['stage'] in TERMINAL:return
+        if s.get('reservation_id'):self.journal.store.settle_reservation(s['reservation_id'],'0')
+        s['stage']='rejected';s['decline']={'code':body['code'],'message':body['message']}
+        s['updated_at']=self.now();self._save(sid,s,rev)
     def _persist_prepared(self,sid,asset,kind,prepared):
         return self.journal.prepare(sid,asset,kind,prepared.txid,prepared.raw,
                                     {**prepared.metadata,'reference':prepared.reference,'fee_atoms':prepared.fee_atoms})

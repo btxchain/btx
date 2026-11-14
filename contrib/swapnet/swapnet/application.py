@@ -26,7 +26,7 @@ NEW_METHODS={
  'getswapvalidationinfo':'read'
 }
 METHODS={**LEGACY_METHODS,**NEW_METHODS}
-PACKET_COMMANDS={'rfq':'swrfq','quote':'swquote','proposal':'swterms','agreement':'swterms','commit':'swterms',
+PACKET_COMMANDS={'rfq':'swrfq','quote':'swquote','decline':'swquote','proposal':'swterms','agreement':'swterms','commit':'swterms',
                  'funded':'swreceipt','cancel':'swterms','ack':'swreceipt'}
 
 class NativeIdentity:
@@ -157,21 +157,37 @@ class Application:
             exact_fields(p,{'request_id','rfq'})
             require(digest('BTX/SWAPNET/RFQ/1',p['rfq'])==p['request_id'],'RFQ_BINDING','RFQ identifier mismatch')
             require(p['rfq']['requester']==digest('BTX/SWAPNET/REQUESTER/2',{'identity':sender,'nonce':p['rfq']['nonce']}),'RFQ_BINDING','Requester identity mismatch')
+            refusal=None
             for policy in self.markets():
                 market=Market(**policy['market'])
                 if (market.sell_asset,market.buy_asset)!=(p['rfq']['sell_asset'],p['rfq']['buy_asset']) or market.expires_at<=self.now():continue
-                driver=self.coordinator._driver(market.buy_asset)
-                maker=self._maker();maker.set_verified_inventory(market.buy_asset,str(driver.inventory()),self.now())
-                quote=maker.quote(p['rfq'],market,self.now())
-                self.emit(sender,'quote',sid,{'request_id':p['request_id'],'quote':quote.as_dict()});break
+                try:
+                    driver=self.coordinator._driver(market.buy_asset)
+                    maker=self._maker();maker.set_verified_inventory(market.buy_asset,str(driver.inventory()),self.now())
+                    quote=maker.quote(p['rfq'],market,self.now())
+                    self._quote_within_mandate(policy,quote.quote,sender)
+                    self.emit(sender,'quote',sid,{'request_id':p['request_id'],'quote':quote.as_dict()})
+                    return
+                except SwapError as e:
+                    refusal=e
+            if refusal is not None:
+                self.emit(sender,'decline',sid,{'request_id':p['request_id'],'code':refusal.code,'message':refusal.message})
         elif kind=='quote':
             exact_fields(p,{'request_id','quote'});require(p['quote']['quote']['provider']==sender,'QUOTE_BINDING','Envelope signer is not quote provider')
             self.service.ingest_quote(p['quote'],p['request_id'])
+        elif kind=='decline':
+            exact_fields(p,{'request_id','code','message'})
+            self.journal.set_setting('decline:'+p['request_id'],{'code':p['code'],'message':p['message']})
+            self.coordinator.receive_decline(sender,sid,p)
         elif kind=='proposal':
-            q=Quote.parse(p['quote']['quote'])
-            policies=[m for m in self.markets() if (m['market']['sell_asset'],m['market']['buy_asset'])==(q.sell_asset,q.buy_asset)]
-            require(policies,'MARKET_UNAVAILABLE','No authorized maker policy')
-            self.coordinator.receive_proposal(sender,sid,p,policies[0])
+            try:
+                q=Quote.parse(p['quote']['quote'])
+                policies=[m for m in self.markets() if (m['market']['sell_asset'],m['market']['buy_asset'])==(q.sell_asset,q.buy_asset)]
+                require(policies,'MARKET_UNAVAILABLE','No authorized maker policy')
+                self.coordinator.receive_proposal(sender,sid,p,policies[0])
+            except SwapError as e:
+                rid=digest('BTX/SWAPNET/RFQ/1',p['rfq']) if isinstance(p,dict) and 'rfq' in p else sid
+                self.emit(sender,'decline',sid,{'request_id':rid,'code':e.code,'message':e.message})
         elif kind=='agreement':self.coordinator.receive_agreement(sender,sid,p)
         elif kind=='commit':self.coordinator.receive_commit(sender,sid,p)
         elif kind=='funded':self.coordinator.receive_reference(sender,sid,p)
@@ -250,6 +266,19 @@ class Application:
             db.execute('INSERT OR IGNORE INTO rfqs VALUES(?,?,?,?)',(rid,now+120,ctx.name,dumps(b)))
         self.emit('*','rfq',rid,{'request_id':rid,'rfq':b})
         return {'request_id':rid,'requester':b['requester'],'expires_at':now+120,'peers':len(self.peers)}
+    def _quote_within_mandate(self,policy,q,requester):
+        pay=atoms(q.buy_atoms)-atoms(q.maker_fee_atoms)
+        require(pay>0,'NET_AMOUNT','Fees consume received amount')
+        reverse=Quote(q.network,requester,digest('BTX/SWAPNET/MAKER/2',{'quote':q.id}),q.nonce,q.sequence,
+                      q.buy_asset,q.sell_asset,str(pay),q.sell_atoms,'0','0',q.issued_at,q.expires_at)
+        ctx=Principal(policy['principal'],False,policy.get('wallet',''))
+        self.coordinator.authority.reserve(ctx,reverse,policy['mandate_id'],policy['max_local_fee_atoms'],check_only=True)
+    def rpc_getswapquotes(self,ctx,request_id):
+        result=self.service.rpc_getswapquotes(self._context(ctx),request_id)
+        decline=self.journal.setting('decline:'+request_id)
+        if decline:
+            result=dict(result);result['declined']=decline
+        return result
     def rpc_acceptswapquote(self,ctx,quote_id,mandate_id,max_local_fee_atoms,refund_fee_atoms=None,claim_fee_atoms=None):
         with self.store.lock:
             row=self.store.db.execute('SELECT body FROM quotes WHERE id=?',(hex32(quote_id),)).fetchone()
