@@ -419,9 +419,9 @@ class ModelNetMinioLayoutsTest(BitcoinTestFramework):
     def _assert_piece_objects_hydrate_incomplete(self, mode, fake, uri, artifact_id, want_sha):
         """Unique incomplete-catalog hydrate after a PIECE_OBJECTS store.
 
-        TryHydrateFromCloud only runs for catalog models[i].incomplete. A local
-        import leaves entries complete, so this leg stops the helper, flips that
-        flag, drops local *.piece files, and requires getmodel to hydrate.
+        A local import leaves entries complete. Stop the helper and delete only
+        the pieces; ordinary getmodel must detect their loss, hydrate and keep
+        the exact bytes local across another restart without fixture flag edits.
         cloud_uploaded already proved the objects exist: failure here is FAIL
         for FakeS3 and MinIO, not HONEST_NOT_RUN.
         """
@@ -435,25 +435,11 @@ class ModelNetMinioLayoutsTest(BitcoinTestFramework):
         catalog_path = Path(self.modeldir) / "catalog.json"
         if not catalog_path.is_file():
             raise AssertionError(f"{mode} PIECE_OBJECTS hydrate-incomplete: missing {catalog_path}")
-        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-        models = catalog.get("models")
-        if not isinstance(models, list):
-            raise AssertionError(f"{mode} PIECE_OBJECTS hydrate-incomplete: catalog.json has no models[]")
-        matched = False
-        want = str(artifact_id).lower()
-        for entry in models:
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("artifact_id") or "").lower() != want:
-                continue
-            entry["incomplete"] = True
-            matched = True
-            break
-        if not matched:
-            raise AssertionError(
-                f"{mode} PIECE_OBJECTS hydrate-incomplete: no catalog model with "
-                f"artifact_id={artifact_id}")
-        catalog_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+        prior_catalog = catalog_path.read_bytes()
+        models = json.loads(prior_catalog).get("models", [])
+        entry = next((e for e in models if e.get("artifact_id") == artifact_id), None)
+        if entry is None or entry.get("incomplete"):
+            raise AssertionError("expected a complete catalog entry before local data loss")
 
         art_dir = Path(self.modeldir) / "store" / "artifacts" / str(artifact_id)
         deleted = []
@@ -464,8 +450,9 @@ class ModelNetMinioLayoutsTest(BitcoinTestFramework):
         if not deleted:
             raise AssertionError(
                 f"{mode} PIECE_OBJECTS hydrate-incomplete: no local *.piece files under {art_dir}")
-        self.log.info("  hydrate-incomplete: marked catalog incomplete, deleted %d local piece(s)",
-                      len(deleted))
+        if catalog_path.read_bytes() != prior_catalog:
+            raise AssertionError("fixture changed catalog metadata while deleting pieces")
+        self.log.info("  normal recovery: unchanged catalog, deleted %d local piece(s)", len(deleted))
 
         self._start_helper()
         self._wait_helper_ready()
@@ -487,6 +474,17 @@ class ModelNetMinioLayoutsTest(BitcoinTestFramework):
             got.get("uri"), got.get("cloud_hydrated"), got.get("origin_get_ops"),
             got.get("automatic_spend_atoms"))
         self._assert_no_sentinel_in_logs(f"{mode} getmodel PIECE_OBJECTS hydrate-incomplete")
+        if got.get("status") != "local":
+            raise AssertionError(f"hydrated bytes must form a local replica: {redact(got)}")
+        pieces = sorted(art_dir.rglob("*.piece"), key=lambda p: (int(p.parent.name), int(p.stem)))
+        restored = b"".join(p.read_bytes() for p in pieces)
+        if hashlib.sha384(restored).hexdigest() != want_sha:
+            raise AssertionError("normal recovery restored different bytes")
+        self._restart_helper()
+        healthy = self._zero_spend(node.getmodel(uri), "normal recovery after another restart")
+        if healthy.get("status") != "local" or healthy.get("cloud_hydrated") is True:
+            raise AssertionError(f"recovered replica did not stay local: {redact(healthy)}")
+
 
         if not fake:
             keys = self._bucket_keys()
