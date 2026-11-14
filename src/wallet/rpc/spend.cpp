@@ -13,6 +13,7 @@
 #include <rpc/util.h>
 #include <script/pqm.h>
 #include <script/script.h>
+#include <util/overflow.h>
 #include <util/rbf.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
@@ -1931,9 +1932,16 @@ RPCHelpMan sendall()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Transaction too large.");
             }
 
+            // Each specified amount is in MoneyRange, but many of them can add up
+            // past the range of CAmount. Such a sum is more than the inputs can
+            // hold, so it is refused like any other excess.
             CAmount output_amounts_claimed{0};
             for (const CTxOut& out : rawTx.vout) {
-                output_amounts_claimed += out.nValue;
+                const auto sum{CheckedAdd(output_amounts_claimed, out.nValue)};
+                if (!sum) {
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Assigned more value to outputs than available funds.");
+                }
+                output_amounts_claimed = *sum;
             }
 
             if (output_amounts_claimed > total_input_value) {
