@@ -397,7 +397,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--python",
-        help="Linux: interpreter whose libpython btxd links (default: pythonX.Y on PATH, from btxd's DT_NEEDED).",
+        help="Interpreter matching the linked Python ABI (Linux shared library or macOS framework).",
     )
     parser.add_argument(
         "--archive-name",
@@ -745,6 +745,15 @@ def stage_release_tree(
     if platform_id.startswith("linux-"):
         # After the Qt bundle: libpython it already placed in lib/ must match.
         included += bundle_linux_python_runtime(release_root, source_root, python)
+
+    if platform_id.startswith("macos-"):
+        script = Path(__file__).with_name("bundle_macos_python_runtime.py")
+        spec = importlib.util.spec_from_file_location("bundle_macos_python_runtime", script)
+        mac_python = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mac_python)
+        included += mac_python.bundle_macos_python(
+            release_root, source_root=source_root, python=python,
+            architecture=config["triple"].split("-", 1)[0])
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
