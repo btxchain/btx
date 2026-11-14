@@ -89,6 +89,9 @@ class ArchiveRequestedBodyNoPunishTest(BitcoinTestFramework):
             f"-regtestmatmulv4height={H_V4}",
             f"-regtestmatmulv4dimension={V4_DIMENSION}",
             f"-regtestbmx4cheight={H_V4}",
+            # In economic mode node1's v4 blocks carry no matrix_c_data, so
+            # case D would have nothing to mutate.
+            "-matmulvalidation=consensus",
             "-debug=net",
             "-nomodelnet",
             "-modellandiscovery=0",
