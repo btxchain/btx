@@ -45,6 +45,13 @@ class Coordinator:
               'funding_broadcast','created_at','updated_at','last_error','last_action','refs','observations','grant_id')
         out={'swap_id':sid,**{k:s[k] for k in keys if k in s}}
         if 'agreement' in s:out['agreement']=s['agreement']
+        if s.get('recovery_facts',{}).get('mode')=='observation_only':
+            f=s['recovery_facts'];out['recovery']={k:f[k] for k in
+                ('mode','status','reason','original','checked_height','checked_at') if k in f}
+            if f.get('last_verified'):
+                out['recovery']['last_verified']={k:f['last_verified'][k] for k in
+                    ('status','original','checked_height','checked_at') if k in f['last_verified']}
+            out['recovery']['actions_enabled']=False
         return out
     def get(self,ctx,sid):return self._safe_view(sid,self._owned(ctx,sid)[1])
     def list(self,ctx,limit=100):
@@ -217,6 +224,7 @@ class Coordinator:
         s['refs'][expected]=ref;s['updated_at']=self.now();self._save(sid,s,rev)
     def cancel(self,ctx,sid):
         rev,s=self._owned(ctx,sid)
+        require(not self._imported_unknown(sid,s),'RECOVERY_READ_ONLY','Imported payment state is unresolved')
         require(not s['funding_prepared'] and not s['funding_broadcast'],'FUNDS_LOCKED','Prepared/funded swaps require refund recovery')
         if s['stage']=='cancelled':return self._safe_view(sid,s)
         self.journal.store.settle_reservation(s['reservation_id'],'0')
@@ -232,6 +240,7 @@ class Coordinator:
     def _own(self,s,agr):
         return (('a',agr.long_leg,'b',agr.short_leg) if s['role']=='initiator' else ('b',agr.short_leg,'a',agr.long_leg))
     def _prepare(self,sid,s,rev,agr):
+        self._require_effect(sid,s)
         own_name,own,incoming_name,incoming=self._own(s,agr)
         driver=self._driver(own.asset);incoming_driver=self._driver(incoming.asset)
         if s['role']=='responder' and 'claim_template' not in s:
@@ -297,6 +306,7 @@ class Coordinator:
             self.emit(s['peer'],'funded',sid,{'agreement_id':agr.id,'leg':own_name,'reference':s['refs'][own_name]})
         rev=self._save(sid,s,rev);self.journal.checkpoint();return rev
     def _fund(self,sid,s,rev,agr):
+        self._require_effect(sid,s)
         own_name,own,_,_=self._own(s,agr)
         require(s.get('fund_op') and (s.get('refund_op') or s.get('evm_refund_plan')) and s['recovery_ready'],'RECOVERY_MISSING','Durable refund missing')
         # Consumption is durable before bytes can escape. Revocation cannot cancel
@@ -313,6 +323,7 @@ class Coordinator:
         self.emit(s['peer'],'funded',sid,{'agreement_id':agr.id,'leg':own_name,'reference':s['refs'][own_name]})
         return rev
     def _claim(self,sid,s,rev,agr):
+        self._require_effect(sid,s)
         _,_,incoming_name,incoming=self._own(s,agr);driver=self._driver(incoming.asset)
         if 'claim_template' not in s:
             s['claim_template']=driver.prepare_claim_template(sid,incoming,s['refs'][incoming_name],s['keys']['claim'])
@@ -330,6 +341,74 @@ class Coordinator:
             s['claim_op']=self._persist_prepared(sid,incoming.asset,'claim',claim);rev=self._save(sid,s,rev)
         self.journal.broadcast(s['claim_op'],driver)
         s['stage']='claim_broadcast';s['updated_at']=self.now();return self._save(sid,s,rev)
+    def _imported_unknown(self,sid,s):
+        if s.get('recovery_facts',{}).get('mode')=='observation_only':return True
+        if (not self.journal.setting('restored_session:'+sid,False)
+                or s.get('stage')!='committed' or not s.get('agreement')):return False
+        agr=Agreement.parse(s['agreement']);name,own,_,_=self._own(s,agr)
+        if Asset.parse(own.asset).family!='btc':return False
+        if (s.get('funding_prepared') or s.get('funding_broadcast') or s.get('recovery_ready')
+                or s['refs'].get(name)):return False
+        return not any(o['asset']==own.asset and o['kind'] in {'fund','refund'}
+                       for o in self.journal.operations(sid))
+    def _observation_only(self,sid,s):
+        if s.get('recovery_facts',{}).get('mode')=='observation_only':return True
+        if not self._imported_unknown(sid,s):return False
+        agr=Agreement.parse(s['agreement']);_,own,_,_=self._own(s,agr)
+        clock=self._driver(own.asset).clock();self.policy.check_clocks(self.now(),clock)
+        return own.lock_domain=='height' and clock.height>=own.lock_value
+    def _require_effect(self,sid,s):
+        require(not self._observation_only(sid,s),'RECOVERY_READ_ONLY',
+                'Expired restored session is observation-only')
+    def _discover_only(self,sid,s,rev,agr):
+        from .funding_scan import find_funding_output
+        from .adapters import to_atoms
+        name,own,_,_=self._own(s,agr);driver=self._driver(own.asset)
+        old=s.get('recovery_facts',{})
+        require(not old or old.get('agreement_id')==agr.id,'RECOVERY_CONFLICT','Recovery agreement changed')
+        if not old:
+            old={'mode':'observation_only','agreement_id':agr.id,'status':'unresolved',
+                 'reason':'EXPIRED_BACKUP_READ_ONLY'}
+            s['recovery_facts']=old;s['last_action']='read_only_recovery'
+            rev=self._save(sid,s,rev) # Fail before I/O; never fall through to spending.
+        facts=dict(old)
+        try:
+            clock=driver.clock();self.policy.check_clocks(self.now(),clock)
+            facts['checked_height']=clock.height
+            ref=facts.get('original')
+            if ref is None:
+                ref=find_funding_output(driver,own,sid,recover_history=True)
+                require(ref is not None,'RECOVERY_UNRESOLVED','Original payment is unresolved')
+                facts['original']={'txid':ref['txid'],'vout':ref['vout']}
+            report=driver.observe(own,facts['original']);obs=report.observation
+            self.policy.check_clocks(self.now(),report.clock)
+            if not obs.present:
+                facts.update(status='unresolved',reason='ORIGINAL_UNAVAILABLE')
+            elif not obs.exact_terms or not obs.canonical or obs.conflicting:
+                facts.update(status='conflicting',reason='ORIGINAL_CONFLICT')
+            elif (obs.claimed or obs.refunded) and obs.settled(driver.family,self.policy,self.now()):
+                facts.update(status='original_claimed' if obs.claimed else 'original_refunded',
+                             reason='EXPIRED_BACKUP_READ_ONLY')
+            else:
+                coin=driver.rpc('gettxout',ref['txid'],ref['vout'],True)
+                if coin:
+                    require(coin['scriptPubKey']['hex']==own.lock_commitment
+                            and to_atoms(coin['value'])==atoms(own.amount_atoms),
+                            'RECOVERY_CONFLICT','Live output changed')
+                facts.update(status='original_unspent' if coin else 'spend_lookup_pending',
+                             reason='EXPIRED_BACKUP_READ_ONLY')
+        except SwapError as error:
+            facts.update(status='unresolved',reason=error.code)
+        if facts.get('status') in {'original_unspent','original_claimed','original_refunded'}:
+            verified={k:facts[k] for k in ('status','original','checked_height') if k in facts}
+            previous=old.get('last_verified',{})
+            if verified!={k:v for k,v in previous.items() if k!='checked_at'}:
+                verified['checked_at']=self.now();facts['last_verified']=verified
+        if facts!=old:
+            facts['checked_at']=self.now();s['recovery_facts']=facts
+            s['last_action']='read_only_recovery';self._save(sid,s,rev)
+        # No normal execution refs/flags, secret, operation or financial mutation.
+
     def tick_one(self,sid):
         rev,s=self.journal.load(sid)
         if s['stage'] in {'proposed','offered'}:
@@ -339,7 +418,10 @@ class Coordinator:
                 self.cancel(Principal(s['principal']),sid)
             return
         if s['stage'] in {'cancelled','rejected'} or 'agreement' not in s:return
-        agr=Agreement.parse(s['agreement']);a,b=self._driver(agr.long_leg.asset),self._driver(agr.short_leg.asset)
+        agr=Agreement.parse(s['agreement'])
+        if self._observation_only(sid,s):
+            self._discover_only(sid,s,rev,agr);return
+        a,b=self._driver(agr.long_leg.asset),self._driver(agr.short_leg.asset)
         # The counterparty leg must not block a mature local refund or claim.
         ra=self._observe(a,agr.long_leg,s['refs'].get('a'),required=s['role']=='initiator')
         try:
@@ -485,6 +567,7 @@ class Coordinator:
         self._owned(ctx,sid);self.tick_one(sid);return self.get(ctx,sid)
     def request_refund(self,ctx,sid):
         _,s=self._owned(ctx,sid)
+        self._require_effect(sid,s)
         require(s['funding_prepared'],'NOT_FUNDED','Swap has no prepared funding')
         agr=Agreement.parse(s['agreement']);_,own,_,_=self._own(s,agr);clock=self._driver(own.asset).clock()
         mature=(clock.height>=own.lock_value if own.lock_domain=='height' else clock.timestamp>=own.lock_value)

@@ -276,7 +276,8 @@ class Application:
         self.coordinator._owned(ctx,swap_id);return {'operations':self.journal.operations(swap_id)}
     def rpc_getswaprecoveryinfo(self,ctx,swap_id):
         _,s=self.coordinator._owned(ctx,swap_id)
-        return {'swap_id':swap_id,'durable_recovery_ready':s['recovery_ready'],'secret_exposed':s['secret_exposed'],
+        return {'swap_id':swap_id,'recovery':self.coordinator._safe_view(swap_id,s).get('recovery'),
+                'durable_recovery_ready':s['recovery_ready'],'secret_exposed':s['secret_exposed'],
                 'refund_transaction_ready':bool(s.get('refund_op')),'evm_refund_intent_ready':bool(s.get('evm_refund_plan')),
                 'raw_transactions_redacted':True}
     def rpc_getswaphealth(self,ctx):
