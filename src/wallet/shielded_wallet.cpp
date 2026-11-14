@@ -7844,15 +7844,16 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
     }
 
     // If the persisted state lost its key_sets, recover by re-deriving keys
-    // from the master seed. The search still covers m_next_spending_index +
-    // GAP_LIMIT indices. issued is that next index before the search. After a
-    // complete scan, keep every derived key below max(one past the highest
-    // note, or 0 when no note exists, issued) and set both next indexes to
-    // that bound. Search keys past the bound are dropped. An incomplete scan,
-    // or a note with no derived key, keeps the whole search set. A finished
-    // search that finds no note and had issued 0 is recorded so the next
-    // unlock does not derive the gap again. The first unlock of a new
-    // encrypted wallet still runs the search.
+    // from the master seed. The search covers m_next_spending_index +
+    // GAP_LIMIT indices, and goes on until the GAP_LIMIT indices after the
+    // highest note are searched. issued is that next index before the search.
+    // After a complete scan, keep every derived key below max(one past the
+    // highest note, or 0 when no note exists, issued) and set both next
+    // indexes to that bound. Search keys past the bound are dropped. An
+    // incomplete scan, or a note with no derived key, keeps the whole search
+    // set. A finished search that finds no note and had issued 0 is recorded
+    // so the next unlock does not derive the gap again. The first unlock of a
+    // new encrypted wallet still runs the search.
     if (m_key_sets.empty() && m_empty_gap_search_done && m_next_spending_index == 0 && m_notes.empty()) {
         LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys empty gap search already completed; not deriving keys\n");
     } else if (m_key_sets.empty()) {
@@ -7865,57 +7866,61 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
             uint32_t max_used_index = 0;
             bool found_any{false};
 
-            // Remember addresses already handed out. The search limit stays
-            // m_next_spending_index + GAP_LIMIT.
+            // Remember addresses already handed out.
             const uint32_t issued = m_next_spending_index;
-            const uint32_t search_limit = m_next_spending_index + GAP_LIMIT;
 
-            for (uint32_t i = 0; i < search_limit; ++i) {
-                ShieldedKeySet keyset;
-                keyset.account = account;
-                keyset.index = i;
-                keyset.has_spending_key = true;
-                keyset.spending_key_loaded = false;
+            // Derive the keys for the indices [begin, end).
+            const auto derive_keys = [&](uint32_t begin, uint32_t end) EXCLUSIVE_LOCKS_REQUIRED(cs_shielded) {
+                for (uint32_t i = begin; i < end; ++i) {
+                    ShieldedKeySet keyset;
+                    keyset.account = account;
+                    keyset.index = i;
+                    keyset.has_spending_key = true;
+                    keyset.spending_key_loaded = false;
 
-                auto spending_key = DerivePQKeyFromBIP39(master_seed,
-                                                         PQAlgorithm::ML_DSA_44,
-                                                         coin_type,
-                                                         account,
-                                                         /*change=*/0,
-                                                         i);
-                if (!spending_key.has_value()) {
-                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys spending key derivation failed index=%u\n", i);
-                    continue;
+                    auto spending_key = DerivePQKeyFromBIP39(master_seed,
+                                                             PQAlgorithm::ML_DSA_44,
+                                                             coin_type,
+                                                             account,
+                                                             /*change=*/0,
+                                                             i);
+                    if (!spending_key.has_value()) {
+                        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys spending key derivation failed index=%u\n", i);
+                        continue;
+                    }
+                    keyset.spending_key = std::move(*spending_key);
+                    keyset.spending_key_loaded = true;
+
+                    keyset.kem_key = DeriveMLKEMKeyFromBIP39(master_seed,
+                                                             coin_type,
+                                                             account,
+                                                             /*change=*/0,
+                                                             i);
+                    if (std::all_of(keyset.kem_key.pk.begin(), keyset.kem_key.pk.end(), [](uint8_t b) { return b == 0; }) ||
+                        !ValidateMLKEMKeyPair(keyset.kem_key)) {
+                        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys invalid derived ML-KEM keypair at index=%u; skipping\n", i);
+                        continue;
+                    }
+
+                    const auto spending_pk = keyset.spending_key.GetPubKey();
+                    keyset.spending_pk_hash = HashBytes(spending_pk);
+                    keyset.kem_pk_hash = HashBytes(Span<const unsigned char>{keyset.kem_key.pk.data(), keyset.kem_key.pk.size()});
+
+                    ShieldedAddress addr;
+                    addr.version = SHIELDED_ADDRESS_VERSION_WITH_KEM_PUBKEY;
+                    addr.algo_byte = SHIELDED_ADDRESS_ALGO_BYTE;
+                    addr.pk_hash = keyset.spending_pk_hash;
+                    addr.kem_pk_hash = keyset.kem_pk_hash;
+                    addr.kem_pk = keyset.kem_key.pk;
+
+                    m_key_sets[addr] = std::move(keyset);
+                    found_any = true;
+                    max_used_index = i;
                 }
-                keyset.spending_key = std::move(*spending_key);
-                keyset.spending_key_loaded = true;
+            };
 
-                keyset.kem_key = DeriveMLKEMKeyFromBIP39(master_seed,
-                                                         coin_type,
-                                                         account,
-                                                         /*change=*/0,
-                                                         i);
-                if (std::all_of(keyset.kem_key.pk.begin(), keyset.kem_key.pk.end(), [](uint8_t b) { return b == 0; }) ||
-                    !ValidateMLKEMKeyPair(keyset.kem_key)) {
-                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys invalid derived ML-KEM keypair at index=%u; skipping\n", i);
-                    continue;
-                }
-
-                const auto spending_pk = keyset.spending_key.GetPubKey();
-                keyset.spending_pk_hash = HashBytes(spending_pk);
-                keyset.kem_pk_hash = HashBytes(Span<const unsigned char>{keyset.kem_key.pk.data(), keyset.kem_key.pk.size()});
-
-                ShieldedAddress addr;
-                addr.version = SHIELDED_ADDRESS_VERSION_WITH_KEM_PUBKEY;
-                addr.algo_byte = SHIELDED_ADDRESS_ALGO_BYTE;
-                addr.pk_hash = keyset.spending_pk_hash;
-                addr.kem_pk_hash = keyset.kem_pk_hash;
-                addr.kem_pk = keyset.kem_key.pk;
-
-                m_key_sets[addr] = std::move(keyset);
-                found_any = true;
-                max_used_index = i;
-            }
+            uint32_t search_limit = m_next_spending_index + GAP_LIMIT;
+            derive_keys(0, search_limit);
             if (found_any) {
                 LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys re-derived %u key(s) from master seed (gap_limit=%u); rebuilding from active chain\n",
                           static_cast<unsigned int>(m_key_sets.size()), GAP_LIMIT);
@@ -7923,25 +7928,41 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
                 // would otherwise store every derived key.
                 const bool previous_defer = m_defer_persist;
                 m_defer_persist = true;
-                RebuildFromActiveChain();
-                m_defer_persist = previous_defer;
 
                 std::optional<uint32_t> highest_note_index;
                 bool note_without_key{false};
-                if (!m_scan_incomplete) {
-                    for (const auto& [_, coin] : m_notes) {
-                        const auto key_it = std::find_if(m_key_sets.begin(), m_key_sets.end(), [&](const auto& entry) {
-                            return entry.second.spending_pk_hash == coin.note.recipient_pk_hash;
-                        });
-                        if (key_it == m_key_sets.end()) {
-                            note_without_key = true;
-                            break;
-                        }
-                        if (!highest_note_index.has_value() || key_it->second.index > *highest_note_index) {
-                            highest_note_index = key_it->second.index;
+                // Every send puts its change on a new index, so a used wallet
+                // can have notes far past the first GAP_LIMIT indices. Search
+                // until GAP_LIMIT indices after the highest note are searched.
+                while (true) {
+                    RebuildFromActiveChain();
+                    highest_note_index.reset();
+                    note_without_key = false;
+                    if (!m_scan_incomplete) {
+                        for (const auto& [_, coin] : m_notes) {
+                            const auto key_it = std::find_if(m_key_sets.begin(), m_key_sets.end(), [&](const auto& entry) {
+                                return entry.second.spending_pk_hash == coin.note.recipient_pk_hash;
+                            });
+                            if (key_it == m_key_sets.end()) {
+                                note_without_key = true;
+                                break;
+                            }
+                            if (!highest_note_index.has_value() || key_it->second.index > *highest_note_index) {
+                                highest_note_index = key_it->second.index;
+                            }
                         }
                     }
+                    if (m_scan_incomplete || note_without_key || !highest_note_index.has_value() ||
+                        *highest_note_index + 1 + GAP_LIMIT <= search_limit) {
+                        break;
+                    }
+                    const uint32_t next_limit{*highest_note_index + 1 + GAP_LIMIT};
+                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys note at index %u; searching indices %u to %u\n",
+                              *highest_note_index, search_limit, next_limit - 1);
+                    derive_keys(search_limit, next_limit);
+                    search_limit = next_limit;
                 }
+                m_defer_persist = previous_defer;
 
                 if (m_scan_incomplete || note_without_key) {
                     // A missing block, or a note we cannot tie to a derived
