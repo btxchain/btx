@@ -35,7 +35,7 @@ class WalletShieldedRehydrateIssuedTest(BitcoinTestFramework):
         payer = encrypt_and_unlock_wallet(node, "payer")
         mine_addr = payer.getnewaddress()
         fund_trusted_transparent_balance(
-            self, node, payer, mine_addr, Decimal("20.0"), sync_fun=self.no_op
+            self, node, payer, mine_addr, Decimal("10.0"), sync_fun=self.no_op
         )
         ensure_ring_diversity(self, node, payer, mine_addr, payer.z_getnewaddress())
 
