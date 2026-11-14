@@ -116,9 +116,11 @@ class UTXODriver:
         c=self.watch_terms(terms,local_key);self.ready()
         result=self.wallet('walletcreatefundedpsbt',[],[{c['address']:coin_string(atoms(terms.amount_atoms))}],0,
                            {'lockUnspents':True,'replaceable':False,'include_unsafe':False,
-                            'fee_rate':self.fee_rate,'minconf':self.confirmations},True)
+                            'fee_rate':self.fee_rate,'minconf':self.confirmations,'psbt_version':0},True)
         fee=to_atoms(result['fee']);require(0<=fee<=atoms(max_fee_atoms),'FEE_CAP','Funding fee exceeds authorization')
-        decoded=self.rpc('decodepsbt',result['psbt'])['tx']
+        psbt=self.rpc('decodepsbt',result['psbt'])
+        decoded=psbt.get('tx') if type(psbt) is dict else None
+        require(type(decoded) is dict,'PSBT_VERSION','decodepsbt has no unsigned transaction')
         expected=[];match=[];input_total=0
         for i in decoded['vin']:
             prev=self.rpc('gettxout',i['txid'],i['vout'],True)

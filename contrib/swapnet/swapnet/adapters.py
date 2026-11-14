@@ -56,13 +56,15 @@ class UtxoAdapter:
     def prepare_funding(self,address,amount_atoms,fee_rate,max_fee_atoms,minconf):
         self.check_chain()
         integer(minconf,lo=1);integer(fee_rate,lo=1,hi=10000)
-        options={'lockUnspents':False,'replaceable':False,'include_unsafe':False,'fee_rate':fee_rate,'minconf':minconf}
+        options={'lockUnspents':False,'replaceable':False,'include_unsafe':False,'fee_rate':fee_rate,'minconf':minconf,'psbt_version':0}
         result=self.wallet('walletcreatefundedpsbt',[],[{address:coin_string(amount_atoms)}],0,options,True)
         require(to_atoms(result['fee'])<=max_fee_atoms,'FEE_CAP','Funding fee exceeds approved cap')
         return result
     def sign_funding(self,psbt,*,approved_plan,is_owned_change):
         decoded=self.rpc('decodepsbt',psbt)
-        approved_plan.verify_decoded(decoded['tx'],is_owned_change=is_owned_change,atoms_from_rpc=to_atoms)
+        tx=decoded.get('tx') if type(decoded) is dict else None
+        require(type(tx) is dict,'PSBT_VERSION','decodepsbt has no unsigned transaction')
+        approved_plan.verify_decoded(tx,is_owned_change=is_owned_change,atoms_from_rpc=to_atoms)
         signed=self.wallet('walletprocesspsbt',psbt,True,'ALL',True)
         require(signed.get('complete') is True,'SIGNING_INCOMPLETE','Wallet did not sign all inputs')
         finalized=self.rpc('finalizepsbt',signed['psbt'],True)
