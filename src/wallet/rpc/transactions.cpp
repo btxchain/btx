@@ -1104,6 +1104,19 @@ UniValue RescanWallet(CWallet& wallet, const UniValue& params, const WalletResca
 
     EnsureNoHistoricalShieldedPartialRescan(*pwallet, start_height);
 
+    // The shielded part of the rescan clears the notes, the tree and the pending
+    // spends and rebuilds them from start_height (Rescan below). A scan that ends
+    // at a stop_height below the tip would leave them rebuilt only that far.
+    if (stop_height && pwallet->m_shielded_wallet) {
+        const int tip_height = WITH_LOCK(pwallet->cs_wallet, return pwallet->GetLastBlockHeight());
+        LOCK(pwallet->m_shielded_wallet->cs_shielded);
+        if (*stop_height < tip_height && pwallet->m_shielded_wallet->LastScannedHeight() >= 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "stop_height below the tip is not supported for a wallet with shielded scan state: "
+                "the shielded rescan rebuilds the notes and the tree up to the tip. Omit stop_height.");
+        }
+    }
+
     // Ensure shielded keys are loaded before rescanning.  When the node
     // started with a locked wallet, LoadPersistedState could only read the
     // plaintext tree-only fallback, leaving m_key_sets empty.  Rehydrating
@@ -1144,7 +1157,7 @@ RPCHelpMan rescanblockchain()
                 "and block filters are available (using startup option \"-blockfilterindex=1\").\n",
                 {
                     {"start_height", RPCArg::Type::NUM, RPCArg::Default{0}, "block height where the rescan should start"},
-                    {"stop_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "the last block height that should be scanned. If none is provided it will rescan up to the tip at return time of this call."},
+                    {"stop_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "the last block height that should be scanned. If none is provided it will rescan up to the tip at return time of this call. A wallet with shielded scan state refuses a height below the tip."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",

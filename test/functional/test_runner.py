@@ -176,6 +176,7 @@ BASE_SCRIPTS = [
     'feature_whitelist_noban_guardrails.py',
     'rpc_pq_wallet.py',
     'wallet_shielded_encrypted_persistence.py',
+    'wallet_shielded_rescan_stop_height.py --descriptors',
     'wallet_shielded_restart_persistence.py',
     'wallet_shielded_reorg_recovery.py',
     'feature_shielded_prune_reorg.py',
