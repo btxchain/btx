@@ -86,7 +86,7 @@ mr(pqhd(seed/…), pk_slh(pqhd(seed/…)))
 
 ### Can withdrawals be batched?
 
-**Yes.** One transaction, many outputs, plus change: `createexchangebatch` (BCP/1) or existing `sendmany` / `createpsbt` with multiple outputs. The batch remains unsigned until the external signer returns ML-DSA-44 (or SLH-DSA-128s) signatures.
+**Yes.** One transaction, many outputs, plus change: `createexchangebatch` (BCP/1) or existing `sendmany` / `createpsbt` with multiple outputs. The batch remains unsigned until the external signer returns ML-DSA-44 (or SLH-DSA-128s) signatures. Pass `lock_unspents: true` so that the next batch does not select the inputs of one still being signed (see [external-sign.md](external-sign.md)).
 
 ### Are mempool and confirmation events available?
 

@@ -445,6 +445,17 @@ UniValue FundedPackage(CWallet& wallet, const std::vector<CRecipient>& recipient
     return out;
 }
 
+// lock_unspents: lock the inputs of a package in memory, as walletcreatefundedpsbt
+// does, so that the next package does not select them while this one is being
+// signed. Spending them unlocks them; lockunspent true releases a dropped package.
+void LockPackageInputs(CWallet& wallet, const UniValue& funded)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    for (const UniValue& in : funded["selected_utxos"].getValues()) {
+        wallet.LockCoin(COutPoint(Txid::FromUint256(ParseHashO(in, "txid")), in["vout"].getInt<uint32_t>()));
+    }
+}
+
 CTxDestination WatchOmnibus(const CWallet& wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
@@ -1310,6 +1321,7 @@ RPCHelpMan createconsolidationtx()
                 {"max_inputs", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
                 {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
                 {"plan", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "planconsolidation result", std::vector<RPCArg>{}},
+                {"lock_unspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock the selected inputs (in memory, as lockunspent) until they are spent or unlocked"},
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
@@ -1338,7 +1350,12 @@ RPCHelpMan createconsolidationtx()
             if (request.params[0].isStr()) {
                 options.pushKV("change_address", request.params[0].get_str());
             }
-            return PlanCoins(*pwallet, options, /*create_tx=*/true);
+            const bool lock_unspents{options.exists("lock_unspents") && options["lock_unspents"].get_bool()};
+            // Held across selection and locking, so no other call selects these inputs in between.
+            LOCK(pwallet->cs_wallet);
+            UniValue funded = PlanCoins(*pwallet, options, /*create_tx=*/true);
+            if (lock_unspents) LockPackageInputs(*pwallet, funded);
+            return funded;
         },
     };
 }
@@ -1413,6 +1430,7 @@ RPCHelpMan createexchangebatch()
                 {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, ""},
                 {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Fee rate in " + CURRENCY_ATOM + "/vB"},
                 {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
+                {"lock_unspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock the selected inputs (in memory, as lockunspent) until they are spent or unlocked"},
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
@@ -1447,11 +1465,15 @@ RPCHelpMan createexchangebatch()
                 }
             }
             CCoinControl cc = CoinControlFromOptions(*pwallet, options, /*default_minconf=*/1);
+            const bool lock_unspents{options.exists("lock_unspents") && options["lock_unspents"].get_bool()};
+            // Held across selection and locking, so no other call selects these inputs in between.
+            LOCK(pwallet->cs_wallet);
             UniValue funded = FundedPackage(*pwallet, recs, cc, std::nullopt);
             if (options.exists("fee_ceiling") && funded.exists("fee_atoms") &&
                 funded["fee_atoms"].getInt<int64_t>() > AmountFromValue(options["fee_ceiling"])) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "estimated fee exceeds fee_ceiling");
             }
+            if (lock_unspents) LockPackageInputs(*pwallet, funded);
             return funded;
         },
     };
