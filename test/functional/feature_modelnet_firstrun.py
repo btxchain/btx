@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import get_datadir_path
+from test_framework.util import get_datadir_path, unix_socket_path
 
 MATMUL_OFF_ARGS = [
     "-regtestmatmulbindingheight=2147483647",
@@ -52,7 +52,7 @@ class ModelNetFirstRunTest(BitcoinTestFramework):
 
     def _start_helper(self, modeldir, extra):
         modeldir.mkdir(parents=True, exist_ok=True)
-        sock = modeldir / "modeld.sock"
+        sock = unix_socket_path(modeldir / "modeld.sock")
         if sock.exists():
             sock.unlink()
         argv = [str(self._modeld_path()), f"-modeldir={modeldir}", f"-modelrpcsocket={sock}", *extra]
