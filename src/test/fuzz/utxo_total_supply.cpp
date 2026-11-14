@@ -171,6 +171,13 @@ FUZZ_TARGET(utxo_total_supply)
             },
             [&] {
                 // Append the current block to the active chain
+                if (duplicate_coinbase_height == ActiveHeight() + 1) {
+                    // The BTX miner tags each coinbase scriptSig with a random
+                    // value (node/miner.cpp), so recreate the duplicate here.
+                    CMutableTransaction tx{*current_block->vtx.front()};
+                    tx.vin.at(0).scriptSig = duplicate_coinbase_script;
+                    current_block->vtx.front() = MakeTransactionRef(tx);
+                }
                 node::RegenerateCommitments(*current_block, chainman);
                 const bool was_valid = !MineBlock(node, current_block).IsNull();
 
