@@ -6714,16 +6714,28 @@ std::optional<ShieldedTxView> CShieldedWallet::RebuildTransactionViewFromNoteAnc
     const auto tip_height = m_parent_wallet.chain().getHeight();
     if (!tip_height.has_value() || m_last_scanned_height < 0) return std::nullopt;
 
-    std::set<uint256> seen_blocks;
+    // The block that confirmed a note, and for a spent note the block that spent
+    // it. A spend this wallet did not create (the same keys in a restored copy)
+    // is not a wallet transaction, and its block may hold none of our notes.
+    // A spent block has no stored hash; spent_height is reset when it is
+    // disconnected, so the active block at that height is the one scanned.
+    std::set<std::pair<int, uint256>> candidates;
     for (const auto& [_, coin] : m_notes) {
-        if (coin.confirmation_height < 0 || coin.block_hash.IsNull()) continue;
-        if (coin.confirmation_height > m_last_scanned_height || coin.confirmation_height > *tip_height) continue;
-        if (!seen_blocks.insert(coin.block_hash).second) continue;
-        if (!m_parent_wallet.chain().haveBlockOnDisk(coin.confirmation_height)) continue;
-        if (m_parent_wallet.chain().getBlockHash(coin.confirmation_height) != coin.block_hash) continue;
+        if (coin.confirmation_height >= 0 && !coin.block_hash.IsNull()) {
+            candidates.emplace(coin.confirmation_height, coin.block_hash);
+        }
+        if (coin.is_spent && coin.spent_height >= 0) candidates.emplace(coin.spent_height, uint256{});
+    }
+    std::set<uint256> seen_blocks;
+    for (const auto& [height, stored_hash] : candidates) {
+        if (height > m_last_scanned_height || height > *tip_height) continue;
+        if (!m_parent_wallet.chain().haveBlockOnDisk(height)) continue;
+        const uint256 block_hash = m_parent_wallet.chain().getBlockHash(height);
+        if (!stored_hash.IsNull() && block_hash != stored_hash) continue;
+        if (!seen_blocks.insert(block_hash).second) continue;
 
         CBlock block;
-        if (!m_parent_wallet.chain().findBlock(coin.block_hash, interfaces::FoundBlock().data(block)) || block.IsNull()) {
+        if (!m_parent_wallet.chain().findBlock(block_hash, interfaces::FoundBlock().data(block)) || block.IsNull()) {
             continue;
         }
         for (const auto& txref : block.vtx) {
