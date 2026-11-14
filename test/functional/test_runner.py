@@ -134,6 +134,7 @@ BASE_SCRIPTS = [
     # inspecting, importing, or migrating pre-existing legacy-wallet data
     # remain registered separately for compatibility coverage.
     'wallet_fundrawtransaction.py --descriptors',
+    'wallet_recipient_amount_range.py --descriptors',
     'wallet_bumpfee.py --descriptors',
     'wallet_import_rescan.py --legacy-wallet',
     'wallet_backup.py --descriptors',
