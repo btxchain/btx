@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from test_framework.blocktools import REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 
 def outpoints(items):
@@ -51,6 +51,16 @@ class WalletBcp1PlanInputsTest(BitcoinTestFramework):
             assert_equal(outpoints(replanned["inputs"]), named)
         replanned = wallet.planconsolidation({"plan": plan})
         assert_equal(outpoints(replanned["inputs"]), named)
+
+        self.log.info("A planned input that is locked now is refused, not spent outside the plan")
+        locked = {"txid": plan["inputs"][0]["txid"], "vout": plan["inputs"][0]["vout"]}
+        wallet.lockunspent(False, [locked])
+        assert_raises_rpc_error(-8, "is not spendable here", wallet.createconsolidationtx,
+                                {"plan": plan, "change_address": change})
+        assert_raises_rpc_error(-8, "is not spendable here", wallet.planconsolidation, {"plan": plan})
+        assert_raises_rpc_error(-8, "is not spendable here", wallet.estimateconsolidationfee,
+                                {"plan": plan, "change_address": change})
+        wallet.lockunspent(True, [locked])
 
         self.log.info("estimateconsolidationfee prices the plan's inputs")
         fee = wallet.estimateconsolidationfee({"plan": plan, "change_address": change})
