@@ -22,6 +22,7 @@
 #include <fstream>
 #include <limits>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -513,6 +514,21 @@ bool ModelCatalog::EnforceQuotaLocked(uint64_t need_bytes, std::string& err)
         for (const auto& f : m.core.files) it.bytes += f.size;
         if (m.pinned) pinned_bytes += it.bytes;
         items.push_back(it);
+    }
+    // Find out first whether eviction can make room at all. The loop below
+    // removes artifacts one by one and checks the space only afterwards, so
+    // a download larger than the room eviction can free removed every
+    // unpinned model and then failed anyway.
+    std::set<Digest48> evictable;
+    for (const auto& it : items) {
+        if (!it.pinned && !m_active_artifacts.count(it.artifact_id)) evictable.insert(it.artifact_id);
+    }
+    uint64_t freeable = 0;
+    for (const auto& artifact : evictable) freeable += m_store.ArtifactBytes(artifact);
+    const uint64_t kept = m_store.UsedBytes() > freeable ? m_store.UsedBytes() - freeable : 0;
+    if (need_bytes > cap || kept > cap - need_bytes) {
+        err = pinned_bytes >= cap ? "PINNED_STORAGE_PRESSURE" : "disk quota";
+        return false;
     }
     std::sort(items.begin(), items.end(), [](const EvictItem& a, const EvictItem& b) {
         const int pa = EvictPriority(a);

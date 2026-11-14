@@ -22,8 +22,10 @@
 #include <modelnet/store.h>
 #include <modelnet/transfer.h>
 #include <modelnet/types.h>
+#include <modelnet/verified_manifest.h>
 #include <span.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
 #include <util/strencodings.h>
@@ -588,6 +590,92 @@ BOOST_AUTO_TEST_CASE(uri_12_btx_open_preview_binary_present)
     BOOST_CHECK(!modelnet::CollectionLoadsCode());
     BOOST_CHECK(!modelnet::CircleHasOnChainMembership());
     BOOST_CHECK(!modelnet::CollectionFollowRaisesQuota());
+}
+
+namespace {
+//! A SafeTensors file with one U8 tensor of n bytes.
+fs::path WriteSizedModel(const fs::path& dir, size_t n, unsigned char fill)
+{
+    fs::create_directories(dir);
+    const std::string header = strprintf("{\"w\":{\"dtype\":\"U8\",\"shape\":[%u],\"data_offsets\":[0,%u]}}", n, n);
+    std::vector<unsigned char> st(8 + header.size() + n, fill);
+    WriteLE64(st.data(), header.size());
+    std::memcpy(st.data() + 8, header.data(), header.size());
+    std::ofstream out(dir / "model.safetensors", std::ios::binary);
+    out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    return dir;
+}
+
+bool HasArtifactOnDisk(const modelnet::ModelCatalog& cat, const modelnet::Digest48& artifact)
+{
+    return fs::exists(cat.Store().Root() / "artifacts" / artifact.Hex().c_str());
+}
+} // namespace
+
+// A download larger than the room eviction can free is refused before any
+// model is evicted. One that fits after evicting a model evicts only that.
+BOOST_AUTO_TEST_CASE(download_quota_refused_before_eviction)
+{
+    constexpr uint64_t MiB{1024 * 1024};
+    constexpr uint64_t quota{4 * MiB};
+    const auto download = [](uint64_t bytes) {
+        modelnet::VerifiedManifest manifest;
+        manifest.artifact_id.data[0] = 0xB1;
+        manifest.model_id.data[0] = 0xB2;
+        modelnet::CoreFile file;
+        file.path = "big.safetensors";
+        file.size = bytes;
+        manifest.core.files.push_back(file);
+        return manifest;
+    };
+    // Room after evicting both unpinned models: quota minus the pinned one.
+    // need: above the quota, above that room, and one that fits after one eviction.
+    for (const uint64_t need : {5 * MiB, 3 * MiB + MiB / 2, MiB + MiB / 2}) {
+        const fs::path root{m_path_root / fs::PathFromString(strprintf("quota-evict-%u", need))};
+        const fs::path catdir{root / "cat"};
+        std::string err;
+        std::vector<modelnet::CatalogEntry> unpinned;
+        modelnet::CatalogEntry pinned;
+        {
+            modelnet::ModelCatalog cat{catdir, quota};
+            for (const unsigned char fill : {0x41, 0x42}) {
+                modelnet::CatalogEntry e;
+                const fs::path src{WriteSizedModel(root / "src" / fs::PathFromString(strprintf("%c", fill)), MiB, fill)};
+                BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), /*pin=*/false, e, err), err);
+                unpinned.push_back(e);
+            }
+            const fs::path src{WriteSizedModel(root / "src" / "P", MiB, 0x50)};
+            BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), /*pin=*/true, pinned, err), err);
+            const uint64_t used_before{cat.UsedBytes()};
+
+            err.clear();
+            const bool ok{cat.EnforceDownloadQuota(download(need), err)};
+            size_t unpinned_left{0};
+            for (const auto& e : unpinned) {
+                modelnet::CatalogEntry found;
+                const bool in_catalog{cat.Find(e.model_id, found)};
+                BOOST_CHECK_EQUAL(in_catalog, HasArtifactOnDisk(cat, e.artifact_id));
+                if (in_catalog) ++unpinned_left;
+            }
+            modelnet::CatalogEntry found;
+            BOOST_CHECK(cat.Find(pinned.model_id, found));
+            if (need > quota - MiB) {
+                BOOST_CHECK(!ok);
+                BOOST_CHECK_EQUAL(err, "disk quota");
+                BOOST_CHECK_EQUAL(unpinned_left, 2U);
+                BOOST_CHECK_EQUAL(cat.UsedBytes(), used_before);
+            } else {
+                BOOST_CHECK_MESSAGE(ok, err);
+                BOOST_CHECK_EQUAL(unpinned_left, 1U);
+            }
+        }
+        // After a restart the catalog and the stored pieces still agree.
+        modelnet::ModelCatalog reloaded{catdir, quota};
+        for (const auto& e : unpinned) {
+            modelnet::CatalogEntry found;
+            BOOST_CHECK_EQUAL(reloaded.Find(e.model_id, found), HasArtifactOnDisk(reloaded, e.artifact_id));
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
