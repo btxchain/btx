@@ -429,6 +429,9 @@ class Coordinator:
             if tx.get('confirmations',0)<self.policy.confirmations(driver.family):
                 return False
             if s['stage']=='refunded':
+                # Stage persistence can precede terminal budget cleanup across a crash.
+                # Retry the idempotent cleanup after revalidating the local refund.
+                self.authority.terminal(s['grant_id'])
                 return True
             s['stage']='refunded'
         else:
