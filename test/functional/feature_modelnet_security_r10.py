@@ -44,7 +44,7 @@ from pathlib import Path
 from test_framework.authproxy import JSONRPCException
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import assert_equal, get_datadir_path
+from test_framework.util import assert_equal, get_datadir_path, unix_socket_path
 from test_framework.wallet import MiniWallet
 
 # Recognised as credential sentinels by src/modelnet/hcp_engine.cpp, which
@@ -134,7 +134,7 @@ class ModelNetSecurityR10Test(BitcoinTestFramework):
         self.datadir.mkdir(parents=True, exist_ok=True)
         self.modeldir = self.datadir / "modeldir"
         self.modeldir.mkdir(parents=True, exist_ok=True)
-        self.modeld_socket = self.modeldir / "modeld.sock"
+        self.modeld_socket = unix_socket_path(self.modeldir / "modeld.sock")
         if self.modeld_socket.exists():
             self.modeld_socket.unlink()
         argv = [
