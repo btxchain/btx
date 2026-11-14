@@ -72,6 +72,36 @@ Further notes for this release: `doc/release-notes-253.md` (macOS ML-DSA
 wallet cache), `doc/release-notes-358.md` (lightwatch) and
 `doc/release-notes-htlc-presign.md` (presigned HTLC claims).
 
+SwapNet
+-------
+
+SwapNet is built into `btxd`: the Python package in `contrib/swapnet` is
+frozen into the node and runs in an embedded interpreter. It is off unless
+`-swapnet=1` is set. With `-swapnet=1`, a SwapNet start that fails stops the
+node. Operator guide: `doc/swapnet/OPERATIONS.md`; RPCs: `doc/swapnet/RPC.md`.
+
+- Build: CMake needs Python 3.11 or newer with its development files, and that
+  interpreter must import `cryptography` and `sqlite3` under `python -I`.
+  Otherwise configure stops (`cmake/SwapNet.cmake`). The tested `cryptography`
+  version is in `contrib/swapnet/requirements-tested-runtime.txt`.
+- Run: `btxd` links the Python library, also with `-swapnet=0`. With
+  `-swapnet=1` it also needs that Python's standard library and
+  `cryptography`. `PYTHONPATH` and `PYTHONHOME` are not read.
+- Options: `-swapnet` (default 0); `-swapnetwallet=<name>` binds SwapNet to one
+  loaded wallet, otherwise exactly one wallet must be loaded;
+  `-swapnetowner=<rpcuser>` grants owner-level policy authority (the cookie
+  and the local Qt console are owners).
+- 33 RPCs in the `swapnet` category; `getswapcapabilities` lists them. With
+  `-swapnet=0` each fails with "SwapNet is disabled or not initialized".
+- State is kept in `swapnet/` under the network's data directory:
+  `state.sqlite`, `foreign-vault.json` (the keys for the other chains) and
+  `vault.key`, the key that wraps them. Back them up with `exportswaprecovery`
+  (`doc/swapnet/RECOVERY.md`), not by copying the live database. Outside
+  Windows, SwapNet does not start unless `vault.key` belongs to the node's
+  user and has no group or other permissions.
+- `-swapnet=0` turns off the recovery worker too. It does not cancel a funded
+  swap: the refund deadlines keep running on the chains.
+
 Not included
 ------------
 
