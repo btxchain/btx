@@ -6001,7 +6001,7 @@ bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, s
                             hyd.ApplyRecord(rec, jerr);
         if (layout == CloudObjectLayout::PIECE_OBJECTS) {
             const uint32_t n = cf.size == 0 ? 1u : static_cast<uint32_t>((cf.size + PIECE_SIZE - 1) / PIECE_SIZE);
-            for (uint32_t p = 0; p < n; ++p) {
+            for (uint32_t p = hyd.Progress().next_piece; p < n; ++p) {
                 std::vector<unsigned char> piece;
                 if (!g_cloud->GetPieceObject(e.artifact_id, fi, p, piece, err)) {
                     GlobalOriginStampede().NoteError("cloud-origin", ConnNowMs());
@@ -8790,9 +8790,34 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         CatalogEntry local;
         if (cat.Find(r.digest, local)) {
+            // Saved catalog flags do not establish that the local pieces survived.
+            bool missing_piece = false;
+            for (uint32_t fi = 0; fi < local.core.files.size() && !missing_piece; ++fi) {
+                const uint64_t size = local.core.files[fi].size;
+                const uint64_t count = size == 0 ? 0 : (size - 1) / PIECE_SIZE + 1;
+                for (uint64_t pi = 0; pi < count; ++pi) {
+                    if (!cat.Store().HasPiece(local.artifact_id, fi, static_cast<uint32_t>(pi))) {
+                        missing_piece = true;
+                        break;
+                    }
+                }
+            }
+            if (missing_piece && !local.incomplete) {
+                if (!cat.MarkIncomplete(local.model_id, true, err)) {
+                    err_code = "IO";
+                    return false;
+                }
+                cat.Find(r.digest, local);
+            }
             if (local.incomplete) {
                 std::string herr;
-                if (!TryHydrateFromCloud(cat, local, result, herr) && !herr.empty()) {
+                if (TryHydrateFromCloud(cat, local, result, herr)) {
+                    if (!cat.MarkIncomplete(local.model_id, false, herr)) {
+                        err_code = "IO";
+                        err = herr;
+                        return false;
+                    }
+                } else if (!herr.empty()) {
                     result.pushKV("cloud_hydrate_error", herr);
                 }
                 cat.Find(r.digest, local);
