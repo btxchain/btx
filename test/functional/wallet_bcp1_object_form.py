@@ -10,6 +10,8 @@ the same object. finalizeexternalsign takes the package itself or
 {"package": ..., "signatures": [...]}. Each object form must give the same
 recipients (or the same result) as the plain form, and the node must stay up.
 Unlike feature_bcp1.py this needs no external signer, so it runs everywhere.
+createexchangebatch and createconsolidationtx also take lock_unspents: left
+false, two batches may share an input; set true, they must not.
 """
 from decimal import Decimal
 
@@ -73,6 +75,59 @@ class BCP1ObjectFormTest(BitcoinTestFramework):
             assert_raises_rpc_error(-3, "Amount out of range", node.createexchangebatch, outs_bad, {"change_address": change})
             assert_raises_rpc_error(-3, "Amount out of range", node.prepareexternalsign, {"recipients": outs_bad}, {"change_address": change})
         assert_equal(recipients(node.createexchangebatch(outs, {"change_address": change})), atoms(outs))
+
+        def selected(package):
+            return sorted((u["txid"], u["vout"]) for u in package["selected_utxos"])
+
+        def locked():
+            return {(e["txid"], e["vout"]) for e in node.listlockunspent()}
+
+        pay = [{"address": a, "amount": Decimal("0.1")}]
+        self.log.info("lockUnspents is rejected and a fee ceiling locks nothing")
+        assert_equal(node.listlockunspent(), [])
+        assert_raises_rpc_error(-8, "Use lock_unspents instead of lockUnspents",
+                                node.createexchangebatch, pay, {"change_address": change, "lockUnspents": True})
+        assert_raises_rpc_error(-8, "Use lock_unspents instead of lockUnspents",
+                                node.createconsolidationtx, {"change_address": change, "lockUnspents": True})
+        assert_raises_rpc_error(-4, "estimated fee exceeds fee_ceiling",
+                                node.createexchangebatch, pay,
+                                {"change_address": change, "lock_unspents": True, "fee_ceiling": Decimal("0.00000001")})
+        assert_raises_rpc_error(-4, "estimated fee exceeds fee_ceiling",
+                                node.createconsolidationtx,
+                                {"change_address": change, "lock_unspents": True, "fee_ceiling": Decimal("0.00000001")})
+        assert_equal(node.listlockunspent(), [])
+
+        utxos = node.listunspent()
+        assert len(utxos) >= 2
+        keep = max(utxos, key=lambda u: u["amount"])
+        keep_out = (keep["txid"], keep["vout"])
+        others = [{"txid": u["txid"], "vout": u["vout"]} for u in utxos if (u["txid"], u["vout"]) != keep_out]
+        node.lockunspent(False, others)
+        self.log.info("two batches with lock_unspents false may share an input")
+        shared = node.createexchangebatch(pay, {"change_address": change})
+        shared_again = node.createexchangebatch(pay, {"change_address": change, "lock_unspents": False})
+        assert_equal(selected(shared), [keep_out])
+        assert_equal(selected(shared_again), [keep_out])
+        cons = node.createconsolidationtx({"change_address": change, "max_inputs": 1})
+        cons_again = node.createconsolidationtx({"change_address": change, "max_inputs": 1, "lock_unspents": False})
+        assert_equal(selected(cons), [keep_out])
+        assert_equal(selected(cons_again), [keep_out])
+        assert keep_out not in locked()
+        node.lockunspent(True)
+        assert_equal(node.listlockunspent(), [])
+
+        self.log.info("two batches with lock_unspents true must not share an input")
+        locked_a = node.createexchangebatch(pay, {"change_address": change, "lock_unspents": True})
+        locked_b = node.createexchangebatch(pay, {"change_address": change, "lock_unspents": True})
+        assert set(selected(locked_a)).isdisjoint(selected(locked_b))
+        assert set(selected(locked_a)).issubset(locked())
+        assert set(selected(locked_b)).issubset(locked())
+        node.lockunspent(True)
+        cons_a = node.createconsolidationtx({"change_address": change, "max_inputs": 1, "lock_unspents": True})
+        cons_b = node.createconsolidationtx({"change_address": change, "max_inputs": 1, "lock_unspents": True})
+        assert set(selected(cons_a)).isdisjoint(selected(cons_b))
+        assert set(selected(cons_a)).issubset(locked())
+        assert set(selected(cons_b)).issubset(locked())
 
 
 if __name__ == '__main__':

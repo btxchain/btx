@@ -69,6 +69,8 @@ Wallet RPCs fail closed if they would use in-process private keys under `-exchan
 | `estimateconsolidationfee` | Fee / weight for a consolidation plan |
 | `createexchangebatch` | One tx, N withdrawal outputs, change, digests |
 
+`createexchangebatch` and `createconsolidationtx` take `lock_unspents` (default false), and a true value locks the selected inputs until the caller unlocks them or spends them.
+
 ### Reused (already in tree)
 
 | RPC | Purpose |
