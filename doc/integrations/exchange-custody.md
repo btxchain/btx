@@ -88,6 +88,8 @@ mr(pqhd(seed/…), pk_slh(pqhd(seed/…)))
 
 **Yes.** One transaction, many outputs, plus change: `createexchangebatch` (BCP/1) or existing `sendmany` / `createpsbt` with multiple outputs. The batch remains unsigned until the external signer returns ML-DSA-44 (or SLH-DSA-128s) signatures.
 
+`createexchangebatch` and `createconsolidationtx` take `lock_unspents` (default false), and a true value locks the selected inputs until the caller unlocks them or spends them.
+
 ### Are mempool and confirmation events available?
 
 **Yes.** BCP/1 names: `transaction.mempool`, `transaction.confirmed`, `deposit.detected`, `deposit.confirmations_changed`, plus block connect/disconnect and reorg. They map onto existing ZMQ (`hashtx`, `hashblock`, `rawtx`, `rawblock`, `sequence`, wallet topics) and wallet notify / `getdepositstatus`. See [bcp1.md](bcp1.md).
