@@ -30,7 +30,15 @@ def find_funding_output(driver, terms, sid=None, *, recover_history=False):
     double alone means no output.
     """
     if isinstance(driver, UTXODriver):
-        return _reference(_scan_utxo_history(driver, terms) if recover_history else _scan_utxo(driver, terms))
+        if not recover_history:
+            return _reference(_scan_utxo(driver, terms))
+        if driver.family == 'btx':
+            # A restored BTX lock that is still unspent is adopted as before. Only
+            # one that is not (claimed, refunded) has to come from wallet history.
+            live = _scan_utxo(driver, terms)
+            if live:
+                return _reference(live)
+        return _reference(_scan_utxo_history(driver, terms))
     if _memory_test_double(driver):
         scanner = getattr(driver, 'scan_existing_funding', None)
         if not callable(scanner):
@@ -323,7 +331,7 @@ def _reference(found):
 
 
 def _scan_utxo_history(driver, terms):
-    """A restored Bitcoin session cannot treat missing history as a new spend grant."""
+    """A restored BTX or Bitcoin session cannot treat missing history as a new spend grant."""
     try:
         return _utxo_history(driver, terms)
     except SwapError:
@@ -333,7 +341,7 @@ def _scan_utxo_history(driver, terms):
 
 
 def _utxo_history(driver, terms):
-    require(driver.family == 'btc', 'FUNDING_LOOKUP', 'Unsupported historical recovery')
+    require(driver.family in ('btc', 'btx'), 'FUNDING_LOOKUP', 'Unsupported historical recovery')
     tip = driver.rpc('getbestblockhash')
     candidates = {}
     live = _scan_utxo(driver, terms)
