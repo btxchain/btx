@@ -17,11 +17,44 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_economy_tests, BasicTestingSetup)
+
+// The helper's two unix workers both call EnsureEconomy, which loads the feed,
+// the search index and the campaigns the first time a directory is used. It
+// read and set its flags without a lock; under -fsanitize=thread this case
+// showed the race before it was locked. btx-modeld binds the event layer at
+// start, before the workers run, so the first call here does that on one thread.
+BOOST_AUTO_TEST_CASE(economy_loads_from_two_workers)
+{
+    using namespace modelnet;
+    auto call = [](ModelCatalog& cat) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "getmodelrelease");
+        req.pushKV("params", UniValue(UniValue::VARR));
+        UniValue result;
+        std::string code, err;
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    const fs::path first_dir = m_args.GetDataDirBase() / "econ-first";
+    const fs::path dir = m_args.GetDataDirBase() / "econ-two-workers";
+    fs::create_directories(first_dir);
+    fs::create_directories(dir);
+    ModelCatalog first{first_dir, 8 << 20};
+    BOOST_REQUIRE(call(first));
+    // A directory the economy has not loaded yet: both workers reach the load.
+    ModelCatalog cat{dir, 8 << 20};
+    std::atomic<int> ok{0};
+    std::thread worker([&] { for (int i = 0; i < 20; ++i) ok += call(cat) ? 1 : 0; });
+    for (int i = 0; i < 20; ++i) ok += call(cat) ? 1 : 0;
+    worker.join();
+    BOOST_CHECK_EQUAL(ok.load(), 40);
+}
 
 BOOST_AUTO_TEST_CASE(econ_fund_01_card_math)
 {

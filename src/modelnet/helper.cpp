@@ -2540,10 +2540,17 @@ void EnsureSearchBound()
     }
 }
 
+//! Taken by EnsureEconomy before g_search_mu and g_campaign_mu. The RPC workers
+//! call it at the same time; no caller holds either of those locks there.
+static std::mutex g_econ_mu;
+
 void EnsureEconomy(ModelCatalog& cat)
 {
     EnsureSearchBound();
     const fs::path dir = HelperDir(cat);
+    // Another worker may be loading: g_feed_loaded is set before the index, the
+    // feed and the campaigns are read, so check and load under one lock.
+    std::lock_guard<std::mutex> econ_lock(g_econ_mu);
     if (g_feed_loaded && dir == g_econ_dir) return;
     g_chain_obs.clear();
     g_feed = FeedStore();
