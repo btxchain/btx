@@ -115,6 +115,8 @@ def create_fake_tools(root):
         done
         if [ -n "$datadir" ]; then
           printf '%s\\n' "$$" > "$datadir/pid"
+          # Every pid this release ran as, so a test can check that none of them outlives a rollback.
+          printf '%s\\n' "$$" >> "$datadir/source-btxd.pids"
           # Healthy = leave a readiness marker. Unhealthy = stay alive (so the basic liveness check
           # passes) but never become ready, so the RPC health probe fails and triggers rollback.
           if [ "${BTX_TEST_RESTART_UNHEALTHY:-0}" != "1" ]; then
@@ -562,6 +564,57 @@ def test_unhealthy_restart_triggers_rollback_path():
         finally:
             _kill_datadir_daemon(scenario.target_datadir)
 
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_rollback_stops_the_release_that_failed_its_probe():
+    # The new release starts but never answers the health probe. The rollback
+    # starts the previous release on the same data directory, so it must stop
+    # the failed daemon first; btxd itself refuses a second process on a
+    # locked data directory.
+    with Scenario("rollback-stop", {"BTX_AUTO_RESTART": "1", "BTX_TEST_RESTART_UNHEALTHY": "1",
+                                    "BTX_HEALTH_TIMEOUT_SECONDS": "2"}) as scenario:
+        install = scenario.tmp / "install"
+        previous = install / "releases" / "old"
+        (previous / "bin").mkdir(parents=True)
+        write_executable(previous / "bin" / "btxd", PREBUILT_BTXD)
+        write_executable(previous / "bin" / "btx-cli", PREBUILT_BTXCLI)
+        (previous / "manifest.json").write_text('{"git_commit": "old"}', encoding="utf8")
+        current = install / "current"
+        current.symlink_to(previous)
+        links = scenario.tmp / "links"
+        links.mkdir()
+        for tool in ("btxd", "btx-cli"):
+            (links / tool).symlink_to(current / "bin" / tool)
+        failed_pids = scenario.target_datadir / "source-btxd.pids"
+        try:
+            result = scenario.run_installer()
+            assert_failure(result)
+            output = result.stdout + result.stderr
+            if "rolled back to the previous release" not in output or current.resolve() != previous.resolve():
+                raise AssertionError(f"expected a rollback to the previous release:\n{output}")
+            if not failed_pids.exists():
+                raise AssertionError(f"the new release never started:\n{output}")
+            alive = [pid for pid in map(int, failed_pids.read_text(encoding="utf8").split()) if _pid_alive(pid)]
+            if alive:
+                raise AssertionError(f"the release that failed its health probe still runs after the rollback (pid {alive})")
+        finally:
+            _kill_datadir_daemon(scenario.target_datadir)
+            if failed_pids.exists():
+                for pid in map(int, failed_pids.read_text(encoding="utf8").split()):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
 
 
 def test_failed_activation_restarts_previous_release():
@@ -1056,6 +1109,7 @@ def main():
         test_manual_mode_refuses_ambiguous_processes,
         test_healthy_restart_passes_health_probe,
         test_unhealthy_restart_triggers_rollback_path,
+        test_rollback_stops_the_release_that_failed_its_probe,
         test_failed_activation_restarts_previous_release,
         test_unusable_previous_release_leaves_running_node_untouched,
         test_prebuilt_binary_is_used_without_source_build,
