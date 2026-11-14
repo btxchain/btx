@@ -7776,6 +7776,23 @@ void CShieldedWallet::LoadPersistedState()
     m_next_spending_index = std::max(m_next_spending_index, max_index);
     m_next_kem_index = std::max(m_next_kem_index, max_index);
 
+    // Shielded keys are not part of the wallet's birth time, which is kept
+    // only in memory. A wallet whose only keys are shielded (a blank wallet
+    // with z_getnewaddress or an imported viewing key) therefore has no birth
+    // time after a restart, and blockConnected skips every new block. Once
+    // the keys are loaded, lower it to the last scanned block, or to 0 when
+    // that block is not known.
+    if (!m_key_sets.empty()) {
+        int64_t birth_time{0};
+        if (m_parent_wallet.HaveChain() && m_last_scanned_height >= 0 && !m_last_scanned_hash.IsNull()) {
+            int64_t max_time{0};
+            if (m_parent_wallet.chain().findBlock(m_last_scanned_hash, interfaces::FoundBlock().maxTime(max_time))) {
+                birth_time = max_time;
+            }
+        }
+        m_parent_wallet.MaybeUpdateBirthTime(birth_time);
+    }
+
     if (!m_parent_wallet.IsCrypted() && rewrite_unencrypted_tree_only && !PersistState()) {
         LogPrintf("CShieldedWallet::LoadPersistedState: failed to persist sanitized tree-only state\n");
     }

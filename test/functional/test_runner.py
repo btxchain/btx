@@ -265,6 +265,7 @@ BASE_SCRIPTS = [
     'wallet_dump.py --legacy-wallet',
     'rpc_signer.py',
     'wallet_signer.py --descriptors',
+    'wallet_shielded_birth_time_restart.py --descriptors',
     'wallet_importmulti.py --legacy-wallet',
     'mempool_limit.py',
     'rpc_txoutproof.py',
