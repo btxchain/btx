@@ -2,6 +2,10 @@
 
 All calls take one optional named request object. Authentication/owner status comes from the native caller and never from these fields. Amounts are atomic-unit decimal strings. See `rpc-catalog.json` and `schemas/local_request.schema.json` for constraints.
 
+A market is named from the taker's side. `sell_asset` is what the taker pays and `buy_asset` is what the taker receives. The maker pays `buy_asset`, so `createswapmandate` for that maker must use `buy_asset`, and the maker's inventory is denominated in `buy_asset`. `max_receive_network_fee_atoms` and the taker's `claim_fee_atoms` are atomic units of `buy_asset`. `refund_fee_atoms` is atomic units of the asset that party refunds.
+
+`runtime_hash` in an EVM asset policy is the keccak256 of the deployed runtime bytecode. Copy it from that build. An anvil node reports `finalized` as block 0 until it is started with `--slots-in-an-epoch 1`.
+
 ## getswapnetworkinfo
 
 Scope: `read`.
@@ -55,7 +59,7 @@ Scope: `trade`.
 - `max_local_fee_atoms` — required; string.
 - `quote_id` — required; string.
 - `refund_fee_atoms` — optional; string.
-- `claim_fee_atoms` — optional; string.
+- `claim_fee_atoms` — optional; string. Atomic units of `buy_asset` (the short leg the taker claims).
 
 ## listswaps
 
