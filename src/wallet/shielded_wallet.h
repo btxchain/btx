@@ -703,7 +703,7 @@ private:
     [[nodiscard]] std::optional<ShieldedTxView> BuildLocalTransactionView(const CTransaction& tx) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     /** On a cache miss, rebuild one transaction from a block this wallet already
-     *  scanned: the block hash stored on a note from that transaction. */
+     *  scanned: the block that confirmed one of its notes, or the block that spent one. */
     [[nodiscard]] std::optional<ShieldedTxView> RebuildTransactionViewFromNoteAnchor(const uint256& txid)
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     [[nodiscard]] std::vector<ShieldedCoin> SelectNotes(CAmount target,
