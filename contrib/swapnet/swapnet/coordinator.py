@@ -248,15 +248,20 @@ class Coordinator:
         else:
             from .funding_scan import find_funding_output
             # A committed restore has no funding record. Adopt an exact unspent
-            # lock instead of building a second one. A failed lookup raises.
-            adopted=find_funding_output(driver,own)
+            # lock, or the EVM lock already stored under its deterministic id,
+            # instead of building a second one. A failed lookup raises.
+            adopted=find_funding_output(driver,own,sid)
             if adopted:
-                ref={'txid':adopted['txid'],'vout':adopted['vout']}
-                if adopted.get('raw'):
-                    from .drivers import Prepared
-                    funded=Prepared(adopted['txid'],adopted['raw'],ref,'0',{'adopted_output':True})
-                else:
+                if 'lock_id' in adopted:
+                    ref={'txid':adopted['txid'],'lock_id':adopted['lock_id'],'salt':adopted['salt']}
                     funded=None
+                else:
+                    ref={'txid':adopted['txid'],'vout':adopted['vout']}
+                    if adopted.get('raw'):
+                        from .drivers import Prepared
+                        funded=Prepared(adopted['txid'],adopted['raw'],ref,'0',{'adopted_output':True})
+                    else:
+                        funded=None
             else:
                 funded=driver.prepare_funding(sid,own,s['keys']['refund'],s['reservation_id'],s['max_local_fee_atoms'])
         # No broadcast until BOTH immutable funding and refund records are durable.
@@ -265,7 +270,7 @@ class Coordinator:
             s['fund_op']=self._persist_prepared(sid,own.asset,'fund',funded)
             s['refs'][own_name]=funded.reference
         else:
-            s['refs'][own_name]={'txid':adopted['txid'],'vout':adopted['vout']}
+            s['refs'][own_name]=ref
         funding_fee=funded.fee_atoms if funded is not None else '0'
         self.authority.check(s['grant_id'],agr.id,kind='refund',asset=own.asset,
                              fee_atoms=own.max_refund_fee_atoms,destination=own.refund_payout)
