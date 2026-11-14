@@ -200,6 +200,10 @@ class ModelNetMinioLayoutsTest(BitcoinTestFramework):
         ]]
         self.add_nodes(self.num_nodes, extra_args=self.extra_args)
         self.start_nodes()
+        # The helper is already up, but the first setcloudstorage can run
+        # before its socket answers. getcloudstorageinfo is the probe that
+        # actually reaches the helper.
+        self._wait_helper_ready()
 
     def shutdown(self):
         self._stop_helper()
