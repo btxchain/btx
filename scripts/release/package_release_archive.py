@@ -124,7 +124,7 @@ if [ -e "$LIB_DIR/libssl.so.3" ]; then
   export LD_LIBRARY_PATH
 fi
 
-# Unprivileged newer-userspace prefix (dpkg-deb -x libc6 libstdc++6 libgcc-s1).
+@SWAPNET_ENV@# Unprivileged newer-userspace prefix (dpkg-deb -x libc6 libstdc++6 libgcc-s1).
 # When set, skip the host glibc check: the prefix loader is what will run.
 if [ -n "${BTX_GLIBC_PREFIX:-}" ]; then
   BTX_GLIBC_LOADER="${BTX_GLIBC_PREFIX}/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
@@ -242,6 +242,26 @@ exec "$REAL" "$@"
 """
 
 
+# btxd and btx-qt run the SwapNet worker. Its cryptography loads OpenSSL's legacy
+# provider by default and refuses to import when that fails. The libcrypto.so.3
+# in lib/ looks for providers under the build host's OpenSSL prefix, and the worker
+# uses no legacy algorithm (SHA-256, scrypt, AES-GCM, EC). This is cryptography's
+# own switch; no OpenSSL search path changes (modelnet clears OPENSSL_MODULES).
+# It sits before the BTX_GLIBC_PREFIX exec so the private-loader path gets it too.
+LINUX_SWAPNET_ENV = r"""if [ -z "${CRYPTOGRAPHY_OPENSSL_NO_LEGACY+x}" ]; then
+  for BTX_PY_LANDMARK in "$LIB_DIR"/python3.*/os.py; do
+    if [ -e "$BTX_PY_LANDMARK" ]; then
+      CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1
+      export CRYPTOGRAPHY_OPENSSL_NO_LEGACY
+    fi
+    break
+  done
+fi
+
+"""
+SWAPNET_BINARIES = ("btxd", "btx-qt")
+
+
 def openssl_runtime_libs(btxd_path: Path) -> list[Path]:
     """Copy the OpenSSL 3.x sonames btxd actually links, if ldd can see them."""
     try:
@@ -290,7 +310,8 @@ def wrapper_payload(binary_name: str, platform_id: str) -> str | None:
         # (then readelf -V, then a grep of the ELF) against getconf /
         # libstdc++ version nodes. BTX_GLIBC_PREFIX skips the host check and
         # execs through a private loader (unprivileged dpkg-deb -x prefix).
-        payload = LINUX_WRAPPER.replace("@BINARY@", binary_name).replace("@EXTRA_HINT@", extra_hint)
+        payload = (LINUX_WRAPPER.replace("@BINARY@", binary_name).replace("@EXTRA_HINT@", extra_hint)
+                   .replace("@SWAPNET_ENV@", LINUX_SWAPNET_ENV if binary_name in SWAPNET_BINARIES else ""))
         if binary_name == "btx-qt":
             # Keep Qt's build-time libraries out of Atlas and the node's path.
             payload = payload.replace(
@@ -373,6 +394,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--source-root",
         default=str(ROOT),
         help="Repository root used to source helper scripts and docs (default: repo root).",
+    )
+    parser.add_argument(
+        "--python",
+        help="Linux: interpreter whose libpython btxd links (default: pythonX.Y on PATH, from btxd's DT_NEEDED).",
     )
     parser.add_argument(
         "--archive-name",
@@ -571,6 +596,33 @@ def _load_qt_bundle():
     return module
 
 
+def _load_python_bundle():
+    script = Path(__file__).with_name("bundle_python_runtime.py")
+    spec = importlib.util.spec_from_file_location("bundle_python_runtime", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def bundle_linux_python_runtime(release_root: Path, source_root: Path, python: str | None) -> list[str]:
+    """Ship the libpython, standard library and cryptography that libexec/btxd.real links.
+
+    Without them btxd exits 127 on a host without libpython3.12, and -swapnet=1
+    stops at Python start-up on a host whose Python differs. btxd.real is not
+    edited: it reaches lib/ through its link-time RUNPATH
+    (cmake/module/InstallBinaryComponent.cmake), and verify_staged_abi_floor
+    refuses an executable that does not.
+    """
+    written = _load_python_bundle().bundle_linux_python(
+        release_root / "libexec" / "btxd.real", release_root, source_root=source_root, python=python)
+    if written:
+        print(f"package_release_archive: bundled the Python runtime btxd links ({', '.join(written)})",
+              file=sys.stderr)
+    return written
+
+
 def set_linux_bundled_lib_runpath(path: Path) -> None:
     """Point a staged ELF executable at the archive's shared libraries."""
     bundle = _load_qt_bundle()
@@ -592,6 +644,7 @@ def stage_release_tree(
     temp_root: Path,
     require_gui: bool = False,
     require_model_helpers: bool = False,
+    python: str | None = None,
 ) -> tuple[Path, list[str], list[str]]:
     config = PLATFORM_CONFIGS[platform_id]
     release_root = temp_root / f"btx-{version}"
@@ -688,6 +741,10 @@ def stage_release_tree(
                 shared_roots=[path for path, name in binary_pairs
                               if not name.startswith(("btx-qt", "btx-atlas"))],
             )
+
+    if platform_id.startswith("linux-"):
+        # After the Qt bundle: libpython it already placed in lib/ must match.
+        included += bundle_linux_python_runtime(release_root, source_root, python)
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
@@ -835,6 +892,7 @@ def main(argv: list[str]) -> int:
             temp_root=temp_root,
             require_gui=args.require_gui,
             require_model_helpers=args.require_model_helpers,
+            python=args.python,
         )
         if PLATFORM_CONFIGS[args.platform_id]["archive_format"] == "zip":
             write_zip(archive_path, release_root)

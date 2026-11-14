@@ -2,7 +2,7 @@
 
 ## First launch
 
-Install the qualified binary with its matched Python runtime/standard library and `cryptography`. Launch BTX normally. `-swapnet` stays off unless it is set. With `-swapnet=1`, existing peer connections discover compatible nodes; no new port, seed list, domain name, hosted service, or external identity registration is required. If that explicit start fails, the node does not finish starting.
+Install the qualified binary with its matched Python runtime/standard library and `cryptography`. The Linux release archive carries them in `lib/` (`libpython3.12.so.1.0`, `python3.12/`, the build host's `cryptography`); start it through `bin/btxd` or `bin/btx-qt`. Launch BTX normally. `-swapnet` stays off unless it is set. With `-swapnet=1`, existing peer connections discover compatible nodes; no new port, seed list, domain name, hosted service, or external identity registration is required. If that explicit start fails, the node does not finish starting.
 
 Run `getswapnetworkinfo`, `getswapbootstrapinfo`, `listswapassets` and `getswapwalletinfo`. An empty provider list or `awaiting_compatible_peer` is an accurate state, not an error to hide. Discovery alone never spends.
 
@@ -46,4 +46,4 @@ Normal shutdown joins the embedded worker before native wallet teardown. Stop ne
 
 ## Distribution
 
-Linux compilation is the initial local integration path. macOS and Windows require a packaged matched interpreter/development ABI, standard library and cryptography dependency plus native wallet/Qt regression tests. Existing Qt functionality is preserved; RPC console access is supplied, not an invented new graphical trading panel. No cross-platform binary qualification is claimed by the source archive.
+Linux compilation is the initial local integration path. `scripts/release/package_release_archive.py` copies the libpython that btxd links, that interpreter's standard library and the modules the SwapNet sources import into the Linux archive; btxd uses that standard library only when the libpython it loaded is the archive's copy. macOS and Windows require a packaged matched interpreter/development ABI, standard library and cryptography dependency plus native wallet/Qt regression tests. Existing Qt functionality is preserved; RPC console access is supplied, not an invented new graphical trading panel. No cross-platform binary qualification is claimed by the source archive.
