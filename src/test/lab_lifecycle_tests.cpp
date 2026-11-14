@@ -278,6 +278,122 @@ BOOST_AUTO_TEST_CASE(failed_write_is_rolled_back_and_does_not_block_later_writes
     modelnet::ResetLabApi();
 }
 
+BOOST_AUTO_TEST_CASE(failed_save_keeps_runtime_pause_until_explicit_resume)
+{
+    TempTree root{m_path_root / "lab-rollback-pause"};
+    LabDirEnv env(root.path);
+    PrepareDir(root.path);
+    UniValue result;
+    std::string err;
+    unsigned counter = 0;
+    auto write = [&](const char* method, UniValue req) {
+        req.pushKV("idempotency_key", "rollback-pause-" + std::to_string(++counter));
+        req.pushKV("expected_state", UniValue());
+        return Call(method, req, result, err);
+    };
+    UniValue prepare(UniValue::VOBJ);
+    prepare.pushKV("intent_id", std::string(96, 'a'));
+    BOOST_REQUIRE(write("lab.action_prepare", prepare));
+    const std::string old_permit = result["one_use_permit"].get_str();
+    UniValue bind(UniValue::VOBJ);
+    bind.pushKV("release_id", std::string(96, 'b'));
+    bind.pushKV("environment_ref", UniValue(UniValue::VOBJ));
+    bind.pushKV("requested_grants", UniValue(UniValue::VARR));
+    bind.pushKV("assurance", "LOCAL");
+    BOOST_REQUIRE(write("lab.runtime_bind", bind));
+    const std::string binding = result["record_id"].get_str();
+    UniValue pause(UniValue::VOBJ);
+    pause.pushKV("runtime_binding_id", binding);
+    pause.pushKV("reason", "operator");
+    BOOST_REQUIRE(write("lab.runtime_pause", pause));
+    UniValue execute(UniValue::VOBJ);
+    execute.pushKV("decision_id", std::string(96, 'b'));
+    execute.pushKV("one_use_permit", old_permit);
+    BOOST_CHECK(!write("lab.action_execute", execute));
+    BOOST_CHECK_EQUAL(err, "BTX035_PAUSED");
+    const std::string disk = ReadFile(root.path / "lab.json");
+    fs::create_directory(root.path / "lab.json.tmp");
+    BOOST_CHECK(!Call("lab.identity_create", Identity("unrelated", "rollback-pause-fault"), result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_RECOVERY_REQUIRED");
+    BOOST_CHECK_EQUAL(ReadFile(root.path / "lab.json"), disk);
+    fs::remove(root.path / "lab.json.tmp");
+    // A lost old permit must not be mistaken for an enforced pause.
+    BOOST_CHECK(!write("lab.action_prepare", prepare));
+    BOOST_CHECK_EQUAL(err, "BTX035_PAUSED");
+    UniValue resume(UniValue::VOBJ);
+    resume.pushKV("runtime_binding_id", binding);
+    resume.pushKV("new_grant_id", std::string(96, 'a'));
+    BOOST_REQUIRE(write("lab.runtime_resume", resume));
+    execute.pushKV("one_use_permit", UniValue(old_permit));
+    BOOST_CHECK(!write("lab.action_execute", execute));
+    BOOST_REQUIRE(write("lab.action_prepare", prepare));
+    execute.pushKV("one_use_permit", result["one_use_permit"]);
+    BOOST_REQUIRE(write("lab.action_execute", execute));
+    BOOST_CHECK_EQUAL(result["state"].get_str(), "PERMIT_CONSUMED");
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("unrelated", "rollback-pause-fault"), result, err));
+    modelnet::ResetLabApi();
+}
+
+BOOST_AUTO_TEST_CASE(failed_save_keeps_identity_revoked)
+{
+    TempTree root{m_path_root / "lab-rollback-revocation"};
+    LabDirEnv env(root.path);
+    PrepareDir(root.path);
+    UniValue result;
+    std::string err;
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("revoked", "rollback-identity"), result, err));
+    const std::string identity = result["record_id"].get_str();
+    UniValue payload(UniValue::VOBJ);
+    payload.pushKV("issuer_root", identity);
+    payload.pushKV("revocation_epoch", "1");
+    UniValue targets(UniValue::VARR);
+    targets.push_back(identity);
+    payload.pushKV("targets", targets);
+    payload.pushKV("effective_after_ms", "1");
+    payload.pushKV("reason_code", "operator");
+    payload.pushKV("prior_revocation_id", UniValue());
+    payload.pushKV("quarantine_since_ms", UniValue());
+    UniValue sign(UniValue::VOBJ);
+    sign.pushKV("record_type", "Revocation");
+    sign.pushKV("payload", payload);
+    sign.pushKV("realm_id", std::string(96, 'a'));
+    sign.pushKV("delegation_id", UniValue());
+    sign.pushKV("expires_ms", "4102444800000");
+    sign.pushKV("idempotency_key", "rollback-sign-before");
+    sign.pushKV("expected_state", UniValue());
+    BOOST_REQUIRE(Call("lab.identity_sign", sign, result, err));
+    UniValue import_req(UniValue::VOBJ);
+    import_req.pushKV("envelope", result["envelope"]);
+    import_req.pushKV("publish", false);
+    import_req.pushKV("idempotency_key", "rollback-import-revocation");
+    import_req.pushKV("expected_state", UniValue());
+    BOOST_REQUIRE(Call("lab.record_import", import_req, result, err));
+    UniValue revoke(UniValue::VOBJ);
+    revoke.pushKV("revocation_id", result["record_id"].get_str());
+    revoke.pushKV("idempotency_key", "rollback-revoke-identity");
+    revoke.pushKV("expected_state", UniValue());
+    BOOST_REQUIRE_MESSAGE(Call("lab.identity_revoke", revoke, result, err), err);
+    sign.pushKV("idempotency_key", "rollback-sign-revoked");
+    BOOST_CHECK(!Call("lab.identity_sign", sign, result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_IDENTITY_REVOKED");
+    const std::string disk = ReadFile(root.path / "lab.json");
+    fs::create_directory(root.path / "lab.json.tmp");
+    BOOST_CHECK(!Call("lab.identity_create", Identity("unrelated", "rollback-revocation-fault"), result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_RECOVERY_REQUIRED");
+    BOOST_CHECK_EQUAL(ReadFile(root.path / "lab.json"), disk);
+    fs::remove(root.path / "lab.json.tmp");
+    sign.pushKV("idempotency_key", "rollback-sign-after-failure");
+    BOOST_CHECK(!Call("lab.identity_sign", sign, result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_IDENTITY_REVOKED");
+    UniValue inspect(UniValue::VOBJ);
+    inspect.pushKV("principal_id", identity);
+    BOOST_REQUIRE(Call("lab.identity_inspect", inspect, result, err));
+    BOOST_CHECK_EQUAL(result["state"].get_str(), "REVOKED");
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("unrelated", "rollback-revocation-fault"), result, err));
+    BOOST_CHECK(ReadFile(root.path / "lab.json").find("identity_sk") == std::string::npos);
+    modelnet::ResetLabApi();
+}
+
 BOOST_AUTO_TEST_CASE(idempotency_replays_one_result_and_conflicts_on_a_different_body)
 {
     BOOST_REQUIRE(!m_path_root.empty());
