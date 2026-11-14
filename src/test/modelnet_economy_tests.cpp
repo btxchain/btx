@@ -833,6 +833,89 @@ BOOST_AUTO_TEST_CASE(recent_releases_local_scope_applies_query)
     BOOST_CHECK_EQUAL(HelperDispatch(cat, "getrecentreleases", fp)["results"].size(), 0U);
 }
 
+BOOST_AUTO_TEST_CASE(peer_and_restricted_views_omit_local_funding_outpoints)
+{
+    // preparemodelfunding and submitmodelfunding record the HTLC output script
+    // and the funding outpoint of a local wallet in the release campaign. The
+    // owner sees them. The peer route ext/feed and the restricted view btxd uses
+    // for a wallet-restricted RPC user must not show them, while they still
+    // list the release.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "funding-outpoints";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+    BOOST_REQUIRE(hosted.exists("uri"));
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("uri", hosted["uri"].get_str());
+    body.pushKV("secret32_hex", std::string(64, 'c'));
+    body.pushKV("refund_height", 100000);
+    body.pushKV("target_atoms", 5'000'000);
+    body.pushKV("display_name", "Funding Outpoints");
+    UniValue create_params(UniValue::VARR);
+    create_params.push_back(body);
+    const UniValue rel = HelperDispatch(cat, "createmodelrelease", create_params);
+    const std::string rid = rel["release_id"].get_str();
+
+    const std::string script{"5120" + std::string(64, 'e')};
+    const std::string txid{std::string(60, 'd') + "f00d"};
+    UniValue so(UniValue::VOBJ);
+    so.pushKV("release_id", rid);
+    so.pushKV("output_script", script);
+    UniValue so_params(UniValue::VARR);
+    so_params.push_back(so);
+    BOOST_REQUIRE(HelperDispatch(cat, "setreleaseoutputscript", so_params)["accepted"].isTrue());
+    UniValue fo(UniValue::VOBJ);
+    fo.pushKV("release_id", rid);
+    fo.pushKV("txid", txid);
+    fo.pushKV("vout", 1);
+    fo.pushKV("output_script", script);
+    fo.pushKV("amount_atoms", 2'000'000);
+    UniValue fo_params(UniValue::VARR);
+    fo_params.push_back(fo);
+    BOOST_REQUIRE(HelperDispatch(cat, "recordmodelfundingoutpoint", fo_params)["accepted"].isTrue());
+
+    UniValue rid_params(UniValue::VARR);
+    rid_params.push_back(rid);
+    const std::string owner = HelperDispatch(cat, "getmodelrelease", rid_params).write();
+    BOOST_CHECK(owner.find(txid) != std::string::npos);
+    BOOST_CHECK(owner.find(script) != std::string::npos);
+
+    const UniValue none(UniValue::VARR);
+    const std::vector<std::pair<std::string, UniValue>> reads{
+        {"getmodelrelease", rid_params}, {"getmodelreleaseeconomics", rid_params}, {"getfundablemodels", none},
+        {"getmodelfeed", none}, {"getreleasefeed", none}, {"getrecentreleases", none}, {"searchmodels", none},
+        {"getmodeldirectory", none}, {"browsemodels", none}, {"getnewmodels", none}};
+    for (const auto& [method, params] : reads) {
+        UniValue scoped(UniValue::VARR);
+        scoped.push_back(method);
+        scoped.push_back(params);
+        const std::string restricted = HelperDispatch(cat, "getrestrictedmodelview", scoped).write();
+        BOOST_CHECK_MESSAGE(restricted.find(rid) != std::string::npos, method);
+        BOOST_CHECK_MESSAGE(restricted.find(txid) == std::string::npos, method);
+        BOOST_CHECK_MESSAGE(restricted.find(script) == std::string::npos, method);
+    }
+
+    NativeRequest req;
+    req.method = "POST";
+    req.path = "/btx-model/2/ext/feed";
+    req.body = R"({"limit":50})";
+    NativeResponse resp;
+    BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+    BOOST_REQUIRE_EQUAL(resp.status, 200);
+    BOOST_CHECK(resp.body.find(rid) != std::string::npos);
+    BOOST_CHECK(resp.body.find(txid) == std::string::npos);
+    BOOST_CHECK(resp.body.find(script) == std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
 {
     const std::string profile = pwc::ProfileIdHex(pwc::ToyProfile());
