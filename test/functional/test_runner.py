@@ -100,6 +100,8 @@ EXTENDED_SCRIPTS = [
     # (DoS 100). Keep it categorized, out of the base suite, until it is ported
     # to node-built MatMul blocks.
     'p2p_unrequested_blocks.py',
+    # Race against blocks being disconnected; whether it hits depends on load.
+    'wallet_shielded_rebuild_chain_shrink.py --descriptors',
 ]
 
 BASE_SCRIPTS = [

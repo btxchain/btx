@@ -1744,6 +1744,14 @@ CShieldedWallet::CShieldedWallet(CWallet& parent_wallet)
 
 CShieldedWallet::~CShieldedWallet() = default;
 
+//! Look up the active block at height. Returns false if the active chain is
+//! shorter than height. The chain can get shorter (reorg, invalidateblock)
+//! after its height was read, and getBlockHash() asserts on a missing height.
+static bool FindActiveBlock(interfaces::Chain& chain, int height, const interfaces::FoundBlock& block)
+{
+    return height >= 0 && chain.findFirstBlockWithTimeAndHeight(/*min_time=*/0, height, block);
+}
+
 //! Lower the wallet birth time to the current chain tip. Shielded keys are not
 //! in the script/address birthday trackers, so without this the blockConnected
 //! fast-path treats every later block as too old to scan.
@@ -1753,8 +1761,7 @@ static void SeedBirthTimeFromChainTip(CWallet& wallet)
     const auto tip_height = wallet.chain().getHeight();
     if (tip_height.has_value()) {
         int64_t tip_max_time{0};
-        const uint256 tip_hash = wallet.chain().getBlockHash(*tip_height);
-        if (wallet.chain().findBlock(tip_hash, interfaces::FoundBlock().maxTime(tip_max_time))) {
+        if (FindActiveBlock(wallet.chain(), *tip_height, interfaces::FoundBlock().maxTime(tip_max_time))) {
             wallet.MaybeUpdateBirthTime(tip_max_time);
         } else {
             // If tip metadata is unavailable, prefer a conservative floor
@@ -6740,7 +6747,8 @@ std::optional<ShieldedTxView> CShieldedWallet::RebuildTransactionViewFromNoteAnc
     for (const auto& [height, stored_hash] : candidates) {
         if (height > m_last_scanned_height || height > *tip_height) continue;
         if (!m_parent_wallet.chain().haveBlockOnDisk(height)) continue;
-        const uint256 block_hash = m_parent_wallet.chain().getBlockHash(height);
+        uint256 block_hash;
+        if (!FindActiveBlock(m_parent_wallet.chain(), height, interfaces::FoundBlock().hash(block_hash))) continue;
         if (!stored_hash.IsNull() && block_hash != stored_hash) continue;
         if (!seen_blocks.insert(block_hash).second) continue;
 
@@ -8070,8 +8078,9 @@ void CShieldedWallet::CatchUpToChainTip()
     if (m_last_scanned_height < 0 || m_last_scanned_height > *tip_height) {
         rebuild = true;
     } else {
-        const uint256 expected_hash = m_parent_wallet.chain().getBlockHash(m_last_scanned_height);
-        rebuild = expected_hash != m_last_scanned_hash;
+        uint256 expected_hash;
+        rebuild = !FindActiveBlock(m_parent_wallet.chain(), m_last_scanned_height, interfaces::FoundBlock().hash(expected_hash)) ||
+                  expected_hash != m_last_scanned_hash;
         if (rebuild) {
             LogPrintf("CShieldedWallet::CatchUpToChainTip detected hash mismatch at height %d expected=%s loaded=%s\n",
                       m_last_scanned_height,
@@ -8134,10 +8143,8 @@ void CShieldedWallet::CatchUpToChainTip()
 
     m_defer_persist = true;
     for (int height = m_last_scanned_height + 1; height <= *tip_height; ++height) {
-        const uint256 block_hash = m_parent_wallet.chain().getBlockHash(height);
         CBlock block;
-        m_parent_wallet.chain().findBlock(block_hash, interfaces::FoundBlock().data(block));
-        if (block.IsNull()) {
+        if (!FindActiveBlock(m_parent_wallet.chain(), height, interfaces::FoundBlock().data(block)) || block.IsNull()) {
             m_defer_persist = false;
             RebuildFromActiveChain();
             return;
@@ -8186,10 +8193,8 @@ void CShieldedWallet::RebuildCommitmentIndex()
 
     shielded::ShieldedMerkleTree index_tree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     for (int height = 0; height <= *tip_height; ++height) {
-        const uint256 block_hash = m_parent_wallet.chain().getBlockHash(height);
         CBlock block;
-        m_parent_wallet.chain().findBlock(block_hash, interfaces::FoundBlock().data(block));
-        if (block.IsNull()) {
+        if (!FindActiveBlock(m_parent_wallet.chain(), height, interfaces::FoundBlock().data(block)) || block.IsNull()) {
             LogPrintf("CShieldedWallet::RebuildCommitmentIndex aborted: missing block at height %d\n", height);
             // Fall back to full rebuild if a block is unavailable.
             RebuildFromActiveChain();
@@ -8233,10 +8238,8 @@ void CShieldedWallet::RebuildSmilePublicAccountIndex()
     m_smile_public_accounts.clear();
     m_account_leaf_commitments.clear();
     for (int height = 0; height <= *tip_height; ++height) {
-        const uint256 block_hash = m_parent_wallet.chain().getBlockHash(height);
         CBlock block;
-        m_parent_wallet.chain().findBlock(block_hash, interfaces::FoundBlock().data(block));
-        if (block.IsNull()) {
+        if (!FindActiveBlock(m_parent_wallet.chain(), height, interfaces::FoundBlock().data(block)) || block.IsNull()) {
             LogPrintf("CShieldedWallet::RebuildSmilePublicAccountIndex aborted: missing block at height %d\n",
                       height);
             m_smile_public_accounts.clear();
@@ -8273,7 +8276,7 @@ void CShieldedWallet::RebuildSmilePublicAccountIndex()
 void CShieldedWallet::RebuildFromActiveChain()
 {
     AssertLockHeld(cs_shielded);
-    const auto tip_height = m_parent_wallet.chain().getHeight();
+    auto tip_height = m_parent_wallet.chain().getHeight();
     if (!tip_height.has_value() || *tip_height < 0) {
         return;
     }
@@ -8285,6 +8288,12 @@ void CShieldedWallet::RebuildFromActiveChain()
     // so we refuse the destructive wipe and warn loudly instead.
     for (int height = 0; height <= *tip_height; ++height) {
         if (!m_parent_wallet.chain().haveBlockOnDisk(height)) {
+            // A chain that got shorter meanwhile is checked up to its tip.
+            const auto now_height = m_parent_wallet.chain().getHeight();
+            if (now_height.has_value() && *now_height < height) {
+                tip_height = now_height;
+                break;
+            }
             LogPrintf("ERROR: CShieldedWallet::RebuildFromActiveChain cannot proceed — "
                       "block at height %d has been pruned. A full shielded rebuild "
                       "requires all blocks from genesis. Either disable pruning and "
@@ -8301,9 +8310,19 @@ void CShieldedWallet::RebuildFromActiveChain()
     Rescan(/*start_height=*/0);
 
     for (int height = 0; height <= *tip_height; ++height) {
-        const uint256 block_hash = m_parent_wallet.chain().getBlockHash(height);
+        uint256 block_hash;
         CBlock block;
-        m_parent_wallet.chain().findBlock(block_hash, interfaces::FoundBlock().data(block));
+        if (!FindActiveBlock(m_parent_wallet.chain(), height, interfaces::FoundBlock().hash(block_hash).data(block))) {
+            // The active chain got shorter while this scan ran (reorg,
+            // invalidateblock). Scan the shorter chain again from genesis.
+            tip_height = m_parent_wallet.chain().getHeight();
+            if (!tip_height.has_value() || *tip_height < 0) break;
+            LogPrintf("CShieldedWallet: active chain no longer reaches height %d; rebuilding again to height %d\n",
+                      height, *tip_height);
+            Rescan(/*start_height=*/0);
+            height = -1;
+            continue;
+        }
         if (block.IsNull()) {
             // Should not happen given the pre-flight check, but handle
             // gracefully if a block disappears between check and read
