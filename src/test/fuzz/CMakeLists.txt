@@ -18,6 +18,7 @@ add_executable(fuzz
   bitdeque.cpp
   bitset.cpp
   block.cpp
+  block_chunk_transport.cpp
   block_header.cpp
   block_index.cpp
   blockfilter.cpp
