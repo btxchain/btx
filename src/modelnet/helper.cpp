@@ -5995,6 +5995,39 @@ bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, s
         hyd.SetExpectedSha384(cf.sha384);
         hyd.SetExpectedPiecesRoot(cf.pieces_root);
         hyd.SetJobDir(HelperDir(cat));
+        fs::path rejected = FileStreamJobPath(HelperDir(cat), e.artifact_id, fi);
+        rejected += ".rejected";
+        const auto clear_rejected = [&](std::string& cleanup_err) {
+            std::error_code ec;
+            std::filesystem::remove_all(qdir / "artifacts" / e.artifact_id.Hex().c_str() /
+                                        std::to_string(fi).c_str(), ec);
+            if (ec) { cleanup_err = "rejected cloud quarantine cleanup failed"; return false; }
+            quarantine.RecountUsed();
+            if (!DeleteFileStreamJob(HelperDir(cat), e.artifact_id, fi, cleanup_err)) return false;
+            std::filesystem::remove(rejected, ec);
+            if (ec) { cleanup_err = "rejected cloud marker cleanup failed"; return false; }
+            return true;
+        };
+        std::error_code marker_error;
+        const bool was_rejected = std::filesystem::exists(rejected, marker_error);
+        if (marker_error) { err = "rejected cloud marker unreadable"; return false; }
+        if (was_rejected && !clear_rejected(err)) return false;
+        // Persist invalidation before deleting anything. A restart or cleanup
+        // failure must retry cleanup rather than resume a rejected checkpoint.
+        const auto discard_rejected = [&] {
+            if (!hyd.IntegrityFailed()) return;
+            if (!WriteBinaryFileAtomically(rejected, "file integrity rejected\n")) {
+                err += "; rejected cloud checkpoint invalidation failed";
+                return;
+            }
+            std::string cleanup_err;
+            if (!clear_rejected(cleanup_err)) err += "; " + cleanup_err;
+        };
+        const auto finish = [&] {
+            if (hyd.Finish(err)) return true;
+            discard_rejected();
+            return false;
+        };
         FileStreamJobRecord rec;
         std::string jerr;
         const bool resume = LoadFileStreamJob(HelperDir(cat), e.artifact_id, fi, rec, jerr) &&
@@ -6010,7 +6043,7 @@ bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, s
                 if (!hyd.Feed(Span<const unsigned char>{piece.data(), piece.size()}, err)) return false;
                 origin_gets += 1;
             }
-            if (!hyd.Finish(err)) return false;
+            if (!finish()) return false;
         } else {
         const std::string key = g_cloud->SourceFileKey(e.artifact_id, fi);
         if (cf.size <= kCloudStreamChunkBytes && !resume) {
@@ -6020,7 +6053,7 @@ bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, s
                 return false;
             }
             if (!hyd.Feed(Span<const unsigned char>{body.data(), body.size()}, err)) return false;
-            if (!hyd.Finish(err)) return false;
+            if (!finish()) return false;
             origin_gets += 1;
         } else {
             uint64_t pos = hyd.ResumeOffset();
@@ -6033,6 +6066,7 @@ bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, s
                 return true;
             };
             if (!hyd.Ingest(read, resume, err)) {
+                discard_rejected();
                 GlobalOriginStampede().NoteError("cloud-origin", ConnNowMs());
                 return false;
             }
