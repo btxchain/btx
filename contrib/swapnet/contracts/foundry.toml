@@ -8,3 +8,14 @@ optimizer_runs = 200
 bytecode_hash = "none"
 [profile.default.fuzz]
 runs = 1000
+[profile.default.invariant]
+runs = 64
+depth = 64
+
+# Long campaign: FOUNDRY_PROFILE=deep forge test
+[profile.deep]
+[profile.deep.fuzz]
+runs = 100000
+[profile.deep.invariant]
+runs = 3000
+depth = 200
