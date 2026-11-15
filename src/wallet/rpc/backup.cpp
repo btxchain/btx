@@ -3386,9 +3386,46 @@ static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWallet
     {
         LOCK(wallet.cs_wallet);
         EnsureWalletIsUnlocked(wallet);
-        WalletBatch batch(wallet.GetDatabase());
-        wallet.SetupImportedPQWalletBundle(batch, Span<const unsigned char>{bundle.master_seed.data(), bundle.master_seed.size()}, bundle.birthday);
+
+        // Importing the bundle replaces the wallet PQ seed, and shielded spending
+        // keys derive from it. If the wallet already holds shielded key material
+        // of its own, replacing the seed would make those notes unspendable, so
+        // refuse before overwriting anything (cs_wallet before cs_shielded, as
+        // everywhere else; MaybeRehydrateSpendingKeys loads the state first so the
+        // check sees the wallet's real key sets, notes and issued indices).
+        if (wallet.m_shielded_wallet) {
+            LOCK(wallet.m_shielded_wallet->cs_shielded);
+            wallet.m_shielded_wallet->MaybeRehydrateSpendingKeys();
+            if (wallet.m_shielded_wallet->HasShieldedKeyMaterial()) {
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                                   "this wallet already has shielded keys or notes; importing a bundle would replace its PQ seed and make them unusable. Restore the bundle into a new wallet with restorewalletbundle");
+            }
+        }
+
+        {
+            WalletBatch batch(wallet.GetDatabase());
+            wallet.SetupImportedPQWalletBundle(batch, Span<const unsigned char>{bundle.master_seed.data(), bundle.master_seed.size()}, bundle.birthday);
+        }
         wallet.ConnectScriptPubKeyManNotifiers();
+
+        // Only now that SetupImportedPQWalletBundle has succeeded: the wallet had
+        // no shielded key material (checked above under cs_wallet, which no address
+        // creation can bypass), so the only persisted shielded state is the old
+        // seed's completed empty-gap result. PersistState deliberately refuses to
+        // overwrite an encrypted blob with empty key sets, so ResetEmptyGapForImportedSeed
+        // erases that state; then derive and scan the imported seed's notes, exactly
+        // as a fresh restorewalletbundle wallet would, so they appear without a
+        // restart. Re-check under the same lock that no key material exists first.
+        // Only encrypted wallets derive shielded keys and run the empty-gap
+        // search with the old seed; an unencrypted wallet has only tree-only
+        // shielded state and nothing to re-derive, so leave it untouched.
+        if (wallet.m_shielded_wallet && wallet.IsCrypted()) {
+            LOCK(wallet.m_shielded_wallet->cs_shielded);
+            if (!wallet.m_shielded_wallet->HasShieldedKeyMaterial()) {
+                wallet.m_shielded_wallet->ResetEmptyGapForImportedSeed();
+                wallet.m_shielded_wallet->MaybeRehydrateSpendingKeys();
+            }
+        }
     }
 
     if (rescan) {
