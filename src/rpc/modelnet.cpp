@@ -55,6 +55,7 @@
 #include <wallet/model_funding.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
+#include <wallet/walletdb.h>
 #include <wallet/context.h>
 #endif
 
@@ -1514,6 +1515,18 @@ static RPCHelpMan submitmodelfunding()
                         it->second.mapValue["model_output_vout"] = std::to_string(funding_vout);
                         if (!frozen.key_hash_hex.empty()) it->second.mapValue["model_key_hash"] = ToLower(frozen.key_hash_hex);
                         if (!frozen.release_id.empty()) it->second.mapValue["model_release_id"] = frozen.release_id;
+                        // remember_funding runs on every submit path (broadcast,
+                        // duplicate, already-in-UTXO), so persist the HTLC refund
+                        // terms here for all of them. Only the preparemodelfunding
+                        // JSON held them before; without this a failed campaign is
+                        // not refundable from the node. The duplicate path has no
+                        // CommitTransaction, so the explicit WriteTx is what makes
+                        // the fields durable across a restart.
+                        if (!frozen.descriptor.empty()) it->second.mapValue["model_descriptor"] = frozen.descriptor;
+                        if (!frozen.refund_key.empty()) it->second.mapValue["model_refund_pubkey"] = frozen.refund_key;
+                        if (frozen.refund_height > 0) it->second.mapValue["model_refund_height"] = std::to_string(frozen.refund_height);
+                        if (!frozen.claimant_key.empty()) it->second.mapValue["model_claimant"] = frozen.claimant_key;
+                        wallet::WalletBatch(pwallet->GetDatabase()).WriteTx(it->second);
                     }
                 }
                 UniValue rec(UniValue::VOBJ);
@@ -1815,6 +1828,53 @@ static RPCHelpMan exportmodelrecovery()
                 options = request.params[1];
             }
             wallet::FrozenFundingQuote q = QuoteFromRequest(release_id, options);
+            // The helper (MergeHelperCampaign) carries no refund terms, so when
+            // neither the options nor a helper card supplied them, recover the
+            // terms submitmodelfunding persisted on the funding transaction. This
+            // lets a funder who kept only release_id/txid still reclaim a failed
+            // campaign, instead of needing the preparemodelfunding JSON.
+            bool ambiguous = false;
+            if (q.descriptor.empty() && !release_id.empty()) {
+                std::string found_descriptor;
+                wallet::mapValue_t terms;
+                for (const auto& w : WalletsForObservation(request)) {
+                    if (!w) continue;
+                    LOCK(w->cs_wallet);
+                    for (const auto& [id, wtx] : w->mapWallet) {
+                        (void)id;
+                        const auto rit = wtx.mapValue.find("model_release_id");
+                        if (rit == wtx.mapValue.end() || rit->second != release_id) continue;
+                        const auto dit = wtx.mapValue.find("model_descriptor");
+                        if (dit == wtx.mapValue.end() || dit->second.empty()) continue;
+                        if (found_descriptor.empty()) {
+                            found_descriptor = dit->second;
+                            terms = wtx.mapValue;
+                        } else if (found_descriptor != dit->second) {
+                            // Same release_id funded under different descriptors: do
+                            // not guess which one the caller wants.
+                            ambiguous = true;
+                        }
+                    }
+                    if (ambiguous) break;
+                }
+                if (!ambiguous && !found_descriptor.empty()) {
+                    q.descriptor = found_descriptor;
+                    const auto fill = [&](const char* key, std::string& dst) {
+                        if (!dst.empty()) return;
+                        const auto it = terms.find(key);
+                        if (it != terms.end()) dst = it->second;
+                    };
+                    fill("model_key_hash", q.key_hash_hex);
+                    fill("model_refund_pubkey", q.refund_key);
+                    fill("model_claimant", q.claimant_key);
+                    if (q.refund_height == 0) {
+                        const auto it = terms.find("model_refund_height");
+                        if (it != terms.end()) {
+                            q.refund_height = static_cast<uint32_t>(LocaleIndependentAtoi<int64_t>(it->second));
+                        }
+                    }
+                }
+            }
             std::string err;
             if (q.descriptor.empty() && !q.key_hash_hex.empty() && !q.claimant_key.empty() &&
                 !q.refund_key.empty() && q.refund_height > 0) {
@@ -1829,7 +1889,9 @@ static RPCHelpMan exportmodelrecovery()
                 q.descriptor = canonical;
             }
             UniValue out = wallet::ExportModelRecoveryJson(q);
-            if (q.descriptor.empty() && q.key_hash_hex.empty()) {
+            if (ambiguous) {
+                out.pushKV("error", "release_id was funded under several descriptors; pass the descriptor of the funding output");
+            } else if (q.descriptor.empty() && q.key_hash_hex.empty()) {
                 out.pushKV("error", "no public recovery material; pass descriptor/key_hash or a known release_id");
             }
             return out;
