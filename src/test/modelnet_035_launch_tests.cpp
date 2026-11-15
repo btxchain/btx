@@ -7,6 +7,10 @@
 
 #include <boost/test/unit_test.hpp>
 
+#ifndef WIN32
+#include <pthread.h>
+#endif
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,6 +45,33 @@ BOOST_AUTO_TEST_CASE(launch_two_runs_match_and_weights_move)
     BOOST_CHECK_NE(first.Checkpoint().weight_hash, zero.Checkpoint().weight_hash);
     BOOST_CHECK(LaunchTrainer::CheckState(first.Checkpoint(), err));
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(launch_step_fits_a_small_thread_stack)
+{
+    // LaunchTrainer::Run() runs on btxd's RPC HTTP-worker threads. On macOS a
+    // non-main thread gets only a 512 KiB stack by default, so Step()'s ~750 KiB
+    // working set must not live on the stack. Run one step on a 512 KiB stack and
+    // require it to complete rather than overflow and crash the process.
+    struct Ctx { bool ok = false; std::string err; };
+    Ctx ctx;
+    pthread_attr_t attr;
+    BOOST_REQUIRE_EQUAL(pthread_attr_init(&attr), 0);
+    BOOST_REQUIRE_EQUAL(pthread_attr_setstacksize(&attr, 512 * 1024), 0);
+    pthread_t thread;
+    auto entry = [](void* arg) -> void* {
+        auto* c = static_cast<Ctx*>(arg);
+        modelnet::LaunchTrainer trainer;
+        c->ok = trainer.Run(1, c->err);
+        return nullptr;
+    };
+    BOOST_REQUIRE_EQUAL(pthread_create(&thread, &attr, entry, &ctx), 0);
+    BOOST_REQUIRE_EQUAL(pthread_join(thread, nullptr), 0);
+    pthread_attr_destroy(&attr);
+    BOOST_CHECK(ctx.ok);
+    BOOST_CHECK(ctx.err.empty());
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(launch_rejects_cursor_optimizer_and_checkpoint)
 {
