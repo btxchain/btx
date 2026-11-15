@@ -552,6 +552,14 @@ bool FileStreamHydration::FinishLocked(std::string& err)
     }
     if (!m_store->SavePieceIndex(m_artifact, m_file_index, idx, err)) return false;
 
+    // The live store now holds this file's verified pieces and index. Drop the
+    // quarantine copy: the quarantine counts its pieces against its own quota,
+    // so every kept copy brought later hydrations closer to "disk quota".
+    std::error_code ec;
+    std::filesystem::remove_all(m_quarantine->Root() / "artifacts" / m_artifact.Hex().c_str() /
+                                std::to_string(m_file_index).c_str(), ec);
+    m_quarantine->RecountUsed();
+
     m_st.complete = true;
     m_st.quarantined = false;
     m_st.advertised = true;
