@@ -28,7 +28,9 @@
 #include <utility>
 #include <vector>
 
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_bridge_tests, BasicTestingSetup)
 
@@ -764,6 +766,7 @@ BOOST_AUTO_TEST_CASE(dequeued_hint_same_policy_for_any_from_addr)
     DrainBridgeHints();
 }
 
+#ifndef _WIN32
 // The /api/v1/feed routes read getmodelfeed from btx-modeld when
 // BTX_BRIDGE_RPC_SOCKET is set. Each route must ask for a feed mode that
 // getmodelfeed accepts; a refused mode leaves the route with the empty shell.
@@ -815,5 +818,7 @@ BOOST_AUTO_TEST_CASE(api_v1_feed_routes_reach_the_helper_feed)
     }
     finish();
 }
+
+#endif // !_WIN32: helper Unix RPC is unavailable on Windows.
 
 BOOST_AUTO_TEST_SUITE_END()
