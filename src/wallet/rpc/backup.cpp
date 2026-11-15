@@ -3360,7 +3360,7 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
     return ProcessDescriptorImport(wallet, data, timestamp, master_keys, EMPTY_PQ_MASTER_SEEDS);
 }
 
-static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWalletBundle& bundle, const bool rescan)
+static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWalletBundle& bundle, const bool rescan, const bool new_wallet = false)
 {
     wallet.BlockUntilSyncedToCurrentChain();
 
@@ -3395,7 +3395,11 @@ static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWallet
         // check sees the wallet's real key sets, notes and issued indices).
         if (wallet.m_shielded_wallet) {
             LOCK(wallet.m_shielded_wallet->cs_shielded);
-            wallet.m_shielded_wallet->MaybeRehydrateSpendingKeys();
+            // A newly created blank restore destination has no persisted shielded
+            // authority to load. Deriving an unrelated seed here can retain search
+            // keys on pruned history and falsely reject the fresh restore. Still
+            // check material already present, including any issued concurrently.
+            if (!new_wallet) wallet.m_shielded_wallet->MaybeRehydrateSpendingKeys();
             if (wallet.m_shielded_wallet->HasShieldedKeyMaterial()) {
                 throw JSONRPCError(RPC_WALLET_ERROR,
                                    "this wallet already has shielded keys or notes; importing a bundle would replace its PQ seed and make them unusable. Restore the bundle into a new wallet with restorewalletbundle");
@@ -3854,7 +3858,7 @@ RPCHelpMan restorewalletbundle()
             }
             relock = true;
         }
-        UniValue result = ImportBtxWalletBundleIntoWallet(*wallet, bundle, rescan);
+        UniValue result = ImportBtxWalletBundleIntoWallet(*wallet, bundle, rescan, /*new_wallet=*/true);
         if (relock) wallet->Lock();
         result.pushKV("name", wallet->GetName());
         PushWarnings(warnings, result);
