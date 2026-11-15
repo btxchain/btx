@@ -1969,6 +1969,9 @@ if(ENABLE_WALLET)
     )
     if((UNIX AND NOT APPLE) OR MINGW)
       target_link_btx_linux_archive_group(btx-wallet ${BTX_NODE_WALLET_ARCHIVES})
+    elseif(WIN32)
+      # The wallet archive's shielded RPC objects reference node symbols.
+      target_link_libraries(btx-wallet bitcoin_wallet bitcoin_node)
     else()
       target_link_libraries(btx-wallet bitcoin_wallet)
     endif()
@@ -2435,3 +2438,6 @@ endif()
 if(BUILD_FUZZ_BINARY)
   add_subdirectory(test/fuzz)
 endif()
+
+# SWAPNET-CMAKE
+include(${PROJECT_SOURCE_DIR}/cmake/SwapNet.cmake)

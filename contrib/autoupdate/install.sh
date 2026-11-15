@@ -58,6 +58,9 @@ BTX_TARGET_CHAIN_FLAG="${BTX_TARGET_CHAIN_FLAG:-}"
 BTX_PROBE_RPC_ARGS=()
 BTX_UPDATER_TEST_ALLOW_NON_BTXD_PID="${BTX_UPDATER_TEST_ALLOW_NON_BTXD_PID:-0}"
 BTX_STOP_TIMEOUT_SECONDS="${BTX_STOP_TIMEOUT_SECONDS:-120}"
+# The node the last restart_node call started (pid and fingerprint), so a rollback can stop it.
+BTX_RESTARTED_NODE_PID=""
+BTX_RESTARTED_NODE_FINGERPRINT=""
 BTX_CLEANUP_CACHE_REPO=""
 BTX_CLEANUP_WORKTREE_PATH=""
 BTX_CLEANUP_LOCK_DIR=""
@@ -1616,15 +1619,17 @@ restart_node() {
 
   mkdir -p "$log_dir"
   note "Restarting BTX node with preserved data directory"
+  BTX_RESTARTED_NODE_PID=""
+  BTX_RESTARTED_NODE_FINGERPRINT=""
   nohup "$daemon_bin" ${args[@]+"${args[@]}"} >>"$log_dir/restart.log" 2>&1 &
   local restarted_pid=$!
+  local found_daemon_pid=""
   sleep 3
   # Do not adjudicate here. A healthy `-daemon` parent exits after fork (kill -0 on $! fails),
   # and an InitError child is gone in tens of milliseconds. Returning non-zero would abort
   # rollback/start-if-stopped under `set -e`. Warn and fall through; health_probe is the adjudicator
   # on the update path (and rollback already dies if its own probe fails).
   if ! kill -0 "$restarted_pid" >/dev/null 2>&1; then
-    local found_daemon_pid=""
     if [[ -n "$pidfile" ]]; then
       local candidate_path candidate_pid
       local -a pidfile_candidates=("$pidfile")
@@ -1646,6 +1651,45 @@ restart_node() {
       warn "launched btxd pid ${restarted_pid} exited within 3s; not failing yet — RPC health probe is the adjudicator. inspect ${log_dir}/restart.log"
     fi
   fi
+  # Remember the node this call started, so a rollback can stop it before it starts another release.
+  local started_pid="$restarted_pid"
+  kill -0 "$started_pid" >/dev/null 2>&1 || started_pid="$found_daemon_pid"
+  if [[ -n "$started_pid" ]] && BTX_RESTARTED_NODE_FINGERPRINT="$(process_fingerprint "$started_pid")"; then
+    BTX_RESTARTED_NODE_PID="$started_pid"
+  else
+    BTX_RESTARTED_NODE_FINGERPRINT=""
+  fi
+}
+
+# Stop the node restart_node started for a release that failed its health probe. Without this the
+# previous release is started next to it on the same data directory: btxd refuses the locked
+# directory, and the failed release keeps running. TERM, then KILL after BTX_STOP_TIMEOUT_SECONDS,
+# as the TERM fallback of stop_running_node; a pid whose fingerprint changed is left alone.
+stop_failed_restart() {
+  local pid="$BTX_RESTARTED_NODE_PID" expected="$BTX_RESTARTED_NODE_FINGERPRINT"
+  BTX_RESTARTED_NODE_PID=""
+  BTX_RESTARTED_NODE_FINGERPRINT=""
+  [[ -n "$pid" ]] || return 0
+  local actual
+  actual="$(process_fingerprint "$pid")" || return 0
+  if [[ "$actual" != "$expected" ]]; then
+    warn "pid ${pid} changed since the restart; not signalling it"
+    return 0
+  fi
+  warn "stopping the node of the failed release (pid ${pid}) before the rollback"
+  kill "$pid" >/dev/null 2>&1 || true
+  local deadline=$((SECONDS + BTX_STOP_TIMEOUT_SECONDS))
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if process_is_zombie "$pid"; then
+      break
+    fi
+    if (( SECONDS >= deadline )); then
+      warn "node of the failed release did not stop in time, sending KILL"
+      kill -9 "$pid" >/dev/null 2>&1 || true
+      break
+    fi
+    sleep 1
+  done
 }
 
 # Confirm a (re)started node is genuinely healthy (RPC reachable), not just briefly alive then
@@ -1673,6 +1717,7 @@ rollback_release() {
   fi
   warn "updated node ($failed_label) failed its health probe; rolling back to $previous_current"
   status_event "rollback" "begin" "from $failed_label to $(basename "$previous_current")"
+  stop_failed_restart
   # If the atomic switch failed, the prepared previous dispatch is already active.
   if [[ "$(cd -- "$BTX_INSTALL_ROOT/current" 2>/dev/null && pwd -P || true)" != "$previous_current" ]]; then
     activate_release_tree "$previous_current" "$BTX_INSTALL_ROOT" "$BTX_LINK_DIR"

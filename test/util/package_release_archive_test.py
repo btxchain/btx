@@ -509,6 +509,51 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 "btx-0.34.7/libexec/metal/matmul_v4_rc_rowleaf_gpu_kernels.metallib", names
             )
 
+    def test_macos_checks_finished_images_after_runtime_bundling(self):
+        # A build input can legitimately link Homebrew Python. Only the final
+        # staged images may pass the shipping gate; a bad bundle must fail closed.
+        for broken in (None, "btxd.real", "btx-cli.real", "btx-util.real", "btx-modeld.real"):
+            with self.subTest(broken=broken), tempfile.TemporaryDirectory() as tmpdir:
+                root = pathlib.Path(tmpdir)
+                source_root = self._build_source_root(root)
+                btxd, cli = self._write_binaries(root)
+                (root / "btx-modeld").write_text("producer dependency\n")
+                checked = []
+                def gate(path):
+                    if path.parent.name != "libexec" or path.read_text() != "bundled\n":
+                        raise RuntimeError("unrelocated producer dependency")
+                    checked.append(path.name)
+                    if path.name == broken:
+                        raise RuntimeError("invalid final image")
+                self.module.verify_shipped_btxd = gate
+                self.module.verify_shipped_cli = gate
+                self.module.verify_shipped_helper = gate
+                def bundle(release_root, **kwargs):
+                    for image in (release_root / "libexec").glob("*.real"):
+                        image.write_text("bundled\n")
+                    return []
+                fake = types.ModuleType("bundle_macos_python_runtime")
+                fake.bundle_macos_python = bundle
+                spec = importlib.machinery.ModuleSpec("bundle_macos_python_runtime",
+                    types.SimpleNamespace(create_module=lambda spec: fake, exec_module=lambda module: None))
+                original_spec = importlib.util.spec_from_file_location
+                def select_spec(name, path, *args, **kwargs):
+                    if pathlib.Path(path).name == "bundle_macos_python_runtime.py":
+                        return spec
+                    return original_spec(name, path, *args, **kwargs)
+                args = ["--output-dir", str(root / "out"), "--version", "test",
+                        "--platform-id", "macos-arm64", "--btxd", str(btxd),
+                        "--btx-cli", str(cli), "--source-root", str(source_root)]
+                with mock.patch.object(self.module.importlib.util, "spec_from_file_location", side_effect=select_spec):
+                    if broken:
+                        with self.assertRaisesRegex(RuntimeError, "invalid final image"):
+                            self.module.main(args)
+                        self.assertFalse(list((root / "out").glob("*.tar.gz")))
+                    else:
+                        self.assertEqual(self.module.main(args), 0)
+                        self.assertEqual(set(checked), {"btxd.real", "btx-cli.real", "btx-util.real", "btx-modeld.real"})
+                        self.assertTrue(list((root / "out").glob("*.tar.gz")))
+
     def test_verify_shipped_btxd_refuses_unrecognized_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             btxd = pathlib.Path(tmpdir) / "btxd"
@@ -965,6 +1010,297 @@ class BundleQtGuiTest(unittest.TestCase):
             self.assertIn("Plugins = lib/qt-private/qt6/plugins", config)
             self.assertIn("Libraries = lib/qt-private", config)
             self.assertTrue((root / "lib/qt-private/qt6/plugins/platforms/libqxcb.so").is_file())
+
+
+def load_python_bundle_module():
+    spec = importlib.util.spec_from_file_location("bundle_python_runtime", ROOT / "scripts/release/bundle_python_runtime.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class BundlePythonRuntimeTest(unittest.TestCase):
+    def setUp(self):
+        self.module = load_python_bundle_module()
+        self.make_elf = load_make_elf()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = pathlib.Path(tmp.name)
+
+    def _elf(self, path, **kwargs):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(self.make_elf(**kwargs))
+        return path
+
+    def test_linked_libpython_reads_dt_needed(self):
+        linked = self._elf(self.root / "a", needed=["libc.so.6", "libpython3.12.so.1.0"])
+        plain = self._elf(self.root / "b", needed=["libc.so.6"])
+        stub = self.root / "c"; stub.write_text("daemon\n")
+        self.assertEqual(self.module.linked_libpython(linked), "libpython3.12.so.1.0")
+        self.assertIsNone(self.module.linked_libpython(plain))
+        self.assertIsNone(self.module.linked_libpython(stub))
+
+    def test_swapnet_imports_include_function_level_and_skip_own_package(self):
+        package = self.root / "contrib/swapnet/swapnet"; package.mkdir(parents=True)
+        (package / "a.py").write_text(
+            "import os\nimport json, re as r\nfrom . import b\nfrom swapnet.x import y\n"
+            "def f():\n    from cryptography.hazmat.primitives import hashes\n    import swapnet.z\n")
+        self.assertEqual(self.module.swapnet_imports(self.root),
+                         ["cryptography.hazmat.primitives", "json", "os", "re"])
+
+    def test_repository_swapnet_sources_import_cryptography_and_sqlite3(self):
+        names = self.module.swapnet_imports(ROOT)
+        self.assertIn("sqlite3", names)
+        self.assertTrue(any(name.startswith("cryptography.") for name in names), names)
+        self.assertFalse(any(name.split(".")[0] == "swapnet" for name in names))
+
+    def test_stdlib_copy_leaves_out_tests_gui_bytecode_and_outside_links(self):
+        src = self.root / "stdlib"; out = self.root / "out"
+        outside = self.root / "etc/sitecustomize.py"; outside.parent.mkdir(); outside.write_text("host policy\n")
+        files = ["os.py", "__pycache__/os.cpython-312.pyc", "test/test_os.py", "tkinter/__init__.py",
+                 "idlelib/idle.py", "config-3.12-x86_64-linux-gnu/Makefile", "json/__init__.py",
+                 "json/__pycache__/x.pyc", "lib-dynload/_ssl.cpython-312-x86_64-linux-gnu.so",
+                 "lib-dynload/readline.cpython-312-x86_64-linux-gnu.so",
+                 "lib-dynload/_testcapi.cpython-312-x86_64-linux-gnu.so", "site-packages/foo.py"]
+        for name in files:
+            (src / name).parent.mkdir(parents=True, exist_ok=True)
+            (src / name).write_text(name)
+        (src / "sitecustomize.py").symlink_to(outside)
+        (src / "_alias.py").symlink_to("os.py")
+        (src / "linked").symlink_to(self.root / "etc", target_is_directory=True)
+        skipped = self.module._copy_stdlib(src, out)
+        copied = sorted(str(p.relative_to(out)) for p in out.rglob("*") if p.is_file())
+        self.assertEqual(copied, ["_alias.py", "json/__init__.py",
+                                  "lib-dynload/_ssl.cpython-312-x86_64-linux-gnu.so", "os.py"])
+        self.assertFalse((out / "_alias.py").is_symlink())
+        self.assertEqual(sorted(skipped), ["linked/", "sitecustomize.py"])
+
+    def test_refuses_a_swapnet_btxd_without_a_shared_libpython(self):
+        static = self._elf(self.root / "release/libexec/btxd.real", needed=["libc.so.6"],
+                           extra=b"\0SwapNet: startup failed\0SwapNet Python initialization failed\0")
+        with self.assertRaisesRegex(RuntimeError, "links no libpython shared library"):
+            self.module.bundle_linux_python(static, self.root / "release", source_root=ROOT)
+        plain = self._elf(self.root / "other/btxd.real", needed=["libc.so.6"])
+        self.assertEqual(self.module.bundle_linux_python(plain, self.root / "other", source_root=ROOT), [])
+
+    def test_third_party_roots_are_top_level_packages_and_modules(self):
+        stdlib = self.root / "usr/lib/python3.12"; site = self.root / "usr/lib/python3/dist-packages"
+        info = {"stdlib": str(stdlib), "lib_dynload": str(stdlib / "lib-dynload"), "modules": {
+            "json": str(stdlib / "json/__init__.py"),
+            "_ssl": str(stdlib / "lib-dynload/_ssl.cpython-312-x86_64-linux-gnu.so"),
+            "cryptography.hazmat.primitives": str(site / "cryptography/hazmat/primitives/__init__.py"),
+            "cryptography": str(site / "cryptography/__init__.py"),
+            "_cffi_backend": str(site / "_cffi_backend.cpython-312-x86_64-linux-gnu.so")}}
+        self.assertEqual(self.module._third_party_roots(info), {
+            "cryptography": site / "cryptography",
+            "_cffi_backend": site / "_cffi_backend.cpython-312-x86_64-linux-gnu.so"})
+
+    def test_startup_sonames_leave_out_what_only_libpython_pulls_in(self):
+        host = self.root / "host"
+        libs = {name: self._elf(host / name, needed=needed, executable=False) for name, needed in (
+            ("libpython3.12.so.1.0", ["libexpat.so.1", "libz.so.1", "libc.so.6"]),
+            ("libsqlite3.so.0", ["libz.so.1", "libc.so.6"]),
+            ("libexpat.so.1", ["libc.so.6"]), ("libz.so.1", ["libc.so.6"]))}
+        btxd = self._elf(self.root / "btxd.real", needed=["libpython3.12.so.1.0", "libsqlite3.so.0", "libc.so.6"])
+        def ldd_map(path, required=None):
+            return {name: libs[name] for name in self.module._needed(path) if name in libs and (required is None or name in required)}
+        self.module._qt_bundle = lambda: types.SimpleNamespace(_ldd_map=ldd_map, _host_soname=lambda n: n.startswith("libc."))
+        self.assertEqual(self.module.startup_sonames(btxd, "libpython3.12.so.1.0"),
+                         {"libsqlite3.so.0", "libz.so.1", "libc.so.6"})
+
+    def test_install_library_accepts_identical_and_refuses_other_existing_copy(self):
+        def fake_rpath(path, rpath):
+            with open(path, "ab") as fh:
+                fh.write(b"RUNPATH=" + rpath.encode())
+        self.module._set_rpath = fake_rpath
+        source = self.root / "host/libexpat.so.1"; source.parent.mkdir(); source.write_bytes(b"expat")
+        dest = self.root / "lib/libexpat.so.1"
+        self.module._install_library(source, dest, "$ORIGIN")
+        self.assertEqual(dest.read_bytes(), b"expatRUNPATH=$ORIGIN")
+        self.module._install_library(source, dest, "$ORIGIN")  # the Qt bundle's copy of the same file
+        dest.write_bytes(b"other")
+        with self.assertRaisesRegex(RuntimeError, "Conflicting packaged dependency libexpat.so.1"):
+            self.module._install_library(source, dest, "$ORIGIN")
+
+    def test_runtime_problems_names_a_soname_its_runpath_cannot_reach(self):
+        release = self.root / "release"
+        module = self._elf(release / "lib/python3.12/lib-dynload/_ctypes.so",
+                           needed=["libffi.so.8", "libc.so.6", "libsqlite3.so.0"],
+                           runpath="$ORIGIN/../../python-private:$ORIGIN/../..", executable=False)
+        problems = self.module.runtime_problems(release, [module], {"libsqlite3.so.0"})
+        self.assertEqual(problems, ["lib/python3.12/lib-dynload/_ctypes.so cannot reach libffi.so.8"])
+        self._elf(release / "lib/python-private/libffi.so.8", executable=False)
+        self.assertEqual(self.module.runtime_problems(release, [module], {"libsqlite3.so.0"}), [])
+
+    def test_origin_rpath_is_relative_to_each_module(self):
+        lib = self.root / "lib"
+        elf = lib / "python3/dist-packages/cryptography/hazmat/bindings/_rust.abi3.so"
+        self.assertEqual(self.module._origin_rpath(elf, lib / "python-private", lib),
+                         "$ORIGIN/../../../../../python-private:$ORIGIN/../../../../..")
+
+    def _refusal(self, **overrides):
+        btxd = self._elf(self.root / "release/libexec/btxd.real", needed=["libpython3.12.so.1.0"])
+        host = self.root / "host/lib"; host.mkdir(parents=True, exist_ok=True)
+        (host / "libpython3.12.so.1.0").write_bytes(b"libpython")
+        stdlib = self.root / "host/python3.12"; (stdlib / "lib-dynload").mkdir(parents=True, exist_ok=True)
+        info = {"version": "3.12", "soname": "libpython3.12.so.1.0", "libdir": str(host),
+                "prefix": str(self.root / "host"), "platlibdir": "lib", "stdlib": str(stdlib),
+                "lib_dynload": str(stdlib / "lib-dynload"), "failed": [], "modules": {}}
+        info.update(overrides)
+        qt = types.SimpleNamespace(_ldd_map=lambda path, req=None: {"libpython3.12.so.1.0": host / "libpython3.12.so.1.0"},
+                                   _host_soname=lambda name: name.startswith("libc."))
+        self.module._qt_bundle = lambda: qt
+        self.module.find_interpreter = lambda soname, explicit=None: "python3.12"
+        self.module.probe_interpreter = lambda python, modules: info
+        self.module.swapnet_imports = lambda source_root: ["sqlite3"]
+        with self.assertRaises(RuntimeError) as ctx:
+            self.module.bundle_linux_python(btxd, self.root / "release", source_root=ROOT)
+        return str(ctx.exception)
+
+    def test_refuses_an_interpreter_of_another_version(self):
+        self.assertIn("is Python 3.13", self._refusal(version="3.13", soname="libpython3.13.so.1.0"))
+
+    def test_refuses_an_interpreter_that_does_not_own_the_linked_library(self):
+        other = self.root / "elsewhere"; other.mkdir()
+        (other / "libpython3.12.so.1.0").write_bytes(b"another build")
+        self.assertIn("btxd loads", self._refusal(libdir=str(other)))
+
+    def test_refuses_when_a_swapnet_import_fails_on_the_host(self):
+        self.assertIn("cryptography.hazmat.primitives (ModuleNotFoundError)",
+                      self._refusal(failed=["cryptography.hazmat.primitives (ModuleNotFoundError)"]))
+
+    def test_refuses_a_lib64_layout(self):
+        self.assertIn("platlibdir 'lib64'", self._refusal(platlibdir="lib64"))
+
+    def test_refuses_a_third_party_module_outside_the_prefix(self):
+        outside = self.root / "home/.local/cryptography"; outside.mkdir(parents=True)
+        (outside / "__init__.py").write_text("")
+        message = self._refusal(modules={"cryptography": str(outside / "__init__.py")})
+        self.assertIn("outside", message)
+        self.assertIn("cryptography", message)
+
+    def _stage_swapnet_wrapper(self, name="btxd", *, bundled=True):
+        bindir = self.root / "bin"; libexec = self.root / "libexec"; tools = self.root / "tools"
+        for d in (bindir, libexec, tools):
+            d.mkdir(exist_ok=True)
+        wrapper = bindir / name
+        wrapper.write_text(load_module().wrapper_payload(name, "linux-x86_64"), encoding="utf-8")
+        wrapper.chmod(0o755)
+        real = libexec / f"{name}.real"
+        real.write_text('#!/bin/sh\necho "NO_LEGACY=${CRYPTOGRAPHY_OPENSSL_NO_LEGACY-unset}"\n# GLIBC_2.2.5\n')
+        real.chmod(0o755)
+        (tools / "ldd").write_text("#!/bin/sh\nprintf '\\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0)\\n'\n")
+        (tools / "getconf").write_text("#!/bin/sh\n[ \"$1\" = GNU_LIBC_VERSION ] && echo 'glibc 2.39'\n")
+        for tool in ("ldd", "getconf"):
+            (tools / tool).chmod(0o755)
+        if bundled:
+            (self.root / "lib/python3.12").mkdir(parents=True, exist_ok=True)
+            (self.root / "lib/python3.12/os.py").write_text("")
+        return wrapper
+
+    def _run_wrapper(self, wrapper, **extra):
+        env = {k: v for k, v in os.environ.items() if k != "CRYPTOGRAPHY_OPENSSL_NO_LEGACY"}
+        env["PATH"] = f"{self.root / 'tools'}:{env.get('PATH', '')}"
+        env.pop("BTX_GLIBC_PREFIX", None)
+        env.update(extra)
+        proc = subprocess.run([str(wrapper)], capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout.strip()
+
+    def test_swapnet_wrapper_skips_the_legacy_provider_with_the_bundled_runtime(self):
+        self.assertEqual(self._run_wrapper(self._stage_swapnet_wrapper()), "NO_LEGACY=1")
+
+    def test_swapnet_wrapper_leaves_the_switch_alone_without_the_runtime(self):
+        self.assertEqual(self._run_wrapper(self._stage_swapnet_wrapper(bundled=False)), "NO_LEGACY=unset")
+
+    def test_swapnet_wrapper_keeps_an_operator_setting(self):
+        wrapper = self._stage_swapnet_wrapper()
+        self.assertEqual(self._run_wrapper(wrapper, CRYPTOGRAPHY_OPENSSL_NO_LEGACY="0"), "NO_LEGACY=0")
+
+    def test_swapnet_wrapper_switch_reaches_the_private_glibc_loader(self):
+        wrapper = self._stage_swapnet_wrapper()
+        libdir = self.root / "glibc/usr/lib/x86_64-linux-gnu"; libdir.mkdir(parents=True)
+        loader = libdir / "ld-linux-x86-64.so.2"
+        loader.write_text('#!/bin/sh\necho "NO_LEGACY=${CRYPTOGRAPHY_OPENSSL_NO_LEGACY-unset}"\n')
+        loader.chmod(0o755)
+        self.assertEqual(self._run_wrapper(wrapper, BTX_GLIBC_PREFIX=str(self.root / "glibc")), "NO_LEGACY=1")
+
+    def test_only_the_swapnet_binaries_get_the_switch(self):
+        archive = load_module()
+        for name in ("btxd", "btx-qt"):
+            self.assertIn("CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1", archive.wrapper_payload(name, "linux-x86_64"))
+        for name in ("btx-cli", "btx-util", "btx-guardd", "btx-modeld", "btx-atlas"):
+            self.assertNotIn("CRYPTOGRAPHY_OPENSSL_NO_LEGACY", archive.wrapper_payload(name, "linux-x86_64"))
+        self.assertNotIn("@SWAPNET_ENV@", archive.wrapper_payload("btxd", "linux-x86_64"))
+
+    def test_stage_release_tree_bundles_python_on_linux_only(self):
+        archive = load_module()
+        archive.verify_shipped_btxd = archive.verify_shipped_cli = archive.verify_shipped_helper = lambda path: None
+        archive.set_linux_bundled_lib_runpath = lambda path: None
+        calls = []
+        fake = types.SimpleNamespace(bundle_linux_python=lambda real, release_root, source_root, python:
+                                     calls.append((real.name, python)) or ["lib/libpython3.12.so.1.0", "lib/python3.12"])
+        archive._load_python_bundle = lambda: fake
+        source_root = self.root / "source-root"
+        for relative in archive.SUPPORT_FILES:
+            (source_root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (source_root / relative).write_text(relative)
+        for name in ("btxd", "btx-cli", "btx-util", "btxd.exe", "btx-cli.exe", "btx-util.exe"):
+            (self.root / name).write_text(name)
+        _, included, _ = archive.stage_release_tree(
+            version="29.2", platform_id="linux-x86_64", btxd_path=self.root / "btxd",
+            btx_cli_path=self.root / "btx-cli", btx_util_path=None, matmul_metallib_path=None,
+            oracle_metallib_path=None, metal_lib_dir=None, source_root=source_root,
+            temp_root=self.root / "linux", python="/opt/py/bin/python3.12")
+        self.assertEqual(calls, [("btxd.real", "/opt/py/bin/python3.12")])
+        self.assertIn("lib/python3.12", included)
+        archive.stage_release_tree(
+            version="29.2", platform_id="windows-x86_64", btxd_path=self.root / "btxd.exe",
+            btx_cli_path=self.root / "btx-cli.exe", btx_util_path=None, matmul_metallib_path=None,
+            oracle_metallib_path=None, metal_lib_dir=None, source_root=source_root,
+            temp_root=self.root / "windows")
+        self.assertEqual(len(calls), 1)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("cc") and shutil.which("patchelf")
+                         and shutil.which("python3-config") and importlib.util.find_spec("cryptography"),
+                         "native Linux ELF tools, python3-dev and cryptography required")
+    def test_native_bundle_ships_a_runtime_the_staged_tree_can_import_from(self):
+        flags = subprocess.check_output(["python3-config", "--embed", "--ldflags"], text=True).split()
+        release = self.root / "release"; real = release / "libexec/btxd.real"; real.parent.mkdir(parents=True)
+        source = self.root / "main.c"; source.write_text("int main(void) { return 0; }\n")
+        subprocess.run(["cc", str(source), "-Wl,--no-as-needed", *flags, "-o", str(real)], check=True)
+        soname = self.module.linked_libpython(real)
+        if soname is None:
+            self.skipTest("host python3-config links libpython statically")
+        written = self.module.bundle_linux_python(real, release, source_root=ROOT, python=sys.executable)
+        version = soname[len("libpython"):].split(".so")[0]
+        lib = release / "lib"
+        self.assertEqual(written[0], f"lib/{soname}")
+        self.assertTrue((lib / f"python{version}/os.py").is_file())
+        self.assertTrue((lib / f"python{version}/lib-dynload").is_dir())
+        self.assertFalse((lib / f"python{version}/test").exists())
+        self.assertFalse(list(lib.rglob("__pycache__")))
+        self.assertFalse(list(lib.rglob("readline.*.so")))
+        self.assertFalse((lib / f"python{version}/sitecustomize.py").exists())
+        self.assertTrue(any(p.name == "cryptography" for p in lib.rglob("cryptography")))
+        self.assertFalse([p for p in release.rglob("*") if p.is_symlink()])
+        self.assertEqual(subprocess.check_output(["patchelf", "--print-rpath", str(lib / soname)], text=True).strip(),
+                         "$ORIGIN")
+        # Extension modules that needed a bundled library point at lib/python-private, then lib/.
+        dynload = lib / f"python{version}/lib-dynload"
+        patched = {p.name: subprocess.check_output(["patchelf", "--print-rpath", str(p)], text=True).strip()
+                   for p in dynload.glob("*.so")}
+        patched = {name: rpath for name, rpath in patched.items() if rpath}
+        self.assertTrue(patched)
+        self.assertEqual(set(patched.values()), {"$ORIGIN/../../python-private:$ORIGIN/../.."})
+        self.assertTrue((lib / "python-private").is_dir())
+        bundled = [p for p in lib.rglob("*") if self.module._is_shared_object_name(p) and self.module._is_elf(p)]
+        self.assertEqual(self.module.runtime_problems(release, bundled, self.module.startup_sonames(real, soname)), [])
+        # bundle_linux_python already imported the SwapNet list from the staged tree
+        # (verify_staged_imports); a missing stdlib piece fails it.
+        shutil.rmtree(lib / f"python{version}/json")
+        with self.assertRaisesRegex(RuntimeError, "cannot import"):
+            self.module.verify_staged_imports(sys.executable, release, ["json"])
 
 
 if __name__ == "__main__":

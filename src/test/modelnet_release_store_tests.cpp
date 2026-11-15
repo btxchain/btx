@@ -18,6 +18,7 @@
 #include <atomic>
 #include <csignal>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -283,6 +284,103 @@ BOOST_AUTO_TEST_CASE(feed_reads_do_not_save_an_older_pledge)
     BOOST_REQUIRE_EQUAL(on_disk.size(), 1U);
     BOOST_CHECK_EQUAL(on_disk[0].pledged_atoms, pledged.load());
 }
+
+// createmodelrelease read refund_height as int64 and cast it to uint32 with no
+// range check: -1 became 4294967295 and 2^32 + 100 became 100. A height from
+// 500000000 on was stored and signed, although the funding path refuses it.
+BOOST_AUTO_TEST_CASE(createmodelrelease_refuses_a_refund_height_that_is_not_a_block_height)
+{
+    const fs::path root = m_path_root / "release-refund-height-range";
+    WriteTinySafeTensors(root / "a.dir", "{}");
+    ModelCatalog cat{root, 8 << 20};
+    UniValue res;
+    std::string code;
+    BOOST_REQUIRE(CallHelper(cat, "hostmodel", OneParam(fs::PathToString(root / "a.dir")), res, code));
+    const std::string uri = res["uri"].get_str();
+
+    const int64_t u32_max{std::numeric_limits<uint32_t>::max()};
+    for (const int64_t bad : {int64_t{-1}, u32_max + 1, u32_max + 100, int64_t{500'000'000}, u32_max}) {
+        UniValue body = CreateParams(uri, 'a')[0];
+        body.pushKV("refund_height", bad);
+        BOOST_CHECK_MESSAGE(!CallHelper(cat, "createmodelrelease", OneParam(body), res, code), "object form accepted " << bad);
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+        UniValue positional(UniValue::VARR);
+        positional.push_back(uri);
+        positional.push_back(std::string(64, 'a'));
+        positional.push_back(bad);
+        BOOST_CHECK_MESSAGE(!CallHelper(cat, "createmodelrelease", positional, res, code), "positional form accepted " << bad);
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    BOOST_REQUIRE(CallHelper(cat, "getmodelrelease", UniValue(UniValue::VARR), res, code));
+    BOOST_CHECK_EQUAL(res["campaigns"].size(), 0U);
+
+    BOOST_REQUIRE_MESSAGE(CallHelper(cat, "createmodelrelease", CreateParams(uri, 'a'), res, code), code);
+    BOOST_REQUIRE(CallHelper(cat, "getmodelrelease", UniValue(UniValue::VARR), res, code));
+    BOOST_REQUIRE_EQUAL(res["campaigns"].size(), 1U);
+    BOOST_CHECK_EQUAL(res["campaigns"][0]["refund_height"].getInt<int64_t>(), 100000);
+}
 #endif // WIN32
+
+// A campaigns.json that is there but cannot be read used to load as an empty
+// list. The helper then found no campaign for its own release and served the
+// plaintext of a release that was still being funded.
+BOOST_AUTO_TEST_CASE(loadcampaigns_reports_a_file_that_cannot_be_read)
+{
+    const fs::path dir = m_path_root / "release-campaigns-unreadable";
+    fs::create_directories(dir);
+    std::string err;
+    std::vector<ReleaseCampaign> out;
+    BOOST_CHECK(LoadCampaigns(dir, out, err));
+    BOOST_CHECK(out.empty());
+    for (const std::string text : {"", "{", "[]", "{}", R"({"campaigns":5})"}) {
+        BOOST_TEST_CONTEXT(text) {
+            {
+                std::ofstream f(dir / "campaigns.json", std::ios::trunc);
+                f << text;
+            }
+            err.clear();
+            BOOST_CHECK(!LoadCampaigns(dir, out, err));
+            BOOST_CHECK(!err.empty());
+            BOOST_CHECK(out.empty());
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(loadcampaigns_names_the_entries_it_skips)
+{
+    const fs::path dir = m_path_root / "release-campaigns-skipped";
+    fs::create_directories(dir);
+    std::string err;
+    ReleaseCampaign a;
+    BOOST_REQUIRE(Digest48::FromHex(std::string(96, 'a'), a.release_id, err));
+    a.target_atoms = 111;
+    BOOST_REQUIRE(SaveCampaigns(dir, {a}, err));
+
+    UniValue file;
+    {
+        std::ifstream in(dir / "campaigns.json");
+        const std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        BOOST_REQUIRE(file.read(raw));
+    }
+    UniValue bad(UniValue::VOBJ);
+    bad.pushKV("release_id", std::string(96, 'B'));
+    bad.pushKV("target_atoms", "not a number");
+    UniValue campaigns = file["campaigns"];
+    campaigns.push_back(bad);
+    UniValue rewritten(UniValue::VOBJ);
+    rewritten.pushKV("campaigns", campaigns);
+    {
+        std::ofstream f(dir / "campaigns.json", std::ios::trunc);
+        f << rewritten.write();
+    }
+
+    std::vector<ReleaseCampaign> out;
+    std::vector<std::string> skipped;
+    BOOST_CHECK(LoadCampaigns(dir, out, err, &skipped));
+    BOOST_REQUIRE_EQUAL(out.size(), 1U);
+    BOOST_CHECK(out[0].release_id == a.release_id);
+    BOOST_REQUIRE_EQUAL(skipped.size(), 1U);
+    BOOST_CHECK_EQUAL(skipped[0], std::string(96, 'b'));
+}
 
 BOOST_AUTO_TEST_SUITE_END()

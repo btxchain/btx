@@ -31,6 +31,10 @@ struct Comp04Setup : public TestingSetup {
     {
         JSONRPCRequest request;
         request.context = &m_node;
+        // An unrestricted local caller. The default "-" restricts the request
+        // to no wallet, and server-path methods refuse such a caller before
+        // the helper is tried.
+        request.m_wallet_restriction.clear();
         request.strMethod = method;
         request.params = std::move(params);
         if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();

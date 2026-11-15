@@ -120,9 +120,20 @@ bcp1::Package PackageFromArg(const UniValue& raw)
 CAmount ParseAtomsOrAmount(const UniValue& o, const char* atoms_key, const char* amount_key)
 {
     if (o.exists(atoms_key) && !o[atoms_key].isNull()) {
-        if (o[atoms_key].isNum()) return o[atoms_key].getInt<int64_t>();
         int64_t v = 0;
-        if (o[atoms_key].isStr() && ParseInt64(o[atoms_key].get_str(), &v)) return v;
+        bool parsed{false};
+        if (o[atoms_key].isNum()) {
+            v = o[atoms_key].getInt<int64_t>();
+            parsed = true;
+        } else if (o[atoms_key].isStr() && ParseInt64(o[atoms_key].get_str(), &v)) {
+            parsed = true;
+        }
+        if (parsed) {
+            // As AmountFromValue does for "amount": the wallet sums the outputs
+            // and the coin selection assumes amounts within MoneyRange.
+            if (!MoneyRange(v)) throw JSONRPCError(RPC_TYPE_ERROR, "Amount out of range");
+            return v;
+        }
     }
     if (o.exists(amount_key) && !o[amount_key].isNull()) return AmountFromValue(o[amount_key]);
     throw JSONRPCError(RPC_INVALID_PARAMETER, "amount or amount_atoms required");
@@ -390,10 +401,12 @@ UniValue FundedPackage(CWallet& wallet, const std::vector<CRecipient>& recipient
             }
         }
     }
-    auto res = CreateTransaction(wallet, recipients, change_pos, coin_control, /*sign=*/false);
+    bool inputs_failed{false};
+    auto res = CreateTransaction(wallet, recipients, change_pos, coin_control, /*sign=*/false, &inputs_failed);
     if (!res) {
-        // As in the RPC FundTransaction(): when the lock hid coins of the wallet's own, ask for the unlock.
-        if (LockedWalletLeftOutOwnCoins(wallet, coin_control)) EnsureWalletIsUnlocked(wallet);
+        // As in the RPC FundTransaction(): ask for the unlock only when the inputs
+        // could not be fetched, selected or sized and the lock hid own coins.
+        if (inputs_failed && LockedWalletLeftOutOwnCoins(wallet, coin_control)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(res).original);
     }
     PartiallySignedTransaction psbtx{CMutableTransaction(*res->tx)};
@@ -488,6 +501,48 @@ bool SelectPlanInputs(CCoinControl& cc, const UniValue& options)
     return cc.HasSelected();
 }
 
+bool LockUnspentsRequested(const UniValue& options)
+{
+    if (options.exists("lockUnspents")) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Use lock_unspents instead of lockUnspents");
+    }
+    if (!options.exists("lock_unspents")) return false;
+    return options["lock_unspents"].get_bool();
+}
+
+// Lock selected_utxos after FundedPackage and the fee ceiling have accepted the
+// package. A coin the wallet already held is not recorded. If a lock fails,
+// unlock only the outpoints this call locked.
+void LockSelectedPackageInputs(CWallet& wallet, const UniValue& funded)
+{
+    LOCK(wallet.cs_wallet);
+    if (!funded.exists("selected_utxos") || !funded["selected_utxos"].isArray()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Locking coin failed");
+    }
+    const UniValue& selected = funded["selected_utxos"];
+    std::vector<COutPoint> locked_here;
+    locked_here.reserve(selected.size());
+    for (const UniValue& utxo : selected.getValues()) {
+        const Txid txid = Txid::FromUint256(ParseHashV(utxo["txid"], "txid"));
+        uint32_t vout{0};
+        std::string vout_err;
+        if (!ParseUint32Index(utxo["vout"].getInt<int64_t>(), vout, "vout", vout_err)) {
+            for (const COutPoint& outpoint : locked_here) wallet.UnlockCoin(outpoint);
+            throw JSONRPCError(RPC_WALLET_ERROR, "Locking coin failed");
+        }
+        const COutPoint outpoint{txid, vout};
+        if (wallet.IsLockedCoin(outpoint)) continue;
+        if (!wallet.LockCoin(outpoint)) {
+            // LockCoin inserts before a database write can fail. Drop that
+            // insert, then the outpoints this call locked. Leave the rest.
+            wallet.UnlockCoin(outpoint);
+            for (const COutPoint& locked : locked_here) wallet.UnlockCoin(locked);
+            throw JSONRPCError(RPC_WALLET_ERROR, "Locking coin failed");
+        }
+        locked_here.push_back(outpoint);
+    }
+}
+
 UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
 {
     options = NormalizePlanOptions(std::move(options));
@@ -506,9 +561,15 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     list_cc.UnSelectAll();
     auto coins = AvailableCoinsListUnspent(wallet, &list_cc, fp);
     std::vector<COutput> all = coins.All();
-    const size_t max_inputs = options.exists("max_inputs") ? static_cast<size_t>(options["max_inputs"].getInt<int64_t>()) :
-                              options.exists("batch_size") ? static_cast<size_t>(options["batch_size"].getInt<int64_t>()) :
-                              all.size();
+    // max_inputs (or batch_size) caps the plan. A cast of a negative value to
+    // size_t would lift the cap, and 0 would plan nothing.
+    const char* const max_key{options.exists("max_inputs") ? "max_inputs" : options.exists("batch_size") ? "batch_size" : nullptr};
+    size_t max_inputs = all.size();
+    if (max_key) {
+        const int64_t requested = options[max_key].getInt<int64_t>();
+        if (requested < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be at least 1", max_key));
+        max_inputs = static_cast<size_t>(requested);
+    }
     const int64_t target_utxos = options.exists("target_utxo_count") ? options["target_utxo_count"].getInt<int64_t>() : 1;
     CAmount fee_ceiling = MAX_MONEY;
     if (options.exists("fee_ceiling")) fee_ceiling = AmountFromValue(options["fee_ceiling"]);
@@ -533,6 +594,16 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     } else {
         for (const COutput& c : all) {
             if (cc.IsSelected(c.outpoint)) selected.push_back(c);
+        }
+        // A named input that the listing leaves out (locked, below minconf or
+        // min_amount, or spent) stays selected and would be spent by the
+        // transaction outside the plan total, as a second output. Refuse it.
+        for (const COutPoint& named : cc.ListSelected()) {
+            if (std::none_of(selected.begin(), selected.end(), [&](const COutput& c) { return c.outpoint == named; })) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                    strprintf("plan input %s:%u is not spendable here (locked, below minconf or min_amount, or spent)",
+                              named.hash.GetHex(), named.n));
+            }
         }
     }
     UniValue plan(UniValue::VOBJ);
@@ -1280,6 +1351,7 @@ RPCHelpMan createconsolidationtx()
                 {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, ""},
                 {"max_inputs", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
                 {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
+                {"lock_unspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock selected unspent outputs"},
                 {"plan", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "planconsolidation result", std::vector<RPCArg>{}},
             }},
         },
@@ -1298,13 +1370,21 @@ RPCHelpMan createconsolidationtx()
             UniValue options{UniValue::VOBJ};
             if (request.params[0].isObject()) {
                 options = request.params[0];
-            } else if (request.params[1].isObject()) {
-                options = request.params[1];
+            }
+            // The options argument also applies next to a plan object in the first
+            // argument (the help names this pair); its keys win, as in createexchangebatch.
+            if (request.params[1].isObject()) {
+                for (const std::string& key : request.params[1].getKeys()) {
+                    options.pushKV(key, request.params[1][key]);
+                }
             }
             if (request.params[0].isStr()) {
                 options.pushKV("change_address", request.params[0].get_str());
             }
-            return PlanCoins(*pwallet, options, /*create_tx=*/true);
+            const bool lock_unspents{LockUnspentsRequested(options)};
+            UniValue funded = PlanCoins(*pwallet, options, /*create_tx=*/true);
+            if (lock_unspents) LockSelectedPackageInputs(*pwallet, funded);
+            return funded;
         },
     };
 }
@@ -1347,7 +1427,12 @@ RPCHelpMan estimateconsolidationfee()
                     o.pushKV("would_broadcast", false);
                     return o;
                 } catch (const UniValue&) {
-                    // Fall through to an unsigned plan when change/omnibus cannot be priced.
+                    // Without change_address or destination the omnibus may not be
+                    // priceable: fall through to an unsigned plan (this still hides any
+                    // other error on that path). With either option the error
+                    // (fee_ceiling, funds, a locked wallet) is the answer, as in
+                    // createconsolidationtx.
+                    if (options.exists("change_address") || options.exists("destination")) throw;
                 }
             }
             return PlanCoins(*pwallet, options, /*create_tx=*/false);
@@ -1374,6 +1459,7 @@ RPCHelpMan createexchangebatch()
                 {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, ""},
                 {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Fee rate in " + CURRENCY_ATOM + "/vB"},
                 {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
+                {"lock_unspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock selected unspent outputs"},
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
@@ -1407,12 +1493,14 @@ RPCHelpMan createexchangebatch()
                     options.pushKV("change_address", request.params[0]["change_address"]);
                 }
             }
+            const bool lock_unspents{LockUnspentsRequested(options)};
             CCoinControl cc = CoinControlFromOptions(*pwallet, options, /*default_minconf=*/1);
             UniValue funded = FundedPackage(*pwallet, recs, cc, std::nullopt);
             if (options.exists("fee_ceiling") && funded.exists("fee_atoms") &&
                 funded["fee_atoms"].getInt<int64_t>() > AmountFromValue(options["fee_ceiling"])) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "estimated fee exceeds fee_ceiling");
             }
+            if (lock_unspents) LockSelectedPackageInputs(*pwallet, funded);
             return funded;
         },
     };

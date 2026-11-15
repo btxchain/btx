@@ -9,9 +9,11 @@
 #include <util/fs.h>
 #include <util/strencodings.h>
 
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <sstream>
 #include <sys/wait.h>
@@ -211,12 +213,31 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
     }
     close(pipefd[1]);
     job.pushKV("pid", pid);
+    // Read the report while the child runs. The child writes it in one
+    // write() before it exits; a report larger than the pipe buffer would
+    // block that write until the timeout below kills the child.
+    std::string raw;
+    char buf[4096];
+    const int pipe_flags = fcntl(pipefd[0], F_GETFL, 0);
+    const bool drain_while_running = pipe_flags >= 0 && fcntl(pipefd[0], F_SETFL, pipe_flags | O_NONBLOCK) == 0;
+    auto drain = [&]() {
+        for (;;) {
+            const ssize_t got = read(pipefd[0], buf, sizeof(buf));
+            if (got > 0) {
+                raw.append(buf, static_cast<size_t>(got));
+                continue;
+            }
+            if (got < 0 && errno == EINTR) continue;
+            return;
+        }
+    };
     const int64_t start = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count();
     int status = 0;
     bool cancelled = job.exists("cancel") && job["cancel"].get_bool();
     while (true) {
+        if (drain_while_running) drain();
         if (job.exists("cancel") && job["cancel"].get_bool()) cancelled = true;
         if (cancelled) {
             kill(pid, SIGKILL);
@@ -242,10 +263,8 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
         }
         usleep(20 * 1000);
     }
-    std::string raw;
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) raw.append(buf, static_cast<size_t>(n));
+    // The child has exited: read what is left up to end of file.
+    drain();
     close(pipefd[0]);
     UniValue report;
     if (!report.read(raw) || !report.isObject()) {

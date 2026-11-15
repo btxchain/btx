@@ -804,7 +804,9 @@ static RPCHelpMan addminingpeermeshnode()
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: v2transport requested but not enabled (see -v2transport)");
     }
 
-    const auto added_nodes = connman.GetAddedNodeInfo(/*include_connected=*/false);
+    // Include connected nodes: an added node that is connected is still in the
+    // addnode list, and AddNode() would refuse it as a duplicate.
+    const auto added_nodes = connman.GetAddedNodeInfo(/*include_connected=*/true);
     const bool already_added = IsAddedNode(added_nodes, node_arg);
     bool added{false};
     if (persistent && !already_added) {

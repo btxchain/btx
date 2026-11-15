@@ -222,7 +222,7 @@ Honest capabilities (`getmodelnetworkinfo` → `capabilities`):
 | `loadmodel` / `unloadmodel` | yes — optional CUDA hold+smoke; never a network server |
 | `generatemodel` / `getmodelhostprofile` | yes — host-profile match; pickle/unknown arch fail closed |
 | Paid retrieve, quotes, campaign RPCs | **quotes + campaign objects yes**; helper `preparemodelfunding` / `sign` / `submit` / `buildmodelhtlcclaim` implemented (no auto-spend; `paid_chain_verify=false`) |
-| CUDA qualification | **isolated worker** (`BTX_CUDA_QUAL_WORKER`); default `-modelruntimecheck=0` is `NOT_RUN_CUDA_ISOLATION`; capability `cuda_qualification=true` for the worker path |
+| CUDA qualification | **isolated worker** (`BTX_CUDA_QUAL_WORKER`); node result `NOT_RUN_CUDA_ISOLATION` (no option enables runtime qualification); capability `cuda_qualification=true` for the worker path |
 | Browser bridge | **false** (optional, never native PQ fallback) |
 | Remote inference | **false** — removed from the roadmap (v1.1 D01) |
 | Worker pool / connection ceilings / cert pin | yes (8/32 workers/queue; 16 inbound; 8 outbound; 2/netgroup; TOFU SPKI pin) |

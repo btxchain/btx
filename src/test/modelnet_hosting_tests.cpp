@@ -27,6 +27,8 @@
 #include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/sock.h>
+#include <util/threadinterrupt.h>
 #include <util/strencodings.h>
 #include <util/syserror.h>
 
@@ -39,6 +41,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <future>
+#include <memory>
 #include <iterator>
 #include <set>
 #include <string>
@@ -48,14 +52,16 @@
 #ifndef WIN32
 #include <fcntl.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
 #if defined(__linux__)
 #include <fcntl.h>
 #include <sched.h>
-#include <sys/wait.h>
 #endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_hosting_tests, BasicTestingSetup)
@@ -585,6 +591,148 @@ BOOST_AUTO_TEST_CASE(start_socket_path_that_cannot_fit_does_not_spawn)
 #endif
 
 #ifndef WIN32
+BOOST_AUTO_TEST_CASE(external_helper_shutdown_cancels_inflight_health_read)
+{
+    // Use a short private socket path. Test datadirs can exceed sun_path.
+    char dir[] = "/tmp/btx-supervisor-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(dir) != nullptr);
+    const fs::path root{dir};
+    const auto cleanup = std::unique_ptr<const fs::path, void (*)(const fs::path*)>{
+        &root, [](const fs::path* path) {
+            std::error_code ignored;
+            fs::remove_all(*path, ignored);
+        }};
+    using namespace std::chrono_literals;
+    const fs::path socket_path = root / "helper.sock";
+    const std::string path = fs::PathToString(socket_path);
+
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(fd >= 0);
+    Sock listener{static_cast<SOCKET>(fd)};
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    BOOST_REQUIRE(path.size() < sizeof(address.sun_path));
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    BOOST_REQUIRE(listener.Bind(reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    BOOST_REQUIRE(listener.Listen(1) == 0);
+    BOOST_REQUIRE(listener.SetNonBlocking());
+
+    modelnet::HelperLaunchConfig cfg;
+    cfg.rpc_socket = socket_path;
+    cfg.external_socket = true;
+    modelnet::HelperSupervisor supervisor{std::move(cfg)};
+    std::string error;
+    BOOST_REQUIRE(supervisor.Start(error));
+
+    BOOST_REQUIRE(listener.Wait(5s, Sock::RECV));
+    auto peer = listener.Accept(nullptr, nullptr);
+    BOOST_REQUIRE(peer);
+    BOOST_REQUIRE(peer->SetNonBlocking());
+    // The received request proves the connection reached the reply path.
+    CThreadInterrupt interrupt;
+    const auto wire = peer->RecvUntilTerminator('\n', 5s, interrupt, 4096);
+    UniValue request;
+    BOOST_REQUIRE(request.read(wire));
+    BOOST_CHECK_EQUAL(request["method"].get_str(), "getmodelnetworkinfo");
+
+    auto result = std::async(std::launch::async, [&supervisor] {
+        supervisor.Stop();
+    });
+    // Destroy the socket before waiting for the async task, including on unwind.
+    auto pending_peer = std::move(peer);
+    const auto status = result.wait_for(2s);
+    // Unblock the baseline before collecting the result.
+    pending_peer.reset();
+    result.get();
+
+    BOOST_CHECK(status == std::future_status::ready);
+    BOOST_CHECK(supervisor.Snapshot().state == modelnet::HelperState::DISABLED);
+    BOOST_CHECK(!listener.Accept(nullptr, nullptr));
+}
+
+#if defined(__linux__) || defined(__APPLE__)
+BOOST_AUTO_TEST_CASE(owned_helper_shutdown_refuses_a_different_socket_peer)
+{
+    using namespace std::chrono_literals;
+    char dir[] = "/tmp/btx-owned-peer-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(dir) != nullptr);
+    const fs::path root{dir};
+    const auto cleanup = std::unique_ptr<const fs::path, void (*)(const fs::path*)>{
+        &root, [](const fs::path* path) {
+            std::error_code ignored;
+            fs::remove_all(*path, ignored);
+        }};
+    const fs::path socket_path = root / "helper.sock";
+    const fs::path script = root / "helper.sh";
+    {
+        std::ofstream out(script);
+        out << "#!/bin/sh\nexec /bin/sleep 60\n";
+        BOOST_REQUIRE(out.good());
+    }
+    fs::permissions(script, fs::perms::owner_all);
+
+    modelnet::HelperLaunchConfig cfg;
+    cfg.helper_exe = script;
+    cfg.modeldir = root;
+    cfg.rpc_socket = socket_path;
+    modelnet::HelperSupervisor supervisor{std::move(cfg)};
+    std::string error;
+    BOOST_REQUIRE(supervisor.Start(error));
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    auto snapshot = supervisor.Snapshot();
+    while (snapshot.pid <= 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+        snapshot = supervisor.Snapshot();
+    }
+    BOOST_REQUIRE(snapshot.pid > 0);
+    BOOST_REQUIRE(snapshot.managed_by_btxd);
+    BOOST_REQUIRE_NE(snapshot.pid, ::getpid());
+
+    // Bind from the test process after the supervisor has spawned its child.
+    // The listener deliberately answers health checks, so a reachable socket
+    // cannot be mistaken for proof that the child owns it.
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(fd >= 0);
+    Sock listener{static_cast<SOCKET>(fd)};
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    const std::string path = fs::PathToString(socket_path);
+    BOOST_REQUIRE(path.size() < sizeof(address.sun_path));
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    BOOST_REQUIRE(listener.Bind(reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    BOOST_REQUIRE(listener.Listen(4) == 0);
+    BOOST_REQUIRE(listener.SetNonBlocking());
+
+    auto stop = std::async(std::launch::async, [&supervisor] { supervisor.Stop(); });
+    bool received_stop = false;
+    const auto stop_deadline = std::chrono::steady_clock::now() + 8s;
+    while (stop.wait_for(0s) != std::future_status::ready &&
+           std::chrono::steady_clock::now() < stop_deadline) {
+        if (!listener.Wait(100ms, Sock::RECV)) continue;
+        auto peer = listener.Accept(nullptr, nullptr);
+        if (!peer || !peer->SetNonBlocking()) continue;
+        CThreadInterrupt interrupt;
+        try {
+            UniValue request;
+            if (!request.read(peer->RecvUntilTerminator('\n', 1s, interrupt, 4096))) continue;
+            received_stop |= request["method"].get_str() == "stop";
+            const std::string reply{"{\"result\":{},\"error\":null}\n"};
+            peer->SendComplete(reply, 1s, interrupt);
+        } catch (const std::runtime_error&) {
+            // The guarded connection closes without writing an RPC.
+        }
+    }
+    BOOST_CHECK(stop.wait_for(0s) == std::future_status::ready);
+    stop.get();
+    BOOST_CHECK(!received_stop);
+    int status = 0;
+    const auto reaped = ::waitpid(snapshot.pid, &status, WNOHANG);
+    BOOST_CHECK_EQUAL(reaped, -1);
+    BOOST_CHECK_EQUAL(errno, ECHILD);
+    BOOST_CHECK(supervisor.Snapshot().state == modelnet::HelperState::DISABLED);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(start_spawned_helper_does_not_inherit_descriptors)
 {
     // A descriptor without FD_CLOEXEC, like btxd's P2P listen socket. A helper

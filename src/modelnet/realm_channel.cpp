@@ -884,7 +884,7 @@ bool RealmRollout::WriteOfflineBundle(const std::filesystem::path& path, const s
 
 #ifdef _WIN32
     // Preserve the CRLF bytes previously emitted by the Windows text stream.
-    ReplaceAll(text, "\n", "\r\n");
+    util::ReplaceAll(text, "\n", "\r\n");
 #endif
     if (!WriteBinaryFileAtomically(fs::path{path}, text)) {
         err = "BTX035_BUNDLE";

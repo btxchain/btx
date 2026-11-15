@@ -124,7 +124,7 @@ if [ -e "$LIB_DIR/libssl.so.3" ]; then
   export LD_LIBRARY_PATH
 fi
 
-# Unprivileged newer-userspace prefix (dpkg-deb -x libc6 libstdc++6 libgcc-s1).
+@SWAPNET_ENV@# Unprivileged newer-userspace prefix (dpkg-deb -x libc6 libstdc++6 libgcc-s1).
 # When set, skip the host glibc check: the prefix loader is what will run.
 if [ -n "${BTX_GLIBC_PREFIX:-}" ]; then
   BTX_GLIBC_LOADER="${BTX_GLIBC_PREFIX}/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
@@ -242,6 +242,26 @@ exec "$REAL" "$@"
 """
 
 
+# btxd and btx-qt run the SwapNet worker. Its cryptography loads OpenSSL's legacy
+# provider by default and refuses to import when that fails. The libcrypto.so.3
+# in lib/ looks for providers under the build host's OpenSSL prefix, and the worker
+# uses no legacy algorithm (SHA-256, scrypt, AES-GCM, EC). This is cryptography's
+# own switch; no OpenSSL search path changes (modelnet clears OPENSSL_MODULES).
+# It sits before the BTX_GLIBC_PREFIX exec so the private-loader path gets it too.
+LINUX_SWAPNET_ENV = r"""if [ -z "${CRYPTOGRAPHY_OPENSSL_NO_LEGACY+x}" ]; then
+  for BTX_PY_LANDMARK in "$LIB_DIR"/python3.*/os.py; do
+    if [ -e "$BTX_PY_LANDMARK" ]; then
+      CRYPTOGRAPHY_OPENSSL_NO_LEGACY=1
+      export CRYPTOGRAPHY_OPENSSL_NO_LEGACY
+    fi
+    break
+  done
+fi
+
+"""
+SWAPNET_BINARIES = ("btxd", "btx-qt")
+
+
 def openssl_runtime_libs(btxd_path: Path) -> list[Path]:
     """Copy the OpenSSL 3.x sonames btxd actually links, if ldd can see them."""
     try:
@@ -290,7 +310,8 @@ def wrapper_payload(binary_name: str, platform_id: str) -> str | None:
         # (then readelf -V, then a grep of the ELF) against getconf /
         # libstdc++ version nodes. BTX_GLIBC_PREFIX skips the host check and
         # execs through a private loader (unprivileged dpkg-deb -x prefix).
-        payload = LINUX_WRAPPER.replace("@BINARY@", binary_name).replace("@EXTRA_HINT@", extra_hint)
+        payload = (LINUX_WRAPPER.replace("@BINARY@", binary_name).replace("@EXTRA_HINT@", extra_hint)
+                   .replace("@SWAPNET_ENV@", LINUX_SWAPNET_ENV if binary_name in SWAPNET_BINARIES else ""))
         if binary_name == "btx-qt":
             # Keep Qt's build-time libraries out of Atlas and the node's path.
             payload = payload.replace(
@@ -373,6 +394,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--source-root",
         default=str(ROOT),
         help="Repository root used to source helper scripts and docs (default: repo root).",
+    )
+    parser.add_argument("--windows-openmp-runtime", type=Path,
+                        help="Explicit redistributable x64 LLVM OpenMP input directory with licence")
+    parser.add_argument("--windows-python-runtime", type=Path,
+                        help="Prepared matching x64 embeddable Python distribution with pinned dependencies")
+    parser.add_argument(
+        "--python",
+        help="Interpreter matching the linked Python ABI (Linux shared library or macOS framework).",
     )
     parser.add_argument(
         "--archive-name",
@@ -571,6 +600,33 @@ def _load_qt_bundle():
     return module
 
 
+def _load_python_bundle():
+    script = Path(__file__).with_name("bundle_python_runtime.py")
+    spec = importlib.util.spec_from_file_location("bundle_python_runtime", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def bundle_linux_python_runtime(release_root: Path, source_root: Path, python: str | None) -> list[str]:
+    """Ship the libpython, standard library and cryptography that libexec/btxd.real links.
+
+    Without them btxd exits 127 on a host without libpython3.12, and -swapnet=1
+    stops at Python start-up on a host whose Python differs. btxd.real is not
+    edited: it reaches lib/ through its link-time RUNPATH
+    (cmake/module/InstallBinaryComponent.cmake), and verify_staged_abi_floor
+    refuses an executable that does not.
+    """
+    written = _load_python_bundle().bundle_linux_python(
+        release_root / "libexec" / "btxd.real", release_root, source_root=source_root, python=python)
+    if written:
+        print(f"package_release_archive: bundled the Python runtime btxd links ({', '.join(written)})",
+              file=sys.stderr)
+    return written
+
+
 def set_linux_bundled_lib_runpath(path: Path) -> None:
     """Point a staged ELF executable at the archive's shared libraries."""
     bundle = _load_qt_bundle()
@@ -592,6 +648,9 @@ def stage_release_tree(
     temp_root: Path,
     require_gui: bool = False,
     require_model_helpers: bool = False,
+    python: str | None = None,
+    windows_python_runtime: Path | None = None,
+    windows_openmp_runtime: Path | None = None,
 ) -> tuple[Path, list[str], list[str]]:
     config = PLATFORM_CONFIGS[platform_id]
     release_root = temp_root / f"btx-{version}"
@@ -619,8 +678,13 @@ def stage_release_tree(
         *resolve_optional_sibling_binaries(btxd_path, config["exe_suffix"]),
         *model_helpers,
     ]
-    verify_shipped_btxd(btxd_path)
-    verify_shipped_cli(btx_cli_path)
+    # Mac build inputs still name the linked CPython framework. Verify the
+    # finished native images after relocation, as the Qt deployment does.
+    # Other platforms retain their existing input admission order.
+    macos = platform_id.startswith("macos-")
+    if not macos:
+        verify_shipped_btxd(btxd_path)
+        verify_shipped_cli(btx_cli_path)
     qt_source = next((source for source, dest_name in binary_pairs if dest_name.startswith("btx-qt")), None)
     if require_gui and qt_source is None:
         raise FileNotFoundError(
@@ -628,9 +692,9 @@ def stage_release_tree(
             "-DWITH_QT_VERSION=6 (Qt 6 on Linux, the host Qt on macOS) and pass --require-gui."
         )
     for helper_path, helper_name in binary_pairs[3:]:
-        # The macOS GUI is rewritten by macdeployqt into btx-qt.app. The build-tree
-        # binary still names Homebrew Qt; the deployed app is checked after that copy.
-        if helper_name.startswith("btx-qt") and platform_id.startswith("macos-"):
+        # macOS input dependencies are relocated during Python/Qt deployment.
+        # Verify the final real images below, not the unbundled producers.
+        if macos:
             continue
         verify_shipped_helper(helper_path)
 
@@ -688,6 +752,35 @@ def stage_release_tree(
                 shared_roots=[path for path, name in binary_pairs
                               if not name.startswith(("btx-qt", "btx-atlas"))],
             )
+
+    if platform_id.startswith("windows-"):
+        script = Path(__file__).with_name("bundle_windows_python_runtime.py")
+        spec = importlib.util.spec_from_file_location("bundle_windows_python_runtime", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        included += module.bundle_windows_python(release_root, windows_python_runtime)
+        included += module.bundle_windows_openmp(release_root, windows_openmp_runtime)
+
+    if platform_id.startswith("linux-"):
+        # After the Qt bundle: libpython it already placed in lib/ must match.
+        included += bundle_linux_python_runtime(release_root, source_root, python)
+
+    if platform_id.startswith("macos-"):
+        script = Path(__file__).with_name("bundle_macos_python_runtime.py")
+        spec = importlib.util.spec_from_file_location("bundle_macos_python_runtime", script)
+        mac_python = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mac_python)
+        included += mac_python.bundle_macos_python(
+            release_root, source_root=source_root, python=python,
+            architecture=config["triple"].split("-", 1)[0])
+        # Run the unchanged shipping gates on real bundled images, never the
+        # shell wrappers. No archive is emitted unless these checks succeed.
+        verify_shipped_btxd(libexec_dir / "btxd.real")
+        verify_shipped_cli(libexec_dir / "btx-cli.real")
+        for _, helper_name in binary_pairs[2:]:
+            if helper_name.startswith("btx-qt"):
+                continue  # deploy_macos_qt_app already checks the deployed app.
+            verify_shipped_helper(libexec_dir / f"{helper_name}.real")
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
@@ -835,6 +928,9 @@ def main(argv: list[str]) -> int:
             temp_root=temp_root,
             require_gui=args.require_gui,
             require_model_helpers=args.require_model_helpers,
+            python=args.python,
+            windows_python_runtime=args.windows_python_runtime,
+            windows_openmp_runtime=args.windows_openmp_runtime,
         )
         if PLATFORM_CONFIGS[args.platform_id]["archive_format"] == "zip":
             write_zip(archive_path, release_root)

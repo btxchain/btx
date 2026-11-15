@@ -198,7 +198,7 @@ bool Cr11Tco(const std::string& annual_tasks, const std::string& service_per_tas
         // fractional digits by long division: the result is the same floor.
         // Inputs too large to represent give null, as below, instead of
         // wrapping.
-        const __int128 kMax = std::numeric_limits<__int128>::max();
+        constexpr auto kMax = static_cast<__int128>(~static_cast<unsigned __int128>(0) >> 1);
         UniValue be;
         if (local >= 0 && unit <= kMax / 10 / years) {
             const __int128 denom = unit * years;

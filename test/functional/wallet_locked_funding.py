@@ -70,6 +70,12 @@ class WalletLockedFundingTest(BitcoinTestFramework):
         preselected = wallet.createrawtransaction([{"txid": coin["txid"], "vout": coin["vout"]}], [{dest: 1}])
         assert_raises_rpc_error(-13, UNLOCK_NEEDED, wallet.fundrawtransaction, preselected)
 
+        self.log.info("Errors that unlocking cannot fix keep their own answer on the locked wallet")
+        assert_raises_rpc_error(-4, "is lower than the minimum fee rate setting", wallet.send, [{dest: 1}], fee_rate=0.1)
+        assert_raises_rpc_error(-4, "Transaction amount too small", wallet.walletcreatefundedpsbt, [], [{dest: Decimal("0.00000001")}])
+        tiny = wallet.createrawtransaction([], [{dest: Decimal("0.00000001")}])
+        assert_raises_rpc_error(-4, "Transaction amount too small", wallet.fundrawtransaction, tiny)
+
         self.log.info("A locked wallet with no coins of its own still reports the shortfall")
         node.createwallet(wallet_name="empty", descriptors=True, passphrase=PASSPHRASE)
         empty = node.get_wallet_rpc("empty")

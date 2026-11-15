@@ -10,6 +10,7 @@ add_executable(fuzz
   asmap.cpp
   asmap_direct.cpp
   autofile.cpp
+  autoupdate.cpp
   banman.cpp
   base_encode_decode.cpp
   bech32.cpp
@@ -17,6 +18,7 @@ add_executable(fuzz
   bitdeque.cpp
   bitset.cpp
   block.cpp
+  block_chunk_transport.cpp
   block_header.cpp
   block_index.cpp
   blockfilter.cpp
@@ -126,6 +128,7 @@ add_executable(fuzz
   span.cpp
   string.cpp
   strprintf.cpp
+  swapnet_transport.cpp
   system.cpp
   timeoffsets.cpp
   torcontrol.cpp
@@ -185,6 +188,7 @@ if(WITH_MODELNET)
       modelnet_canonical_codec.cpp
       modelnet_lab_api.cpp
       modelnet_lab_peer.cpp
+      modelnet_package_pjson.cpp
       modelnet_peer_parsers.cpp
       modelnet_signed_envelope.cpp
       modelnet_typed_records.cpp

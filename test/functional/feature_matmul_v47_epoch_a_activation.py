@@ -45,6 +45,8 @@ class BTXMatMulV47EpochAActivation(BitcoinTestFramework):
             "-regtestrccoupledtoydims=0",
             "-regtestmatmulltsealaspow=0",
             f"-regtestmatmulv4dimension={V4_DIMENSION}",
+            # The relay sample checked below is only recorded in consensus mode.
+            "-matmulvalidation=consensus",
         ]
         self.extra_args = [common, common]
 

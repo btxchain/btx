@@ -214,20 +214,30 @@ bool RecipientBound(const std::string& recipient, const SubscriptionMandate& m)
     return recipient == m.publisher_id || recipient == m.owner_identity;
 }
 
+//! True only when the file is certainly not there; an error while checking
+//! counts as present, so the read below refuses it.
+bool StateFileMissing(const fs::path& path)
+{
+    try {
+        return !fs::exists(path);
+    } catch (const fs::filesystem_error&) {
+        return false;
+    }
+}
+
 bool ReadStateFile(const fs::path& path, UniValue& out)
 {
+    out = UniValue(UniValue::VOBJ);
+    // Only a missing file is an empty store. A file that is there but cannot be
+    // opened, or is empty, may have held mandates whose spent budget must not
+    // be freed, so it counts as unreadable.
+    if (StateFileMissing(path)) return true;
     std::ifstream in(path);
-    if (!in) {
-        out = UniValue(UniValue::VOBJ);
-        return true;
-    }
+    if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
     const std::string text = ss.str();
-    if (text.empty()) {
-        out = UniValue(UniValue::VOBJ);
-        return true;
-    }
+    if (text.empty()) return false;
     if (!out.read(text) || !out.isObject()) {
         out = UniValue(UniValue::VOBJ);
         return false;
@@ -1086,6 +1096,9 @@ bool SubscriptionBudget::LoadStateJson(const UniValue& state, std::string& err)
                 return false;
             }
             Reservation r;
+            // A budget holds the reservations of its one mandate; the file does
+            // not repeat the id per reservation.
+            r.mandate_id = m.mandate_id;
             r.reservation_id = StrField(e, "reservation_id");
             r.event_id = StrField(e, "event_id");
             r.object_id = StrField(e, "object_id");
@@ -1157,6 +1170,7 @@ bool SubscriptionStore::SetPersistPath(const fs::path& path, std::string& err)
     m_mandates.clear();
     m_budgets.clear();
     m_path = path;
+    if (StateFileMissing(m_path)) return true; // no file yet
     UniValue root;
     if (!ReadStateFile(m_path, root)) {
         // Refuse to start on a corrupt file rather than silently freeing a spent budget.
@@ -1164,7 +1178,11 @@ bool SubscriptionStore::SetPersistPath(const fs::path& path, std::string& err)
         err = "corrupt " + fs::PathToString(path);
         return false;
     }
-    if (!root.exists("mandates") || !root["mandates"].isArray()) return true;
+    if (!root.exists("mandates") || !root["mandates"].isArray()) {
+        m_path.clear();
+        err = "corrupt " + fs::PathToString(path);
+        return false;
+    }
     for (const UniValue& state : root["mandates"].getValues()) {
         auto slot = std::make_unique<SubscriptionBudget>();
         if (!slot->LoadStateJson(state, err)) {

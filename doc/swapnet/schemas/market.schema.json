@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sell_asset": {
+      "type": "string",
+      "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$"
+    },
+    "buy_asset": {
+      "type": "string",
+      "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$"
+    },
+    "numerator": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "denominator": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "maker_fee_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "max_receive_network_fee_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "max_input_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "sell_asset",
+    "buy_asset",
+    "numerator",
+    "denominator",
+    "maker_fee_atoms",
+    "max_receive_network_fee_atoms",
+    "max_input_atoms",
+    "expires_at"
+  ],
+  "additionalProperties": false
+}

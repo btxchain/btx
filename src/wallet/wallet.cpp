@@ -2256,6 +2256,23 @@ void CWallet::blockConnected(ChainstateRole role, const interfaces::BlockInfo& b
     MaybeRecoverPendingBridgeOperations();
 }
 
+bool CWallet::RehydrateShieldedStateAfterUnlock()
+{
+    AssertLockHeld(cs_wallet);
+    // When the wallet was loaded or scanned while locked, LoadPersistedState
+    // kept only the tree-only fallback (no keys, no notes). Rehydrating
+    // decrypts the full persisted state and catches up with the chain.
+    bool rehydrated{false};
+    if (m_shielded_wallet) {
+        LOCK(m_shielded_wallet->cs_shielded);
+        rehydrated = m_shielded_wallet->MaybeRehydrateSpendingKeys();
+    }
+    // The mempool pass at load found no note of an unconfirmed transaction
+    // while the keys were missing. Now that they are loaded, go over it again.
+    if (rehydrated) chain().requestMempoolTransactions(*this);
+    return rehydrated;
+}
+
 void CWallet::AbandonStuckShieldingTransactions()
 {
     AssertLockHeld(cs_wallet);

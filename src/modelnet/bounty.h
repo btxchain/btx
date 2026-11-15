@@ -103,6 +103,12 @@ public:
     UniValue Snapshot(const std::string& bounty_id) const;
     UniValue ExportRecovery(const std::string& bounty_id, const std::vector<std::string>& lot_ids) const;
     bool ImportManifest(const UniValue& manifest, std::string& err);
+    //! The facts and the height, for the bounty store file (the undo stack stays in memory).
+    UniValue SaveState() const;
+    //! Restore SaveState() output.
+    bool LoadState(const UniValue& state, std::string& err);
+    //! Drop all facts, the undo stack and the height.
+    void Clear();
 };
 
 class BountyStore {
@@ -131,6 +137,8 @@ class BountyStore {
     uint64_t m_epoch{1};
     mutable std::mutex m_mu;
     BountyChainIndex m_chain;
+    //! The directory whose chain facts are in m_chain (see Load()).
+    fs::path m_chain_dir;
     MandateBudget m_budget;
     std::map<std::string, std::unique_ptr<MandateBudget>> m_budgets;
 

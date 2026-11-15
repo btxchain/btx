@@ -708,6 +708,89 @@ BOOST_AUTO_TEST_CASE(bounty_events_pages_reach_every_event_once)
     BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
 }
 
+// The watch-only chain facts that observebountychain and importbountyrecovery
+// add were not part of the store file: after a restart getbountyfunding listed
+// no facts and exportbountyrecovery returned no lots.
+BOOST_AUTO_TEST_CASE(bounty_chain_facts_survive_a_store_restart)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "bounty-chain-restart";
+    fs::create_directories(dir);
+    std::string code, err;
+    UniValue result;
+    std::string bounty_id;
+    const auto one = [](const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        return params;
+    };
+    {
+        BountyStore store;
+        store.Bind(dir, ZeroNet());
+        UniValue draft_params(UniValue::VARR);
+        draft_params.push_back(DefaultTerms(ZeroNet()));
+        BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+        UniValue pub(UniValue::VOBJ);
+        pub.pushKV("draft_id", result["draft_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("publishbounty", one(pub), result, code, err), err);
+        bounty_id = result["bounty_id"].get_str();
+
+        UniValue fact(UniValue::VOBJ);
+        fact.pushKV("outpoint", std::string(64, 'a') + ":0");
+        fact.pushKV("bounty_id", bounty_id);
+        fact.pushKV("lot_id", "lot1");
+        fact.pushKV("amount_atoms", "100000");
+        fact.pushKV("confirmations", 6);
+        fact.pushKV("height", 120);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("observebountychain", one(fact), result, code, err), err);
+
+        UniValue lot(UniValue::VOBJ);
+        lot.pushKV("outpoint", std::string(64, 'b') + ":1");
+        lot.pushKV("lot_id", "lot2");
+        lot.pushKV("amount_atoms", "50000");
+        UniValue lots(UniValue::VARR);
+        lots.push_back(lot);
+        UniValue manifest(UniValue::VOBJ);
+        manifest.pushKV("bounty_id", bounty_id);
+        manifest.pushKV("lots", lots);
+        UniValue imp(UniValue::VOBJ);
+        imp.pushKV("manifest", manifest);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("importbountyrecovery", one(imp), result, code, err), err);
+
+        UniValue idp(UniValue::VARR);
+        idp.push_back(bounty_id);
+        BOOST_REQUIRE(store.Dispatch("getbountyfunding", idp, result, code, err));
+        BOOST_REQUIRE_EQUAL(result["facts"].size(), 2U);
+    }
+    BountyStore restarted;
+    restarted.Bind(dir, ZeroNet());
+    UniValue idp(UniValue::VARR);
+    idp.push_back(bounty_id);
+    BOOST_REQUIRE(restarted.Dispatch("getbountyfunding", idp, result, code, err));
+    BOOST_REQUIRE(result["facts"].isArray());
+    BOOST_CHECK_EQUAL(result["facts"].size(), 2U);
+    BOOST_CHECK_EQUAL(result["confirmed_atoms"].get_str(), "150000");
+    UniValue exp(UniValue::VOBJ);
+    exp.pushKV("bounty_id", bounty_id);
+    BOOST_REQUIRE(restarted.Dispatch("exportbountyrecovery", one(exp), result, code, err));
+    BOOST_REQUIRE(result["lots"].isArray());
+    BOOST_CHECK_EQUAL(result["lots"].size(), 2U);
+
+    // Bound to another, empty directory, the store must not carry these facts there.
+    const fs::path other = m_path_root / "bounty-chain-other";
+    fs::create_directories(other);
+    restarted.Bind(other, ZeroNet());
+    UniValue other_draft(UniValue::VARR);
+    other_draft.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(restarted.Dispatch("createbountydraft", other_draft, result, code, err));
+    std::ifstream in(other / "bounty-store.json");
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    UniValue saved;
+    BOOST_REQUIRE(saved.read(text));
+    BOOST_REQUIRE(saved["chain"]["facts"].isArray());
+    BOOST_CHECK_EQUAL(saved["chain"]["facts"].size(), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_signed_records_survive_a_store_restart)
 {
     // The store saves drafts, bounties, submissions, jobs and awards, but kept
@@ -1472,6 +1555,43 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     budget.Revoke();
     BOOST_CHECK(!budget.Reserve("k5", 10, err));
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(evaluation_report_larger_than_the_pipe_buffer_completes)
+{
+    // The evaluation child writes its report to a pipe and exits. A report
+    // larger than the pipe buffer must still reach the parent: the run must
+    // complete with every task instead of timing out.
+    const fs::path art = m_path_root / "eval-many-files";
+    fs::create_directories(art);
+    constexpr size_t kFiles{1500};
+    UniValue files(UniValue::VARR);
+    for (size_t i = 0; i < kFiles; ++i) {
+        const std::string name = "shard-" + std::to_string(i) + ".bin";
+        std::ofstream out(art / fs::PathFromString(name), std::ios::binary);
+        out << "ok";
+        files.push_back(name);
+    }
+    UniValue spec(UniValue::VOBJ);
+    spec.pushKV("profile_id", "EXACT_CHECKS");
+    spec.pushKV("required_files", files);
+    UniValue sub(UniValue::VOBJ);
+    sub.pushKV("artifact_dir", fs::PathToString(art));
+    UniValue resources(UniValue::VOBJ);
+    resources.pushKV("timeout_ms", int64_t{10000});
+    std::string err;
+    UniValue plan;
+    BOOST_REQUIRE(modelnet::PrepareEvaluation(spec, sub, resources, plan, err));
+    UniValue job(UniValue::VOBJ);
+    job.pushKV("plan", plan);
+    BOOST_REQUIRE_MESSAGE(modelnet::RunEvaluationJob(job, err), err);
+    BOOST_CHECK_EQUAL(job["state"].get_str(), "COMPLETE");
+    BOOST_CHECK(job["pass"].get_bool());
+    BOOST_REQUIRE_EQUAL(job["report"]["tasks"].size(), kFiles);
+    // Larger than the 64 KiB a pipe holds by default on Linux and macOS.
+    BOOST_CHECK_GT(job["report"].write().size(), size_t{64 * 1024});
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(bounty_idempotency_key_reused_for_another_request_is_refused)
 {

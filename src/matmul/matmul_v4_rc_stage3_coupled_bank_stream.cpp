@@ -1701,9 +1701,11 @@ BuildRCStage3CoupledBankFullBinaryMirrorWitness(
                 });
         }
     }
+    // Captured by value: copies of `source` live on in the residual closures
+    // stored in the returned constraint system, after this frame is gone.
     const auto source =
-        [&](uint32_t logical, uint32_t word,
-            const std::vector<gf::Fp3>& cur) {
+        [lane_sources](uint32_t logical, uint32_t word,
+                       const std::vector<gf::Fp3>& cur) {
             return air_recurse::
                 EvaluateVerifierAIRTranscriptOutput(
                     lane_sources[2 * logical][word], cur);

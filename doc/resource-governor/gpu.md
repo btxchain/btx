@@ -12,8 +12,9 @@ episode uses that preempt latch. Discarding a partial mining attempt is
 acceptable. Consensus validation is not.
 
 Multi-GPU: `AcceleratorSample.reserved_for_validation` never mines.
-`-governorgpu` / device lists are documented as operator config; AUTO must
-not mine a reserved validator device.
+There is no operator option for device lists (`btxd` refuses `-governorgpu`),
+and no option sets `reserved_for_validation` in this tree. AUTO must not mine
+a reserved validator device.
 
 Apple unified memory: GPU util alone is insufficient. Combined memory
 pressure, thermal, and explicit validation/AI hooks govern mining. Mining

@@ -22,6 +22,7 @@
 #include <fstream>
 #include <limits>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -513,6 +514,21 @@ bool ModelCatalog::EnforceQuotaLocked(uint64_t need_bytes, std::string& err)
         for (const auto& f : m.core.files) it.bytes += f.size;
         if (m.pinned) pinned_bytes += it.bytes;
         items.push_back(it);
+    }
+    // Find out first whether eviction can make room at all. The loop below
+    // removes artifacts one by one and checks the space only afterwards, so
+    // a download larger than the room eviction can free removed every
+    // unpinned model and then failed anyway.
+    std::set<Digest48> evictable;
+    for (const auto& it : items) {
+        if (!it.pinned && !m_active_artifacts.count(it.artifact_id)) evictable.insert(it.artifact_id);
+    }
+    uint64_t freeable = 0;
+    for (const auto& artifact : evictable) freeable += m_store.ArtifactBytes(artifact);
+    const uint64_t kept = m_store.UsedBytes() > freeable ? m_store.UsedBytes() - freeable : 0;
+    if (need_bytes > cap || kept > cap - need_bytes) {
+        err = pinned_bytes >= cap ? "PINNED_STORAGE_PRESSURE" : "disk quota";
+        return false;
     }
     std::sort(items.begin(), items.end(), [](const EvictItem& a, const EvictItem& b) {
         const int pa = EvictPriority(a);
@@ -1190,14 +1206,35 @@ bool ModelCatalog::MarkIncomplete(const Digest48& model_or_artifact, bool incomp
     std::lock_guard<std::mutex> lock(m_mu);
     for (auto& m : m_models) {
         if (!(m.model_id == model_or_artifact || m.artifact_id == model_or_artifact)) continue;
+        // Only verified bytes may turn an incomplete entry back into a replica.
+        if (!incomplete) {
+            for (uint32_t fi = 0; fi < m.core.files.size(); ++fi) {
+                PieceIndex index;
+                const CoreFile& file = m.core.files[fi];
+                if (!m_store.LoadPieceIndex(m.artifact_id, fi, index, err)) return false;
+                if (index.file_size != file.size || index.pieces_root != file.pieces_root) {
+                    err = "recovered file metadata mismatch";
+                    return false;
+                }
+                if (!VerifyFileDigest(m.artifact_id, fi, file.sha384, err)) return false;
+            }
+        }
+        const CatalogEntry prior = m;
         m.incomplete = incomplete;
         if (incomplete) {
             m.bytes_verified = false;
             m.admission = AdmissionLevel::FETCHING;
             m.completed_at = 0;
             m.seeded = false;
+        } else {
+            m.bytes_verified = true;
+            m.admission = m.pinned ? AdmissionLevel::PINNED : AdmissionLevel::BYTES_VERIFIED;
+            m.completed_at = GetTime();
+            DemandSeedLocked(m);
         }
-        return PersistLocked(err);
+        if (PersistLocked(err)) return true;
+        m = prior;
+        return false;
     }
     err = "unknown model";
     return false;

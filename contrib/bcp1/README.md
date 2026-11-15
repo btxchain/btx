@@ -55,11 +55,11 @@ The functional harness (`test/functional/feature_bcp1.py`) still covers watch-on
 
 ---
 
-## `./run-certification`
+## `./run-certification.sh`
 
 ```bash
 cd contrib/bcp1
-./run-certification
+./run-certification.sh
 ```
 
 The script drives the compose stack (or an already-running local regtest) and prints `PASS` / `FAIL` per case. Named cases:
@@ -104,7 +104,7 @@ Same contract, isolated regtest:
 btxd -regtest -txindex=1 -exchange-watchonly \
   -zmqpubsequence=tcp://127.0.0.1:28332 \
   -signer=./contrib/bcp1/mock_signer.py
-./contrib/bcp1/run-certification
+./contrib/bcp1/run-certification.sh
 ```
 
 Functional coverage also lives in `test/functional/feature_bcp1.py` (`--timeout-factor=1`). One `test_runner.py` at a time. Delete `/tmp/test_runner_*` when finished.

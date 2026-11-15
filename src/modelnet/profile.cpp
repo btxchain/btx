@@ -17,6 +17,11 @@
 #include <mutex>
 #include <stdexcept>
 #include <set>
+#include <system_error>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace modelnet {
 namespace {
@@ -405,9 +410,22 @@ bool SaveOperatorProfile(const fs::path& path, OperatorProfile profile, const Pr
         return false;
     }
     const fs::path temporary = path.parent_path() / fs::u8path(fs::PathToString(path.filename()) + ".tmp");
-    if (IsSymlink(path) || IsSymlink(temporary)) {
-        err = "operator profile paths must not be symbolic links";
-        return false;
+    for (const auto* candidate : {&path, &temporary}) {
+        std::error_code ec;
+        if (IsSymlink(*candidate, ec)) {
+            err = "operator profile paths must not be symbolic links";
+            return false;
+        }
+#ifdef _WIN32
+        // The Windows error category maps more than a missing leaf to ENOENT.
+        const bool missing = ec == std::error_code{ERROR_FILE_NOT_FOUND, std::system_category()};
+#else
+        const bool missing = ec == std::errc::no_such_file_or_directory;
+#endif
+        if (ec && !missing) {
+            err = "cannot inspect operator profile path: " + ec.message();
+            return false;
+        }
     }
     const std::string bytes = OperatorProfileToJson(profile, policy).write() + "\n";
     FILE* file = fsbridge::fopen(temporary, "wb");

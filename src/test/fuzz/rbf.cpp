@@ -183,7 +183,7 @@ FUZZ_TARGET(package_rbf, .init = initialize_package_rbf)
         pool.CalculateDescendants(txiter, all_conflicts);
     }
 
-    CAmount replacement_fees = ConsumeMoney(fuzzed_data_provider);
+    CAmount replacement_fees = ConsumeTxMemPoolEntryFee(fuzzed_data_provider, replacement_tx_final);
     const auto replacement_entry_coin_age_cache = replacement_entry.GetInternalCoinAgeCache();
     auto changeset = pool.GetChangeSet();
     for (auto& txiter : all_conflicts) {

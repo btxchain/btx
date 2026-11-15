@@ -112,6 +112,24 @@ class ModelnetReleaseCardsTest(BitcoinTestFramework):
         rid = rel["release_id"]
         assert_equal(rel["publish_state"], "published")
 
+        # btxd passes the release id (and the secret) to the helper, which reads them.
+        refund = node.refundmodelrelease(rid)
+        assert_equal(refund["release_id"], rid)
+        assert_equal(refund["refund_height"], height + 50)
+        assert_equal(node.claimmodelrelease(rid)["use"], "buildhtlcclaim")
+        assert_refusal(lambda: node.claimmodelrelease(rid, "00" * 32), "INVALID_PARAMETER")
+
+        # listmodels and getmodeltransfers pass their filter object to the helper too.
+        for method, key in (("listmodels", "models"), ("getmodeltransfers", "transfers")):
+            every = getattr(node, method)()[key]
+            assert any(row.get("model_id") == hosted["model_id"] for row in every)
+            for flag in ("pinned", "seeded"):
+                on = getattr(node, method)({flag: True})[key]
+                off = getattr(node, method)({flag: False})[key]
+                assert all(row.get(flag) is True for row in on), (method, flag, on)
+                assert all(row.get(flag) is False for row in off), (method, flag, off)
+                assert_equal(len(on) + len(off), len(every))
+
         for method in ("getrecentreleases", "getfundablemodels"):
             card = find_card(getattr(node, method)({"scope": "LOCAL", "limit": 10}), rid)
             assert card is not None

@@ -944,4 +944,36 @@ BOOST_AUTO_TEST_CASE(gov_permit_file_is_never_read_half_written)
     BOOST_CHECK_EQUAL(unreadable, 0);
 }
 
+BOOST_AUTO_TEST_CASE(gov_observe_and_reports_from_two_threads)
+{
+    // The scheduler tick calls Observe() on the global governor while RPC
+    // threads build getresourcegovernorinfo and change the policy. Observe()
+    // replaces the signals, including the gpu.type string the report reads,
+    // so the governor must not let these calls run at the same time. Run this
+    // under -DSANITIZERS=thread to see a race.
+    ResourceGovernor g;
+    g.SetMiningConsent(true);
+    SystemSignals a = QuietDesktop();
+    a.gpu.type = "a gpu type longer than the short string buffer";
+    SystemSignals b = QuietDesktop();
+    b.gpu.type = "another gpu type longer than the short string buffer";
+    std::atomic<bool> stop{false};
+    std::thread tick([&] {
+        int64_t now{0};
+        for (int i = 0; !stop.load(); ++i) {
+            g.Observe(i % 2 ? a : b, now += 2000);
+        }
+    });
+    int reports{0};
+    for (int i = 0; i < 20000; ++i) {
+        const UniValue info = g.InfoJson();
+        if (info.isObject()) ++reports;
+        GovernorPolicy p = g.Policy();
+        g.SetPolicy(p);
+    }
+    stop = true;
+    tick.join();
+    BOOST_CHECK_EQUAL(reports, 20000);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

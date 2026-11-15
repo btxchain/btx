@@ -509,7 +509,10 @@ FUZZ_TARGET(coinscache_sim)
             const auto real{cache.PeekCoin(data.outpoints[outpointidx])};
             auto sim = lookup(outpointidx, sim_idx);
             if (!sim.has_value()) {
-                assert(!real);
+                // PeekCoin passes an uncached lookup through to CoinsViewBottom,
+                // which keeps spent coins (index 4 mod 5, see above). A spent
+                // coin is an absent coin, as GetCoin reports it.
+                assert(!real || real->IsSpent());
             } else {
                 assert(real && !real->IsSpent());
                 assert(real->out == data.coins[sim->first].out);

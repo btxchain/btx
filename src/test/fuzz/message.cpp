@@ -31,11 +31,10 @@ FUZZ_TARGET(message, .init = initialize_message)
         CKey private_key = ConsumePrivateKey(fuzzed_data_provider);
         std::string signature;
         const bool message_signed = MessageSign(private_key, random_message, signature);
-        if (private_key.IsValid()) {
-            assert(message_signed);
-            const MessageVerificationResult verification_result = MessageVerify(EncodeDestination(PKHash(private_key.GetPubKey().GetID())), signature, random_message);
-            assert(verification_result == MessageVerificationResult::OK);
-        }
+        // BTX does not produce classical secp256k1 compact message signatures
+        // (common/signmessage.cpp), so MessageSign refuses every key.
+        assert(!message_signed);
+        assert(signature.empty());
     }
     {
         (void)MessageHash(random_message, MessageSignatureFormat::LEGACY);

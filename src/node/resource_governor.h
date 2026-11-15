@@ -5,6 +5,7 @@
 #ifndef BITCOIN_NODE_RESOURCE_GOVERNOR_H
 #define BITCOIN_NODE_RESOURCE_GOVERNOR_H
 
+#include <sync.h>
 #include <univalue.h>
 
 #include <cstdint>
@@ -121,46 +122,49 @@ struct GovernorMetrics {
 
 class ResourceGovernor
 {
-    GovernorMode m_mode{GovernorMode::AUTO};
-    GovernorPolicy m_policy;
-    SystemSignals m_sig;
-    bool m_mining_consent{false}; // product: do not enable mining without consent
-    bool m_auto_schedule{true};   // idle hysteresis when true
-    bool m_unavailable{false};   // fail-closed optional work
-    bool m_user_pause{false};
-    int64_t m_user_pause_until_ms{0};
-    bool m_foreground_ai{false};
-    bool m_validation{false};
-    bool m_user_retrieval{false};
-    bool m_mining_active{false};
-    int m_intensity{0};
-    PauseReason m_mining_reason{PauseReason::NONE};
-    PauseReason m_seed_reason{PauseReason::NONE};
-    PauseReason m_preserve_reason{PauseReason::NONE};
-    int64_t m_low_util_since_ms{-1};
-    int64_t m_high_util_since_ms{-1};
-    int64_t m_last_pause_ms{-1};
-    int64_t m_last_resume_ms{-1};
-    int64_t m_last_tick_ms{0};
-    uint64_t m_generation{1};
-    uint64_t m_status_seq{0};
-    bool m_have_sample{false};
-    GovernorMetrics m_metrics;
-    int64_t m_effective_upload_bps{0};
-    DimIdle m_gpu_idle{DimIdle::ACTIVE};
+    // RPC threads, the scheduler tick, validation and the miner all use the
+    // global governor. Recursive: the JSON reports call MiningAllowed()/Permit().
+    mutable RecursiveMutex m_mutex;
+    GovernorMode m_mode GUARDED_BY(m_mutex){GovernorMode::AUTO};
+    GovernorPolicy m_policy GUARDED_BY(m_mutex);
+    SystemSignals m_sig GUARDED_BY(m_mutex);
+    bool m_mining_consent GUARDED_BY(m_mutex){false}; // product: do not enable mining without consent
+    bool m_auto_schedule GUARDED_BY(m_mutex){true};   // idle hysteresis when true
+    bool m_unavailable GUARDED_BY(m_mutex){false};   // fail-closed optional work
+    bool m_user_pause GUARDED_BY(m_mutex){false};
+    int64_t m_user_pause_until_ms GUARDED_BY(m_mutex){0};
+    bool m_foreground_ai GUARDED_BY(m_mutex){false};
+    bool m_validation GUARDED_BY(m_mutex){false};
+    bool m_user_retrieval GUARDED_BY(m_mutex){false};
+    bool m_mining_active GUARDED_BY(m_mutex){false};
+    int m_intensity GUARDED_BY(m_mutex){0};
+    PauseReason m_mining_reason GUARDED_BY(m_mutex){PauseReason::NONE};
+    PauseReason m_seed_reason GUARDED_BY(m_mutex){PauseReason::NONE};
+    PauseReason m_preserve_reason GUARDED_BY(m_mutex){PauseReason::NONE};
+    int64_t m_low_util_since_ms GUARDED_BY(m_mutex){-1};
+    int64_t m_high_util_since_ms GUARDED_BY(m_mutex){-1};
+    int64_t m_last_pause_ms GUARDED_BY(m_mutex){-1};
+    int64_t m_last_resume_ms GUARDED_BY(m_mutex){-1};
+    int64_t m_last_tick_ms GUARDED_BY(m_mutex){0};
+    uint64_t m_generation GUARDED_BY(m_mutex){1};
+    uint64_t m_status_seq GUARDED_BY(m_mutex){0};
+    bool m_have_sample GUARDED_BY(m_mutex){false};
+    GovernorMetrics m_metrics GUARDED_BY(m_mutex);
+    int64_t m_effective_upload_bps GUARDED_BY(m_mutex){0};
+    DimIdle m_gpu_idle GUARDED_BY(m_mutex){DimIdle::ACTIVE};
 
-    void MaybeTransition(int64_t now_ms);
+    void MaybeTransition(int64_t now_ms) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
 
 public:
     void SetMode(GovernorMode m);
-    GovernorMode Mode() const { return m_mode; }
+    GovernorMode Mode() const { LOCK(m_mutex); return m_mode; }
     void SetPolicy(const GovernorPolicy& p);
-    GovernorPolicy Policy() const { return m_policy; }
+    GovernorPolicy Policy() const { LOCK(m_mutex); return m_policy; }
     void ResetPolicy();
     void SetMiningConsent(bool on);
-    bool MiningConsent() const { return m_mining_consent; }
-    void SetAutoSchedule(bool on) { m_auto_schedule = on; }
-    bool AutoSchedule() const { return m_auto_schedule; }
+    bool MiningConsent() const { LOCK(m_mutex); return m_mining_consent; }
+    void SetAutoSchedule(bool on) { LOCK(m_mutex); m_auto_schedule = on; }
+    bool AutoSchedule() const { LOCK(m_mutex); return m_auto_schedule; }
     void SetUnavailable(bool on);
 
     void BeginForegroundAiWork();
@@ -176,11 +180,11 @@ public:
     BackgroundPermit Permit(GovernorJob job) const;
 
     bool MiningAllowed() const;
-    int MiningIntensity() const { return m_intensity; }
-    PauseReason MiningPauseReason() const { return m_mining_reason; }
-    int64_t BackgroundUploadLimitBps() const { return m_effective_upload_bps; }
-    uint64_t StatusSequence() const { return m_status_seq; }
-    GovernorMetrics Metrics() const { return m_metrics; }
+    int MiningIntensity() const { LOCK(m_mutex); return m_intensity; }
+    PauseReason MiningPauseReason() const { LOCK(m_mutex); return m_mining_reason; }
+    int64_t BackgroundUploadLimitBps() const { LOCK(m_mutex); return m_effective_upload_bps; }
+    uint64_t StatusSequence() const { LOCK(m_mutex); return m_status_seq; }
+    GovernorMetrics Metrics() const { LOCK(m_mutex); return m_metrics; }
 
     UniValue InfoJson() const;
     UniValue PolicyJson() const;

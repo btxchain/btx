@@ -230,7 +230,22 @@ public:
     }
     bool isCrypted() override { return m_wallet->IsCrypted(); }
     bool lock() override { return m_wallet->Lock(); }
-    bool unlock(const SecureString& wallet_passphrase) override { return m_wallet->Unlock(wallet_passphrase); }
+    bool unlock(const SecureString& wallet_passphrase) override
+    {
+        if (!m_wallet->Unlock(wallet_passphrase)) return false;
+        // As walletpassphrase does: a wallet loaded or scanned while locked
+        // gets its shielded keys and notes back. No auto-shield here: a Qt
+        // unlock is short and serves one action.
+        try {
+            LOCK(m_wallet->cs_wallet);
+            (void)m_wallet->RehydrateShieldedStateAfterUnlock();
+        } catch (const std::exception& e) {
+            // The wallet is unlocked; report the failure in the log instead of
+            // making the dialog say the unlock failed.
+            m_wallet->WalletLogPrintf("Shielded state rehydration after unlock failed: %s\n", e.what());
+        }
+        return true;
+    }
     bool isLocked() override { return m_wallet->IsLocked(); }
     bool changeWalletPassphrase(const SecureString& old_wallet_passphrase,
         const SecureString& new_wallet_passphrase) override

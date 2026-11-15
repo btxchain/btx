@@ -89,10 +89,16 @@ def test_work_queue_getblock(node, got_exceeded_error):
 
 
 class RPCInterfaceTest(BitcoinTestFramework):
+    def add_options(self, parser):
+        self.add_wallet_options(parser)
+
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.supports_cli = False
+
+    def skip_test_if_missing_module(self):
+        self.skip_if_no_wallet()
 
     def test_getrpcinfo(self):
         self.log.info("Testing getrpcinfo...")
@@ -181,6 +187,23 @@ class RPCInterfaceTest(BitcoinTestFramework):
             request_fields={"jsonrpc": "2.1"},
             ))
 
+    def test_batch_invalid_element_reply(self):
+        self.log.info("Testing that an invalid batch element does not reuse the id or version of the previous one...")
+
+        response, status = send_json_rpc(self.nodes[0], [{"jsonrpc": "2.0", "method": "getblockcount", "id": "X"}, "not an object"])
+        assert_equal(status, 200)
+        assert_equal(response, [
+            {"jsonrpc": "2.0", "result": 0, "id": "X"},
+            {"result": None, "error": {"code": RPC_INVALID_REQUEST, "message": "Invalid Request object"}, "id": None},
+        ])
+
+        # The error is not dropped as if it were the reply to the notification before it
+        response, status = send_json_rpc(self.nodes[0], [{"jsonrpc": "2.0", "method": "getblockcount"}, "not an object"])
+        assert_equal(status, 200)
+        assert_equal(response, [
+            {"result": None, "error": {"code": RPC_INVALID_REQUEST, "message": "Invalid Request object"}, "id": None},
+        ])
+
     def test_http_status_codes(self):
         self.log.info("Testing HTTP status codes for JSON-RPC 1.1 requests...")
         # OK
@@ -221,8 +244,12 @@ class RPCInterfaceTest(BitcoinTestFramework):
         # Not notification: has "id" field
         expect_http_rpc_status(200, None,                   self.nodes[0], "getblockcount", [],  2, False)
         block_count = self.nodes[0].getblockcount()
-        # Notification response status code: HTTP_NO_CONTENT
-        expect_http_rpc_status(204, None,                   self.nodes[0], "generatetoaddress", [1, "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202"],  2, True)
+        # Notification response status code: HTTP_NO_CONTENT.
+        # This node has no loaded wallet, and a Bitcoin regtest address is not
+        # valid here, so take one address from a descriptor wallet.
+        self.nodes[0].createwallet(wallet_name="miner", descriptors=True)
+        mine_addr = self.nodes[0].get_wallet_rpc("miner").getnewaddress()
+        expect_http_rpc_status(204, None,                   self.nodes[0], "generatetoaddress", [1, mine_addr],  2, True)
         # The command worked even though there was no response
         assert_equal(block_count + 1, self.nodes[0].getblockcount())
         # No error response for notifications even if they are invalid
@@ -245,6 +272,7 @@ class RPCInterfaceTest(BitcoinTestFramework):
     def run_test(self):
         self.test_getrpcinfo()
         self.test_batch_requests()
+        self.test_batch_invalid_element_reply()
         self.test_http_status_codes()
         self.test_work_queue_exceeded()
 

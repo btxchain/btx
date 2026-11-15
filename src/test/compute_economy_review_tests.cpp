@@ -20,9 +20,14 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <csignal>
 #include <fstream>
 #include <limits>
 #include <string>
+
+#ifndef WIN32
+#include <sys/resource.h>
+#endif
 
 namespace {
 
@@ -730,5 +735,40 @@ BOOST_AUTO_TEST_CASE(expired_job_cannot_be_settled)
     const UniValue bal = Call(dir, "getcomputebalance", b);
     BOOST_CHECK_EQUAL(bal["credited_p1e_microunits"].getInt<uint64_t>(), 10U);
 }
+
+#ifndef WIN32
+// ComputeStore::WriteEnvelope wrote a record through an unchecked stream and
+// renamed it over the target. A write cut short (a full disk) left a record
+// cut short, the RPC reported success, and the next load marked the whole
+// store corrupt. RLIMIT_FSIZE stands in for the full disk.
+BOOST_AUTO_TEST_CASE(record_write_cut_short_leaves_no_record)
+{
+    std::vector<unsigned char> pk, sk;
+    const fs::path dir = NewDir(m_path_root, "r-write-cut", pk, sk);
+    const std::string me = HexStr(pk);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("offer", Offer(me, Keys({me}), Keys({me}), "PREPAID", 1'000'000, "cut"));
+    req.pushKV("now_ms", 1000);
+
+    struct rlimit old_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cut{old_limit};
+    cut.rlim_cur = 1024;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+    UniValue out;
+    std::string code;
+    const bool ok{TryCall(dir, "createcomputeoffer", req, out, code)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK_MESSAGE(!ok, "createcomputeoffer reported success although its record was not written in full");
+    // Nothing cut short is left behind: the store loads, and the same offer can be created again.
+    const UniValue again = Call(dir, "createcomputeoffer", req);
+    UniValue get(UniValue::VOBJ);
+    get.pushKV("id", again["offer_id"].get_str());
+    BOOST_CHECK(Call(dir, "getcomputeoffer", get).isObject());
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

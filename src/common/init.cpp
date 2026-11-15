@@ -68,15 +68,16 @@ std::optional<ConfigError> InitConfig(ArgsManager& args, SettingsAbortFn setting
         {
             const fs::path legacy_config = base_path / "bitcoin.conf";
             const fs::path canonical_config = base_path / BITCOIN_CONF_FILENAME;  // btx.conf
-            if (fs::exists(legacy_config) && !fs::exists(canonical_config)) {
-                LogWarning(
-                    "Data directory %s contains a legacy \"bitcoin.conf\" but no \"%s\". "
-                    "The default configuration filename has changed to \"%s\". "
-                    "Please rename \"bitcoin.conf\" to \"%s\" to ensure your settings are applied.",
+            if (fs::exists(legacy_config) && !fs::exists(canonical_config) && args.GetArg("-conf", "").empty()) {
+                // bitcoin.conf is not read. Starting anyway applies mainnet
+                // defaults and ignores a chain= line in the legacy file.
+                return ConfigError{ConfigStatus::FAILED, strprintf(
+                    _("Data directory %s contains a legacy \"bitcoin.conf\" but no \"%s\". "
+                      "That file is not read. Refusing to start so a chain setting in it cannot be ignored. "
+                      "Rename \"bitcoin.conf\" to \"%s\"."),
                     fs::quoted(fs::PathToString(base_path)),
                     BITCOIN_CONF_FILENAME,
-                    BITCOIN_CONF_FILENAME,
-                    BITCOIN_CONF_FILENAME);
+                    BITCOIN_CONF_FILENAME)};
             }
         }
 

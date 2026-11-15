@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from test_framework.blocktools import REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 
 def outpoints(items):
@@ -52,16 +52,36 @@ class WalletBcp1PlanInputsTest(BitcoinTestFramework):
         replanned = wallet.planconsolidation({"plan": plan})
         assert_equal(outpoints(replanned["inputs"]), named)
 
+        self.log.info("A planned input that is locked now is refused, not spent outside the plan")
+        locked = {"txid": plan["inputs"][0]["txid"], "vout": plan["inputs"][0]["vout"]}
+        wallet.lockunspent(False, [locked])
+        assert_raises_rpc_error(-8, "is not spendable here", wallet.createconsolidationtx,
+                                {"plan": plan, "change_address": change})
+        assert_raises_rpc_error(-8, "is not spendable here", wallet.planconsolidation, {"plan": plan})
+        assert_raises_rpc_error(-8, "is not spendable here", wallet.estimateconsolidationfee,
+                                {"plan": plan, "change_address": change})
+        wallet.lockunspent(True, [locked])
+
         self.log.info("estimateconsolidationfee prices the plan's inputs")
         fee = wallet.estimateconsolidationfee({"plan": plan, "change_address": change})
         assert_equal(fee["input_count"], 3)
         assert fee["fee_atoms"] > 0, fee
+        assert_raises_rpc_error(-4, "estimated fee exceeds fee_ceiling", wallet.estimateconsolidationfee,
+                                {"plan": plan, "change_address": change, "fee_ceiling": Decimal("0.00000001")})
 
         self.log.info("createconsolidationtx spends the plan's inputs")
         cons = wallet.createconsolidationtx({"plan": plan, "change_address": change})
         assert_equal(cons["fee_atoms"], fee["fee_atoms"])
         tx = node.decodepsbt(cons["psbt"])["tx"]
         assert_equal(sorted((i["txid"], i["vout"]) for i in tx["vin"]), named)
+
+        self.log.info("createconsolidationtx takes the options next to a plan object")
+        cons = wallet.createconsolidationtx(plan, {"change_address": change})
+        tx = node.decodepsbt(cons["psbt"])["tx"]
+        assert_equal(sorted((i["txid"], i["vout"]) for i in tx["vin"]), named)
+        assert_equal([o["scriptPubKey"]["address"] for o in tx["vout"]], [change])
+        assert_raises_rpc_error(-4, "estimated fee exceeds fee_ceiling", wallet.createconsolidationtx,
+                                plan, {"change_address": change, "fee_ceiling": Decimal("0.00000001")})
 
 
 if __name__ == "__main__":
