@@ -9,6 +9,7 @@
 #include <crypto/sha384.h>
 
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -158,7 +159,27 @@ void Normalize(const int32_t* in, int32_t* out, int32_t& denom)
     for (int i = 0; i < kWidth; ++i) out[i] = Clamp((static_cast<int64_t>(in[i]) * kScale) / denom, 4096);
 }
 
-bool Step(std::vector<int32_t>& weights, uint64_t cursor, int64_t& hits, int64_t& miss, std::string& err)
+// The per-step working set of Step() is about 750 KiB of int32 arrays. Keep it
+// off the stack: Run() is called on btxd's RPC HTTP-worker threads, and on macOS
+// a non-main thread gets only a 512 KiB stack by default, so these arrays as
+// locals overflow it and crash btxd. The caller allocates one StepScratch on the
+// heap and reuses it across steps.
+struct StepScratch {
+    int32_t grad[kTotal];
+    int32_t resid[kCtx][kWidth];
+    int32_t d_resid[kCtx][kWidth];
+    int32_t norm[kLayers][kCtx][kWidth];
+    int32_t denom[kLayers][kCtx];
+    int32_t query[kLayers][kCtx][kWidth];
+    int32_t key[kLayers][kCtx][kWidth];
+    int32_t value[kLayers][kCtx][kWidth];
+    int32_t mixed[kLayers][kCtx][kWidth];
+    int32_t attn[kLayers][kCtx][kCtx];
+    int32_t hidden[kLayers][kCtx][kFf];
+    int32_t d_out_row[kOutN];
+};
+
+bool Step(std::vector<int32_t>& weights, StepScratch& scratch, uint64_t cursor, int64_t& hits, int64_t& miss, std::string& err)
 {
     unsigned corpus_n = 0;
     const unsigned char* corpus = Corpus(corpus_n);
@@ -169,26 +190,26 @@ bool Step(std::vector<int32_t>& weights, uint64_t cursor, int64_t& hits, int64_t
     for (int i = 0; i < kCtx; ++i) token[i] = corpus[(cursor + static_cast<uint64_t>(i)) % corpus_n];
     const int target = corpus[(cursor + static_cast<uint64_t>(kCtx)) % corpus_n];
 
-    int32_t resid[kCtx][kWidth];
+    auto& resid = scratch.resid;
     for (int t = 0; t < kCtx; ++t) {
         const int32_t* emb = weights.data() + kEmbed + token[t] * kWidth;
         const int32_t* pos = weights.data() + kPos + t * kWidth;
         for (int d = 0; d < kWidth; ++d) resid[t][d] = Clamp(static_cast<int64_t>(emb[d]) + pos[d], 4096);
     }
 
-    int32_t grad[kTotal];
+    auto& grad = scratch.grad;
     std::memset(grad, 0, sizeof(grad));
-    int32_t d_resid[kCtx][kWidth];
+    auto& d_resid = scratch.d_resid;
     std::memset(d_resid, 0, sizeof(d_resid));
 
-    int32_t norm[kLayers][kCtx][kWidth];
-    int32_t denom[kLayers][kCtx];
-    int32_t query[kLayers][kCtx][kWidth];
-    int32_t key[kLayers][kCtx][kWidth];
-    int32_t value[kLayers][kCtx][kWidth];
-    int32_t mixed[kLayers][kCtx][kWidth];
-    int32_t attn[kLayers][kCtx][kCtx];
-    int32_t hidden[kLayers][kCtx][kFf];
+    auto& norm = scratch.norm;
+    auto& denom = scratch.denom;
+    auto& query = scratch.query;
+    auto& key = scratch.key;
+    auto& value = scratch.value;
+    auto& mixed = scratch.mixed;
+    auto& attn = scratch.attn;
+    auto& hidden = scratch.hidden;
 
     for (int layer = 0; layer < kLayers; ++layer) {
         const int32_t* base = weights.data() + kLayer0 + layer * kLayerN;
@@ -277,7 +298,7 @@ bool Step(std::vector<int32_t>& weights, uint64_t cursor, int64_t& hits, int64_t
     miss += 256 - target_prob;
 
     int32_t d_last[kWidth];
-    int32_t d_out_row[kOutN];
+    auto& d_out_row = scratch.d_out_row;
     std::memset(d_out_row, 0, sizeof(d_out_row));
     ProjectGrad(weights.data() + kOut, kVocab, kWidth, resid[kCtx - 1], d_logit, d_last, d_out_row);
     for (int i = 0; i < kOutN; ++i) grad[kOut + i] = d_out_row[i];
@@ -340,8 +361,9 @@ bool LaunchTrainer::Run(uint64_t steps, std::string& err)
     if (!CorpusLocked(err)) return false;
     if (m_weights.empty()) InitWeights(m_weights);
     if (steps > 4096 || m_step + steps > 4096) return Fail(err, "BTX035_LIMIT_EXCEEDED");
+    auto scratch = std::make_unique<StepScratch>();
     for (uint64_t i = 0; i < steps; ++i) {
-        if (!Step(m_weights, m_cursor, m_hits, m_miss, err)) return false;
+        if (!Step(m_weights, *scratch, m_cursor, m_hits, m_miss, err)) return false;
         ++m_cursor;
         ++m_step;
     }
