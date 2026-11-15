@@ -153,7 +153,10 @@ bool TxDownloadManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_rec
 
     if (RecentConfirmedTransactionsFilter().contains(hash)) return true;
 
-    return RecentRejectsFilter().contains(hash) || m_opts.m_mempool.exists(gtxid);
+    if (RecentRejectsFilter().contains(hash)) return true;
+    if (!m_opts.m_mempool.exists(gtxid)) return false;
+    // See TxDownloadOptions::m_is_own_stem_tx.
+    return !(m_opts.m_is_own_stem_tx && m_opts.m_is_own_stem_tx(gtxid));
 }
 
 void TxDownloadManagerImpl::ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info)

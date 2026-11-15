@@ -5,9 +5,18 @@ Presigned HTLC claims
   the `htlc_sha256` claim leaf selected through `p2mr_leaf`, the wallet signs
   that leaf before the preimage is known. The leaf signature does not commit
   to the preimage, so the PSBT stays incomplete and holds no preimage. Whoever
-  later learns the preimage adds it as `PSBT_IN_SHA256` and calls
-  `finalizepsbt`; no wallet is needed for that step. This lets a swap party
-  hand a presigned claim to a watchtower.
+  later learns the preimage passes it to `finalizepsbt` (new argument
+  `preimages`, see below) or adds it as `PSBT_IN_SHA256` itself; no wallet is
+  needed for that step. This lets a swap party hand a presigned claim to a
+  watchtower.
+- `finalizepsbt` has a new optional third argument `preimages`, an array of
+  32-byte hex strings. Each one is added as `PSBT_IN_SHA256` to every input
+  whose selected `htlc_sha256` claim leaf locks its SHA256 hash, and then the
+  PSBT is finalized as before. A preimage that is not 32 bytes, is not hex, or
+  matches no such input is an error, and nothing is returned. The
+  `htlc_sha256_legacy` leaf is not matched. An input that is already
+  finalized no longer carries its selected leaf, so it is not matched either;
+  call `finalizepsbt` without `preimages` for such a PSBT.
 - The option needs `sign=true`, a selected leaf and `sighashtype` `DEFAULT` or
   `ALL`. Only the `htlc_sha256` claim leaf is presigned, not the
   recovery-only `htlc_sha256_legacy` leaf. Without the option nothing

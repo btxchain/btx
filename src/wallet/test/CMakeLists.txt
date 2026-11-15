@@ -15,6 +15,7 @@ target_sources(test_btx
     init_tests.cpp
     ismine_tests.cpp
     labels_tests.cpp
+    wallet_labels_export_tests.cpp
     bridge_wallet_tests.cpp
     psbt_wallet_tests.cpp
     pq_multisig_wallet_tests.cpp
@@ -26,6 +27,7 @@ target_sources(test_btx
     wallet_crypto_tests.cpp
     wallet_rpc_tests.cpp
     wallet_tests.cpp
+    wallet_bundle_write_tests.cpp
     balance_watch_tests.cpp
     wallet_transaction_tests.cpp
     walletdb_tests.cpp
@@ -34,4 +36,6 @@ target_sources(test_btx
     bcp1_review_tests.cpp
     ../../test/shielded_coin_selection_tests.cpp
     ../../test/shielded_wallet_address_tests.cpp
+    ../../test/shielded_wallet_privacy_tests.cpp
+    ../../test/shielded_wallet_chunk_discovery_tests.cpp
 )

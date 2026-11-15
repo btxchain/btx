@@ -1,0 +1,146 @@
+[
+  {
+    "id": "DS-PLAN-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches persists a hypothesis, a dependency edge, and retracted evidence through SwarmPlanner and reads each back."
+  },
+  {
+    "id": "DS-PLAN-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches dispatches two independent work ids together and keeps a dependent id blocked until its predecessor finishes."
+  },
+  {
+    "id": "DS-PLAN-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches counts only the signal named for that workload and ignores another workload's signal and a non-positive amount."
+  },
+  {
+    "id": "DS-PLAN-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches retracts evidence and SwarmPlanner dispatch of the dependent work returns INVALID."
+  },
+  {
+    "id": "DS-PLAN-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches refuses a plan above the cost bound and refuses a plan while backpressure is set, and the earlier plan stays."
+  },
+  {
+    "id": "DS-PLAN-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches keeps the stored procedure body after quorum and runtime are marked lost."
+  },
+  {
+    "id": "DS-ACT-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches calls SwarmDefWork propose for D0-D3, refuses D4, and leaves an unknown level unstored."
+  },
+  {
+    "id": "DS-ACT-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches requires a present human before a D3 action is approved or executed."
+  },
+  {
+    "id": "DS-ACT-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches rejects a negative blast and an execute whose asset or blast differs from the proposal."
+  },
+  {
+    "id": "DS-ACT-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches keeps a single receipt on a repeated execute and leaves an unknown effect ambiguous so a later execute does not retry."
+  },
+  {
+    "id": "DS-ACT-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches rolls back when the canary fails, keeps the asset and receipt, and does not mark rollback when the canary passes."
+  },
+  {
+    "id": "DS-ACT-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches leaves the receipt in place when retaliation is refused as out of scope."
+  },
+  {
+    "id": "DS-SHARE-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches accepts only a listed recipient, a matching purpose, and a TLP 2.0 marking, and a refused recipient is not stored."
+  },
+  {
+    "id": "DS-SHARE-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches calls SwarmDefense publish and an embargo expiry without both protections stores nothing."
+  },
+  {
+    "id": "DS-SHARE-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches publishes only when sanitized and validated are both true."
+  },
+  {
+    "id": "DS-SHARE-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches returns the same not-visible result for a missing id and for an id stored on another case."
+  },
+  {
+    "id": "DS-SHARE-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches records a higher retraction version and leaves a different artifact body and version unchanged."
+  },
+  {
+    "id": "DS-SHARE-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches leaves training consent false after a share and sets it only through the separate training call."
+  },
+  {
+    "id": "DS-STD-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches accepts STIX 2.0 and 2.1, rejects another version, and keeps the first external-id mapping."
+  },
+  {
+    "id": "DS-STD-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches enforces collection read and write flags and returns at most the requested page."
+  },
+  {
+    "id": "DS-STD-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches keeps the original raw event and mapping version when a later raw body differs."
+  },
+  {
+    "id": "DS-STD-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches checks the rule on every advertised backend and does not add a backend it cannot check."
+  },
+  {
+    "id": "DS-STD-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches rejects a malformed event and an oversized event and keeps a small well-formed event."
+  },
+  {
+    "id": "DS-STD-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "pass_latches imports only the typed subset and does not launch."
+  }
+]

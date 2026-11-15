@@ -17,11 +17,44 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_economy_tests, BasicTestingSetup)
+
+// The helper's two unix workers both call EnsureEconomy, which loads the feed,
+// the search index and the campaigns the first time a directory is used. It
+// read and set its flags without a lock; under -fsanitize=thread this case
+// showed the race before it was locked. btx-modeld binds the event layer at
+// start, before the workers run, so the first call here does that on one thread.
+BOOST_AUTO_TEST_CASE(economy_loads_from_two_workers)
+{
+    using namespace modelnet;
+    auto call = [](ModelCatalog& cat) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "getmodelrelease");
+        req.pushKV("params", UniValue(UniValue::VARR));
+        UniValue result;
+        std::string code, err;
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    const fs::path first_dir = m_args.GetDataDirBase() / "econ-first";
+    const fs::path dir = m_args.GetDataDirBase() / "econ-two-workers";
+    fs::create_directories(first_dir);
+    fs::create_directories(dir);
+    ModelCatalog first{first_dir, 8 << 20};
+    BOOST_REQUIRE(call(first));
+    // A directory the economy has not loaded yet: both workers reach the load.
+    ModelCatalog cat{dir, 8 << 20};
+    std::atomic<int> ok{0};
+    std::thread worker([&] { for (int i = 0; i < 20; ++i) ok += call(cat) ? 1 : 0; });
+    for (int i = 0; i < 20; ++i) ok += call(cat) ? 1 : 0;
+    worker.join();
+    BOOST_CHECK_EQUAL(ok.load(), 40);
+}
 
 BOOST_AUTO_TEST_CASE(econ_fund_01_card_math)
 {
@@ -280,6 +313,37 @@ BOOST_AUTO_TEST_CASE(econ_ingest_rejects_remote_unsigned)
     BOOST_CHECK(result["accepted"].isFalse());
 }
 
+BOOST_AUTO_TEST_CASE(econ_ingest_chain_height_not_wrapped)
+{
+    using namespace modelnet;
+    const fs::path tmp = m_args.GetDataDirBase() / "ingest-chain-height";
+    ModelCatalog cat{tmp, 1 << 20};
+    auto ingest = [&](int64_t chain_height, std::string& code) {
+        UniValue obs(UniValue::VOBJ);
+        obs.pushKV("confirmed_known", true);
+        obs.pushKV("funding_source", "CHAIN_OBSERVATION");
+        obs.pushKV("confirmed_funded_atoms", 999);
+        obs.pushKV("chain_height", chain_height);
+        obs.pushKV("release_id", std::string(96, 'c'));
+        UniValue params(UniValue::VARR);
+        params.push_back(obs);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "ingestchainfundingobservation");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string err;
+        code.clear();
+        return DispatchHelperRpc(cat, req, result, code, err) && result["accepted"].isTrue();
+    };
+    std::string code;
+    // 2^32 + 5 was stored as chain height 5; -1 as 4294967295.
+    BOOST_CHECK(!ingest((int64_t{1} << 32) + 5, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!ingest(-1, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(ingest(5, code));
+}
+
 BOOST_AUTO_TEST_CASE(econ_ciphertext_needs_provider)
 {
     using namespace modelnet;
@@ -455,6 +519,65 @@ const UniValue* FindReleaseCard(const UniValue& res, const std::string& release_
 
 } // namespace
 
+BOOST_AUTO_TEST_CASE(feed_wrappers_continue_from_their_cursor)
+{
+    // getrecentreleases, getnewmodels and getrecentlyunlockedmodels return
+    // the next_cursor of the feed page they read. Passing it back must give
+    // the next page, not the first one again, or a walk never ends.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "feed-wrapper-cursor";
+    ModelCatalog cat{root, 8 << 20};
+    for (int i = 0; i < 3; ++i) {
+        const fs::path model = root / fs::PathFromString("toy" + std::to_string(i) + ".safetensors.dir");
+        fs::create_directories(model);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(model / "toy.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue host_params(UniValue::VARR);
+        host_params.push_back(fs::PathToString(model));
+        const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+        BOOST_REQUIRE(hosted.exists("uri"));
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("uri", hosted["uri"].get_str());
+        body.pushKV("secret32_hex", std::string(64, static_cast<char>('a' + i)));
+        body.pushKV("refund_height", 100000);
+        body.pushKV("target_atoms", 5'000'000);
+        body.pushKV("display_name", "Wrapper " + std::to_string(i));
+        UniValue create_params(UniValue::VARR);
+        create_params.push_back(body);
+        const UniValue rel = HelperDispatch(cat, "createmodelrelease", create_params);
+        UniValue claim(UniValue::VARR);
+        claim.push_back(rel["release_id"].get_str());
+        claim.push_back(std::string(64, static_cast<char>('a' + i)));
+        HelperDispatch(cat, "claimmodelrelease", claim);
+    }
+    const auto page = [&](const std::string& method, const std::string& scope, const std::string& cursor) {
+        UniValue o(UniValue::VOBJ);
+        if (!scope.empty()) o.pushKV("scope", scope);
+        o.pushKV("limit", 1);
+        if (!cursor.empty()) o.pushKV("cursor", cursor);
+        UniValue p(UniValue::VARR);
+        p.push_back(o);
+        return HelperDispatch(cat, method, p);
+    };
+    for (const auto& [method, scope] : std::vector<std::pair<std::string, std::string>>{
+             {"getrecentreleases", "NETWORK"}, {"getnewmodels", "NETWORK"}, {"getrecentlyunlockedmodels", ""}}) {
+        const UniValue first = page(method, scope, "");
+        BOOST_REQUIRE_MESSAGE(first["results"].size() == 1, method);
+        const std::string next = first["next_cursor"].get_str();
+        BOOST_REQUIRE_MESSAGE(!next.empty(), method);
+        // The second page starts after the first, so it hands out a new cursor
+        // (or none at the end) instead of the same one again.
+        const UniValue second = page(method, scope, next);
+        BOOST_CHECK_MESSAGE(second["next_cursor"].get_str() != next, method);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(release_card_keeps_display_name_publisher_and_size)
 {
     using namespace modelnet;
@@ -567,6 +690,147 @@ BOOST_AUTO_TEST_CASE(release_card_keeps_display_name_publisher_and_size)
     BOOST_CHECK_EQUAL(econ["confirmed_funded_atoms"].getInt<int64_t>(), 2'000'000);
     const UniValue still = HelperDispatch(cat, "getfundablemodels", list_params);
     BOOST_REQUIRE(FindReleaseCard(still, rid) != nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(peer_and_restricted_feeds_omit_local_wallet_observation)
+{
+    // btxd joins release cards against the local wallets and ingests the result
+    // (ObserveReleaseFunding reads mapWallet). The peer route ext/feed must not
+    // hand that wallet state, or the funding event it causes, to a remote peer,
+    // and the restricted view btxd uses for a wallet-restricted RPC user must
+    // not show it to that user.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "peer-feed";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+    BOOST_REQUIRE(hosted.exists("uri"));
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("uri", hosted["uri"].get_str());
+    body.pushKV("secret32_hex", std::string(64, 'c'));
+    body.pushKV("refund_height", 100000);
+    body.pushKV("target_atoms", 5'000'000);
+    body.pushKV("display_name", "Peer Feed");
+    UniValue create_params(UniValue::VARR);
+    create_params.push_back(body);
+    const UniValue rel = HelperDispatch(cat, "createmodelrelease", create_params);
+    const std::string rid = rel["release_id"].get_str();
+
+    UniValue obs(UniValue::VOBJ);
+    obs.pushKV("confirmed_known", true);
+    obs.pushKV("funding_source", "CHAIN_OBSERVATION");
+    obs.pushKV("confirmed_funded_atoms", 1'234'567);
+    obs.pushKV("wallet_contributor", true);
+    obs.pushKV("refund_available_locally", true);
+    obs.pushKV("chain_height", 150);
+    obs.pushKV("release_id", rid);
+    UniValue obs_params(UniValue::VARR);
+    obs_params.push_back(obs);
+    BOOST_REQUIRE(HelperDispatch(cat, "ingestchainfundingobservation", obs_params)["accepted"].isTrue());
+
+    // The local view still has the wallet observation.
+    UniValue econ_params(UniValue::VARR);
+    econ_params.push_back(rid);
+    const UniValue econ = HelperDispatch(cat, "getmodelreleaseeconomics", econ_params);
+    BOOST_CHECK_EQUAL(econ["confirmed_funded_atoms"].getInt<int64_t>(), 1'234'567);
+
+    NativeRequest req;
+    req.method = "POST";
+    req.path = "/btx-model/2/ext/feed";
+    req.body = R"({"limit":50})";
+    NativeResponse resp;
+    BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+    BOOST_REQUIRE_EQUAL(resp.status, 200);
+    BOOST_CHECK(resp.body.find(rid) != std::string::npos);
+    BOOST_CHECK(resp.body.find("1234567") == std::string::npos);
+    BOOST_CHECK(resp.body.find("\"wallet_local_state\":true") == std::string::npos);
+    BOOST_CHECK(resp.body.find("\"refund_available_locally\":true") == std::string::npos);
+    BOOST_CHECK(resp.body.find("RELEASE_FUNDING_CHANGED") == std::string::npos);
+    BOOST_CHECK(resp.body.find("\"funded_percent\"") == std::string::npos);
+
+    UniValue feed_query(UniValue::VOBJ);
+    feed_query.pushKV("mode", "FUNDING_ACTIVITY");
+    feed_query.pushKV("scope", "LOCAL");
+    UniValue feed_args(UniValue::VARR);
+    feed_args.push_back(feed_query);
+    // The unrestricted local feed lists the funding event of the wallet join...
+    const std::string local_feed = HelperDispatch(cat, "getmodelfeed", feed_args).write();
+    BOOST_CHECK(local_feed.find("RELEASE_FUNDING_CHANGED") != std::string::npos);
+    // ...the restricted view does not.
+    for (const char* feed_method : {"getmodelfeed", "getreleasefeed"}) {
+        UniValue scoped(UniValue::VARR);
+        scoped.push_back(feed_method);
+        scoped.push_back(feed_args);
+        const UniValue restricted = HelperDispatch(cat, "getrestrictedmodelview", scoped);
+        const std::string body = restricted.write();
+        BOOST_CHECK_MESSAGE(body.find("RELEASE_FUNDING_CHANGED") == std::string::npos, feed_method);
+        BOOST_CHECK_MESSAGE(body.find("RELEASE_FUNDED\"") == std::string::npos, feed_method);
+        BOOST_CHECK_MESSAGE(body.find("1234567") == std::string::npos, feed_method);
+        // The public campaign is still listed.
+        BOOST_CHECK_MESSAGE(body.find(rid) != std::string::npos, feed_method);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(recent_releases_local_scope_applies_query)
+{
+    // The NETWORK scope passes limit and filters to getmodelfeed; the LOCAL
+    // scope must apply them to local campaigns too.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "recent-releases-limit";
+    ModelCatalog cat{root, 8 << 20};
+    for (int i = 0; i < 3; ++i) {
+        const fs::path model = root / fs::PathFromString("toy" + std::to_string(i) + ".safetensors.dir");
+        fs::create_directories(model);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(model / "toy.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue host_params(UniValue::VARR);
+        host_params.push_back(fs::PathToString(model));
+        const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+        BOOST_REQUIRE(hosted.exists("uri"));
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("uri", hosted["uri"].get_str());
+        body.pushKV("secret32_hex", std::string(64, static_cast<char>('a' + i)));
+        body.pushKV("refund_height", 100000);
+        body.pushKV("target_atoms", 5'000'000);
+        UniValue create_params(UniValue::VARR);
+        create_params.push_back(body);
+        HelperDispatch(cat, "createmodelrelease", create_params);
+    }
+    for (const int limit : {1, 2}) {
+        UniValue q(UniValue::VOBJ);
+        q.pushKV("scope", "LOCAL");
+        q.pushKV("limit", limit);
+        UniValue p(UniValue::VARR);
+        p.push_back(q);
+        const UniValue page = HelperDispatch(cat, "getrecentreleases", p);
+        BOOST_CHECK_EQUAL(page["results"].size(), static_cast<size_t>(limit));
+    }
+    UniValue all(UniValue::VOBJ);
+    all.pushKV("scope", "LOCAL");
+    UniValue ap(UniValue::VARR);
+    ap.push_back(all);
+    BOOST_CHECK_EQUAL(HelperDispatch(cat, "getrecentreleases", ap)["results"].size(), 3U);
+    // None of the three campaigns is released yet.
+    UniValue filters(UniValue::VOBJ);
+    filters.pushKV("released_only", true);
+    all.pushKV("filters", filters);
+    UniValue fp(UniValue::VARR);
+    fp.push_back(all);
+    BOOST_CHECK_EQUAL(HelperDispatch(cat, "getrecentreleases", fp)["results"].size(), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
@@ -687,6 +951,76 @@ BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
     ComputeCall(reader, "importcomputereceipt", vr);
     const UniValue listed = ComputeCall(reader, "listcomputereceipts", UniValue(UniValue::VOBJ));
     BOOST_CHECK_EQUAL(listed["records"].size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(own_models_are_not_held_by_the_publisher_quota)
+{
+    // The search index charges every new record to the key that signed it,
+    // at most 64 per key, so that one peer cannot flood it. This node signs
+    // its own hosted models with its own key, so from the 65th one on
+    // hostmodel answered search_published false ("publisher spam"), and
+    // the count came back with the saved index after a restart.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "own-model-quota";
+    ModelCatalog cat{root, 64 << 20};
+    constexpr int MODELS = 70;
+    for (int i = 0; i < MODELS; ++i) {
+        const fs::path model = root / fs::PathFromString("m" + std::to_string(i) + ".dir");
+        fs::create_directories(model);
+        const std::string header = "{\"__metadata__\":{\"n\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> st(8 + header.size());
+        WriteLE64(st.data(), header.size());
+        std::copy(header.begin(), header.end(), st.begin() + 8);
+        {
+            std::ofstream out(model / "m.safetensors", std::ios::binary);
+            out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        }
+        UniValue params(UniValue::VARR);
+        params.push_back(fs::PathToString(model));
+        const UniValue hosted = HelperDispatch(cat, "hostmodel", params);
+        BOOST_CHECK_MESSAGE(hosted["search_published"].isTrue(),
+                            "model " << i << ": " << (hosted.exists("search_error") ? hosted["search_error"].write() : "?"));
+    }
+    // A restarted helper loads the saved index; every own record must come back.
+    SearchIndex restarted;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(restarted.Load(cat.Store().Root().parent_path() / "search-index.json",
+                                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::system_clock::now().time_since_epoch()).count(),
+                                         err), err);
+    BOOST_CHECK_EQUAL(restarted.All().size(), static_cast<size_t>(MODELS));
+}
+
+// getmodeldirectory, searchpublishers, getfundablemodels and the getmodelfeed
+// filters dropped the result of ParseSearchQuery: a malformed query gave an
+// unfiltered or default-sorted answer with success, while searchmodels and
+// browsemodels refuse the same input.
+BOOST_AUTO_TEST_CASE(malformed_search_query_is_refused)
+{
+    const fs::path dir = m_path_root / "economy-bad-query";
+    fs::create_directories(dir);
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    auto refused = [&](const std::string& method, const std::string& json, const std::string& want_code = "INVALID_PARAMETER") {
+        UniValue arg;
+        BOOST_REQUIRE(arg.read(json));
+        UniValue params(UniValue::VARR);
+        params.push_back(arg);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        UniValue result;
+        std::string code, err;
+        const bool ok = modelnet::DispatchHelperRpc(cat, req, result, code, err);
+        BOOST_CHECK_MESSAGE(!ok, method << " accepted " << json);
+        if (!ok) BOOST_CHECK_EQUAL(code, want_code);
+    };
+    refused("getfundablemodels", R"({"sort":"nearly-funded","limit":1})");
+    refused("getfundablemodels", R"({"filters":{"min_funded_percent":"50"}})");
+    refused("getmodeldirectory", R"({"filters":{"tags":"x"}})");
+    refused("searchpublishers", R"({"sort":"bogus"})");
+    refused("getmodelfeed", R"({"filters":{"family":7}})");
+    // The same input is refused by browsemodels already (with its own code).
+    refused("browsemodels", R"({"sort":"nearly-funded"})", "INVALID_PARAMS");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

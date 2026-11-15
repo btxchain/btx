@@ -155,23 +155,11 @@ inline constexpr uint32_t kMaxBatchedWindowBMX4C = 256;
 // ---------------------------------------------------------------------------
 // Dispatcher-integration adapter.
 //
-// src/matmul/accel_v4.h (the existing MatMul v4 GPU-mining dispatch/
-// integration layer -- NOT part of this task's editable surface, read-only
-// context here) declares and calls the ENC-BMX4C HIP entry point as
-// `matmul_v4::hip::ComputeDigestsBMX4CAccel` (mirroring
-// `matmul_v4::cuda::ComputeDigestsBMX4CAccel` / `matmul_v4::metal::
-// ComputeDigestsBMX4CAccel`), and `matmul/accel_v4_stub.cpp` already provides
-// a weak `matmul_v4::hip::ComputeDigestsBMX4CAccel` stub returning false so
-// the dispatcher always links. That is a DIFFERENT namespace from this file's
-// task-specified entry point above (`matmul_v4::bmx4::hip`). Both surfaces
-// are provided here so (a) the exact fixed signature this task specifies
-// exists and holds the real implementation, and (b) the pre-existing
-// dispatcher contract is actually satisfied -- a strong definition of
-// `matmul_v4::hip::ComputeDigestsBMX4CAccel`, compiled in whenever this file
-// is, that simply forwards to (a). Without this adapter the dispatcher would
-// keep resolving to the always-false weak stub and this backend would never
-// be reachable from SolveMatMulV4 / ComputeDigestsBMX4CDispatched, whatever
-// this file's own namespace looks like in isolation.
+// The dispatcher in matmul/accel_v4.h calls
+// matmul_v4::hip::ComputeDigestsBMX4CAccel, while the implementation above
+// lives in matmul_v4::bmx4::hip. The device translation unit supplies this
+// forwarding adapter; the disabled-backend stub supplies the same signature.
+// Both CMake selections therefore satisfy the dispatcher contract.
 namespace matmul_v4::hip {
 [[nodiscard]] bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t rounds,
                                             std::vector<uint256>& digests_out,

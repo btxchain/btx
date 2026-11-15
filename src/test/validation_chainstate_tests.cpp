@@ -364,7 +364,11 @@ struct AssumeutxoTestChain100Setup : TestChain100Setup {
     AssumeutxoTestChain100Setup()
         : TestChain100Setup(
               ChainType::REGTEST,
-              {.defer_expensive_matmul = false,
+              // 28fefe91 defers ConnectTip of a v4 body until ExactReplay in
+              // consensus mode; block 100 is v4 on default regtest. Economic
+              // mode keeps the canned schedule and connects synchronously.
+              {.extra_args = {"-matmulvalidation=economic"},
+               .defer_expensive_matmul = false,
                .freeze_coinbase_extra_nonce = true})
     {
     }
@@ -2042,7 +2046,12 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_defers_unattested_twin_for_hea
         BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), parent_tip);
         BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(parent_tip));
         BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(attested_index));
-        BOOST_CHECK(!chainman.GetSignedFrontierStatus().on_active_chain);
+        // Since 28fefe91 on_active_chain is also true while the frontier
+        // extends the tip (same-chain catch-up). The attested sibling's
+        // parent is the tip, so this is catch-up, not a stranded fork.
+        const auto frontier{chainman.GetSignedFrontierStatus()};
+        BOOST_CHECK(frontier.on_active_chain);
+        BOOST_CHECK_EQUAL(frontier.hash, attested->GetHash());
         // HEADER_ONLY attested child + unattested HAVE_DATA twin must not
         // put FMWC into a skip-budget spin (live 2026-08-16 miner wedge).
         for (int i = 0; i < 64; ++i) {
@@ -2499,10 +2508,17 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_is_unique_competi
 
     CKey signer;
     signer.MakeNewKey(/*fCompressed=*/true);
+    // The child is attested by another pin key. Since f35d8496 (V5/RB-12)
+    // this node refuses its own vote for a hash it disconnected, and the
+    // InvalidateBlock below disconnects the child.
+    CKey peer;
+    peer.MakeNewKey(/*fCompressed=*/true);
+    const uint256 chain_id{uint256::ONE};
+    const uint256 replay_ctx{uint256::FromHex(std::string(64, 'f')).value()};
     matmul::trusted::StoreConfig config;
-    config.chain_id = uint256::ONE;
-    config.replay_authority_context = uint256::FromHex(std::string(64, 'f')).value();
-    config.trusted_signers = {signer.GetPubKey()};
+    config.chain_id = chain_id;
+    config.replay_authority_context = replay_ctx;
+    config.trusted_signers = {signer.GetPubKey(), peer.GetPubKey()};
     config.threshold = 1;
     config.local_signer = signer;
     std::string error;
@@ -2532,8 +2548,9 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_is_unique_competi
         BOOST_REQUIRE(child->HaveNumChainTxs());
         BOOST_REQUIRE(child->pprev == chainstate.m_chain.Tip());
     }
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
-                      child->GetBlockHash(), child->nHeight) ==
+    BOOST_REQUIRE(InjectHistoricalAttestation(
+                      peer, chain_id, replay_ctx, child->GetBlockHash(),
+                      child->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
 
     {
@@ -2844,13 +2861,18 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_beats_short_reorg
 
     CKey signer;
     signer.MakeNewKey(/*fCompressed=*/true);
+    // The child and the sibling are attested by another pin key. Since
+    // f35d8496 (V5/RB-12) this node refuses its own vote for a hash it
+    // disconnected, and the InvalidateBlock calls below disconnect both.
+    CKey peer;
+    peer.MakeNewKey(/*fCompressed=*/true);
     const uint256 chain_id{uint256::ONE};
     const uint256 replay_ctx{
         uint256::FromHex(std::string(64, 'd')).value()};
     matmul::trusted::StoreConfig config;
     config.chain_id = chain_id;
     config.replay_authority_context = replay_ctx;
-    config.trusted_signers = {signer.GetPubKey()};
+    config.trusted_signers = {signer.GetPubKey(), peer.GetPubKey()};
     config.threshold = 1;
     config.local_signer = signer;
     std::string error;
@@ -2878,6 +2900,13 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_beats_short_reorg
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
                   parent_hash);
+    // Invalidating the parent withdrew the local vote for it, and
+    // reconnecting does not restore it. Keep the parent's quorum through
+    // the peer key.
+    BOOST_REQUIRE(InjectHistoricalAttestation(
+                      peer, chain_id, replay_ctx, parent_hash,
+                      parent_height) ==
+                  matmul::trusted::AddResult::Accepted);
     {
         LOCK(::cs_main);
         chainstate.ResetBlockFailureFlags(sibling);
@@ -2906,13 +2935,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_beats_short_reorg
         BOOST_REQUIRE(child->nStatus & BLOCK_HAVE_DATA);
         BOOST_REQUIRE(child->pprev == chainstate.m_chain.Tip());
     }
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
-                      child->GetBlockHash(), child->nHeight) ==
+    BOOST_REQUIRE(InjectHistoricalAttestation(
+                      peer, chain_id, replay_ctx, child->GetBlockHash(),
+                      child->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
     // Sibling shares the parent's height, which already has quorum. Ingest
     // the historical dual-attest rather than minting a second local signature.
     BOOST_REQUIRE(InjectHistoricalAttestation(
-                      signer, chain_id, replay_ctx, sibling->GetBlockHash(),
+                      peer, chain_id, replay_ctx, sibling->GetBlockHash(),
                       sibling->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
 
@@ -5295,13 +5325,15 @@ BOOST_FIXTURE_TEST_CASE(chainstate_consensus_gold_standard_ignores_cleared_attes
 
     RewindToParentAndActivate(chainstate, parent, {twin_a_index, twin_b_index});
     {
-        LOCK(::cs_main);
         // Invalidate the connected child so WITHOUT starts from the same parent
         // without re-applying the just-activated twin before ResetForTest.
-        CBlockIndex* child{chainstate.m_chain[parent->nHeight + 1]};
+        CBlockIndex* child{WITH_LOCK(::cs_main, {
+            return chainstate.m_chain[parent->nHeight + 1];
+        })};
         BOOST_REQUIRE(child != nullptr);
         BlockValidationState inv;
         BOOST_REQUIRE(chainstate.InvalidateBlock(inv, child));
+        LOCK(::cs_main);
         BOOST_REQUIRE(chainstate.m_chain.Tip() == parent);
     }
     node::matmul_trusted::ResetForTest();
@@ -5514,8 +5546,11 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain1
         LOCK(::cs_main);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
-        BlockValidationState again;
-        BOOST_REQUIRE(chainstate.InvalidateBlock(again, invalidate_at));
+    }
+    BlockValidationState again;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(again, invalidate_at));
+    {
+        LOCK(::cs_main);
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_MANUALLY_INVALIDATED);
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));

@@ -12,6 +12,13 @@
 #include <util/subprocess.h>
 #endif // ENABLE_EXTERNAL_SIGNER
 
+#ifndef WIN32
+#include <array>
+
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include <boost/test/unit_test.hpp>
 
 BOOST_FIXTURE_TEST_SUITE(system_tests, BasicTestingSetup)
@@ -102,6 +109,48 @@ BOOST_AUTO_TEST_CASE(run_command)
     }
 #endif
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(subprocess_cleanup_closes_parent_fds_once)
+{
+    // When the child cannot exec, Popen calls cleanup_fds() and the streams
+    // are destroyed afterwards. The parent pipe ends are owned by FILE*s after
+    // setup_comm_channels(), so each must be closed exactly once. Otherwise a
+    // descriptor number reused in between (for example by another thread) is
+    // closed as well.
+    int in[2], out[2], err[2];
+    BOOST_REQUIRE_EQUAL(pipe(in), 0);
+    BOOST_REQUIRE_EQUAL(pipe(out), 0);
+    BOOST_REQUIRE_EQUAL(pipe(err), 0);
+    const std::array<int, 3> parent_ends{in[1], out[0], err[0]};
+    {
+        subprocess::detail::Streams streams;
+        streams.read_from_parent_ = in[0];
+        streams.write_to_child_ = in[1];
+        streams.read_from_child_ = out[0];
+        streams.write_to_parent_ = out[1];
+        streams.err_read_ = err[0];
+        streams.err_write_ = err[1];
+        streams.setup_comm_channels();
+        streams.close_child_fds();
+        streams.cleanup_fds();
+
+        // Reuse each parent descriptor number before the streams go away.
+        for (const int fd : parent_ends) {
+            const int other{open("/dev/null", O_RDONLY)};
+            BOOST_REQUIRE(other != -1);
+            if (other != fd) {
+                BOOST_REQUIRE_EQUAL(dup2(other, fd), fd);
+                BOOST_REQUIRE_EQUAL(close(other), 0);
+            }
+        }
+    }
+    for (const int fd : parent_ends) {
+        BOOST_CHECK_MESSAGE(fcntl(fd, F_GETFD) != -1, "descriptor " << fd << " was closed twice");
+        close(fd);
+    }
+}
+#endif // WIN32
 #endif // ENABLE_EXTERNAL_SIGNER
 
 BOOST_AUTO_TEST_SUITE_END()

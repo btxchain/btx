@@ -1,0 +1,10 @@
+swarm_agentrun/trace.cpp
+swarm_agentrun/task.cpp
+swarm_agentrun/lease.cpp
+swarm_agentrun/result.cpp
+swarm_agentrun/branch.cpp
+swarm_agentrun/tool.cpp
+swarm_agentrun/quiet.cpp
+swarm_agentrun/leader.cpp
+swarm_agentrun/sandbox.cpp
+swarm_agentrun/swarm_agentrun.cpp

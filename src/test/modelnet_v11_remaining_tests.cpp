@@ -33,6 +33,7 @@
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -59,13 +60,13 @@ public:
     ~EnvRestore()
     {
         if (m_prev) {
-            setenv(m_key.c_str(), m_prev->c_str(), 1);
+            test::SetEnv(m_key.c_str(), m_prev->c_str());
         } else {
-            unsetenv(m_key.c_str());
+            test::UnsetEnv(m_key.c_str());
         }
     }
-    void Set(const char* v) { setenv(m_key.c_str(), v, 1); }
-    void Unset() { unsetenv(m_key.c_str()); }
+    void Set(const char* v) { test::SetEnv(m_key.c_str(), v); }
+    void Unset() { test::UnsetEnv(m_key.c_str()); }
 
 private:
     std::string m_key;
@@ -291,6 +292,32 @@ BOOST_AUTO_TEST_CASE(delegate_body_refuses_unknown_scopes)
     BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, ok_req, ok, code, err));
     BOOST_CHECK(ok["recorded"].get_bool());
     BOOST_CHECK(ok["note"].get_str().find("never a money") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(delegate_scopes_not_wrapped)
+{
+    const fs::path tmp = m_args.GetDataDirBase() / "v11-remaining-delegate-wrap";
+    modelnet::ModelCatalog cat{tmp, /*quota_bytes=*/1 << 20};
+    auto delegate = [&](int64_t scopes, std::string& code) {
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("scopes", scopes);
+        UniValue params(UniValue::VARR);
+        params.push_back(body);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "delegatemodelservice");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string err;
+        code.clear();
+        return modelnet::DispatchHelperRpc(cat, req, result, code, err);
+    };
+    std::string code;
+    // 2^32 + 6 was cut to 6, which passes the known-scope mask, and recorded.
+    BOOST_CHECK(!delegate((int64_t{1} << 32) + 6, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!delegate(-1, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(delegate(6, code));
 }
 
 BOOST_AUTO_TEST_CASE(comm_preserve_obeys_pins_and_quota)

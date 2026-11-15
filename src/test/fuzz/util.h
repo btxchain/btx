@@ -340,4 +340,24 @@ void ReadFromStream(FuzzedDataProvider& fuzzed_data_provider, Stream& stream) no
     }
 }
 
+/**
+ * Extra args for fuzz setups that mine 2 * COINBASE_MATURITY regtest blocks.
+ * Under the default regtest MatMul schedule (v4, BMX4C and DRLT from height
+ * 100, RC from 101) the second half of that chain is mined and validated
+ * under the v4 and RC rules, and under ASan such a setup does not finish
+ * within 20 minutes. Mainnet activated v4, BMX4C and RC Profile-1 at one
+ * height (Epoch A), with DRLT and seal-as-PoW off. Activate them the same way
+ * at the first height after the setup chain: the setup stays cheap, and the
+ * target then runs under that rule set (with regtest's toy RC dimensions).
+ */
+inline std::vector<const char*> SetupChainMatMulArgs()
+{
+    static_assert(2 * COINBASE_MATURITY + 1 == 201);
+    return {"-regtestmatmulv4height=201",
+            "-regtestbmx4cheight=201",
+            "-regtestrcheight=201",
+            "-regtestdrltheight=2147483647",
+            "-regtestmatmulltsealaspow=0"};
+}
+
 #endif // BITCOIN_TEST_FUZZ_UTIL_H

@@ -150,11 +150,14 @@ std::optional<int64_t> CalculateMaximumP2MRInputWeight(
 /** Return the input weight of the canonical P2MR path the wallet would select
  *  with the private PQ keys exposed by provider and the requested algorithm.
  *  This mirrors SignP2MR's key-path priority without creating signatures.
- *  Message/preimage-dependent CSFS paths are deliberately not selected. */
+ *  Message/preimage-dependent CSFS paths are deliberately not selected.
+ *  If sigop_cost is set, it receives the witness sigop cost of the selected
+ *  leaf, which policy turns into virtual size via -bytespersigop. */
 std::optional<int64_t> CalculateSelectedP2MRInputWeight(
     const CScript& script_pubkey,
     const SigningProvider& provider,
-    std::optional<PQAlgorithm> preferred_algo = std::nullopt);
+    std::optional<PQAlgorithm> preferred_algo = std::nullopt,
+    int64_t* sigop_cost = nullptr);
 
 /** Return whether validated provider metadata commits at least one canonical
  *  key-signature path that a generic wallet transaction can satisfy. Message,

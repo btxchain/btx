@@ -44,6 +44,12 @@
 
 #include <boost/test/unit_test.hpp>
 
+#if defined(_WIN32)
+// Windows headers may define OPAQUE after v2_types.h has been included.
+#pragma push_macro("OPAQUE")
+#undef OPAQUE
+#endif
+
 using namespace util::hex_literals;
 using interfaces::BlockTemplate;
 using interfaces::Mining;
@@ -1698,7 +1704,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_unprojectable_scan_placeholder_when_v
     Txid scan_txid;
     Txid tree_txid;
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         for (size_t i = 0; i < SCARCITY_TEST_FILLER_COUNT; ++i) {
             AddSyntheticShieldedMinerTx(tx_mempool,
                                         next_funding_tx(),
@@ -1763,7 +1769,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_unprojectable_tree_placeholder_when_v
     Txid tree_txid;
     Txid scan_txid;
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         for (size_t i = 0; i < SCARCITY_TEST_FILLER_COUNT; ++i) {
             AddSyntheticShieldedMinerTx(tx_mempool,
                                         next_funding_tx(),
@@ -1822,7 +1828,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_projects_shielded_pool_balance_when_validit
     Txid first_txid;
     Txid second_txid;
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         first_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
                                                       /*fee=*/1'000'000,
                                                       MakeSyntheticSendBundle(50'000,
@@ -1857,7 +1863,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_prefilters_stale_shielded_pool_candidates_b
     CTxMemPool& tx_mempool{MakeMempool()};
     Txid transparent_txid;
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         uint64_t sequence{0};
         constexpr size_t STALE_SHIELDED_CANDIDATE_COUNT{140};
         for (size_t i = 0; i < STALE_SHIELDED_CANDIDATE_COUNT; ++i) {
@@ -2060,7 +2066,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_orders_mixed_family_workload_by_ancestor_fe
     std::vector<std::pair<Txid, std::string>> family_labels;
     std::map<Txid, ShieldedResourceUsage> expected_usage_by_txid;
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         const Txid send_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
                                                                 /*fee=*/900'000,
                                                                 MakeSyntheticSendBundle(60'000,
@@ -2242,7 +2248,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_includes_egress_with_confirmed_rebalance_se
     uint64_t sequence{0};
     Txid egress_txid;
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         egress_txid = AddSyntheticShieldedStateMinerTx(tx_mempool,
                                                        /*fee=*/900'000,
                                                        ExtractV2Bundle(egress_fixture.tx),
@@ -2281,7 +2287,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_rebalance_that_exceeds_account_regist
 
     CTxMemPool& tx_mempool{MakeMempool()};
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         AddSyntheticShieldedMinerTx(tx_mempool,
                                     m_coinbase_txns.at(0),
                                     90'000,
@@ -2321,7 +2327,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_rebalance_that_exceeds_account_regist
 
     CTxMemPool& tx_mempool{MakeMempool()};
     {
-        LOCK(tx_mempool.cs);
+        LOCK2(::cs_main, tx_mempool.cs);
         AddSyntheticShieldedMinerTx(tx_mempool,
                                     m_coinbase_txns.at(0),
                                     90'000,
@@ -2339,3 +2345,7 @@ BOOST_AUTO_TEST_CASE(block_assembler_skips_rebalance_that_exceeds_account_regist
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("OPAQUE")
+#endif

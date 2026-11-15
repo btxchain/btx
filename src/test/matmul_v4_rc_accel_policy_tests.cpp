@@ -12,15 +12,19 @@
 #include <chainparams.h>
 #include <init.h>
 #include <util/chaintype.h>
+#include <util/translation.h>
 
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdlib>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace rc = matmul::v4::rc;
 namespace dc = matmul::v4::rc::dc;
@@ -48,20 +52,20 @@ BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_and_env_overrides)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
     // Unset → ProductionPreferred (default).
-    unsetenv("BTX_RC_ACCEL_POLICY");
+    test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                       static_cast<uint8_t>(rc::RCAccelerationPolicy::ProductionPreferred));
     // Explicit opt-in overrides both directions.
-    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "native");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                       static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
-    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "portable");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                       static_cast<uint8_t>(rc::RCAccelerationPolicy::PortableExplicit));
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -72,7 +76,7 @@ BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_and_env_overrides)
 BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
-    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1); // NativeRequired is opt-in now
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "native"); // NativeRequired is opt-in now
     BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                         static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
 
@@ -94,9 +98,9 @@ BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
     }
 
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -104,7 +108,7 @@ BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
 BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
-    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1); // NativeRequired is opt-in now
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "native"); // NativeRequired is opt-in now
     BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                         static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
 
@@ -126,9 +130,9 @@ BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
     }
 
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -140,13 +144,13 @@ BOOST_AUTO_TEST_CASE(rc_production_preferred_default_admits_device_like_portable
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
     rc::ResetRcOzakiQualForTest();
-    unsetenv("BTX_RC_ACCEL_POLICY"); // ProductionPreferred (default)
+    test::UnsetEnv("BTX_RC_ACCEL_POLICY"); // ProductionPreferred (default)
     const auto def = matmul_v4::accel::ResolveExactGemmBackendForRC();
     BOOST_CHECK_MESSAGE(
         !rc::IsRcOzakiMxfp4Qualified(),
         "automatic production resolution must not run correctness-only native qual");
 
-    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1); // PortableExplicit
+    test::SetEnv("BTX_RC_ACCEL_POLICY", "portable"); // PortableExplicit
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
     const auto portable = matmul_v4::accel::ResolveExactGemmBackendForRC();
     BOOST_CHECK_EQUAL(def.backend.gemm_s8s8 == nullptr,
@@ -157,9 +161,9 @@ BOOST_AUTO_TEST_CASE(rc_production_preferred_default_admits_device_like_portable
     BOOST_CHECK(!def.production_eligible);
     BOOST_CHECK(!portable.production_eligible);
     if (prev != nullptr) {
-        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+        test::SetEnv("BTX_RC_ACCEL_POLICY", prev);
     } else {
-        unsetenv("BTX_RC_ACCEL_POLICY");
+        test::UnsetEnv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -407,6 +411,53 @@ BOOST_AUTO_TEST_CASE(runtime_reprobe_is_bounded_and_unavailable_only)
     BOOST_CHECK(!absent.attempted);
     BOOST_CHECK_EQUAL(absent.reason, "no_runtime_candidate");
     BOOST_CHECK_EQUAL(calls, 1);
+}
+
+
+BOOST_AUTO_TEST_CASE(unverifiable_next_block_warning_names_tip_and_fixes)
+{
+    ArgsManager empty;
+    const auto main{CreateChainParams(empty, ChainType::MAIN)};
+    const int32_t rc_height{main->GetConsensus().nMatMulRCHeight};
+    BOOST_REQUIRE_EQUAL(rc_height, 185000);
+
+    const auto contains = [](const std::string& text, const std::string& part) {
+        return text.find(part) != std::string::npos;
+    };
+    // A GPU-less node at the activation boundary, and one sitting on the
+    // 228,000 compiled snapshot base retrying 228,001.
+    for (const auto& [tip, next] : {std::pair<int, std::string>{rc_height - 1, "185000"},
+                                    std::pair<int, std::string>{rc_height, "185001"},
+                                    std::pair<int, std::string>{228000, "228001"}}) {
+        const std::string text{MatMulRCNextBlockUnverifiableWarning(
+            rc_height, tip, "cuda", "strict_device_not_ready").original};
+        BOOST_TEST_MESSAGE(text);
+        BOOST_CHECK(contains(text, "at height " + std::to_string(tip)));
+        BOOST_CHECK(contains(text, "cannot connect block " + next));
+        BOOST_CHECK(!contains(text, "activation height"));
+        // Fix 1: a qualified GPU on consensus mode.
+        BOOST_CHECK(contains(text, "qualified strict-device GPU"));
+        BOOST_CHECK(contains(text, "-matmulvalidation=consensus"));
+        // Fix 2: a 2-of-N trusted mirror; mainnet refuses 1-of-1.
+        BOOST_CHECK(contains(text, "-matmulvalidation=trusted"));
+        BOOST_CHECK(contains(text, "at least two -matmultrustedpubkey"));
+        BOOST_CHECK(contains(text, "-matmultrustedthreshold=2"));
+        BOOST_CHECK(contains(text, "-allowsinglekeytrustedmirror=1"));
+        // The trap: pins on consensus mode never skip ExactReplay.
+        BOOST_CHECK(contains(text, "staying on -matmulvalidation=consensus do not skip ExactReplay"));
+        // Relay mode must not be offered as a way to advance.
+        BOOST_CHECK(!contains(text, "discovery relay if"));
+        BOOST_CHECK(contains(text, "relay only introduces peers"));
+        BOOST_CHECK(contains(text, "provider=cuda reason=strict_device_not_ready"));
+    }
+
+    // Below the boundary, or with no known tip, the text is unchanged.
+    for (const std::optional<int> tip : {std::optional<int>{rc_height - 2}, std::optional<int>{}}) {
+        const std::string text{MatMulRCNextBlockUnverifiableWarning(
+            rc_height, tip, "", "").original};
+        BOOST_CHECK(contains(text, "at or after activation height 185000"));
+        BOOST_CHECK(contains(text, "provider=unavailable reason=strict_device_not_ready"));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

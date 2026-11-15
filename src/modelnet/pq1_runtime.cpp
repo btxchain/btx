@@ -65,6 +65,7 @@ void DecayUnauthLocked(UnauthState& e)
 ConnLimits& GlobalConnLimits() { return g_limits; }
 
 namespace {
+#ifndef _WIN32
 bool OpensslCliHasMlKem768(const std::string& bin)
 {
     if (bin.empty()) return false;
@@ -77,11 +78,17 @@ bool OpensslCliHasMlKem768(const std::string& bin)
     const int rc = pclose(fp);
     return rc == 0 && out.find("MLKEM768") != std::string::npos;
 }
+#endif
 } // namespace
 
 std::string OpensslBin()
 {
     if (const char* e = std::getenv("BTX_OPENSSL")) return e;
+#ifdef _WIN32
+    // Keep the explicit override above and the existing CLI-name fallback.
+    // The POSIX shell probe is not a native Windows capability check.
+    return "openssl";
+#else
     static const std::string cached = [] {
         const char* cands[] = {
             "/opt/openssl-3.5.8/bin/openssl",
@@ -97,6 +104,7 @@ std::string OpensslBin()
         return std::string{"openssl"};
     }();
     return cached;
+#endif
 }
 
 void SetPq1SocketOpts(int fd, bool nonblock)
@@ -408,7 +416,11 @@ bool CheckOrStorePin(const fs::path& pinfile, const std::string& endpoint, const
             return false;
         }
         out << obj.write() << "\n";
+        // close() writes the buffered bytes; on a full disk only that fails.
+        out.close();
         if (!out) {
+            std::error_code ec;
+            fs::remove(tmp, ec);
             err = "pin file write";
             return false;
         }
@@ -416,6 +428,7 @@ bool CheckOrStorePin(const fs::path& pinfile, const std::string& endpoint, const
     std::error_code ec;
     fs::rename(tmp, pinfile, ec);
     if (ec) {
+        fs::remove(tmp, ec);
         err = "pin file write";
         return false;
     }
@@ -479,6 +492,36 @@ void ConnLimits::ReleaseInbound(uint32_t netgroup)
         if (it->second == 0) g_inbound_netgroup.erase(it);
     }
     if (inbound.load() > 0) inbound.fetch_sub(1);
+}
+
+size_t Pq1NextWaiting(const std::vector<uint32_t>& waiting, const std::map<uint32_t, int>& held)
+{
+    size_t next = 0;
+    int fewest = std::numeric_limits<int>::max();
+    for (size_t i = 0; i < waiting.size(); ++i) {
+        const auto it = held.find(waiting[i]);
+        const int n = it == held.end() ? 0 : it->second;
+        if (n < fewest) {
+            next = i;
+            fewest = n;
+        }
+    }
+    return next;
+}
+
+std::optional<uint32_t> Pq1WorkerDonor(uint32_t waiting, const std::map<uint32_t, int>& held)
+{
+    const auto it = held.find(waiting);
+    const int need = (it == held.end() ? 0 : it->second) + 2;
+    std::optional<uint32_t> donor;
+    int most = 0;
+    for (const auto& [netgroup, n] : held) {
+        if (netgroup != waiting && n >= need && n > most) {
+            donor = netgroup;
+            most = n;
+        }
+    }
+    return donor;
 }
 
 bool ConnLimits::TryOutbound()

@@ -885,6 +885,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         201'500,
         203'000,
         219'000,
+        228'000,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -921,6 +922,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(201'500));
     BOOST_CHECK(params->AssumeutxoForHeight(203'000));
     BOOST_CHECK(params->AssumeutxoForHeight(219'000));
+    BOOST_CHECK(params->AssumeutxoForHeight(228'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(199'299));
     BOOST_CHECK(!params->AssumeutxoForHeight(199'300));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
@@ -944,7 +946,7 @@ BOOST_AUTO_TEST_CASE(assumeutxo_bases_must_sit_on_checkpoint_lineage)
     BOOST_REQUIRE(params);
     const auto& checkpoints = params->Checkpoints().mapCheckpoints;
     BOOST_REQUIRE(!checkpoints.empty());
-    BOOST_CHECK_EQUAL(checkpoints.rbegin()->first, 219000);
+    BOOST_CHECK_EQUAL(checkpoints.rbegin()->first, 228000);
     BOOST_CHECK_EQUAL(
         checkpoints.at(186000).GetHex(),
         "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
@@ -957,6 +959,9 @@ BOOST_AUTO_TEST_CASE(assumeutxo_bases_must_sit_on_checkpoint_lineage)
     BOOST_CHECK_EQUAL(
         checkpoints.at(219000).GetHex(),
         "dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3");
+    BOOST_CHECK_EQUAL(
+        checkpoints.at(228000).GetHex(),
+        "0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87");
     BOOST_CHECK_EQUAL(
         params->GetConsensus().defaultAssumeValid.GetHex(),
         "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
@@ -972,7 +977,7 @@ BOOST_AUTO_TEST_CASE(assumeutxo_bases_must_sit_on_checkpoint_lineage)
     BOOST_REQUIRE(withdrawn_199299);
     BOOST_CHECK(!params->AssumeutxoForBlockhash(*withdrawn_199300));
     BOOST_CHECK(!params->AssumeutxoForBlockhash(*withdrawn_199299));
-    BOOST_CHECK_EQUAL(params->HighestAssumeutxoHeight(), 219000);
+    BOOST_CHECK_EQUAL(params->HighestAssumeutxoHeight(), 228000);
     const auto au_201500 = params->AssumeutxoForHeight(201500);
     BOOST_REQUIRE(au_201500);
     BOOST_CHECK_EQUAL(
@@ -987,6 +992,11 @@ BOOST_AUTO_TEST_CASE(assumeutxo_bases_must_sit_on_checkpoint_lineage)
         au_219000->hash_serialized.ToString(),
         "3c065aabb529eaab5646825927d9f20a91426dc7e83b4890b575324f5bfccc99");
     BOOST_CHECK_EQUAL(au_219000->m_chain_tx_count, 320540);
+    const auto au_228000 = params->AssumeutxoForHeight(228000);
+    BOOST_REQUIRE(au_228000);
+    BOOST_CHECK_EQUAL(
+        au_228000->blockhash.GetHex(),
+        checkpoints.at(228000).GetHex());
 
     constexpr int first_divergent_height{199299};
     for (int height : params->GetAvailableSnapshotHeights()) {

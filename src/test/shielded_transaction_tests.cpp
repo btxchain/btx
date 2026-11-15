@@ -478,6 +478,27 @@ BOOST_AUTO_TEST_CASE(view_grant_roundtrip_encrypt_decrypt)
     BOOST_CHECK_EQUAL_COLLECTIONS(decrypted->begin(), decrypted->end(), view_key.begin(), view_key.end());
 }
 
+BOOST_AUTO_TEST_CASE(view_grant_rejects_invalid_secret_key_lengths)
+{
+    const auto keypair = mlkem::KeyGen();
+    const std::vector<uint8_t> view_key(32, 0x42);
+    const std::vector<uint8_t> metadata_aad{'m', 'e', 't', 'a'};
+    const auto grant = CViewGrant::Create(view_key, keypair.pk);
+    const auto bound_grant = CViewGrant::CreateWithAad(view_key, keypair.pk, metadata_aad);
+    for (const size_t length : {size_t{0}, mlkem::SECRETKEYBYTES - 1, mlkem::SECRETKEYBYTES + 1}) {
+        auto sk = keypair.sk;
+        sk.resize(length);
+        BOOST_CHECK(!grant.Decrypt(sk).has_value());
+        BOOST_CHECK(!bound_grant.DecryptWithAad(sk, metadata_aad).has_value());
+    }
+    const auto recovered = grant.Decrypt(keypair.sk);
+    const auto recovered_bound = bound_grant.DecryptWithAad(keypair.sk, metadata_aad);
+    BOOST_REQUIRE(recovered.has_value());
+    BOOST_REQUIRE(recovered_bound.has_value());
+    BOOST_CHECK_EQUAL_COLLECTIONS(recovered->begin(), recovered->end(), view_key.begin(), view_key.end());
+    BOOST_CHECK_EQUAL_COLLECTIONS(recovered_bound->begin(), recovered_bound->end(), view_key.begin(), view_key.end());
+}
+
 BOOST_AUTO_TEST_CASE(view_grant_metadata_aad_authenticates_context)
 {
     const auto keypair = mlkem::KeyGen();

@@ -11,6 +11,7 @@
 #include <test/util/txmempool.h>
 #include <test/util/mining.h>
 
+#include <coins.h>
 #include <node/miner.h>
 #include <node/mini_miner.h>
 #include <node/types.h>
@@ -20,6 +21,7 @@
 #include <util/check.h>
 #include <util/time.h>
 #include <util/translation.h>
+#include <validation.h>
 
 #include <deque>
 #include <vector>
@@ -37,6 +39,14 @@ void initialize_miner()
         g_available_coins.emplace_back(Txid::FromUint256(uint256::ZERO), i);
     }
     g_setup->m_node.args->ForceSetArg("-blockprioritysize", "0");
+    // BlockAssembler::TestPackageTransactions recomputes lock points from the
+    // coins view and skips a transaction whose inputs are missing, so the
+    // available coins need an entry there for mini_miner_selection.
+    LOCK(::cs_main);
+    auto& coins_tip{g_setup->m_node.chainman->ActiveChainstate().CoinsTip()};
+    for (const auto& outpoint : g_available_coins) {
+        coins_tip.AddCoin(outpoint, Coin{CTxOut{100, P2WSH_OP_TRUE}, /*nHeightIn=*/1, /*fCoinBaseIn=*/false}, /*possible_overwrite=*/false);
+    }
 }
 
 // Test that the MiniMiner can run with various outpoints and feerates.
@@ -193,6 +203,8 @@ FUZZ_TARGET(mini_miner_selection, .init = initialize_miner)
     miner_options.blockMinFeeRate = target_feerate;
     miner_options.nBlockMaxWeight = MAX_BLOCK_WEIGHT;
     miner_options.test_block_validity = false;
+    // MiniMiner has no transaction count limit; lift BTX's template cap (-blockmaxtemplatetxs).
+    miner_options.nBlockMaxTemplateTxs = 0;
     miner_options.coinbase_output_script = CScript() << OP_0;
 
     node::BlockAssembler miner{g_setup->m_node.chainman->ActiveChainstate(), &pool, miner_options, g_setup->m_node};

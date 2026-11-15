@@ -19,6 +19,7 @@
 #include <script/solver.h>
 #include <util/check.h>
 #include <util/moneystr.h>
+#include <util/overflow.h>
 #include <util/rbf.h>
 #include <util/trace.h>
 #include <util/translation.h>
@@ -186,15 +187,26 @@ int CalculateMaximumSignedInputSize(const CTxOut& txout, const COutPoint outpoin
     return -1;
 }
 
+/** Bytes per sigop that relay policy charges, so that fee sizing matches the
+ *  mempool's sigop-adjusted virtual size. */
+static unsigned int BytesPerSigOp(const CWallet* wallet)
+{
+    return wallet && wallet->HaveChain() ? wallet->chain().bytesPerSigOp() : DEFAULT_BYTES_PER_SIGOP;
+}
+
 int CalculateMaximumSignedInputSize(const CTxOut& txout, const CWallet* wallet, const CCoinControl* coin_control)
 {
     if (IsP2MROutput(txout.scriptPubKey)) {
         const auto signing_provider{GetP2MRSigningProvider(wallet, coin_control, txout.scriptPubKey)};
+        int64_t sigop_cost{0};
         if (const auto weight = CalculateSelectedP2MRInputWeight(
                 txout.scriptPubKey,
                 *signing_provider,
-                coin_control ? coin_control->m_preferred_pq_signing_algo : std::nullopt)) {
-            return static_cast<int>(GetVirtualTransactionSize(*weight, 0, 0));
+                coin_control ? coin_control->m_preferred_pq_signing_algo : std::nullopt,
+                &sigop_cost)) {
+            // Per input, max(weight, sigops * bytes_per_sigop) is an upper bound
+            // on this input's share of the sigop-adjusted transaction vsize.
+            return static_cast<int>(GetVirtualTransactionSize(*weight, sigop_cost, BytesPerSigOp(wallet)));
         }
         if (AllowWatchOnlyP2MRSizingFallback(coin_control) &&
             HasGenericP2MRSigningPath(txout.scriptPubKey, *signing_provider)) {
@@ -219,8 +231,9 @@ static std::unique_ptr<Descriptor> GetDescriptor(const CWallet* wallet, const CC
 /** Infer the maximum size of this input after it will be signed. */
 static std::optional<int64_t> GetSignedTxinWeight(const CWallet* wallet, const CCoinControl* coin_control,
                                                   const CTxIn& txin, const CTxOut& txo, const bool tx_is_segwit,
-                                                  const bool can_grind_r)
+                                                  const bool can_grind_r, int64_t& sigop_cost)
 {
+    sigop_cost = 0;
     // If weight was provided, use that.
     std::optional<int64_t> weight;
     if (coin_control && (weight = coin_control->GetInputWeight(txin.prevout))) {
@@ -232,7 +245,8 @@ static std::optional<int64_t> GetSignedTxinWeight(const CWallet* wallet, const C
         if (const auto selected_weight = CalculateSelectedP2MRInputWeight(
                 txo.scriptPubKey,
                 *signing_provider,
-                coin_control ? coin_control->m_preferred_pq_signing_algo : std::nullopt)) {
+                coin_control ? coin_control->m_preferred_pq_signing_algo : std::nullopt,
+                &sigop_cost)) {
             return selected_weight;
         }
         if (AllowWatchOnlyP2MRSizingFallback(coin_control) &&
@@ -274,15 +288,21 @@ TxSize CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *walle
     for (const auto& txo : tx.vout) weight += GetSerializeSize(txo) * WITNESS_SCALE_FACTOR;
 
     // Add the size of the transaction inputs as if they were signed.
+    int64_t sigop_cost{0};
     for (uint32_t i = 0; i < txouts.size(); i++) {
-        const auto txin_weight = GetSignedTxinWeight(wallet, coin_control, tx.vin[i], txouts[i], is_segwit, wallet->CanGrindR());
+        int64_t txin_sigop_cost{0};
+        const auto txin_weight = GetSignedTxinWeight(wallet, coin_control, tx.vin[i], txouts[i], is_segwit, wallet->CanGrindR(), txin_sigop_cost);
         if (!txin_weight) return TxSize{-1, -1};
         assert(*txin_weight > -1);
         weight += *txin_weight;
+        sigop_cost += txin_sigop_cost;
     }
 
-    // It's ok to use 0 as the number of sigops since we never create any pathological transaction.
-    return TxSize{GetVirtualTransactionSize(weight, 0, 0), weight};
+    // P2MR PQ signature checks are charged far more sigops than ECDSA ones
+    // (an SLH-DSA checksig alone is 500 * 20 = 10,000 vbytes under default
+    // policy), so the mempool vsize of a P2MR spend is often set by its sigops,
+    // not its weight. Size the fee for the same vsize the mempool will use.
+    return TxSize{GetVirtualTransactionSize(weight, sigop_cost, BytesPerSigOp(wallet)), weight};
 }
 
 TxSize CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *wallet, const CCoinControl* coin_control)
@@ -1254,7 +1274,8 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
         const std::vector<CRecipient>& vecSend,
         std::optional<unsigned int> change_pos,
         const CCoinControl& coin_control,
-        bool sign) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+        bool sign,
+        bool* inputs_failed) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
 
@@ -1387,7 +1408,10 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     PreSelectedInputs preset_inputs;
     if (coin_control.HasSelected()) {
         auto res_fetch_inputs = FetchSelectedInputs(wallet, coin_control, coin_selection_params);
-        if (!res_fetch_inputs) return util::Error{util::ErrorString(res_fetch_inputs)};
+        if (!res_fetch_inputs) {
+            if (inputs_failed) *inputs_failed = true;
+            return util::Error{util::ErrorString(res_fetch_inputs)};
+        }
         preset_inputs = *res_fetch_inputs;
     }
 
@@ -1405,6 +1429,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     if (!select_coins_res) {
         // 'SelectCoins' either returns a specific error message or, if empty, means a general "Insufficient funds".
         const bilingual_str& err = util::ErrorString(select_coins_res);
+        if (inputs_failed) *inputs_failed = true;
         return util::Error{err.empty() ?_("Insufficient funds") : err};
     }
     const SelectionResult& result = *select_coins_res;
@@ -1497,6 +1522,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     TxSize tx_sizes = CalculateMaximumSignedTxSize(CTransaction(txNew), &wallet, &coin_control);
     int nBytes = tx_sizes.vsize;
     if (nBytes == -1) {
+        if (inputs_failed) *inputs_failed = true;
         return util::Error{_("Missing solving data for estimating transaction size")};
     }
     CAmount fee_needed = coin_selection_params.m_effective_feerate.GetFee(nBytes) + result.GetTotalBumpFees();
@@ -1576,6 +1602,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
         tx_sizes = CalculateMaximumSignedTxSize(CTransaction(txNew), &wallet, &coin_control);
         nBytes = tx_sizes.vsize;
         if (nBytes == -1) {
+            if (inputs_failed) *inputs_failed = true;
             return util::Error{_("Missing solving data for estimating transaction size")};
         }
         fee_needed = coin_selection_params.m_effective_feerate.GetFee(nBytes) + result.GetTotalBumpFees();
@@ -1640,7 +1667,8 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         const std::vector<CRecipient>& vecSend,
         std::optional<unsigned int> change_pos,
         const CCoinControl& coin_control,
-        bool sign)
+        bool sign,
+        bool* inputs_failed)
 {
     AssertLockHeld(wallet.cs_wallet);
 
@@ -1652,12 +1680,27 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         return util::Error{_("Transaction amounts must not be negative")};
     }
 
+    // CreateTransactionInternal adds the amounts into recipients_sum and the
+    // coin selection works with that sum. The values of a raw transaction
+    // (fundrawtransaction) are not range checked, and many outputs that are
+    // each in range (createexchangebatch) can still add up past MAX_MONEY or
+    // past the range of CAmount. The amounts are not negative here, so a sum
+    // within MoneyRange after each output also keeps each amount in range.
+    CAmount recipients_sum{0};
+    for (const auto& recipient : vecSend) {
+        const auto sum{CheckedAdd(recipients_sum, recipient.nAmount)};
+        if (!sum || !MoneyRange(*sum)) {
+            return util::Error{_("Transaction amounts out of range")};
+        }
+        recipients_sum = *sum;
+    }
+
     // The grouped comparison is discarded unless its fee is within
     // -maxapsfee. Build both unsigned and sign only the one that is kept.
     // Signing both spends a full PQ signature round on a transaction that
     // is then thrown away.
     const bool defer_sign = sign && wallet.m_max_aps_fee > -1 && !coin_control.m_avoid_partial_spends;
-    auto res = CreateTransactionInternal(wallet, vecSend, change_pos, coin_control, sign && !defer_sign);
+    auto res = CreateTransactionInternal(wallet, vecSend, change_pos, coin_control, sign && !defer_sign, inputs_failed);
     TRACEPOINT(coin_selection, normal_create_tx_internal,
            wallet.GetName().c_str(),
            bool(res),
@@ -1672,7 +1715,16 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         if (GetTransactionWeight(CTransaction{mtx}) > MAX_STANDARD_TX_WEIGHT) {
             return util::Error{_("Transaction too large")};
         }
-        return CreatedTransactionResult(MakeTransactionRef(std::move(mtx)), chosen.fee, chosen.change_pos, chosen.fee_calc);
+        CTransactionRef tx = MakeTransactionRef(std::move(mtx));
+        // The internal build checked the chain limits on the unsigned
+        // transaction. Check them again with the signed vsize.
+        if (gArgs.GetBoolArg("-walletrejectlongchains", DEFAULT_WALLET_REJECT_LONG_CHAINS)) {
+            auto result = wallet.chain().checkChainLimits(tx);
+            if (!result) {
+                return util::Error{util::ErrorString(result)};
+            }
+        }
+        return CreatedTransactionResult(tx, chosen.fee, chosen.change_pos, chosen.fee_calc);
     };
     const auto& txr_ungrouped = *res;
     // try with avoidpartialspends unless it's enabled already
@@ -1686,7 +1738,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
             ExtractDestination(txr_ungrouped.tx->vout[*txr_ungrouped.change_pos].scriptPubKey, tmp_cc.destChange);
         }
 
-        auto txr_grouped = CreateTransactionInternal(wallet, vecSend, change_pos, tmp_cc, /*sign=*/false);
+        auto txr_grouped = CreateTransactionInternal(wallet, vecSend, change_pos, tmp_cc, /*sign=*/false, /*inputs_failed=*/nullptr);
         // if fee of this alternative one is within the range of the max fee, we use this one
         const bool use_aps{txr_grouped.has_value() ? (txr_grouped->fee <= txr_ungrouped.fee + wallet.m_max_aps_fee) : false};
         TRACEPOINT(coin_selection, aps_create_tx_internal,
@@ -1708,7 +1760,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
     return res;
 }
 
-util::Result<CreatedTransactionResult> FundTransaction(CWallet& wallet, const CMutableTransaction& tx, const std::vector<CRecipient>& vecSend, std::optional<unsigned int> change_pos, bool lockUnspents, CCoinControl coinControl)
+util::Result<CreatedTransactionResult> FundTransaction(CWallet& wallet, const CMutableTransaction& tx, const std::vector<CRecipient>& vecSend, std::optional<unsigned int> change_pos, bool lockUnspents, CCoinControl coinControl, bool* inputs_failed)
 {
     // We want to make sure tx.vout is not used now that we are passing outputs as a vector of recipients.
     // This sets us up to remove tx completely in a future PR in favor of passing the inputs directly.
@@ -1748,7 +1800,7 @@ util::Result<CreatedTransactionResult> FundTransaction(CWallet& wallet, const CM
         preset_txin.SetScriptWitness(txin.scriptWitness);
     }
 
-    auto res = CreateTransaction(wallet, vecSend, change_pos, coinControl, false);
+    auto res = CreateTransaction(wallet, vecSend, change_pos, coinControl, false, inputs_failed);
     if (!res) {
         return res;
     }

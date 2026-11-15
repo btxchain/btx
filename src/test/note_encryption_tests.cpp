@@ -39,6 +39,25 @@ BOOST_AUTO_TEST_CASE(encrypt_decrypt_roundtrip)
     BOOST_CHECK(dec->memo == note.memo);
 }
 
+BOOST_AUTO_TEST_CASE(decrypt_rejects_invalid_secret_key_lengths)
+{
+    const auto recipient = mlkem::KeyGen();
+    ShieldedNote note;
+    note.value = COIN;
+    note.recipient_pk_hash = uint256::ONE;
+    note.rho = GetRandHash();
+    note.rcm = GetRandHash();
+    const auto enc = shielded::NoteEncryption::Encrypt(note, recipient.pk);
+    for (const size_t length : {size_t{0}, mlkem::SECRETKEYBYTES - 1, mlkem::SECRETKEYBYTES + 1}) {
+        auto sk = recipient.sk;
+        sk.resize(length);
+        BOOST_CHECK(!shielded::NoteEncryption::TryDecrypt(enc, recipient.pk, sk).has_value());
+    }
+    const auto recovered = shielded::NoteEncryption::TryDecrypt(enc, recipient.pk, recipient.sk);
+    BOOST_REQUIRE(recovered.has_value());
+    BOOST_CHECK_EQUAL(recovered->value, note.value);
+}
+
 BOOST_AUTO_TEST_CASE(decrypt_with_wrong_key_returns_nullopt)
 {
     const auto recipient = mlkem::KeyGen();

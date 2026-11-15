@@ -248,15 +248,19 @@ static bool HTTPReq_JSONRPC(const std::any& context, HTTPRequest* req)
                 // Batches never throw HTTP errors, they are always just included
                 // in "HTTP OK" responses. Notifications never get any response.
                 UniValue response;
+                // Each element gets its own copy of the unparsed request, so
+                // that nothing parsed from one element ends up in the reply to
+                // the next
+                JSONRPCRequest elem_jreq{jreq};
                 try {
-                    jreq.parse(valRequest[i]);
-                    response = JSONRPCExec(jreq, /*catch_errors=*/true);
+                    elem_jreq.parse(valRequest[i]);
+                    response = JSONRPCExec(elem_jreq, /*catch_errors=*/true);
                 } catch (UniValue& e) {
-                    response = JSONRPCReplyObj(NullUniValue, std::move(e), jreq.id, jreq.m_json_version);
+                    response = JSONRPCReplyObj(NullUniValue, std::move(e), elem_jreq.id, elem_jreq.m_json_version);
                 } catch (const std::exception& e) {
-                    response = JSONRPCReplyObj(NullUniValue, JSONRPCError(RPC_PARSE_ERROR, e.what()), jreq.id, jreq.m_json_version);
+                    response = JSONRPCReplyObj(NullUniValue, JSONRPCError(RPC_PARSE_ERROR, e.what()), elem_jreq.id, elem_jreq.m_json_version);
                 }
-                if (!jreq.IsNotification()) {
+                if (!elem_jreq.IsNotification()) {
                     reply.push_back(std::move(response));
                 }
             }
@@ -409,6 +413,32 @@ static bool InitRPCAuthentication()
     return true;
 }
 
+#ifdef BTX_WITH_MODELNET
+/** The lab peer routes read the same store as the lab035 RPC, so they take the same credential and whitelist. */
+static bool LabPeerAuthorized(HTTPRequest* req)
+{
+    const std::pair<bool, std::string> auth_header = req->GetHeader("authorization");
+    std::string user;
+    std::string wallet_restriction;
+    if (!auth_header.first || !RPCAuthorized(auth_header.second, user, wallet_restriction)) {
+        if (auth_header.first) {
+            LogPrintf("ThreadRPCServer incorrect password attempt from %s\n", req->GetPeer().ToStringAddrPort());
+            UninterruptibleSleep(std::chrono::milliseconds{250});
+        }
+        req->WriteHeader("WWW-Authenticate", WWW_AUTH_HEADER_DATA);
+        req->WriteReply(HTTP_UNAUTHORIZED);
+        return false;
+    }
+    const auto whitelist = g_rpc_whitelist.find(user);
+    if (whitelist == g_rpc_whitelist.end() ? g_rpc_whitelist_default : !whitelist->second.count("lab035")) {
+        LogPrintf("RPC User %s not allowed to call the lab peer routes\n", user);
+        req->WriteReply(HTTP_FORBIDDEN);
+        return false;
+    }
+    return true;
+}
+#endif
+
 bool StartHTTPRPC(const std::any& context)
 {
     LogDebug(BCLog::RPC, "Starting HTTP RPC server\n");
@@ -423,6 +453,7 @@ bool StartHTTPRPC(const std::any& context)
             req->WriteReply(403, "BTX035_SCOPE_DENIED");
             return true;
         }
+        if (!LabPeerAuthorized(req)) return true;
         const std::string prefix = "/btx-model/3/";
         std::string route = req->GetURI();
         if (route.compare(0, prefix.size(), prefix) != 0) {

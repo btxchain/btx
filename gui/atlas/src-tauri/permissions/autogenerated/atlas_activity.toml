@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-atlas-activity"
+description = "Enables the atlas_activity command without any pre-configured scope."
+commands.allow = ["atlas_activity"]
+
+[[permission]]
+identifier = "deny-atlas-activity"
+description = "Denies the atlas_activity command without any pre-configured scope."
+commands.deny = ["atlas_activity"]

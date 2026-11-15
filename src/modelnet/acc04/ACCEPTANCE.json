@@ -1,0 +1,128 @@
+[
+  {
+    "id": "ASR-PAY-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmPayReg::Reserve keeps the first pool's outpoint and refuses that outpoint on the second pool. acc04_tests pass_latches observes the funded balances and the zero spend."
+  },
+  {
+    "id": "ASR-PAY-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmPayReg::Claim then FailCompute leaves claim_kept true and moves no atoms. acc04_tests pass_latches observes the kept claim."
+  },
+  {
+    "id": "ASR-PAY-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmPayReg::Terms refuses a later atom or timeout change and keeps the first terms. acc04_tests pass_latches observes the stored atoms and timeout."
+  },
+  {
+    "id": "ASR-PAY-004",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmPayReg::Settle returns UNQUALIFIED, Mode stays REGTEST_UNBROADCAST, and no atoms move. Real signed settlement is a release gate."
+  },
+  {
+    "id": "ASR-PRT-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "AcceptCanonicalEnvelope accepts one object. StrictParseJson rejects a duplicate key, so that text is not the envelope. acc04_tests pass_latches observes both results."
+  },
+  {
+    "id": "ASR-PRT-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "LeaseTable::Cancel while work is in flight returns STILL_IN_FLIGHT. ReleaseIfQuiescent then returns not quiescent. acc04_tests pass_latches observes that refusal."
+  },
+  {
+    "id": "ASR-RES-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "One HostResourceBroker ceiling admits 60 bytes and refuses a further 50 with host budget. acc04_tests pass_latches observes the shared refusal."
+  },
+  {
+    "id": "ASR-RES-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "UploadScheduler admits a second identity and refuses a repeat of the first with per-identity, then refuses another once slots are full. acc04_tests pass_latches observes both bounds."
+  },
+  {
+    "id": "ASR-SEC-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmTrustLabel returns the policy label and ignores a caller-supplied domain. An empty policy is TRUST_LABEL. acc04_tests pass_latches observes the accepted label."
+  },
+  {
+    "id": "ASR-SEC-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "NifScope stays on the default local policy. SendLocal keeps the payload, SendWan returns NO_ROUTE, and the packet count stays 0. acc04_tests pass_latches observes that the payload was not routed."
+  },
+  {
+    "id": "ASR-REC-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmRecoverFault02 on an expired durable lease with a payment claim sets recovered and payment_preserved and does not commit or move bytes. acc04_tests pass_latches observes both."
+  },
+  {
+    "id": "ASR-REC-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmCommandLog::Truncate of the commit index returns COMMITTED_PREFIX and leaves the committed command. A later truncate removes only the uncommitted tail. acc04_tests pass_latches observes the prefix. The temporary directory is removed."
+  },
+  {
+    "id": "ASR-OBS-001",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmProbeEngine can report a present file with advertised and qualified both false, and SwarmQualifyEngine refuses a caller-supplied rate. This process never observes an advertised capability that is not qualified, so the distinction is defined and not closed here."
+  },
+  {
+    "id": "ASR-MIG-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "MigrateSafe::Move with a higher assurance returns UPGRADE and keeps the stored assurance and body. acc04_tests pass_latches observes the unchanged record."
+  },
+  {
+    "id": "ASR-MIG-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "MigrateSafe::Fail makes Move return JOURNAL and leaves the body. After Clear, a lower claim still leaves the body and assurance. acc04_tests pass_latches observes the stored body."
+  },
+  {
+    "id": "ASR-ACC-001",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "The sentence requires independent real participants. hosts() stays 1 and Hosts(2) returns HOSTS. One process is not that journey."
+  },
+  {
+    "id": "ASR-ACC-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmProbeEngine on a missing file returns ENGINE_ABSENT with present, advertised, and qualified false. Gpu returns ENGINE_ABSENT. passed, gpu_passed, windows_passed, and hardware_qualified stay false. acc04_tests pass_latches observes those refusals."
+  },
+  {
+    "id": "ASR-PUB-001",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SafeGitPath refuses a path that enters a git directory. Confirming research material is outside every worktree is a separate scan and is not run here."
+  },
+  {
+    "id": "ASR-PUB-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "GitObjectDigest changes when the bytes change. RefJournal refuses an empty history and publishes a ref whose record id is that digest. acc04_tests pass_latches observes the digest and the committed ref."
+  },
+  {
+    "id": "ASR-PUB-003",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "DocClaim refuses a qualification sentence and release_qualified stays false. Matching public documents to native behavior is a release gate and is not run here."
+  },
+  {
+    "id": "ASR-PUB-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmNoteNotTrainLicense refuses want_train with NOT_GRANT. VerifyProvenanceEvidence parses an unsigned note and leaves verified_here false. acc04_tests pass_latches observes the two checks separately."
+  }
+]

@@ -16,6 +16,7 @@
 #include <policy/feerate.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <rpc/client.h>
 #include <rpc/mining.h>
 #include <rpc/protocol.h>
@@ -1386,6 +1387,20 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
     }
 
     const fs::path file = LightWatchFile();
+    if (command == "init" || command == "add" || command == "sync") {
+        // Hold the lock from before loading through the final save. An atomic
+        // rename alone cannot stop another writer from replacing a newer watch
+        // with the copy it loaded before an RPC call.
+        fs::create_directories(file.parent_path());
+        switch (util::LockDirectory(file.parent_path(), "watch.lock")) {
+        case util::LockResult::ErrorWrite:
+            throw std::runtime_error("BTX_LIGHTWATCH_IO");
+        case util::LockResult::ErrorLock:
+            throw std::runtime_error("BTX_LIGHTWATCH_BUSY");
+        case util::LockResult::Success:
+            break;
+        }
+    }
     if (command == "init") {
         if (args.size() < 2 || args.size() > 3) throw std::runtime_error("lightwatch init <descriptor> [start_height]");
         if (fs::exists(file)) throw std::runtime_error("lightwatch state already exists");
@@ -1421,13 +1436,17 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
         if (!watch.Sync(LightWatchRpc, error)) throw std::runtime_error(error.empty() ? "BTX_FILTER_HEADER" : error);
         if (!watch.Save(PathToString(file), error)) throw std::runtime_error(error);
         const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
-        strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+        LightWatchStatus status = watch.Status(tip);
+        status.ready = status.ready && watch.IsCurrentAt(tip, tip, LightWatchRpc);
+        strPrint = LightWatchStatusJson(status).write(2);
         return EXIT_SUCCESS;
     }
     if (command == "status" || command == "balance" || command == "balanceat") {
         const int tip = LightWatchRpc("getblockcount", {}).getInt<int>();
         if (command == "status") {
-            strPrint = LightWatchStatusJson(watch.Status(tip)).write(2);
+            LightWatchStatus status = watch.Status(tip);
+            status.ready = status.ready && watch.IsCurrentAt(tip, tip, LightWatchRpc);
+            strPrint = LightWatchStatusJson(status).write(2);
             return EXIT_SUCCESS;
         }
         int height = tip;
@@ -1437,6 +1456,10 @@ static int LightWatchCommand(const std::vector<std::string>& args, std::string& 
             if (!parsed || *parsed < 0) throw std::runtime_error("invalid height");
             height = *parsed;
         } else if (!watch.Status(tip).ready) {
+            strPrint = "BTX_BALANCE_NOT_READY";
+            return EXIT_FAILURE;
+        }
+        if (!watch.IsCurrentAt(height, tip, LightWatchRpc)) {
             strPrint = "BTX_BALANCE_NOT_READY";
             return EXIT_FAILURE;
         }
@@ -1523,7 +1546,18 @@ static int CommandLineRPC(int argc, char *argv[])
                 fputc('\n', stdout);
             }
         }
-        if (bundle_passphrase.has_value()) {
+        // Named conversion collects bare tokens as a positional prefix. Only
+        // all-named bundle and archive calls need a named passphrase; keep
+        // mixed calls on the existing positional insertion path.
+        const bool named_bundle_passphrases = gArgs.GetBoolArg("-named", DEFAULT_NAMED) &&
+            args.size() > 1 && (wallet_passphrase || bundle_passphrase) &&
+            (args[0] == "backupwalletbundle" || args[0] == "backupwalletbundlearchive" ||
+             args[0] == "restorewalletbundlearchive") &&
+            std::all_of(args.begin() + 1, args.end(), [](const std::string& arg) {
+                const auto separator = arg.find('=');
+                return separator != std::string::npos && separator != 0 && !arg.starts_with("args=");
+            });
+        if (bundle_passphrase.has_value() && !named_bundle_passphrases) {
             const bool is_backupwalletbundlearchive = args.size() >= 1 && args[0] == "backupwalletbundlearchive";
             const bool is_restorewalletbundlearchive = args.size() >= 1 && args[0] == "restorewalletbundlearchive";
             if (is_backupwalletbundlearchive) {
@@ -1538,7 +1572,7 @@ static int CommandLineRPC(int argc, char *argv[])
                 args.insert(args.begin() + 3, *bundle_passphrase);
             }
         }
-        if (wallet_passphrase.has_value()) {
+        if (wallet_passphrase.has_value() && !named_bundle_passphrases) {
             const bool is_walletpassphrase = args.size() >= 1 && args[0].substr(0, 16) == "walletpassphrase";
             const bool is_backupwalletbundle = args.size() >= 1 && args[0] == "backupwalletbundle";
             const bool is_backupwalletbundlearchive = args.size() >= 1 && args[0] == "backupwalletbundlearchive";
@@ -1565,6 +1599,21 @@ static int CommandLineRPC(int argc, char *argv[])
             if (StdinTerminal()) {
                 fputc('\n', stdout);
             }
+        }
+        if (named_bundle_passphrases) {
+            const auto add_passphrase = [&](const std::string& name, const std::string& value) {
+                const std::string prefix = name + "=";
+                // Named conversion normally lets later values override earlier
+                // ones. Refuse a second source for a passphrase explicitly.
+                if (std::any_of(args.begin() + 1, args.end(), [&](const std::string& arg) {
+                        return arg.starts_with(prefix);
+                    })) {
+                    throw std::runtime_error(name + " was supplied both explicitly and through a stdin passphrase option");
+                }
+                args.push_back(prefix + value);
+            };
+            if (bundle_passphrase) add_passphrase("archive_passphrase", *bundle_passphrase);
+            if (wallet_passphrase) add_passphrase("wallet_passphrase", *wallet_passphrase);
         }
         gArgs.CheckMultipleCLIArgs();
         std::unique_ptr<BaseRequestHandler> rh;

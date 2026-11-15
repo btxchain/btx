@@ -717,6 +717,15 @@ class BCP1Test(BitcoinTestFramework):
             raise AssertionError(f"N confirmation status: {nconf}")
         self._pass("1→N confirmations")
 
+        # A vout above uint32 must be refused, not truncated to another output.
+        big_vout = deposit_vouts[0] + 2**32
+        assert_raises_rpc_error(-8, "vout exceeds uint32 range",
+                                wallet.getdepositstatus, deposit_txids[0], big_vout)
+        assert_raises_rpc_error(-8, "vout exceeds uint32 range",
+                                wallet.getdepositstatus, {"txid": deposit_txids[0], "vout": big_vout})
+        assert_raises_rpc_error(-8, "vout exceeds uint32 range", wallet.planconsolidation,
+                                {"inputs": [{"txid": deposit_txids[0], "vout": big_vout}]})
+
         listed = self._call_variants(
             wallet.listdepositutxos,
             [([], {}), ([{}], {}), ([{"min_confirmations": 1}], {})],

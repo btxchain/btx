@@ -10,6 +10,7 @@
 #include <init.h>
 #include <node/interface_ui.h>
 #include <pqkey.h>
+#include <test/util/logging.h>
 #include <test/util/setup_common.h>
 #include <tinyformat.h>
 #include <uint256.h>
@@ -19,6 +20,7 @@
 #include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
+#include <csignal>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
@@ -26,6 +28,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifndef WIN32
+#include <sys/resource.h>
+#endif
 
 namespace {
 
@@ -211,6 +217,27 @@ bool AutoUpdateInitAccepted(const fs::path& datadir,
     return ok;
 }
 
+//! Parse a btxd command line, so negation (-noproxy) and repeated options (-onlynet) behave as
+//! they do in btxd. The options are registered with their SetupServerArgs flags.
+void ParseServerArgs(ArgsManager& args, std::vector<const char*> argv)
+{
+    for (const char* name : {"-autoupdate", "-autoupdateseamless", "-listenonion", "-onion", "-onlynet"}) {
+        args.AddArg(name, "", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    }
+    args.AddArg("-datadir", "", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::OPTIONS);
+    args.AddArg("-proxy", "", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_ELISION, OptionsCategory::CONNECTION);
+    argv.insert(argv.begin(), "btxd");
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(args.ParseParameters(argv.size(), argv.data(), error), error);
+}
+
+bool AutoUpdateOn(std::vector<const char*> argv, ChainType chain)
+{
+    ArgsManager args;
+    ParseServerArgs(args, std::move(argv));
+    return node::AutoUpdateEnabled(args, chain);
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(autoupdate_tests, BasicTestingSetup)
@@ -249,6 +276,90 @@ BOOST_AUTO_TEST_CASE(inert_pubkey_skips_classical_algo_at_init)
     BOOST_CHECK(error.find("-autoupdatepubkeyalgo must be ml-dsa-44 or slh-dsa-128s.") !=
                 std::string::npos);
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("secp256k1") == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(proxy_or_onlynet_turns_mainnet_default_off)
+{
+    // Without these settings: on for mainnet, off for test chains.
+    BOOST_CHECK(AutoUpdateOn({}, ChainType::MAIN));
+    for (const ChainType chain : {ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET,
+                                  ChainType::REGTEST, ChainType::SHIELDEDV2DEV}) {
+        BOOST_CHECK(!AutoUpdateOn({}, chain));
+        BOOST_CHECK(AutoUpdateOn({"-autoupdate=1"}, chain));
+        BOOST_CHECK(!AutoUpdateOn({"-proxy=127.0.0.1:9050"}, chain));
+    }
+
+    // -proxy: the same test as the -proxy privacy defaults (-listen=0, -discover=0).
+    BOOST_CHECK(!AutoUpdateOn({"-proxy=127.0.0.1:9050"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-proxy=127.0.0.1:9050=onion"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-proxy=0"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-noproxy"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-proxy=127.0.0.1:9050", "-proxy=0"}, ChainType::MAIN));
+
+    // -onlynet: off only when no listed network is ipv4 or ipv6 (the same test as -dnsseed=0).
+    BOOST_CHECK(!AutoUpdateOn({"-onlynet=onion"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-onlynet=onion", "-onlynet=i2p"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-onlynet=ipv4"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-onlynet=onion", "-onlynet=ipv6"}, ChainType::MAIN));
+
+    // -onion and -listenonion alone still leave IPv4/IPv6 peers on direct connections.
+    BOOST_CHECK(AutoUpdateOn({"-onion=127.0.0.1:9050"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-listenonion=1"}, ChainType::MAIN));
+
+    // An explicit -autoupdate wins.
+    BOOST_CHECK(AutoUpdateOn({"-proxy=127.0.0.1:9050", "-autoupdate=1"}, ChainType::MAIN));
+    BOOST_CHECK(AutoUpdateOn({"-onlynet=onion", "-autoupdate=1"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-autoupdate=0"}, ChainType::MAIN));
+    BOOST_CHECK(!AutoUpdateOn({"-noautoupdate"}, ChainType::MAIN));
+}
+
+BOOST_AUTO_TEST_CASE(startup_log_states_the_auto_update_path)
+{
+    const std::string datadir{"-datadir=" + fs::PathToString(m_path_root)};
+    {
+        ASSERT_DEBUG_LOG("Auto-update is off because -proxy is set: its checks connect directly from this host, not via -proxy. Set -autoupdate=1 to turn it on.");
+        ArgsManager args;
+        ParseServerArgs(args, {datadir.c_str(), "-proxy=127.0.0.1:9050"});
+        BOOST_CHECK(node::MakeAutoUpdateManager(args, ChainType::MAIN) == nullptr);
+    }
+    {
+        ASSERT_DEBUG_LOG(strprintf("Auto-update is on: checks %s every %d seconds and installs a verified newer release (-autoupdateseamless=1). Checks are direct HTTPS from this host, not via -proxy. Set -autoupdate=0 to turn it off.",
+                                   node::DEFAULT_AUTOUPDATE_MANIFEST_URL, node::DEFAULT_AUTOUPDATE_INTERVAL_SECONDS));
+        ArgsManager args;
+        ParseServerArgs(args, {datadir.c_str()});
+        BOOST_CHECK(node::MakeAutoUpdateManager(args, ChainType::MAIN) != nullptr);
+    }
+    {
+        ASSERT_DEBUG_LOG("only logs a verified newer release (-autoupdateseamless=0). Checks are direct HTTPS from this host, not via -proxy, although -onlynet excludes ipv4 and ipv6.");
+        ArgsManager args;
+        ParseServerArgs(args, {datadir.c_str(), "-onlynet=onion", "-autoupdate=1", "-autoupdateseamless=0"});
+        BOOST_CHECK(node::MakeAutoUpdateManager(args, ChainType::MAIN) != nullptr);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(init_checks_auto_update_settings_only_when_it_runs)
+{
+    const std::string datadir{fs::PathToString(m_path_root)};
+    {
+        // Off because of -proxy, so a bad -autoupdateinterval does not stop start, as on test chains.
+        ArgsManager args;
+        args.ForceSetArg("-datadir", datadir);
+        args.ForceSetArg("-proxy", "127.0.0.1:9050");
+        args.ForceSetArg("-autoupdateinterval", "0");
+        InitErrorCapture capture;
+        BOOST_CHECK(AppInitParameterInteraction(args));
+        BOOST_CHECK(capture.LastError().empty());
+    }
+    {
+        ArgsManager args;
+        args.ForceSetArg("-datadir", datadir);
+        args.ForceSetArg("-proxy", "127.0.0.1:9050");
+        args.ForceSetArg("-autoupdateinterval", "0");
+        args.ForceSetArg("-autoupdate", "1");
+        InitErrorCapture capture;
+        BOOST_CHECK(!AppInitParameterInteraction(args));
+        BOOST_CHECK(capture.LastError().find("-autoupdateinterval must be between 1 and 86400 seconds.") != std::string::npos);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(version_comparison_uses_client_version)
@@ -606,6 +717,46 @@ BOOST_AUTO_TEST_CASE(real_signature_path_accepts_supported_encodings_and_rejects
     }
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(installer_cut_short_at_close_is_not_staged)
+{
+    // LaunchInstaller runs the staged file as it is on disk. A full disk can
+    // fail only the flush at close, so the staging must not report a cut-off
+    // script as staged. RLIMIT_FSIZE lets only the first line reach the file.
+    const std::string first_line{"#!/bin/sh\necho one\n"};
+    const std::string text{first_line + "echo two\n"};
+    const std::vector<unsigned char> script{text.begin(), text.end()};
+    const fs::path datadir{m_path_root / "stage"};
+    const fs::path update_dir{datadir / "autoupdate"};
+    const auto read_file = [](const fs::path& path) {
+        std::ifstream in{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    };
+
+    struct rlimit old_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit cut{old_limit};
+    cut.rlim_cur = first_line.size();
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+    const auto staged{node::StageAutoUpdateInstallerScript(datadir, "99.0.0", script)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    if (staged) {
+        BOOST_CHECK_EQUAL(read_file(*staged), text);
+    }
+    BOOST_CHECK(!staged);
+    BOOST_CHECK(fs::is_empty(update_dir));
+
+    // With room again the same script is staged in full and executable.
+    const auto later{node::StageAutoUpdateInstallerScript(datadir, "99.0.0", script)};
+    BOOST_REQUIRE(later);
+    BOOST_CHECK_EQUAL(read_file(*later), text);
+    BOOST_CHECK((fs::status(*later).permissions() & fs::perms::owner_exec) != fs::perms::none);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
 {
     CPQKey signing_key;
@@ -658,6 +809,79 @@ BOOST_AUTO_TEST_CASE(pq_ml_dsa_signature_path_launches_and_rejects_tamper)
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("ecdsa") == nullptr);
     BOOST_CHECK(node::MakeAutoUpdateSignatureVerifier("not-a-scheme") == nullptr);
 }
+
+BOOST_AUTO_TEST_CASE(unreadable_floor_is_refused_and_logged)
+{
+    fs::create_directories(m_path_root / "autoupdate");
+    {
+        std::ofstream empty{m_path_root / "autoupdate" / "highest-accepted-version", std::ios::trunc};
+    }
+    Harness h;
+    h.config.datadir = m_path_root;
+    h.AddManifest();
+    h.AddSignature();
+    h.AddScript();
+    {
+        ASSERT_DEBUG_LOG("Auto-update is paused");
+        const auto result = h.Run();
+        BOOST_CHECK(result.status == node::AutoUpdateStatus::BAD_MANIFEST);
+        BOOST_CHECK(result.detail.find("unreadable") != std::string::npos);
+    }
+    BOOST_CHECK_EQUAL(h.runner.calls, 0);
+}
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(dangling_floor_is_refused_and_logged)
+{
+    const auto dir = m_path_root / "autoupdate";
+    fs::create_directories(dir);
+    fs::create_symlink(dir / "missing-floor", dir / "highest-accepted-version");
+    Harness h;
+    h.config.datadir = m_path_root;
+    h.AddManifest();
+    h.AddSignature();
+    h.AddScript();
+    ASSERT_DEBUG_LOG("Auto-update is paused");
+    BOOST_CHECK(h.Run().status == node::AutoUpdateStatus::BAD_MANIFEST);
+    BOOST_CHECK_EQUAL(h.runner.calls, 0);
+}
+
+BOOST_AUTO_TEST_CASE(failed_state_write_is_not_reported_as_written)
+{
+    // RLIMIT_FSIZE 0 fails every write that grows a file (EFBIG), the way a
+    // full disk fails the flush at close.
+    Harness first;
+    first.config.datadir = m_path_root;
+    first.AddManifest();
+    first.AddSignature();
+    first.AddScript();
+    struct rlimit old_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    struct rlimit no_growth{old_limit};
+    no_growth.rlim_cur = 0;
+    const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &no_growth) == 0);
+    const auto during{first.Run()};
+    BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+    std::signal(SIGXFSZ, old_handler);
+
+    BOOST_CHECK(during.status == node::AutoUpdateStatus::LAUNCH_FAILED);
+    BOOST_CHECK_EQUAL(first.runner.calls, 0);
+    BOOST_CHECK(!fs::exists(m_path_root / "autoupdate" / "highest-accepted-version"));
+
+    // Once writes work again the next poll proceeds normally.
+    Harness later;
+    later.config.datadir = m_path_root;
+    later.AddManifest();
+    later.AddSignature();
+    later.AddScript();
+    BOOST_CHECK(later.Run().status == node::AutoUpdateStatus::LAUNCHED);
+    std::ifstream mark_in{m_path_root / "autoupdate" / "highest-accepted-version"};
+    std::string marked;
+    std::getline(mark_in, marked);
+    BOOST_CHECK_EQUAL(marked, "99.0.0");
+}
+#endif
 
 // End-to-end artifact generator: when BTX_AUTOUPDATE_E2E_DIR + BTX_AUTOUPDATE_E2E_BASEURL are
 // set, emit a real ML-DSA-44-signed manifest, signature, installer, and public key so a live

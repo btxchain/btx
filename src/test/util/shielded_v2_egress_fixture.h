@@ -26,6 +26,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+// Windows headers may define OPAQUE after v2_types.h has been included.
+#pragma push_macro("OPAQUE")
+#undef OPAQUE
+#endif
+
 namespace test::shielded {
 
 inline std::string DescribeInvalidBundleForFixture(const ::shielded::v2::TransactionBundle& bundle)
@@ -1314,5 +1320,9 @@ inline V2SettlementAnchorClaimFixture BuildV2SettlementAnchorAdapterClaimFixture
 }
 
 } // namespace test::shielded
+
+#if defined(_WIN32)
+#pragma pop_macro("OPAQUE")
+#endif
 
 #endif // BTX_TEST_UTIL_SHIELDED_V2_EGRESS_FIXTURE_H

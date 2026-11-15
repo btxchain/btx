@@ -213,7 +213,7 @@ bool SaveFileStreamJob(const fs::path& modeldir, const FileStreamJobRecord& rec,
         err = "file stream job json must not contain secrets or URLs";
         return false;
     }
-    if (!WriteBinaryFile(FileStreamJobPath(modeldir, j.artifact, j.file_index), raw)) {
+    if (!WriteBinaryFileAtomically(FileStreamJobPath(modeldir, j.artifact, j.file_index), raw)) {
         err = "failed to write file stream job";
         return false;
     }
@@ -393,10 +393,16 @@ bool FileStreamHydration::ApplyRecord(const FileStreamJobRecord& rec, std::strin
     }
     FileStreamJobRecord norm = rec;
     if (!NormalizeResumeCursor(norm, err)) return false;
-    // Cursor only: verified pieces already live in ModelStore. Do not re-ingest.
+    const uint64_t pieces = m_expected_size == 0 ? 0 : (m_expected_size - 1) / PIECE_SIZE + 1;
+    if (norm.next_piece > pieces) {
+        err = "file stream job cursor past file";
+        return false;
+    }
+    // A final short piece has an aligned cursor but contains only the remaining
+    // file bytes. Finalization still re-reads and authenticates every piece.
     m_st.next_piece = norm.next_piece;
     m_st.pieces_verified = norm.next_piece;
-    m_st.bytes_ingested = norm.resume_offset;
+    m_st.bytes_ingested = std::min(norm.resume_offset, m_expected_size);
     m_st.resume_offset = norm.resume_offset;
     if (norm.have_sha) SetExpectedSha384(norm.expected_sha384);
     if (norm.have_root) SetExpectedPiecesRoot(norm.expected_root);
@@ -475,6 +481,7 @@ bool FileStreamHydration::Ingest(const FileStreamReadFn& read, bool resume, std:
 
 bool FileStreamHydration::Finish(std::string& err)
 {
+    m_integrity_failed = false;
     if (!FinishLocked(err)) return false;
     if (m_job_dir.empty()) return true;
     return DeleteFileStreamJob(m_job_dir, m_artifact, m_file_index, err);
@@ -508,6 +515,7 @@ bool FileStreamHydration::FinishLocked(std::string& err)
     Digest48 sha;
     hasher.Finalize(sha.data.data());
     if (m_have_expected_sha && sha != m_expected_sha384) {
+        m_integrity_failed = true;
         err = "file SHA-384 mismatch";
         return false;
     }
@@ -531,6 +539,7 @@ bool FileStreamHydration::FinishLocked(std::string& err)
         idx.pieces_root = rows.back()[0];
     }
     if (m_have_expected_root && idx.pieces_root != m_expected_root) {
+        m_integrity_failed = true;
         err = "pieces_root mismatch";
         return false;
     }
@@ -660,6 +669,15 @@ void TrimWindow(std::vector<int64_t>& hits, int64_t now_ms, int64_t window_ms)
     hits.erase(it, hits.end());
 }
 
+void PruneWindows(std::map<std::string, std::vector<int64_t>>& m, int64_t now_ms, int64_t window_ms)
+{
+    for (auto it = m.begin(); it != m.end();) {
+        TrimWindow(it->second, now_ms, window_ms);
+        if (it->second.empty()) it = m.erase(it);
+        else ++it;
+    }
+}
+
 } // namespace
 
 bool OriginStampedeGuard::CircuitOpenLocked(const std::string& peer, int64_t now_ms) const
@@ -671,6 +689,13 @@ bool OriginStampedeGuard::CircuitOpenLocked(const std::string& peer, int64_t now
 bool OriginStampedeGuard::Allow(const std::string& peer, const std::string& netgroup, int64_t now_ms, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
+    // A key is otherwise only dropped when the same peer or netgroup comes
+    // back. Once per window, drop the keys with no hit inside it.
+    if (now_ms < m_pruned_ms || now_ms - m_pruned_ms > m_s.window_ms) {
+        PruneWindows(m_peer_hits, now_ms, m_s.window_ms);
+        PruneWindows(m_ng_hits, now_ms, m_s.window_ms);
+        m_pruned_ms = now_ms;
+    }
     if (CircuitOpenLocked(peer, now_ms)) {
         err = "origin circuit open";
         return false;
@@ -746,6 +771,7 @@ void OriginStampedeGuard::ResetForTests()
     std::lock_guard<std::mutex> lock(m_mu);
     m_peer_hits.clear();
     m_ng_hits.clear();
+    m_pruned_ms = 0;
     m_errors.clear();
     m_open_until.clear();
 }

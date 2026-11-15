@@ -15,6 +15,11 @@ function(create_test_config)
     endif()
   endmacro()
 
+  set(ENABLE_MODELNET false)
+  if(WITH_MODELNET)
+    set(ENABLE_MODELNET true)
+  endif()
+
   set_configure_variable(ENABLE_WALLET ENABLE_WALLET)
   set_configure_variable(WITH_SQLITE USE_SQLITE)
   set_configure_variable(WITH_BDB USE_BDB)
@@ -44,6 +49,7 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/util)
 # successful test as failed.
 file(GLOB_RECURSE functional_tests CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
   functional/*.py
+  functional/*.c
   functional/*.json
   functional/*.csv
   functional/*.md

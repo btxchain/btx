@@ -12,8 +12,10 @@
 #include <chainparams.h>
 #include <core_io.h>
 #include <hash.h>
+#ifdef ENABLE_MODELNET
 #include <modelnet/catalog.h>
 #include <modelnet/funding.h>
+#endif
 #include <pqkey.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -376,6 +378,7 @@ BOOST_AUTO_TEST_CASE(pre_03413_htlc_sha256_loads_as_legacy_leaf)
     BOOST_CHECK(DescriptorMatchesStoredPre03413HtlcID(*flat_legacy[0], flat_id));
 }
 
+#ifdef ENABLE_MODELNET
 // F4: the modelnet claim/refund templates follow the 0.34.13 wallet rules.
 BOOST_AUTO_TEST_CASE(fix_f4_modelnet_claim_and_refund_templates)
 {
@@ -434,6 +437,7 @@ BOOST_AUTO_TEST_CASE(fix_f4_modelnet_claim_and_refund_templates)
     BOOST_CHECK_EQUAL(mtx.nLockTime, 500U);
     BOOST_CHECK_EQUAL(mtx.vin.at(0).nSequence, MAX_BIP125_RBF_SEQUENCE);
 }
+#endif
 
 #ifdef ENABLE_WALLET
 // Wallet compatibility: a wallet that imported an HTLC descriptor which

@@ -14,6 +14,7 @@
 #include <modelnet/package_documents.h>
 #include <modelnet/package_economy.h>
 #include <modelnet/package_install.h>
+#include <test/util/sdk_process.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
@@ -82,7 +83,7 @@ bool JsonHasAccountKey(const UniValue& v)
     return false;
 }
 
-#ifdef MODELNET_BTX_OPEN_PATH
+#if defined(MODELNET_BTX_OPEN_PATH) && !defined(WIN32)
 std::string ShellQuote(const std::string& s)
 {
     std::string q = "'";
@@ -320,15 +321,19 @@ BOOST_AUTO_TEST_CASE(ahp_j08_offline_and_cancellation)
     BOOST_TEST_MESSAGE(std::string("AHP-J08 btx-open binary: ") + MODELNET_BTX_OPEN_PATH);
     BOOST_REQUIRE(fs::exists(fs::PathFromString(MODELNET_BTX_OPEN_PATH)));
     const std::string fixture = fs::PathToString(Fixture("model-agent.btx"));
+    std::string out;
+#ifdef WIN32
+    const int rc = sdk_test::Spawn({MODELNET_BTX_OPEN_PATH, fixture}, out, false);
+#else
     const std::string cmd = ShellQuote(MODELNET_BTX_OPEN_PATH) + " " + ShellQuote(fixture);
     FILE* fp = popen(cmd.c_str(), "r");
     BOOST_REQUIRE(fp);
-    std::string out;
     char buf[4096];
     while (fgets(buf, sizeof(buf), fp) != nullptr) {
         out.append(buf);
     }
     const int rc = pclose(fp);
+#endif
     BOOST_REQUIRE_EQUAL(rc, 0);
     BOOST_CHECK(out.find("action=preview-only") != std::string::npos);
     BOOST_CHECK(out.find("agents_md_write=false") != std::string::npos);

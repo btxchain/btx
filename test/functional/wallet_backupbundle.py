@@ -73,7 +73,7 @@ class WalletBackupBundleTest(BitcoinTestFramework):
         assert_equal(bundle["unlocked_by_rpc"], True)
         assert_equal(bundle["wallet_encrypted"], True)
         assert_equal(bundle["wallet_passphrase_included"], False)
-        assert_equal(bundle["wallet_passphrase_required_to_spend"], True)
+        assert_equal(bundle["wallet_passphrase_required_to_spend"], False)
         assert_equal(bundle["integrity"]["integrity_ok"], True)
         assert any("Wallet passphrase is not stored" in warning for warning in bundle["warnings"])
 
@@ -91,7 +91,7 @@ class WalletBackupBundleTest(BitcoinTestFramework):
         assert_equal(manifest["integrity_warnings"], [])
         assert_equal(manifest["wallet_encrypted"], True)
         assert_equal(manifest["wallet_passphrase_included"], False)
-        assert_equal(manifest["wallet_passphrase_required_to_spend"], True)
+        assert_equal(manifest["wallet_passphrase_required_to_spend"], False)
         assert any("Wallet passphrase is not stored" in warning for warning in manifest["warnings"])
 
         self.log.info("The source wallet should be relocked after the bundle export")

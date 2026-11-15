@@ -232,6 +232,19 @@ bool IsP2MROutputScript(const CScript& script_pub_key)
         }
     }
 
+    // A note anchor that left the SHIELDED_ANCHOR_DEPTH window after the tx
+    // entered the mempool fails ConnectBlock with bad-shielded-anchor, and
+    // TestBlockValidity then drops the whole template. Spend-path recovery
+    // has no account-registry reference, so the registry check below does
+    // not catch it. Look the anchor up directly: IsShieldedAnchorValid logs
+    // every miss, which would repeat on each template until the tx expires.
+    const auto& anchor_roots{chainman.GetShieldedAnchorRoots()};
+    for (const auto& anchor : CollectShieldedAnchors(tx.GetShieldedBundle())) {
+        if (std::find(anchor_roots.begin(), anchor_roots.end(), anchor) == anchor_roots.end()) {
+            return false;
+        }
+    }
+
     for (const auto& account_registry_anchor :
          CollectShieldedAccountRegistryRefs(tx.GetShieldedBundle())) {
         if (account_registry_anchor.IsNull()) continue;

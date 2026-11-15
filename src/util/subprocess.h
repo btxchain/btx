@@ -841,14 +841,25 @@ public:
 
   void cleanup_fds()
   {
+    // After setup_comm_channels() the parent ends are owned by FILE*s. Close
+    // each end once, through its FILE* if it has one, so that destroying the
+    // streams later cannot close the same descriptor number again.
+    auto close_parent_end = [](std::shared_ptr<FILE>& fp, int& fd) {
+      if (fp) {
+        fp.reset();
+      } else {
+        subprocess_close(fd);
+      }
+      fd = -1;
+    };
     if (write_to_child_ != -1 && read_from_parent_ != -1) {
-      subprocess_close(write_to_child_);
+      close_parent_end(input_, write_to_child_);
     }
     if (write_to_parent_ != -1 && read_from_child_ != -1) {
-      subprocess_close(read_from_child_);
+      close_parent_end(output_, read_from_child_);
     }
     if (err_write_ != -1 && err_read_ != -1) {
-      subprocess_close(err_read_);
+      close_parent_end(error_, err_read_);
     }
   }
 

@@ -6,6 +6,10 @@
 
 #include <chain.h>
 #include <consensus/validation.h>
+#include <dbwrapper.h>
+#include <random.h>
+#include <shielded/account_registry.h>
+#include <shielded/merkle_tree.h>
 #include <node/blockstorage.h>
 #include <rpc/blockchain.h>
 #include <sync.h>
@@ -154,6 +158,59 @@ BOOST_FIXTURE_TEST_CASE(invalidate_block_marks_only_descendants_failed_child, Te
     BOOST_CHECK_EQUAL(invalidate_at->nStatus & BLOCK_FAILED_MASK, 0U);
     for (CBlockIndex* descendant{original_tip}; descendant != invalidate_at; descendant = descendant->pprev) {
         BOOST_CHECK_EQUAL(descendant->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// No outer fixture: observe the database lifetime after the chain fixture dies.
+BOOST_AUTO_TEST_SUITE(fixture_cleanup_tests)
+
+BOOST_AUTO_TEST_CASE(shielded_db_locks_released)
+{
+    const fs::path root{fs::temp_directory_path() / ("btx-cln-" + GetRandHash().ToString().substr(0, 10))};
+    struct Cleanup {
+        fs::path root;
+        ~Cleanup()
+        {
+            // Also make a failing control safe to run on Windows.
+            shielded::ShieldedMerkleTree::ResetCommitmentIndexStore();
+            shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
+            std::error_code ec;
+            fs::remove_all(root, ec);
+        }
+    } cleanup{root};
+    const std::string datadir_arg{"-testdatadir=" + fs::PathToString(root)};
+    fs::path state_dir;
+    const auto open_db = [](const fs::path& path) {
+        try {
+            CDBWrapper db{DBParams{.path = path, .cache_bytes = 1 << 20, .obfuscate = false}};
+            return std::pair{true, std::string{}};
+        } catch (const dbwrapper_error& e) {
+            return std::pair{false, std::string{e.what()}};
+        }
+    };
+    {
+        TestingSetup setup{ChainType::REGTEST,
+                           TestOpts{.extra_args = {datadir_arg.c_str()}, .setup_net = false}};
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(setup.m_node.chainman->EnsureShieldedStateInitialized());
+        }
+        state_dir = setup.m_args.GetDataDirNet() / "shielded_state";
+        for (const char* name : {"account_registry", "commitments", "nullifiers"}) {
+            const auto path{state_dir / name};
+            BOOST_REQUIRE_MESSAGE(fs::exists(path / "LOCK"), fs::PathToString(path));
+            const auto status{open_db(path)};
+            BOOST_CHECK_MESSAGE(!status.first, "live DB must still be locked: " << name << " " << status.second);
+        }
+    }
+    // -testdatadir preserves the real files: this tests closing, not POSIX unlink.
+    for (const char* name : {"account_registry", "commitments", "nullifiers"}) {
+        const auto path{state_dir / name};
+        BOOST_REQUIRE_MESSAGE(fs::exists(path / "CURRENT"), fs::PathToString(path));
+        const auto status{open_db(path)};
+        BOOST_CHECK_MESSAGE(status.first, "DB lock leaked after fixture teardown: " << name << " " << status.second);
     }
 }
 

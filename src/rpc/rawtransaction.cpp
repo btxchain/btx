@@ -10,6 +10,7 @@
 #include <consensus/amount.h>
 #include <consensus/validation.h>
 #include <core_io.h>
+#include <crypto/sha256.h>
 #include <index/txindex.h>
 #include <key_io.h>
 #include <node/blockstorage.h>
@@ -33,6 +34,7 @@
 #include <rpc/util.h>
 #include <script/ctv.h>
 #include <script/interpreter.h>
+#include <script/pqm.h>
 #include <script/script.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
@@ -48,6 +50,7 @@
 #include <validation.h>
 #include <validationinterface.h>
 
+#include <algorithm>
 #include <numeric>
 #include <stdint.h>
 
@@ -1773,6 +1776,38 @@ static RPCHelpMan combinepsbt()
     };
 }
 
+// Add each 32-byte preimage as PSBT_IN_SHA256 to every input whose selected
+// htlc_sha256 claim leaf locks its SHA256 hash. This lets a party without a
+// wallet complete a claim presigned with walletprocesspsbt htlc_presign.
+// A preimage that matches no input is an error, so a wrong secret is reported
+// instead of an incomplete PSBT.
+static void AddHTLCSha256Preimages(PartiallySignedTransaction& psbtx, const UniValue& preimages)
+{
+    for (size_t i = 0; i < preimages.size(); ++i) {
+        const std::string name{strprintf("preimages[%u]", i)};
+        const std::vector<unsigned char> preimage{ParseHexV(preimages[i], name)};
+        if (preimage.size() != CSHA256::OUTPUT_SIZE) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be 32 bytes, not %u", name, preimage.size()));
+        }
+        uint256 hash;
+        CSHA256().Write(preimage.data(), preimage.size()).Finalize(hash.begin());
+        bool matched{false};
+        for (PSBTInput& input : psbtx.inputs) {
+            std::vector<unsigned char> hashlock;
+            std::vector<unsigned char> pubkey;
+            PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+            if (!ParseP2MRHTLCSha256Leaf(input.m_p2mr_leaf_script, hashlock, algo, pubkey)) continue;
+            if (!std::equal(hashlock.begin(), hashlock.end(), hash.begin(), hash.end())) continue;
+            input.sha256_preimages.emplace(hash, preimage);
+            matched = true;
+        }
+        if (!matched) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf(
+                "%s matches no input: no selected htlc_sha256 claim leaf locks SHA256 %s", name, HexStr(hash)));
+        }
+    }
+}
+
 static RPCHelpMan finalizepsbt()
 {
     return RPCHelpMan{"finalizepsbt",
@@ -1784,6 +1819,13 @@ static RPCHelpMan finalizepsbt()
                     {"psbt", RPCArg::Type::STR, RPCArg::Optional::NO, "A base64 string of a PSBT"},
                     {"extract", RPCArg::Type::BOOL, RPCArg::Default{true}, "If true and the transaction is complete,\n"
             "                             extract and return the complete transaction in normal network serialization instead of the PSBT."},
+                    {"preimages", RPCArg::Type::ARR, RPCArg::Optional::OMITTED, "SHA256 preimages to add before finalizing, for example the secret for a claim\n"
+            "                             presigned with walletprocesspsbt htlc_presign. Each one is added as PSBT_IN_SHA256 to every input whose\n"
+            "                             selected htlc_sha256 claim leaf locks its hash. A preimage that matches no input is an error.",
+                        {
+                            {"preimage", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "A 32-byte preimage"},
+                        },
+                    },
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1795,6 +1837,7 @@ static RPCHelpMan finalizepsbt()
                 },
                 RPCExamples{
                     HelpExampleCli("finalizepsbt", "\"psbt\"")
+            + HelpExampleCli("finalizepsbt", "\"psbt\" true '[\"<32-byte preimage hex>\"]'")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -1806,6 +1849,9 @@ static RPCHelpMan finalizepsbt()
     }
 
     bool extract = request.params[1].isNull() || (!request.params[1].isNull() && request.params[1].get_bool());
+    if (!request.params[2].isNull()) {
+        AddHTLCSha256Preimages(psbtx, request.params[2].get_array());
+    }
 
     CMutableTransaction mtx;
     const bool slhdsa_fips205 = SlhdsaFips205ForNextBlock(request.context);

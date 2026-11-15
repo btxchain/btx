@@ -32,12 +32,16 @@ def process_mapping(fname):
                 if line.startswith('};'):
                     in_rpcs = False
                 elif '{' in line and '"' in line:
-                    m = re.search(r'{ *("[^"]*"), *([0-9]+) *, *("[^"]*") *(, \/\*also_string=\*\/true *)?},', line)
+                    m = re.search(
+                        r'{ *("[^"]*"), *([0-9]+) *, *("[^"]*") *'
+                        r'(?:, *(?:/\*also_string=\*/)?(true|false) *'
+                        r'(?:, *(?:/\*json_object=\*/)?(?:true|false) *)?)?},', line)
                     assert m, 'No match to table expression: %s' % line
                     name = parse_string(m.group(1))
                     idx = int(m.group(2))
                     argname = parse_string(m.group(3))
-                    cmds.append((name, idx, argname))
+                    also_string = m.group(4) == 'true'
+                    cmds.append((name, idx, argname, also_string))
     assert not in_rpcs and cmds
     return cmds
 
@@ -51,11 +55,20 @@ class HelpRpcTest(BitcoinTestFramework):
         self.supports_cli = False
 
     def run_test(self):
-        self.test_client_conversion_table()
-        self.test_categories()
-        self.dump_help()
+        checks = [self.test_client_conversion_table, self.test_argument_names,
+                  self.test_categories, self.dump_help]
         if self.is_wallet_compiled():
-            self.wallet_help()
+            checks.append(self.wallet_help)
+
+        failures = []
+        for check in checks:
+            try:
+                check()
+            except Exception as error:
+                self.log.exception("RPC help check failed: %s", check.__name__)
+                failures.append(f"{check.__name__}: {error}")
+        if failures:
+            raise AssertionError("RPC help checks failed:\n" + "\n".join(failures))
 
     def test_client_conversion_table(self):
         file_conversion_table = os.path.join(self.config["environment"]["SRCDIR"], 'src', 'rpc', 'client.cpp')
@@ -67,6 +80,30 @@ class HelpRpcTest(BitcoinTestFramework):
         # Filter all RPCs whether they need conversion
         mapping_server_conversion = set(tuple(m[:3]) for m in mapping_server if not m[3])
 
+        # These string arguments also take an options object. Their also_string
+        # row parses a JSON object and passes any other text through.
+        string_or_object = {
+            ("createconsolidationtx", 0, "change_address"),
+            ("exportmodelrecovery", 0, "release_id"),
+            ("getmodel", 1, "mode"),
+            ("preparemodelfunding", 0, "release_id"),
+        }
+        server_string_args = set(tuple(m[:3]) for m in mapping_server if m[3])
+        for m in mapping_client:
+            if m[:3] in string_or_object:
+                assert m[3] and m[:3] in server_string_args, "{} is no longer an also_string row on a string argument".format(m)
+        mapping_client = [m[:3] for m in mapping_client if m[:3] not in string_or_object]
+
+        # importmatmulattestations is an alias of submitmatmulattestations
+        # (rpc/matmul_trusted.cpp). The conversion dump lists the command under
+        # its own name only, so the alias rows must equal the command's rows.
+        aliases = {"importmatmulattestations": "submitmatmulattestations"}
+        for alias, target in aliases.items():
+            alias_rows = sorted(m[1:] for m in mapping_client if m[0] == alias)
+            target_rows = sorted(m[1:] for m in mapping_client if m[0] == target)
+            assert alias_rows == target_rows, "alias {} rows {} differ from {} rows {}".format(alias, alias_rows, target, target_rows)
+        mapping_client = [m for m in mapping_client if m[0] not in aliases]
+
         # Only check if all RPC methods have been compiled (i.e. wallet is enabled)
         if self.is_wallet_compiled() and sorted(mapping_client) != sorted(mapping_server_conversion):
             raise AssertionError("RPC client conversion table ({}) and RPC server named arguments mismatch!\n{}".format(
@@ -74,6 +111,8 @@ class HelpRpcTest(BitcoinTestFramework):
                 set(mapping_client).symmetric_difference(mapping_server_conversion),
             ))
 
+    def test_argument_names(self):
+        mapping_server = self.nodes[0].help("dump_all_command_conversions")
         # Check for conversion difference by argument name.
         # It is preferable for API consistency that arguments with the same name
         # have the same conversion, so bin by argument name.
@@ -85,8 +124,12 @@ class HelpRpcTest(BitcoinTestFramework):
 
         for argname, convert in converts_by_argname.items():
             if all(convert) != any(convert):
-                # Only allow dummy and psbt to fail consistency check
-                assert argname in ['dummy', "psbt"], ('WARNING: conversion mismatch for argument named %s (%s)' % (argname, list(zip(all_methods_by_argname[argname], converts_by_argname[argname]))))
+                # Only allow dummy and psbt to fail consistency check, and three
+                # names that mean different things in different RPCs: profile
+                # (a name, or bridge_buildproofprofile's label object), format
+                # (bridge_decryptviewgrant's payload format string) and account
+                # (getbalance's string, an index number elsewhere).
+                assert argname in ['dummy', "psbt", "profile", "format", "account"], ('WARNING: conversion mismatch for argument named %s (%s)' % (argname, list(zip(all_methods_by_argname[argname], converts_by_argname[argname]))))
 
     def test_categories(self):
         node = self.nodes[0]
@@ -103,10 +146,13 @@ class HelpRpcTest(BitcoinTestFramework):
         # command titles
         titles = [line[3:-3] for line in node.help().splitlines() if line.startswith('==')]
 
-        components = ['Blockchain', 'Control', 'Mining', 'Network', 'Rawtransactions', 'Stats', 'Util']
+        components = ['Blockchain', 'Control', 'Mining', 'Network', 'Rawtransactions', 'Stats', 'Swapnet', 'Util']
+
+        if self.config['components'].getboolean('ENABLE_MODELNET'):
+            components.append('Modelnet')
 
         if self.is_wallet_compiled():
-            components.append('Wallet')
+            components.extend(['Bridge', 'Shielded', 'Wallet'])
 
         if self.is_external_signer_compiled():
             components.append('Signer')

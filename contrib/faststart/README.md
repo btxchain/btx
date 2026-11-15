@@ -4,8 +4,9 @@ Fast-start changes sync mechanics, not consensus activation or verification
 authority. Current downloadable release is **v0.34.9**
 (`--release-tag v0.34.9`). Historical `v0.34.8-rc4` and `v0.34.9-dev.pr198*`
 remain on GitHub and are not recut.
-Epoch A (height 185000) is live, and the compiled assumeutxo pin is height
-**219000**. A near-tip claimed block
+Epoch A (height 185000) is live, and since 0.34.12 the highest compiled
+assumeutxo pin is height **228000** (219000 is still compiled). A near-tip
+claimed block
 still requires Profile 1 ExactReplay even when historical state was bootstrapped
 from a snapshot; checkpoint/assumeutxo trust must be disclosed rather than
 described as replay of all history. Profile 2 is reserved for a later

@@ -188,6 +188,19 @@ class MatMulHeardServeTest(BitcoinTestFramework):
         trusted_b = sorted(b.getmatmultrustedstatus()["trusted_signer_pubkeys"])
         assert_equal(trusted_b, sorted([self.kx, self.kb]))
 
+        # Finish both genesis getheaders exchanges before mining. Otherwise a
+        # late initial request can accidentally deliver block 1 and hide a
+        # broken first-body announcement behind a handshake race. Each peer's
+        # two-minute getheaders send window is now occupied by an empty reply.
+        self.wait_until(lambda: all(
+            any(peer["bytesrecv_per_msg"].get("headers", 0) > 0
+                for peer in node.getpeerinfo())
+            for node in (b, b0)
+        ))
+        assert_equal(a.getblockcount(), 0)
+        assert_equal(b.getblockcount(), 0)
+        assert_equal(b0.getblockcount(), 0)
+
         self.log.info("Mine through the toy Profile-1 activation on A")
         # One block at a time. In a burst, A announces only the next body a
         # behind peer needs, and a B that does not pin KA does not fetch a

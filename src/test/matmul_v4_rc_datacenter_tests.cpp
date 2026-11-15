@@ -28,6 +28,7 @@
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <algorithm>
 #include <array>
@@ -223,14 +224,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_getenv_cannot_flip_consensus_digest)
     const auto header = MakeCoupHeader(12345);
     rc::RCCoupOptions opts; // defaults follow dc levers
 
-    ::setenv("BTX_RC_COUP_FULL_BANK_SCHEDULE", "0", /*overwrite=*/1);
-    ::setenv("BTX_RC_COUP_MATERIAL_EXCHANGE", "0", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_COUP_FULL_BANK_SCHEDULE", "0");
+    test::SetEnv("BTX_RC_COUP_MATERIAL_EXCHANGE", "0");
     BOOST_CHECK(dc::RCCoupFullBankScheduleActive());
     BOOST_CHECK(dc::RCCoupMaterialExchangeActive());
     const uint256 with_env = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
 
-    ::unsetenv("BTX_RC_COUP_FULL_BANK_SCHEDULE");
-    ::unsetenv("BTX_RC_COUP_MATERIAL_EXCHANGE");
+    test::UnsetEnv("BTX_RC_COUP_FULL_BANK_SCHEDULE");
+    test::UnsetEnv("BTX_RC_COUP_MATERIAL_EXCHANGE");
     const uint256 without_env = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts);
     BOOST_CHECK(with_env == without_env);
     BOOST_CHECK(with_env == rc::MineRCCoupledEpisode(header, 0, params));
@@ -246,20 +247,20 @@ BOOST_AUTO_TEST_CASE(rc_dc_hetero_exactgemm_gkr_env_cannot_flip_digest)
     const auto header = MakeCoupHeader(424242);
     rc::RCCoupOptions opts;
 
-    ::unsetenv("BTX_RC_EXACT_GEMM_COMPARE");
-    ::unsetenv("BTX_RC_GKR_SHADOW");
-    ::unsetenv("BTX_RC_GKR_ARBITER");
-    ::unsetenv("BTX_RC_GKR_MEASURE_LADDER");
-    ::unsetenv("BTX_RC_GKR_MEASURE_MEDIUM");
+    test::UnsetEnv("BTX_RC_EXACT_GEMM_COMPARE");
+    test::UnsetEnv("BTX_RC_GKR_SHADOW");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_MEASURE_LADDER");
+    test::UnsetEnv("BTX_RC_GKR_MEASURE_MEDIUM");
     const uint256 baseline =
         rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
     BOOST_REQUIRE(!baseline.IsNull());
 
-    ::setenv("BTX_RC_EXACT_GEMM_COMPARE", "1", /*overwrite=*/1);
-    ::setenv("BTX_RC_GKR_SHADOW", "1", /*overwrite=*/1);
-    ::setenv("BTX_RC_GKR_ARBITER", "1", /*overwrite=*/1);
-    ::setenv("BTX_RC_GKR_MEASURE_LADDER", "1", /*overwrite=*/1);
-    ::setenv("BTX_RC_GKR_MEASURE_MEDIUM", "1", /*overwrite=*/1);
+    test::SetEnv("BTX_RC_EXACT_GEMM_COMPARE", "1");
+    test::SetEnv("BTX_RC_GKR_SHADOW", "1");
+    test::SetEnv("BTX_RC_GKR_ARBITER", "1");
+    test::SetEnv("BTX_RC_GKR_MEASURE_LADDER", "1");
+    test::SetEnv("BTX_RC_GKR_MEASURE_MEDIUM", "1");
     const uint256 with_flags =
         rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
     BOOST_CHECK(with_flags == baseline);
@@ -267,13 +268,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_hetero_exactgemm_gkr_env_cannot_flip_digest)
     uint256 t_on{};
     uint256 t_off{};
     std::thread a([&]() {
-        ::setenv("BTX_RC_EXACT_GEMM_COMPARE", "1", /*overwrite=*/1);
-        ::setenv("BTX_RC_GKR_ARBITER", "1", /*overwrite=*/1);
+        test::SetEnv("BTX_RC_EXACT_GEMM_COMPARE", "1");
+        test::SetEnv("BTX_RC_GKR_ARBITER", "1");
         t_on = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
     });
     std::thread b([&]() {
-        ::unsetenv("BTX_RC_EXACT_GEMM_COMPARE");
-        ::unsetenv("BTX_RC_GKR_ARBITER");
+        test::UnsetEnv("BTX_RC_EXACT_GEMM_COMPARE");
+        test::UnsetEnv("BTX_RC_GKR_ARBITER");
         t_off = rc::RecomputeCoupledPuzzleReference(header, 0, params, opts, /*gemm=*/{});
     });
     a.join();
@@ -282,11 +283,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_hetero_exactgemm_gkr_env_cannot_flip_digest)
     BOOST_CHECK(t_off == baseline);
     BOOST_CHECK(t_on == t_off);
 
-    ::unsetenv("BTX_RC_EXACT_GEMM_COMPARE");
-    ::unsetenv("BTX_RC_GKR_SHADOW");
-    ::unsetenv("BTX_RC_GKR_ARBITER");
-    ::unsetenv("BTX_RC_GKR_MEASURE_LADDER");
-    ::unsetenv("BTX_RC_GKR_MEASURE_MEDIUM");
+    test::UnsetEnv("BTX_RC_EXACT_GEMM_COMPARE");
+    test::UnsetEnv("BTX_RC_GKR_SHADOW");
+    test::UnsetEnv("BTX_RC_GKR_ARBITER");
+    test::UnsetEnv("BTX_RC_GKR_MEASURE_LADDER");
+    test::UnsetEnv("BTX_RC_GKR_MEASURE_MEDIUM");
 }
 
 BOOST_AUTO_TEST_CASE(rc_dc_q_batch_digest_identity)

@@ -7007,7 +7007,7 @@ void EnsureBridgeFeeHeadroomOrThrow(const BridgeFeeHeadroomAssessment& assessmen
     keypair.sk.assign(kem_sk.begin(), kem_sk.end());
     const auto enc = mlkem::Encaps(keypair.pk);
     const auto dec = mlkem::Decaps(enc.ct, keypair.sk);
-    return dec == enc.ss;
+    return dec && *dec == enc.ss;
 }
 
 [[nodiscard]] bool CommitShieldedTransaction(const std::shared_ptr<CWallet>& pwallet,
@@ -7981,6 +7981,12 @@ void AppendBridgePsbtRelayFeeAnalysis(UniValue& out,
         return std::nullopt;
     }
 
+    // Each chunk preview builds and signs a candidate shielding transaction and
+    // may derive a shielded change address, which a locked wallet cannot do.
+    // z_shieldfunds asks for the passphrase first; the plan asks here, after the
+    // funds checks, so a real shortfall keeps its error.
+    EnsureWalletIsUnlocked(*pwallet);
+
     CAmount remaining_requested = requested;
     while (remaining_requested > 0) {
         auto preview = BuildShieldingChunkPreview(
@@ -8201,6 +8207,9 @@ RPCHelpMan z_sendtoaddress()
                 explicit_fee = true;
                 fee = AmountFromValue(request.params[5]);
                 if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+                // The send rounds the fee up to the canonical bucket; report and
+                // subtract the fee the transaction pays, as z_sendmany does.
+                fee = CanonicalizeShieldingFee(*pwallet, fee);
             }
 
             const bool verbose{!request.params[6].isNull() && request.params[6].get_bool()};
@@ -8218,9 +8227,11 @@ RPCHelpMan z_sendtoaddress()
             std::optional<std::vector<ShieldedCoin>> conflict_selection;
             if (conflict_txid.has_value()) {
                 std::string conflict_error;
-                conflict_selection = WITH_LOCK(
-                    pwallet->m_shielded_wallet->cs_shielded,
-                    return pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error));
+                {
+                    // GetConflictSpendSelection() takes cs_wallet: lock it first.
+                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                    conflict_selection = pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error);
+                }
                 if (!conflict_selection.has_value()) {
                     throw JSONRPCError(
                         RPC_INVALID_PARAMETER,
@@ -8643,9 +8654,11 @@ RPCHelpMan z_sendmany()
             std::optional<std::vector<ShieldedCoin>> conflict_selection;
             if (conflict_txid.has_value()) {
                 std::string conflict_error;
-                conflict_selection = WITH_LOCK(
-                    pwallet->m_shielded_wallet->cs_shielded,
-                    return pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error));
+                {
+                    // GetConflictSpendSelection() takes cs_wallet: lock it first.
+                    LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+                    conflict_selection = pwallet->m_shielded_wallet->GetConflictSpendSelection(*conflict_txid, &conflict_error);
+                }
                 if (!conflict_selection.has_value()) {
                     throw JSONRPCError(
                         RPC_INVALID_PARAMETER,
@@ -9026,7 +9039,21 @@ RPCHelpMan z_shieldcoinbase()
                     }
                     if (static_cast<int>(utxos.size()) >= limit) break;
                 }
+                // Keep the selected outputs locked (in memory) until this call
+                // has committed or failed: the build below releases cs_wallet,
+                // and a z_shieldcoinbase (or auto-shield) running at the same
+                // time would otherwise select them again.
+                for (const auto& outpoint : utxos) pwallet->LockCoin(outpoint);
             }
+            struct UnlockSelected {
+                CWallet& wallet;
+                const std::vector<COutPoint> outpoints;
+                ~UnlockSelected()
+                {
+                    LOCK(wallet.cs_wallet);
+                    for (const auto& outpoint : outpoints) wallet.UnlockCoin(outpoint);
+                }
+            } unlock_selected{*pwallet, utxos};
             if (utxos.empty()) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "No mature coinbase outputs available");
             }
@@ -9101,6 +9128,45 @@ RPCHelpMan z_shieldcoinbase()
         }};
 }
 
+/** Lock the inputs of a shielding chunk in memory (no wallet write) before it is
+ *  committed. The chunk is built without cs_wallet held, so a shielding call running
+ *  at the same time may have picked the same coins; whichever call locks them first
+ *  keeps them. Returns false, and locks nothing, when one of them is spent or locked
+ *  by someone else by now. `reserved` holds what this call has locked so far. */
+[[nodiscard]] bool ReserveShieldingInputs(CWallet& wallet,
+                                          const std::vector<TransparentShieldingUTXO>& selected,
+                                          std::vector<COutPoint>& reserved)
+{
+    LOCK(wallet.cs_wallet);
+    const auto is_ours = [&](const COutPoint& outpoint) {
+        return std::find(reserved.begin(), reserved.end(), outpoint) != reserved.end();
+    };
+    for (const auto& coin : selected) {
+        if (wallet.IsSpent(coin.outpoint)) return false;
+        if (wallet.IsLockedCoin(coin.outpoint) && !is_ours(coin.outpoint)) return false;
+    }
+    for (const auto& coin : selected) {
+        if (is_ours(coin.outpoint)) continue;
+        wallet.LockCoin(coin.outpoint);
+        reserved.push_back(coin.outpoint);
+    }
+    return true;
+}
+
+/** Drop the coins another call has spent or locked since they were collected. */
+void DropTakenShieldingInputs(const CWallet& wallet,
+                              std::vector<TransparentShieldingUTXO>& available,
+                              const std::vector<COutPoint>& reserved)
+{
+    LOCK(wallet.cs_wallet);
+    available.erase(std::remove_if(available.begin(), available.end(), [&](const TransparentShieldingUTXO& coin) {
+                        if (wallet.IsSpent(coin.outpoint)) return true;
+                        return wallet.IsLockedCoin(coin.outpoint) &&
+                               std::find(reserved.begin(), reserved.end(), coin.outpoint) == reserved.end();
+                    }),
+                    available.end());
+}
+
 RPCHelpMan z_shieldfunds()
 {
     return RPCHelpMan{
@@ -9121,6 +9187,8 @@ RPCHelpMan z_shieldfunds()
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
+                {RPCResult::Type::BOOL, "complete", "False when a later chunk failed after earlier chunks were committed; the listed chunks are in the mempool"},
+                {RPCResult::Type::STR, "error", /*optional=*/true, "Why the remaining amount was not shielded, when complete is false"},
                 {RPCResult::Type::STR_HEX, "txid", "First chunk transaction id (for backward compatibility)"},
                 {RPCResult::Type::ARR, "txids", "", {
                     {RPCResult::Type::STR_HEX, "", "Committed chunk transaction id"},
@@ -9227,23 +9295,56 @@ RPCHelpMan z_shieldfunds()
             UniValue chunks(UniValue::VARR);
             std::string first_txid;
 
-            while (remaining_requested > 0) {
+            // Inputs this call has locked in memory; unlocked again when it returns,
+            // after the commits or on any error.
+            std::vector<COutPoint> reserved;
+            struct UnlockReserved {
+                CWallet& wallet;
+                const std::vector<COutPoint>& outpoints;
+                ~UnlockReserved()
+                {
+                    LOCK(wallet.cs_wallet);
+                    for (const auto& outpoint : outpoints) wallet.UnlockCoin(outpoint);
+                }
+            } unlock_reserved{*pwallet, reserved};
+
+            // Once a chunk is in the mempool its transaction is out; a later failure
+            // must not be reported as if nothing happened. It ends the loop instead,
+            // and the result lists the chunks sent with "complete": false.
+            std::string stop_error;
+            while (remaining_requested > 0) try {
                 std::string build_error;
-                auto preview = BuildShieldingChunkPreview(
-                    pwallet,
-                    available,
-                    *effective_dest,
-                    remaining_requested,
-                    explicit_fee,
-                    fee,
-                    policy.applied_max_inputs_per_chunk,
-                    policy,
-                    build_error);
-                if (!preview.has_value()) {
-                    const RPCErrorCode code = build_error.find("Insufficient transparent funds") != std::string::npos
-                        ? RPC_WALLET_INSUFFICIENT_FUNDS
-                        : RPC_WALLET_ERROR;
-                    throw JSONRPCError(code, build_error);
+                const auto build_chunk = [&]() {
+                    auto chunk = BuildShieldingChunkPreview(
+                        pwallet,
+                        available,
+                        *effective_dest,
+                        remaining_requested,
+                        explicit_fee,
+                        fee,
+                        policy.applied_max_inputs_per_chunk,
+                        policy,
+                        build_error);
+                    if (!chunk.has_value()) {
+                        const RPCErrorCode code = build_error.find("Insufficient transparent funds") != std::string::npos
+                            ? RPC_WALLET_INSUFFICIENT_FUNDS
+                            : RPC_WALLET_ERROR;
+                        throw JSONRPCError(code, build_error);
+                    }
+                    return chunk;
+                };
+                auto preview = build_chunk();
+                // Another shielding call may have taken some of these inputs since they
+                // were collected: drop those and build the chunk again.
+                while (!ReserveShieldingInputs(*pwallet, preview->selected, reserved)) {
+                    DropTakenShieldingInputs(*pwallet, available, reserved);
+                    preview = build_chunk();
+                }
+
+                // A chunk that takes every input left and still shields less than the
+                // rest of the request cannot complete it: do not send it.
+                if (preview->shielded_amount < remaining_requested && preview->selected.size() >= available.size()) {
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds under current shielding policy");
                 }
 
                 std::string commit_error;
@@ -9285,9 +9386,15 @@ RPCHelpMan z_shieldfunds()
                 if (available.empty() && remaining_requested > 0) {
                     throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient transparent funds under current shielding policy");
                 }
+            } catch (const UniValue& e) {
+                if (txids.empty()) throw;
+                stop_error = GetRpcErrorMessage(e);
+                break;
             }
 
             UniValue out(UniValue::VOBJ);
+            out.pushKV("complete", stop_error.empty());
+            if (!stop_error.empty()) out.pushKV("error", stop_error);
             out.pushKV("txid", first_txid);
             out.pushKV("txids", std::move(txids));
             out.pushKV("amount", ValueFromAmount(total_shielded));
@@ -9870,6 +9977,7 @@ RPCHelpMan z_recoverstrandednote()
                 explicit_fee = true;
                 fee = AmountFromValue(request.params[2]);
                 if (fee <= 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee must be positive");
+                fee = CanonicalizeShieldingFee(*pwallet, fee);
             }
 
             const bool verbose = request.params[3].isNull() || request.params[3].get_bool();
@@ -10503,7 +10611,10 @@ RPCHelpMan z_viewtransaction()
                 return out;
             }
 
-            auto cached_view = pwallet->m_shielded_wallet->GetCachedTransactionView(txid);
+            // An incoming shielded transaction is not a wallet tx, and the view
+            // cache is not persisted. Rebuild this one transaction from the
+            // block the wallet already scanned (the note's anchor).
+            auto cached_view = pwallet->m_shielded_wallet->GetTransactionView(txid);
             if (!cached_view.has_value()) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not found or no shielded bundle");
             }
@@ -10758,13 +10869,13 @@ RPCHelpMan z_validateaddress()
             RPCResult::Type::OBJ, "", "",
             {
                 {RPCResult::Type::BOOL, "isvalid", "True if valid shielded address"},
-                {RPCResult::Type::STR, "address", "Normalized address (if valid)"},
-                {RPCResult::Type::NUM, "version", "Address version"},
-                {RPCResult::Type::STR_HEX, "pk_hash", "Spending key hash"},
-                {RPCResult::Type::STR_HEX, "kem_pk_hash", "KEM key hash"},
+                {RPCResult::Type::STR, "address", /*optional=*/true, "Normalized address (if valid)"},
+                {RPCResult::Type::NUM, "version", /*optional=*/true, "Address version (if valid)"},
+                {RPCResult::Type::STR_HEX, "pk_hash", /*optional=*/true, "Spending key hash (if valid)"},
+                {RPCResult::Type::STR_HEX, "kem_pk_hash", /*optional=*/true, "KEM key hash (if valid)"},
                 {RPCResult::Type::STR_HEX, "kem_public_key", /*optional=*/true, "KEM public key when derivable from the address or known to the local wallet"},
-                {RPCResult::Type::BOOL, "ismine", "Wallet has spending key"},
-                {RPCResult::Type::BOOL, "iswatchonly", "Wallet has viewing key only"},
+                {RPCResult::Type::BOOL, "ismine", /*optional=*/true, "Wallet has spending key (if valid)"},
+                {RPCResult::Type::BOOL, "iswatchonly", /*optional=*/true, "Wallet has viewing key only (if valid)"},
                 {RPCResult::Type::STR, "lifecycle_state", /*optional=*/true, "Wallet-local lifecycle state if the address belongs to this wallet"},
                 {RPCResult::Type::BOOL, "has_successor", /*optional=*/true, "Whether the wallet-local address lifecycle points to a successor"},
                 {RPCResult::Type::STR, "successor", /*optional=*/true, "Successor address when lifecycle_state is rotated"},
@@ -11256,7 +11367,10 @@ RPCHelpMan z_verifywalletintegrity()
             out.pushKV("scan_height", report.scan_height);
             out.pushKV("scan_incomplete", report.scan_incomplete);
 
-            if (!report.master_seed_available) {
+            // Shielded keys need an encrypted wallet, so an unencrypted wallet has no
+            // shielded master seed to check.
+            const bool master_seed_expected = pwallet->IsCrypted() || report.total_keys > 0;
+            if (master_seed_expected && !report.master_seed_available) {
                 warnings.push_back("Master seed is not available — spending keys cannot be derived. "
                                    "Wallet may be locked or seed was not persisted.");
             }
@@ -11293,7 +11407,10 @@ RPCHelpMan z_verifywalletintegrity()
                     }
 
                     std::vector<unsigned char> seed;
-                    if (batch.ReadPQDescriptorSeed(desc_spkm->GetID(), seed) && seed.size() == 32) {
+                    uint256 iv;
+                    // An encrypted wallet keeps only the ciphertext record.
+                    if ((batch.ReadPQDescriptorSeed(desc_spkm->GetID(), seed) && seed.size() == 32) ||
+                        (batch.ReadCryptedPQDescriptorSeed(desc_spkm->GetID(), iv, seed) && !seed.empty())) {
                         ++pq_report.with_seed;
                         if (seed_capable) {
                             ++pq_report.seed_capable_with_seed;
@@ -11330,7 +11447,7 @@ RPCHelpMan z_verifywalletintegrity()
             }
 
             bool integrity_ok = (report.spending_keys_missing == 0 &&
-                                 report.master_seed_available &&
+                                 (!master_seed_expected || report.master_seed_available) &&
                                  !report.scan_incomplete &&
                                  (private_keys_disabled || pq_report.missing_local_seed == 0));
             out.pushKV("integrity_ok", integrity_ok);

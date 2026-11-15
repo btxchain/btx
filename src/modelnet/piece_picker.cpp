@@ -60,6 +60,23 @@ bool JsonTimestampMs(const UniValue& o, int64_t& out)
     return false;
 }
 
+/** True if the union of ranges covers every piece in [0, n). Work is per range, not per piece. */
+bool RangesCoverPrefix(std::vector<PieceRange> ranges, uint32_t n)
+{
+    std::sort(ranges.begin(), ranges.end(), [](const PieceRange& a, const PieceRange& b) {
+        return a.first < b.first;
+    });
+    uint64_t next = 0;
+    for (const auto& r : ranges) {
+        if (next >= n) break;
+        // Same as RangeCovers: an empty or wrapping range covers nothing.
+        if (r.count == 0 || r.first > std::numeric_limits<uint32_t>::max() - r.count) continue;
+        if (r.first > next) break;
+        next = std::max<uint64_t>(next, uint64_t{r.first} + r.count);
+    }
+    return next >= n;
+}
+
 } // namespace
 
 std::string DiversityKey(const PeerId& peer)
@@ -384,22 +401,13 @@ SwarmSnapshot SummarizeSwarm(uint32_t file_index,
     for (const auto& src : sources) {
         if (!SourceIsFresh(src, cfg)) continue;
         if (MetricsFailed(metrics, src.peer.endpoint)) continue;
+        // src.piece_count comes from the peer's availability reply (up to
+        // 2^32 - 1), so completeness is decided per range, never per piece.
         bool complete = src.piece_count > 0;
         if (complete) {
-            for (uint32_t p = 0; p < src.piece_count; ++p) {
-                if (!SourceHasPiece(src, src.file_index, p)) {
-                    complete = false;
-                    break;
-                }
-            }
+            complete = src.ranges.empty() || RangesCoverPrefix(src.ranges, src.piece_count);
         } else if (!src.ranges.empty() && piece_count > 0) {
-            complete = true;
-            for (uint32_t p = 0; p < piece_count; ++p) {
-                if (!SourceHasPiece(src, file_index, p)) {
-                    complete = false;
-                    break;
-                }
-            }
+            complete = src.file_index == file_index && RangesCoverPrefix(src.ranges, piece_count);
         }
         if (complete) ++s.complete_sources;
         else ++s.partial_sources;

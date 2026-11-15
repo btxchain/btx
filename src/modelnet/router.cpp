@@ -75,6 +75,10 @@ std::string HintKey(const Digest48& id, uint8_t kind)
 {
     return std::to_string(static_cast<int>(kind)) + "|" + id.Hex();
 }
+size_t HintBytes(const SignedRecordHint& h)
+{
+    return h.payload.size() + h.signature.size() + h.pubkey.size();
+}
 } // namespace
 
 bool RouterCache::Insert(const SignedRecordHint& rec, int64_t now, std::string& err)
@@ -83,14 +87,28 @@ bool RouterCache::Insert(const SignedRecordHint& rec, int64_t now, std::string& 
         err = "expired record";
         return false;
     }
-    if (m_by_id.size() >= m_max) {
+    const std::string key = HintKey(rec.record_id, rec.kind);
+    // Replacing the entry with the same key takes no new slot.
+    const auto fits = [&] {
+        const auto it = m_by_id.find(key);
+        const bool held = it != m_by_id.end();
+        return m_by_id.size() + (held ? 0 : 1) <= m_max &&
+               m_bytes - (held ? HintBytes(it->second) : 0) + HintBytes(rec) <= m_max_bytes;
+    };
+    if (!fits()) {
         Expire(now);
-        if (m_by_id.size() >= m_max) {
+        if (!fits()) {
             err = "router cache full";
             return false;
         }
     }
-    m_by_id[HintKey(rec.record_id, rec.kind)] = rec;
+    const auto it = m_by_id.find(key);
+    // The record id is the hash of the record body, so a live entry with the
+    // same key already holds this record and refreshing it adds nothing new.
+    if (it == m_by_id.end() || (it->second.expiry && it->second.expiry < now)) m_unsaved = true;
+    if (it != m_by_id.end()) m_bytes -= HintBytes(it->second);
+    m_bytes += HintBytes(rec);
+    m_by_id[key] = rec;
     return true;
 }
 
@@ -129,8 +147,12 @@ std::vector<SignedRecordHint> RouterCache::All(int64_t now) const
 void RouterCache::Expire(int64_t now)
 {
     for (auto it = m_by_id.begin(); it != m_by_id.end();) {
-        if (it->second.expiry && it->second.expiry < now) it = m_by_id.erase(it);
-        else ++it;
+        if (it->second.expiry && it->second.expiry < now) {
+            m_bytes -= HintBytes(it->second);
+            it = m_by_id.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

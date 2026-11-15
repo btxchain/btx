@@ -216,6 +216,10 @@ void TorControlConnection::Disconnect()
     if (b_conn)
         bufferevent_free(b_conn);
     b_conn = nullptr;
+    // Replies still owed on this connection will never arrive. Drop their
+    // handlers and any partial reply, so the next connection starts clean.
+    message.Clear();
+    reply_handlers.clear();
 }
 
 bool TorControlConnection::Command(const std::string &cmd, const ReplyHandlerCB& reply_handler)

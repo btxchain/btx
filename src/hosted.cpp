@@ -14,7 +14,9 @@ const TranslateFn G_TRANSLATION_FUN{nullptr};
 
 int main(int argc, char* argv[])
 {
+#ifndef WIN32
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     std::vector<std::string> args;
     for (int i = 0; i < argc; ++i) args.emplace_back(argv[i]);
     std::string out, err;

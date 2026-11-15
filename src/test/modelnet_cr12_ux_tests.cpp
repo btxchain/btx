@@ -3,15 +3,13 @@
 // file COPYING or https://opensource.org/license/mit/.
 #include <test/modelnet_cr12_test.h>
 #include <test/util/setup_common.h>
+#include <test/util/sdk_process.h>
 #include <util/fs.h>
 #include <boost/test/unit_test.hpp>
 
-#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #ifdef MODELNET_CRL12_PORTAL_PATH
 namespace {
@@ -27,44 +25,10 @@ fs::path Cr12SdkRoot()
     return fs::PathFromString(MODELNET_CRL12_PORTAL_PATH).parent_path().parent_path() / "crl12-sdk";
 }
 
-std::string ShellQuote(const std::string& s)
-{
-    std::string q = "'";
-    for (char c : s) {
-        if (c == '\'') q += "'\\''";
-        else q += c;
-    }
-    q += "'";
-    return q;
-}
+using sdk_test::Python3;
+using sdk_test::Spawn;
+using sdk_test::Which;
 
-int Spawn(const std::string& cmd, std::string& combined)
-{
-    FILE* fp = ::popen(cmd.c_str(), "r");
-    if (!fp) return -1;
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), fp) != nullptr) combined.append(buf);
-    const int st = ::pclose(fp);
-    if (st == -1) return -1;
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    return 127;
-}
-
-std::string Which(const char* name)
-{
-    std::string out;
-    const int rc = Spawn(std::string("command -v ") + name + " 2>/dev/null", out);
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
-    if (rc != 0) return {};
-    return out;
-}
-
-std::string Python3()
-{
-    std::string exe = "/usr/bin/python3";
-    if (::access(exe.c_str(), X_OK) != 0) exe = Which("python3");
-    return exe;
-}
 } // namespace
 #endif
 
@@ -177,8 +141,7 @@ BOOST_AUTO_TEST_CASE(cr12_ux_05)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(Cr12SdkRoot())) + " && " +
-                            ShellQuote(python) + " python/test_portal_a11y.py 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(Cr12SdkRoot() / "python/test_portal_a11y.py")};
     const int rc = Spawn(cmd, out);
     BOOST_REQUIRE_MESSAGE(rc == 0, "portal a11y unittest rc=" + std::to_string(rc) + "\n" + out);
 #endif

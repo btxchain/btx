@@ -38,12 +38,23 @@ std::string NowMsString()
     return std::to_string(now_ms < 0 ? 0 : now_ms);
 }
 
-bool EnsureParentsNoFollow(const fs::path& dest_file, std::string& err_code, std::string& err)
+//! Create and check the directories between root and dest_file. Only the
+//! components below root are checked: root itself is checked by the caller,
+//! and a symlink above it (macOS /tmp or /var, a datadir moved to another
+//! disk) is the operator's layout, as for the security store
+//! (ResolveSecurityDirectory). HasSymlinkBelow uses the same boundary.
+bool EnsureParentsNoFollow(const fs::path& root, const fs::path& dest_file, std::string& err_code, std::string& err)
 {
-    fs::path parent = dest_file.parent_path();
-    if (parent.empty()) return true;
-    fs::path cur;
-    for (const auto& part : parent) {
+    const fs::path below = dest_file.parent_path().lexically_relative(root);
+    if (below.empty()) {
+        return Fail(err_code, err, "DOCUMENT_PATH_REJECTED", "materialize path outside the destination");
+    }
+    fs::path cur = root;
+    for (const auto& part : below) {
+        if (part == ".") continue;
+        if (part == "..") {
+            return Fail(err_code, err, "DOCUMENT_PATH_REJECTED", "materialize path outside the destination");
+        }
         cur /= part;
         if (std::filesystem::is_symlink(cur)) {
             return Fail(err_code, err, "SYMLINK_REFUSED", "materialize parent is a symlink");
@@ -59,6 +70,22 @@ bool EnsureParentsNoFollow(const fs::path& dest_file, std::string& err_code, std
         }
     }
     return true;
+}
+
+//! Whether any component of rel below root is a symlink or cannot be checked.
+//! The cache probe and the stale-cache remove() follow a symlinked directory,
+//! so every component is checked, not only the last one.
+bool HasSymlinkBelow(const fs::path& root, const std::string& rel)
+{
+    fs::path cur = root;
+    for (const auto& part : fs::PathFromString(rel)) {
+        cur /= part;
+        std::error_code ec;
+        const auto st = std::filesystem::symlink_status(cur, ec);
+        // A component that cannot be checked (for example a name longer than NAME_MAX) is refused too.
+        if (std::filesystem::is_symlink(st) || (ec && st.type() != std::filesystem::file_type::not_found)) return true;
+    }
+    return false;
 }
 
 std::string StoredDigestFor(const ExecuteAcquisitionRequest& req, const std::string& rel)
@@ -105,8 +132,8 @@ bool Sha384Path(const std::string& path, std::string& hex, std::string& err)
     return true;
 }
 
-bool ExclusiveNofollowWrite(const std::string& dest_path, const std::string& bytes, std::string& err_code,
-                            std::string& err)
+bool ExclusiveNofollowWrite(const fs::path& root, const std::string& dest_path, const std::string& bytes,
+                            std::string& err_code, std::string& err)
 {
     if (bytes.size() > ACQ_EXECUTE_MAX_FILE_BYTES) {
         return Fail(err_code, err, "BUDGET_EXCEEDED", "file too large");
@@ -115,7 +142,7 @@ bool ExclusiveNofollowWrite(const std::string& dest_path, const std::string& byt
     if (std::filesystem::is_symlink(dest)) {
         return Fail(err_code, err, "SYMLINK_REFUSED", "dest is a symlink");
     }
-    if (!EnsureParentsNoFollow(dest, err_code, err)) return false;
+    if (!EnsureParentsNoFollow(root, dest, err_code, err)) return false;
     const int fd = ::open(dest.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
     if (fd < 0) {
         return Fail(err_code, err, (errno == EEXIST) ? "OVERWRITE_REFUSED" : "IO_ERROR",
@@ -198,6 +225,10 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
         if (!seen.insert(f.relative_path).second) {
             return Fail(err_code, err, "OVERWRITE_REFUSED", "duplicate path");
         }
+        // Refuse before anything is reserved or written.
+        if (HasSymlinkBelow(dest_root, f.relative_path)) {
+            return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
+        }
         const std::string expect = StoredDigestFor(req, f.relative_path);
         if (expect.size() != 96) {
             out.ready_state.clear();
@@ -247,9 +278,11 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
     for (const auto& f : req.files) {
         const fs::path dest = dest_root / fs::PathFromString(f.relative_path);
         const std::string dest_s = fs::PathToString(dest);
-        if (std::filesystem::is_symlink(dest)) {
+        // Checked again here: an earlier file of this request created the
+        // directories, and the cache probe and remove() below follow links.
+        if (HasSymlinkBelow(dest_root, f.relative_path)) {
             release_on_fail();
-            return Fail(err_code, err, "SYMLINK_REFUSED", "output is a symlink");
+            return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
         }
         if (fs::exists(dest) && !std::filesystem::is_directory(dest)) {
             std::string have, herr;
@@ -284,7 +317,7 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
             release_on_fail();
             return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "source hash mismatch");
         }
-        if (!ExclusiveNofollowWrite(dest_s, bytes, err_code, err)) {
+        if (!ExclusiveNofollowWrite(dest_root, dest_s, bytes, err_code, err)) {
             release_on_fail();
             return false;
         }

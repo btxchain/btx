@@ -45,8 +45,10 @@ bool ParseStorageBudget(const std::string& in, uint64_t& out, std::string& err);
  *  It is kept when the operator consented: `explicit_operator_choice` (an
  *  explicit -modelstorage / -modelprofile, or a profile the operator saved),
  *  a first-run consent file that allows payload storage, or a positive
- *  BTX_MODEL_STORAGE. Otherwise it is "0", the documented fresh-install default.
- *  The GUI and btx-open ask through the same consent file. */
+ *  BTX_MODEL_STORAGE. Saved and environment budgets are honored exactly.
+ *  With no existing policy, "auto" gets a bounded 1 GiB free-model starter
+ *  cache. Explicit zero, a saved refusal, or invalid policy keeps storage off.
+ *  Storage does not authorize inference, training, private data, or spending. */
 std::string ResolveHeadlessStorageArg(const std::string& requested, bool explicit_operator_choice, const fs::path& consent_path);
 
 /** `BTX_MODEL_STORAGE`. False if unset, empty, zero, or unparsable. */

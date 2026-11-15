@@ -1059,6 +1059,95 @@ RPCHelpMan abandontransaction()
     };
 }
 
+UniValue RescanWallet(CWallet& wallet, const UniValue& params, const WalletRescanReserver& reserver)
+{
+    CWallet* pwallet = &wallet;
+    int start_height = 0;
+    std::optional<int> stop_height;
+    uint256 start_block;
+
+    LOCK(pwallet->m_relock_mutex);
+    {
+        LOCK(pwallet->cs_wallet);
+        EnsureWalletIsUnlocked(*pwallet);
+        int tip_height = pwallet->GetLastBlockHeight();
+
+        if (!params[0].isNull()) {
+            start_height = params[0].getInt<int>();
+            if (start_height < 0 || start_height > tip_height) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid start_height");
+            }
+        }
+
+        if (!params[1].isNull()) {
+            stop_height = params[1].getInt<int>();
+            if (*stop_height < 0 || *stop_height > tip_height) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid stop_height");
+            } else if (*stop_height < start_height) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "stop_height must be greater than start_height");
+            }
+        }
+
+        // We can't rescan unavailable blocks, stop and throw an error
+        if (!pwallet->chain().hasBlocks(pwallet->GetLastBlockHash(), start_height, stop_height)) {
+            if (pwallet->chain().havePruned() && pwallet->chain().getPruneHeight() >= start_height) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Can't rescan beyond pruned data. Use RPC call getblockchaininfo to determine your pruned height.");
+            }
+            if (pwallet->chain().hasAssumedValidChain()) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Failed to rescan unavailable blocks likely due to an in-progress assumeutxo background sync. Check logs or getchainstates RPC for assumeutxo background sync progress and try again later.");
+            }
+            throw JSONRPCError(RPC_MISC_ERROR, "Failed to rescan unavailable blocks, potentially caused by data corruption. If the issue persists you may want to reindex (see -reindex option).");
+        }
+
+        CHECK_NONFATAL(pwallet->chain().findAncestorByHeight(pwallet->GetLastBlockHash(), start_height, FoundBlock().hash(start_block)));
+    }
+
+    EnsureNoHistoricalShieldedPartialRescan(*pwallet, start_height);
+
+    // The shielded part of the rescan clears the notes, the tree and the pending
+    // spends and rebuilds them from start_height (Rescan below). A scan that ends
+    // at a stop_height below the tip would leave them rebuilt only that far.
+    if (stop_height && pwallet->m_shielded_wallet) {
+        const int tip_height = WITH_LOCK(pwallet->cs_wallet, return pwallet->GetLastBlockHeight());
+        LOCK(pwallet->m_shielded_wallet->cs_shielded);
+        if (*stop_height < tip_height && pwallet->m_shielded_wallet->LastScannedHeight() >= 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER,
+                "stop_height below the tip is not supported for a wallet with shielded scan state: "
+                "the shielded rescan rebuilds the notes and the tree up to the tip. Omit stop_height.");
+        }
+    }
+
+    // Ensure shielded keys are loaded before rescanning.  When the node
+    // started with a locked wallet, LoadPersistedState could only read the
+    // plaintext tree-only fallback, leaving m_key_sets empty.  Rehydrating
+    // here (now that the wallet is unlocked) restores the KEM keys from the
+    // encrypted blob so ScanBlock can trial-decrypt notes.
+    const bool has_shielded = pwallet->m_shielded_wallet != nullptr;
+    if (has_shielded) {
+        // cs_wallet before cs_shielded: rehydration takes cs_wallet.
+        LOCK2(pwallet->cs_wallet, pwallet->m_shielded_wallet->cs_shielded);
+        pwallet->m_shielded_wallet->MaybeRehydrateSpendingKeys();
+        // Reset the shielded Merkle tree so ScanBlock rebuilds it from scratch.
+        pwallet->m_shielded_wallet->Rescan(start_height);
+    }
+
+    CWallet::ScanResult result =
+        pwallet->ScanForWalletTransactions(start_block, start_height, stop_height, reserver, /*fUpdate=*/true, /*save_progress=*/false, /*scan_shielded=*/has_shielded);
+    switch (result.status) {
+    case CWallet::ScanResult::SUCCESS:
+        break;
+    case CWallet::ScanResult::FAILURE:
+        throw JSONRPCError(RPC_MISC_ERROR, "Rescan failed. Potentially corrupted data files.");
+    case CWallet::ScanResult::USER_ABORT:
+        throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted.");
+        // no default case, so the compiler can warn about missing cases
+    }
+    UniValue response(UniValue::VOBJ);
+    response.pushKV("start_height", start_height);
+    response.pushKV("stop_height", result.last_scanned_height ? *result.last_scanned_height : UniValue());
+    return response;
+}
+
 RPCHelpMan rescanblockchain()
 {
     return RPCHelpMan{"rescanblockchain",
@@ -1068,7 +1157,7 @@ RPCHelpMan rescanblockchain()
                 "and block filters are available (using startup option \"-blockfilterindex=1\").\n",
                 {
                     {"start_height", RPCArg::Type::NUM, RPCArg::Default{0}, "block height where the rescan should start"},
-                    {"stop_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "the last block height that should be scanned. If none is provided it will rescan up to the tip at return time of this call."},
+                    {"stop_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "the last block height that should be scanned. If none is provided it will rescan up to the tip at return time of this call. A wallet with shielded scan state refuses a height below the tip."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -1096,76 +1185,7 @@ RPCHelpMan rescanblockchain()
         throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning. Abort existing rescan or wait.");
     }
 
-    int start_height = 0;
-    std::optional<int> stop_height;
-    uint256 start_block;
-
-    LOCK(pwallet->m_relock_mutex);
-    {
-        LOCK(pwallet->cs_wallet);
-        EnsureWalletIsUnlocked(*pwallet);
-        int tip_height = pwallet->GetLastBlockHeight();
-
-        if (!request.params[0].isNull()) {
-            start_height = request.params[0].getInt<int>();
-            if (start_height < 0 || start_height > tip_height) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid start_height");
-            }
-        }
-
-        if (!request.params[1].isNull()) {
-            stop_height = request.params[1].getInt<int>();
-            if (*stop_height < 0 || *stop_height > tip_height) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid stop_height");
-            } else if (*stop_height < start_height) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "stop_height must be greater than start_height");
-            }
-        }
-
-        // We can't rescan unavailable blocks, stop and throw an error
-        if (!pwallet->chain().hasBlocks(pwallet->GetLastBlockHash(), start_height, stop_height)) {
-            if (pwallet->chain().havePruned() && pwallet->chain().getPruneHeight() >= start_height) {
-                throw JSONRPCError(RPC_MISC_ERROR, "Can't rescan beyond pruned data. Use RPC call getblockchaininfo to determine your pruned height.");
-            }
-            if (pwallet->chain().hasAssumedValidChain()) {
-                throw JSONRPCError(RPC_MISC_ERROR, "Failed to rescan unavailable blocks likely due to an in-progress assumeutxo background sync. Check logs or getchainstates RPC for assumeutxo background sync progress and try again later.");
-            }
-            throw JSONRPCError(RPC_MISC_ERROR, "Failed to rescan unavailable blocks, potentially caused by data corruption. If the issue persists you may want to reindex (see -reindex option).");
-        }
-
-        CHECK_NONFATAL(pwallet->chain().findAncestorByHeight(pwallet->GetLastBlockHash(), start_height, FoundBlock().hash(start_block)));
-    }
-
-    EnsureNoHistoricalShieldedPartialRescan(*pwallet, start_height);
-
-    // Ensure shielded keys are loaded before rescanning.  When the node
-    // started with a locked wallet, LoadPersistedState could only read the
-    // plaintext tree-only fallback, leaving m_key_sets empty.  Rehydrating
-    // here (now that the wallet is unlocked) restores the KEM keys from the
-    // encrypted blob so ScanBlock can trial-decrypt notes.
-    const bool has_shielded = pwallet->m_shielded_wallet != nullptr;
-    if (has_shielded) {
-        LOCK(pwallet->m_shielded_wallet->cs_shielded);
-        pwallet->m_shielded_wallet->MaybeRehydrateSpendingKeys();
-        // Reset the shielded Merkle tree so ScanBlock rebuilds it from scratch.
-        pwallet->m_shielded_wallet->Rescan(start_height);
-    }
-
-    CWallet::ScanResult result =
-        pwallet->ScanForWalletTransactions(start_block, start_height, stop_height, reserver, /*fUpdate=*/true, /*save_progress=*/false, /*scan_shielded=*/has_shielded);
-    switch (result.status) {
-    case CWallet::ScanResult::SUCCESS:
-        break;
-    case CWallet::ScanResult::FAILURE:
-        throw JSONRPCError(RPC_MISC_ERROR, "Rescan failed. Potentially corrupted data files.");
-    case CWallet::ScanResult::USER_ABORT:
-        throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted.");
-        // no default case, so the compiler can warn about missing cases
-    }
-    UniValue response(UniValue::VOBJ);
-    response.pushKV("start_height", start_height);
-    response.pushKV("stop_height", result.last_scanned_height ? *result.last_scanned_height : UniValue());
-    return response;
+    return RescanWallet(wallet, request.params, reserver);
 },
     };
 }

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "quote": {
+      "additionalProperties": false,
+      "properties": {
+        "buy_asset": {
+          "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+          "type": "string"
+        },
+        "buy_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "expires_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maker_fee_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "max_receive_network_fee_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "network": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "nonce": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "provider": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "requester": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "sell_asset": {
+          "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+          "type": "string"
+        },
+        "sell_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "sequence": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "settlement": {
+          "const": "sha256-htlc-v1"
+        }
+      },
+      "required": [
+        "network",
+        "provider",
+        "requester",
+        "nonce",
+        "sequence",
+        "sell_asset",
+        "buy_asset",
+        "sell_atoms",
+        "buy_atoms",
+        "maker_fee_atoms",
+        "max_receive_network_fee_atoms",
+        "issued_at",
+        "expires_at",
+        "settlement"
+      ],
+      "type": "object"
+    },
+    "signature": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "quote",
+    "signature"
+  ],
+  "title": "SwapNet signed_quote",
+  "type": "object"
+}

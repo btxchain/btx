@@ -71,7 +71,7 @@ static constexpr size_t SHIELDED_ADDRESS_BASE_PAYLOAD_SIZE{66};
 static constexpr size_t SHIELDED_ADDRESS_EXTENDED_PAYLOAD_SIZE{
     SHIELDED_ADDRESS_BASE_PAYLOAD_SIZE + mlkem::PUBLICKEYBYTES};
 static constexpr int SHIELDED_ADDRESS_CHAR_LIMIT{3000};
-static constexpr uint32_t SHIELDED_STATE_VERSION{4};
+static constexpr uint32_t SHIELDED_STATE_VERSION{5};
 static constexpr uint8_t SHIELDED_ADDRESS_LIFECYCLE_VERSION{1};
 static constexpr size_t MAX_V2_SEND_BUILDER_PROOF_ATTEMPTS{4};
 static constexpr const char* SHIELDED_ENCRYPTION_REQUIRED_ERROR{
@@ -1228,7 +1228,7 @@ bool AppendOutputChunkViews(ShieldedTxView& tx_view,
     if (keypair.sk.size() != mlkem::SECRETKEYBYTES) return false;
     const auto enc = mlkem::Encaps(keypair.pk);
     const auto dec = mlkem::Decaps(enc.ct, keypair.sk);
-    return dec == enc.ss;
+    return dec && *dec == enc.ss;
 }
 
 [[nodiscard]] bool EncryptWithWalletKey(const CWallet& wallet,
@@ -1463,6 +1463,8 @@ struct PersistedShieldedState
     std::vector<PersistedShieldedNoteClassEntry> note_classes;
     std::vector<std::pair<uint256, shielded::ShieldedMerkleWitness>> witnesses;
     std::vector<uint64_t> recent_ring_exclusions;
+    // Written only for version >= 5. Version 4 blobs leave this false.
+    bool empty_gap_search_done{false};
 
     SERIALIZE_METHODS(PersistedShieldedState, obj)
     {
@@ -1483,6 +1485,9 @@ struct PersistedShieldedState
         }
         if (obj.version >= 4) {
             READWRITE(obj.note_classes);
+        }
+        if (obj.version >= 5) {
+            READWRITE(obj.empty_gap_search_done);
         }
     }
 };
@@ -1581,6 +1586,11 @@ void LogPersistedShieldedIdentitySalvage(const PersistedShieldedState& state,
             }
             if (salvaged.version >= 3) {
                 ss >> salvaged.address_lifecycles;
+            }
+            if (salvaged.version >= 5) {
+                std::vector<PersistedShieldedNoteClassEntry> ignored_note_classes;
+                ss >> ignored_note_classes;
+                ss >> salvaged.empty_gap_search_done;
             }
         } catch (const std::exception& e) {
             diagnostic = strprintf("salvaged key metadata only; failed to skip scan cache: %s", e.what());
@@ -1725,12 +1735,36 @@ bool ShieldedAddressLifecycle::IsValid() const
 CShieldedWallet::CShieldedWallet(CWallet& parent_wallet)
     : m_parent_wallet(parent_wallet)
 {
-    LOCK(cs_shielded);
+    // LoadPersistedState() takes cs_wallet; take it first so the order
+    // does not depend on the caller (AttachChain already holds it).
+    LOCK2(m_parent_wallet.cs_wallet, cs_shielded);
     LoadPersistedState();
     CatchUpToChainTip();
 }
 
 CShieldedWallet::~CShieldedWallet() = default;
+
+//! Lower the wallet birth time to the current chain tip. Shielded keys are not
+//! in the script/address birthday trackers, so without this the blockConnected
+//! fast-path treats every later block as too old to scan.
+static void SeedBirthTimeFromChainTip(CWallet& wallet)
+{
+    if (!wallet.HaveChain()) return;
+    const auto tip_height = wallet.chain().getHeight();
+    if (tip_height.has_value()) {
+        int64_t tip_max_time{0};
+        const uint256 tip_hash = wallet.chain().getBlockHash(*tip_height);
+        if (wallet.chain().findBlock(tip_hash, interfaces::FoundBlock().maxTime(tip_max_time))) {
+            wallet.MaybeUpdateBirthTime(tip_max_time);
+        } else {
+            // If tip metadata is unavailable, prefer a conservative floor
+            // over wallclock time so future blocks are never skipped.
+            wallet.MaybeUpdateBirthTime(0);
+        }
+    } else {
+        wallet.MaybeUpdateBirthTime(0);
+    }
+}
 
 ShieldedAddress CShieldedWallet::GenerateNewAddress(uint32_t account)
 {
@@ -1817,6 +1851,9 @@ ShieldedAddress CShieldedWallet::GenerateNewAddress(uint32_t account)
     if (!PersistState()) {
         LogPrintf("CShieldedWallet: failed to persist state after GenerateNewAddress\n");
     }
+    // A wallet whose only keys are shielded (a blank wallet) has no other birth
+    // time; without one it never scans a new block for this address.
+    SeedBirthTimeFromChainTip(m_parent_wallet);
     return addr;
 }
 
@@ -1876,22 +1913,7 @@ bool CShieldedWallet::ImportViewingKey(const std::vector<unsigned char>& kem_sk,
     // to scan. Seed the birthday from the current chain tip so newly imported
     // viewing keys can discover subsequent blocks even when no rescan is
     // requested.
-    if (m_parent_wallet.HaveChain()) {
-        const auto tip_height = m_parent_wallet.chain().getHeight();
-        if (tip_height.has_value()) {
-            int64_t tip_max_time{0};
-            const uint256 tip_hash = m_parent_wallet.chain().getBlockHash(*tip_height);
-            if (m_parent_wallet.chain().findBlock(tip_hash, interfaces::FoundBlock().maxTime(tip_max_time))) {
-                m_parent_wallet.MaybeUpdateBirthTime(tip_max_time);
-            } else {
-                // If tip metadata is unavailable, prefer a conservative floor
-                // over wallclock time so future blocks are never skipped.
-                m_parent_wallet.MaybeUpdateBirthTime(0);
-            }
-        } else {
-            m_parent_wallet.MaybeUpdateBirthTime(0);
-        }
-    }
+    SeedBirthTimeFromChainTip(m_parent_wallet);
     return true;
 }
 
@@ -2842,6 +2864,7 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
             // Keep live mempool spends unavailable for reselection until the
             // transaction leaves the mempool or confirms in a block.
             m_pending_spends.insert(nullifier);
+            m_inflight_spends.erase(nullifier);
             spend_view.amount = it->second.note.value;
             spend_view.is_ours = true;
             tx_has_local_visibility = true;
@@ -2856,6 +2879,8 @@ void CShieldedWallet::TransactionAddedToMempool(const CTransaction& tx)
         if (note_it != m_notes.end()) {
             m_pending_spends.insert(recovery_spend->nullifier);
             m_pending_spends.insert(note_it->first);
+            m_inflight_spends.erase(recovery_spend->nullifier);
+            m_inflight_spends.erase(note_it->first);
             spend_view.amount = note_it->second.note.value;
             spend_view.is_ours = true;
             tx_has_local_visibility = true;
@@ -3049,6 +3074,7 @@ void CShieldedWallet::Rescan(int start_height)
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_tx_view_cache.clear();
     m_tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     m_last_scanned_height = start_height - 1;
@@ -3065,6 +3091,7 @@ void CShieldedWallet::PruneStalePendingSpends() const
 
     std::vector<Nullifier> stale_pending;
     for (const auto& nf : m_pending_spends) {
+        if (m_inflight_spends.count(nf)) continue;
         if (!NullifierReservedByAnotherMempoolTx(nf)) stale_pending.push_back(nf);
     }
     for (const auto& nf : stale_pending) {
@@ -6519,6 +6546,229 @@ std::optional<ShieldedTxView> CShieldedWallet::GetCachedTransactionView(const ui
     return it->second;
 }
 
+void CShieldedWallet::AppendRebuiltOutputView(const uint256& commitment,
+                                              const shielded::EncryptedNote& enc_note,
+                                              const std::optional<smile2::CompactPublicAccount>& smile_account,
+                                              ShieldedTxView& tx_view,
+                                              bool& tx_has_local_visibility) const
+{
+    AssertLockHeld(cs_shielded);
+    ShieldedTxViewOutput output_view;
+    output_view.commitment = commitment;
+    auto decrypted = TryDecryptNoteFull(enc_note);
+    if (decrypted.has_value() &&
+        smile_account.has_value() &&
+        !DecryptedNoteMatchesSmileAccount(decrypted->first, *smile_account)) {
+        decrypted.reset();
+    }
+    if (decrypted.has_value()) {
+        output_view.amount = decrypted->first.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    } else if (const auto coin = GetCoinByCommitment(commitment)) {
+        // The note is already in the balance from the scan that stored this anchor.
+        output_view.amount = coin->note.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    }
+    tx_view.outputs.push_back(std::move(output_view));
+}
+
+void CShieldedWallet::AppendRebuiltOutputView(const shielded::v2::OutputDescription& output,
+                                              ShieldedTxView& tx_view,
+                                              bool& tx_has_local_visibility) const
+{
+    AssertLockHeld(cs_shielded);
+    ShieldedTxViewOutput output_view;
+    output_view.commitment = output.note_commitment;
+    auto decrypted = TryDecryptNoteFull(output.encrypted_note);
+    if (decrypted.has_value() &&
+        output.smile_account.has_value() &&
+        !DecryptedNoteMatchesSmileAccount(decrypted->first, *output.smile_account)) {
+        decrypted.reset();
+    }
+    if (decrypted.has_value()) {
+        output_view.amount = decrypted->first.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    } else if (const auto coin = GetCoinByCommitment(output.note_commitment)) {
+        output_view.amount = coin->note.value;
+        output_view.is_ours = true;
+        tx_has_local_visibility = true;
+    }
+    tx_view.outputs.push_back(std::move(output_view));
+}
+
+std::optional<ShieldedTxView> CShieldedWallet::BuildLocalTransactionView(const CTransaction& tx) const
+{
+    AssertLockHeld(cs_shielded);
+    if (!tx.HasShieldedBundle()) return std::nullopt;
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    ShieldedTxView tx_view;
+    tx_view.value_balance = GetShieldedStateValueBalance(bundle);
+    tx_view.family = DescribeShieldedBundleFamily(bundle);
+    bool tx_has_local_visibility{false};
+
+    for (const Nullifier& nullifier : CollectShieldedNullifiers(bundle)) {
+        ShieldedTxViewSpend spend_view;
+        spend_view.nullifier = nullifier;
+        const auto note_it = m_notes.find(nullifier);
+        if (note_it != m_notes.end()) {
+            spend_view.amount = note_it->second.note.value;
+            spend_view.is_ours = true;
+            tx_has_local_visibility = true;
+        }
+        tx_view.spends.push_back(std::move(spend_view));
+    }
+    if (const auto recovery_spend = TryDeriveRecoveryExitWalletSpend(bundle)) {
+        ShieldedTxViewSpend spend_view;
+        spend_view.nullifier = recovery_spend->nullifier;
+        spend_view.amount = recovery_spend->amount;
+        const auto note_it = FindNoteByRecoveryExitSpend(m_notes, *recovery_spend);
+        if (note_it != m_notes.end()) {
+            spend_view.amount = note_it->second.note.value;
+            spend_view.is_ours = true;
+            tx_has_local_visibility = true;
+        }
+        tx_view.spends.push_back(std::move(spend_view));
+    }
+
+    if (bundle.HasV2Bundle()) {
+        const auto* v2_bundle = bundle.GetV2Bundle();
+        if (v2_bundle != nullptr) {
+            switch (shielded::v2::GetBundleSemanticFamily(*v2_bundle)) {
+            case shielded::v2::TransactionFamily::V2_SEND: {
+                const auto& payload = std::get<shielded::v2::SendPayload>(v2_bundle->payload);
+                for (const auto& output : payload.outputs) {
+                    AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY: {
+                const auto& payload = std::get<shielded::v2::SpendPathRecoveryPayload>(v2_bundle->payload);
+                for (const auto& output : payload.outputs) {
+                    AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_LIFECYCLE:
+                break;
+            case shielded::v2::TransactionFamily::V2_INGRESS_BATCH: {
+                const auto& payload = std::get<shielded::v2::IngressBatchPayload>(v2_bundle->payload);
+                for (const auto& output : payload.reserve_outputs) {
+                    AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_EGRESS_BATCH: {
+                const auto& payload = std::get<shielded::v2::EgressBatchPayload>(v2_bundle->payload);
+                const bool recorded = RecordCanonicalOutputChunks(
+                    *v2_bundle,
+                    {payload.outputs.data(), payload.outputs.size()},
+                    "CShieldedWallet::BuildLocalTransactionView",
+                    [&](const shielded::v2::OutputDescription& output) NO_THREAD_SAFETY_ANALYSIS {
+                        AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                    });
+                if (recorded) {
+                    AppendOutputChunkViews(tx_view,
+                                           {v2_bundle->output_chunks.data(), v2_bundle->output_chunks.size()},
+                                           "CShieldedWallet::BuildLocalTransactionView");
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_REBALANCE: {
+                const auto& payload = std::get<shielded::v2::RebalancePayload>(v2_bundle->payload);
+                if (!v2_bundle->output_chunks.empty()) {
+                    const bool recorded = RecordCanonicalOutputChunks(
+                        *v2_bundle,
+                        {payload.reserve_outputs.data(), payload.reserve_outputs.size()},
+                        "CShieldedWallet::BuildLocalTransactionView",
+                        [&](const shielded::v2::OutputDescription& output) NO_THREAD_SAFETY_ANALYSIS {
+                            AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                        });
+                    if (recorded) {
+                        AppendOutputChunkViews(tx_view,
+                                               {v2_bundle->output_chunks.data(), v2_bundle->output_chunks.size()},
+                                               "CShieldedWallet::BuildLocalTransactionView");
+                    }
+                } else {
+                    for (const auto& output : payload.reserve_outputs) {
+                        AppendRebuiltOutputView(output, tx_view, tx_has_local_visibility);
+                    }
+                }
+                break;
+            }
+            case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+            case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
+            case shielded::v2::TransactionFamily::V2_GENERIC:
+                break;
+            }
+        }
+    } else {
+        for (const auto& output : bundle.shielded_outputs) {
+            AppendRebuiltOutputView(output.note_commitment,
+                                    output.encrypted_note,
+                                    std::nullopt,
+                                    tx_view,
+                                    tx_has_local_visibility);
+        }
+    }
+
+    if (!tx_has_local_visibility) return std::nullopt;
+    return tx_view;
+}
+
+std::optional<ShieldedTxView> CShieldedWallet::RebuildTransactionViewFromNoteAnchor(const uint256& txid)
+{
+    AssertLockHeld(cs_shielded);
+    const auto tip_height = m_parent_wallet.chain().getHeight();
+    if (!tip_height.has_value() || m_last_scanned_height < 0) return std::nullopt;
+
+    // The block that confirmed a note, and for a spent note the block that spent
+    // it. A spend this wallet did not create (the same keys in a restored copy)
+    // is not a wallet transaction, and its block may hold none of our notes.
+    // A spent block has no stored hash; spent_height is reset when it is
+    // disconnected, so the active block at that height is the one scanned.
+    std::set<std::pair<int, uint256>> candidates;
+    for (const auto& [_, coin] : m_notes) {
+        if (coin.confirmation_height >= 0 && !coin.block_hash.IsNull()) {
+            candidates.emplace(coin.confirmation_height, coin.block_hash);
+        }
+        if (coin.is_spent && coin.spent_height >= 0) candidates.emplace(coin.spent_height, uint256{});
+    }
+    std::set<uint256> seen_blocks;
+    for (const auto& [height, stored_hash] : candidates) {
+        if (height > m_last_scanned_height || height > *tip_height) continue;
+        if (!m_parent_wallet.chain().haveBlockOnDisk(height)) continue;
+        const uint256 block_hash = m_parent_wallet.chain().getBlockHash(height);
+        if (!stored_hash.IsNull() && block_hash != stored_hash) continue;
+        if (!seen_blocks.insert(block_hash).second) continue;
+
+        CBlock block;
+        if (!m_parent_wallet.chain().findBlock(block_hash, interfaces::FoundBlock().data(block)) || block.IsNull()) {
+            continue;
+        }
+        for (const auto& txref : block.vtx) {
+            if (txref->GetHash() != txid) continue;
+            auto view = BuildLocalTransactionView(*txref);
+            if (!view.has_value()) return std::nullopt;
+            m_tx_view_cache[txid] = *view;
+            while (m_tx_view_cache.size() > TX_VIEW_CACHE_MAX) {
+                m_tx_view_cache.erase(m_tx_view_cache.begin());
+            }
+            return view;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<ShieldedTxView> CShieldedWallet::GetTransactionView(const uint256& txid)
+{
+    AssertLockHeld(cs_shielded);
+    if (auto cached = GetCachedTransactionView(txid)) return cached;
+    return RebuildTransactionViewFromNoteAnchor(txid);
+}
+
 bool CShieldedWallet::GetKEMPublicKey(const ShieldedAddress& addr, mlkem::PublicKey& out_pk) const
 {
     AssertLockHeld(cs_shielded);
@@ -7027,6 +7277,7 @@ bool CShieldedWallet::PersistState()
     PersistedShieldedState state;
     state.next_spending_index = m_next_spending_index;
     state.next_kem_index = m_next_kem_index;
+    state.empty_gap_search_done = m_empty_gap_search_done;
     state.last_scanned_height = m_last_scanned_height;
     state.last_scanned_hash = m_last_scanned_hash;
     state.tree = m_tree;
@@ -7099,6 +7350,7 @@ bool CShieldedWallet::PersistState()
         PersistedShieldedState tree_only;
         tree_only.next_spending_index = state.next_spending_index;
         tree_only.next_kem_index = state.next_kem_index;
+        tree_only.empty_gap_search_done = state.empty_gap_search_done;
         tree_only.last_scanned_height = state.last_scanned_height;
         tree_only.last_scanned_hash = state.last_scanned_hash;
         tree_only.tree = state.tree;
@@ -7136,6 +7388,7 @@ bool CShieldedWallet::PersistState()
             PersistedShieldedState tree_only;
             tree_only.next_spending_index = state.next_spending_index;
             tree_only.next_kem_index = state.next_kem_index;
+            tree_only.empty_gap_search_done = state.empty_gap_search_done;
             tree_only.last_scanned_height = state.last_scanned_height;
             tree_only.last_scanned_hash = state.last_scanned_hash;
             tree_only.tree = state.tree;
@@ -7154,7 +7407,10 @@ bool CShieldedWallet::PersistState()
         // operation like Rescan() calls PersistState() before keys have been
         // rehydrated.  Overwriting in that situation would permanently destroy
         // the keys and notes, requiring a full chain rescan to recover.
-        if (state.key_sets.empty()) {
+        // A completed empty gap search is the exception: its key set is empty
+        // on purpose, and the flag has to replace a keyless encrypted blob
+        // migrated from tree-only plaintext during this same unlock.
+        if (state.key_sets.empty() && !state.empty_gap_search_done) {
             uint256 existing_iv;
             std::vector<unsigned char> existing_encrypted;
             if (batch.ReadCryptedShieldedState(existing_iv, existing_encrypted) && !existing_encrypted.empty()) {
@@ -7181,6 +7437,7 @@ void CShieldedWallet::LoadPersistedState()
     // session. The mempool is empty after a restart, so no in-flight transactions
     // exist that would still need the reservations.
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
 
@@ -7338,11 +7595,13 @@ void CShieldedWallet::LoadPersistedState()
     m_mempool_notes.clear();
     m_mempool_note_index.clear();
     m_pending_spends.clear();
+    m_inflight_spends.clear();
     m_recent_ring_exclusions.clear();
     m_tx_view_cache.clear();
     m_tree = shielded::ShieldedMerkleTree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     m_next_spending_index = 0;
     m_next_kem_index = 0;
+    m_empty_gap_search_done = false;
     m_last_scanned_height = -1;
     m_last_scanned_hash.SetNull();
 
@@ -7503,6 +7762,7 @@ void CShieldedWallet::LoadPersistedState()
 
     m_next_spending_index = state.next_spending_index;
     m_next_kem_index = state.next_kem_index;
+    m_empty_gap_search_done = state.empty_gap_search_done;
     m_last_scanned_height = state.last_scanned_height;
     m_last_scanned_hash = state.last_scanned_hash;
     m_recent_ring_exclusions = state.recent_ring_exclusions;
@@ -7534,8 +7794,33 @@ void CShieldedWallet::LoadPersistedState()
     m_next_spending_index = std::max(m_next_spending_index, max_index);
     m_next_kem_index = std::max(m_next_kem_index, max_index);
 
+    // Shielded keys are not part of the wallet's birth time, which is kept
+    // only in memory. A wallet whose only keys are shielded (a blank wallet
+    // with z_getnewaddress or an imported viewing key) therefore has no birth
+    // time after a restart, and blockConnected skips every new block. Once
+    // the keys are loaded, lower it to the last scanned block, or to 0 when
+    // that block is not known.
+    if (!m_key_sets.empty()) {
+        int64_t birth_time{0};
+        if (m_parent_wallet.HaveChain() && m_last_scanned_height >= 0 && !m_last_scanned_hash.IsNull()) {
+            int64_t max_time{0};
+            if (m_parent_wallet.chain().findBlock(m_last_scanned_hash, interfaces::FoundBlock().maxTime(max_time))) {
+                birth_time = max_time;
+            }
+        }
+        m_parent_wallet.MaybeUpdateBirthTime(birth_time);
+    }
+
     if (!m_parent_wallet.IsCrypted() && rewrite_unencrypted_tree_only && !PersistState()) {
         LogPrintf("CShieldedWallet::LoadPersistedState: failed to persist sanitized tree-only state\n");
+    }
+}
+
+void CShieldedWallet::LockSpendingKeys()
+{
+    AssertLockHeld(cs_shielded);
+    for (auto& [_, keyset] : m_key_sets) {
+        keyset.spending_key.ClearKeyData();
     }
 }
 
@@ -7558,14 +7843,19 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
         }
     }
 
-    // If the persisted state lost its key_sets AND indices (e.g. tree-only
-    // fallback was later overwritten by an unlocked PersistState with empty
-    // state), attempt to recover by re-deriving keys from the master seed
-    // using a gap-limit scan.  We derive keys at successive indices and scan
-    // the chain; if a derived key decrypts at least one note we know the
-    // index was in use.  We stop after GAP_LIMIT consecutive indices that
-    // produce no on-chain notes.
-    if (m_key_sets.empty()) {
+    // If the persisted state lost its key_sets, recover by re-deriving keys
+    // from the master seed. The search still covers m_next_spending_index +
+    // GAP_LIMIT indices. issued is that next index before the search. After a
+    // complete scan, keep every derived key below max(one past the highest
+    // note, or 0 when no note exists, issued) and set both next indexes to
+    // that bound. Search keys past the bound are dropped. An incomplete scan,
+    // or a note with no derived key, keeps the whole search set. A finished
+    // search that finds no note and had issued 0 is recorded so the next
+    // unlock does not derive the gap again. The first unlock of a new
+    // encrypted wallet still runs the search.
+    if (m_key_sets.empty() && m_empty_gap_search_done && m_next_spending_index == 0 && m_notes.empty()) {
+        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys empty gap search already completed; not deriving keys\n");
+    } else if (m_key_sets.empty()) {
         std::vector<unsigned char> master_seed = GetMasterSeed();
         ScopedByteVectorCleanse master_seed_cleanse_rederive(master_seed);
         if (!master_seed.empty()) {
@@ -7575,8 +7865,9 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
             uint32_t max_used_index = 0;
             bool found_any{false};
 
-            // Derive up to m_next_spending_index (if known) plus GAP_LIMIT
-            // additional indices to discover keys whose indices were lost.
+            // Remember addresses already handed out. The search limit stays
+            // m_next_spending_index + GAP_LIMIT.
+            const uint32_t issued = m_next_spending_index;
             const uint32_t search_limit = m_next_spending_index + GAP_LIMIT;
 
             for (uint32_t i = 0; i < search_limit; ++i) {
@@ -7626,13 +7917,89 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
                 max_used_index = i;
             }
             if (found_any) {
-                m_next_spending_index = max_used_index + 1;
-                m_next_kem_index = max_used_index + 1;
                 LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys re-derived %u key(s) from master seed (gap_limit=%u); rebuilding from active chain\n",
                           static_cast<unsigned int>(m_key_sets.size()), GAP_LIMIT);
+                // Persist only after unused search keys are dropped. Rebuild
+                // would otherwise store every derived key.
+                const bool previous_defer = m_defer_persist;
+                m_defer_persist = true;
                 RebuildFromActiveChain();
+                m_defer_persist = previous_defer;
+
+                std::optional<uint32_t> highest_note_index;
+                bool note_without_key{false};
+                if (!m_scan_incomplete) {
+                    for (const auto& [_, coin] : m_notes) {
+                        const auto key_it = std::find_if(m_key_sets.begin(), m_key_sets.end(), [&](const auto& entry) {
+                            return entry.second.spending_pk_hash == coin.note.recipient_pk_hash;
+                        });
+                        if (key_it == m_key_sets.end()) {
+                            note_without_key = true;
+                            break;
+                        }
+                        if (!highest_note_index.has_value() || key_it->second.index > *highest_note_index) {
+                            highest_note_index = key_it->second.index;
+                        }
+                    }
+                }
+
+                if (m_scan_incomplete || note_without_key) {
+                    // A missing block, or a note we cannot tie to a derived
+                    // index, means the search keys have to stay. Do not record
+                    // an empty gap search for an incomplete scan.
+                    m_next_spending_index = max_used_index + 1;
+                    m_next_kem_index = max_used_index + 1;
+                    LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys keeping %u search key(s) (scan_incomplete=%d unmatched_note=%d)\n",
+                              static_cast<unsigned int>(m_key_sets.size()),
+                              m_scan_incomplete ? 1 : 0,
+                              note_without_key ? 1 : 0);
+                } else {
+                    const uint32_t note_bound = highest_note_index.has_value() ? (*highest_note_index + 1) : 0;
+                    const uint32_t keep_bound = std::max(note_bound, issued);
+                    for (auto it = m_key_sets.begin(); it != m_key_sets.end();) {
+                        if (it->second.index >= keep_bound) {
+                            m_address_lifecycles.erase(it->first);
+                            it = m_key_sets.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    m_next_spending_index = keep_bound;
+                    m_next_kem_index = keep_bound;
+                    if (!highest_note_index.has_value() && issued == 0) {
+                        m_empty_gap_search_done = true;
+                        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys no decrypted note; dropped search keys, reset next spending index to 0, and recorded empty gap search\n");
+                    } else {
+                        LogPrintf("CShieldedWallet::MaybeRehydrateSpendingKeys kept %u key(s) below index %u (note_bound=%u issued=%u)\n",
+                                  static_cast<unsigned int>(m_key_sets.size()),
+                                  keep_bound,
+                                  note_bound,
+                                  issued);
+                    }
+                }
+
                 m_locked_state_incomplete = false;
+                if (!m_defer_persist && !PersistState()) {
+                    LogPrintf("CShieldedWallet: failed to persist state after trimming rehydrated spending keys\n");
+                }
                 return true;
+            }
+        }
+    }
+
+    std::vector<unsigned char> master_seed = GetMasterSeed();
+    ScopedByteVectorCleanse master_seed_cleanse_rehydrate(master_seed);
+    // Keys wiped by LockSpendingKeys() keep spending_key_loaded: their hash was
+    // checked when they were first derived. Derive them again before the note
+    // repair below, which needs them. A lock changes no note, so no rebuild.
+    // A key that no longer derives takes the missing-key path.
+    if (!master_seed.empty()) {
+        for (auto& [_, keyset] : m_key_sets) {
+            if (!keyset.has_spending_key || !keyset.spending_key_loaded || keyset.spending_key.IsValid()) {
+                continue;
+            }
+            if (!DeriveSpendingKeyForKeyset(master_seed, keyset)) {
+                keyset.spending_key_loaded = false;
             }
         }
     }
@@ -7644,8 +8011,6 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
             break;
         }
     }
-    std::vector<unsigned char> master_seed = GetMasterSeed();
-    ScopedByteVectorCleanse master_seed_cleanse_rehydrate(master_seed);
     if (have_missing_spending_keys && master_seed.empty()) {
         return rehydrated;
     }
@@ -7965,7 +8330,7 @@ CShieldedWallet::KeyIntegrityReport CShieldedWallet::VerifyKeyIntegrity()
     KeyIntegrityReport report;
     report.total_keys = static_cast<int>(m_key_sets.size());
     for (const auto& [addr, ks] : m_key_sets) {
-        if (ks.spending_key_loaded) {
+        if (ks.spending_key_loaded && ks.spending_key.IsValid()) {
             ++report.spending_keys_loaded;
         } else if (ks.has_spending_key) {
             ++report.spending_keys_missing;
@@ -7999,6 +8364,7 @@ void CShieldedWallet::ReservePendingSpends(const std::vector<Nullifier>& nullifi
     AssertLockHeld(cs_shielded);
     for (const auto& nf : nullifiers) {
         m_pending_spends.insert(nf);
+        m_inflight_spends.insert(nf);
     }
 }
 
@@ -8007,6 +8373,7 @@ void CShieldedWallet::ReleasePendingSpends(const std::vector<Nullifier>& nullifi
     AssertLockHeld(cs_shielded);
     for (const auto& nf : nullifiers) {
         m_pending_spends.erase(nf);
+        m_inflight_spends.erase(nf);
     }
 }
 

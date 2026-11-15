@@ -3,9 +3,12 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <modelnet/s3_store.h>
+#include <random.h>
+#include <util/fs_helpers.h>
 
 #include <algorithm>
 #include <ctime>
+#include <cstdio>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -84,9 +87,9 @@ void S3PieceStore::RollWindowsLocked(int64_t now_s)
     }
 }
 
-void S3PieceStore::PersistBudgetLocked() const
+bool S3PieceStore::PersistBudgetLocked(std::string& err) const
 {
-    if (m_cfg.budget_state_path.empty()) return;
+    if (m_cfg.budget_state_path.empty()) return true;
     UniValue o(UniValue::VOBJ);
     o.pushKV("day_utc", m_day_utc);
     o.pushKV("month_utc", m_month_utc);
@@ -96,27 +99,79 @@ void S3PieceStore::PersistBudgetLocked() const
     o.pushKV("month_bytes", m_month_bytes);
     o.pushKV("used_gets", m_used_gets);
     o.pushKV("used_bytes", m_used_bytes);
-    const fs::path parent = m_cfg.budget_state_path.parent_path();
-    if (!parent.empty()) fs::create_directories(parent);
-    std::ofstream out{m_cfg.budget_state_path};
-    if (!out) return;
-    out << o.write() << "\n";
+    const fs::path& path = m_cfg.budget_state_path;
+    try {
+        if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
+    } catch (const fs::filesystem_error&) {
+        err = "cloud budget directory creation failed";
+        return false;
+    }
+    // Keep the committed accounting intact until a complete replacement is
+    // flushed and closed. Exclusive creation must not truncate a stale file.
+    const std::string text = o.write() + "\n";
+    FastRandomContext rng;
+    const fs::path tmp = path.parent_path() / fs::PathFromString(
+        fs::PathToString(path.filename()) + ".tmp." + std::to_string(rng.rand64()));
+    FILE* file = fsbridge::fopen(tmp, "wbx");
+    if (!file) {
+        err = "cloud budget temporary file creation failed";
+        return false;
+    }
+    const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
+    const bool committed = written && FileCommit(file);
+    const bool closed = std::fclose(file) == 0;
+    if (!committed || !closed || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        err = "cloud budget save failed";
+        return false;
+    }
+    return true;
 }
 
-void S3PieceStore::LoadBudgetState()
+bool S3PieceStore::LoadBudgetState(std::string& err)
 {
-    if (m_cfg.budget_state_path.empty()) return;
-    std::ifstream in{m_cfg.budget_state_path};
-    if (!in) return;
+    if (m_cfg.budget_state_path.empty()) return true;
+    const fs::path& path = m_cfg.budget_state_path;
+    std::error_code ec;
+    if (!fs::exists(fs::symlink_status(path, ec))) return true;
+    // A file that is there but cannot be read as the saved counters is not a
+    // fresh budget: starting from zero would admit reads past a cap that was
+    // already used up, and Init would then overwrite the file with zeros.
+    err = "cloud budget state " + fs::PathToString(path) + " is unreadable; fix or remove it";
+    std::ifstream in{path};
+    if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
+    if (in.bad()) return false;
     UniValue o;
-    if (!o.read(ss.str()) || !o.isObject()) return;
+    if (!o.read(ss.str()) || !o.isObject()) return false;
+    bool well_formed = true;
     auto i64 = [&](const char* k, int64_t& dst) {
-        if (o.exists(k) && o[k].isNum()) dst = o[k].getInt<int64_t>();
+        if (!o.exists(k)) return;
+        if (!o[k].isNum()) {
+            well_formed = false;
+            return;
+        }
+        try {
+            dst = o[k].getInt<int64_t>();
+        } catch (const std::exception&) {
+            // Negative, fractional or out of range.
+            well_formed = false;
+        }
     };
     auto u64 = [&](const char* k, uint64_t& dst) {
-        if (o.exists(k) && o[k].isNum()) dst = o[k].getInt<uint64_t>();
+        if (!o.exists(k)) return;
+        if (!o[k].isNum()) {
+            well_formed = false;
+            return;
+        }
+        try {
+            dst = o[k].getInt<uint64_t>();
+        } catch (const std::exception&) {
+            // Negative, fractional or out of range.
+            well_formed = false;
+        }
     };
     i64("day_utc", m_day_utc);
     i64("month_utc", m_month_utc);
@@ -126,6 +181,9 @@ void S3PieceStore::LoadBudgetState()
     u64("month_bytes", m_month_bytes);
     u64("used_gets", m_used_gets);
     u64("used_bytes", m_used_bytes);
+    if (!well_formed) return false;
+    err.clear();
+    return true;
 }
 
 bool S3PieceStore::WouldExceed(uint64_t bytes) const
@@ -139,21 +197,40 @@ bool S3PieceStore::WouldExceed(uint64_t bytes) const
     return false;
 }
 
+bool S3PieceStore::BudgetAllowsGet(uint64_t max_bytes, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    RollWindowsLocked(NowS());
+    // A range GET is checked against its requested length. A whole-object
+    // GET learns its size only from the response (max_bytes 0): check the GET
+    // caps and whether a byte cap is already used up.
+    if (WouldExceed(max_bytes)) {
+        err = "cloud origin budget exhausted";
+        return false;
+    }
+    return true;
+}
+
 bool S3PieceStore::ChargeGet(uint64_t bytes, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
     RollWindowsLocked(NowS());
-    if (WouldExceed(bytes)) {
-        err = "cloud origin budget exhausted";
-        return false;
-    }
+    // The origin read already happened and was billed, so charge it even when
+    // it crosses a cap. Refusing it uncharged would let the next request pass
+    // the pre-check and pay for the same read again.
+    const bool over = WouldExceed(bytes);
     ++m_used_gets;
     m_used_bytes += bytes;
     ++m_day_gets;
     ++m_month_gets;
     m_day_bytes += bytes;
     m_month_bytes += bytes;
-    PersistBudgetLocked();
+    // Retain the in-memory charge on a save failure too.
+    if (!PersistBudgetLocked(err)) return false;
+    if (over) {
+        err = "cloud origin budget exhausted";
+        return false;
+    }
     return true;
 }
 
@@ -173,11 +250,11 @@ bool S3PieceStore::Init(std::string& err)
         return false;
     }
     if (!m_client.Init(m_cfg.s3, err)) return false;
-    LoadBudgetState();
+    if (!LoadBudgetState(err)) return false;
     {
         std::lock_guard<std::mutex> lock(m_mu);
         RollWindowsLocked(NowS());
-        PersistBudgetLocked();
+        if (!PersistBudgetLocked(err)) return false;
     }
     m_ready = true;
     return true;
@@ -190,14 +267,7 @@ bool S3PieceStore::GetObject(const std::string& key, uint64_t offset, uint64_t l
         err = "s3 store not initialized";
         return false;
     }
-    {
-        std::lock_guard<std::mutex> lock(m_mu);
-        RollWindowsLocked(NowS());
-        if (WouldExceed(/*bytes unknown; check GET count first*/ 0)) {
-            err = "cloud origin budget exhausted";
-            return false;
-        }
-    }
+    if (!BudgetAllowsGet(len, err)) return false;
     bool ok = false;
     if (offset == 0 && len == 0) {
         ok = m_client.Get(key, out, err);
@@ -482,6 +552,7 @@ bool S3PieceStore::FetchPresignedGet(const std::string& url, std::vector<unsigne
         err = "s3 store not initialized";
         return false;
     }
+    if (!BudgetAllowsGet(/*max_bytes=*/0, err)) return false;
     if (!m_client.FetchPresignedGet(url, out, err)) return false;
     if (!ChargeGet(out.size(), err)) {
         out.clear();

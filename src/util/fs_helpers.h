@@ -13,6 +13,7 @@
 #include <iosfwd>
 #include <limits>
 #include <optional>
+#include <system_error>
 
 /**
  * Ensure file contents are fully committed to disk, using a platform-specific
@@ -101,6 +102,12 @@ bool IsDirWritable(const fs::path& dir_path);
 
 /** Determine whether a path is a symbolic link or, on Windows, a reparse point. */
 bool IsSymlink(const fs::path& path);
+
+/**
+ * The same test without the throw: when the path cannot be examined (for
+ * example because it does not exist), return false and set ec.
+ */
+bool IsSymlink(const fs::path& path, std::error_code& ec);
 
 #ifdef WIN32
 fs::path GetSpecialFolderPath(int nFolder, bool fCreate = true);

@@ -60,10 +60,18 @@ bool ParseProviderHint(const UniValue& obj, int64_t now_ms, int64_t ttl_ms, Prov
         out.availability_summary = obj["availability"].get_str().substr(0, 64);
     }
     int64_t expiry = now_ms + ttl_ms;
-    if (obj.exists("expiry") && obj["expiry"].isNum()) {
-        expiry = obj["expiry"].getInt<int64_t>();
-    } else if (obj.exists("ttl_ms") && obj["ttl_ms"].isNum()) {
-        expiry = now_ms + obj["ttl_ms"].getInt<int64_t>();
+    try {
+        if (obj.exists("expiry") && obj["expiry"].isNum()) {
+            expiry = obj["expiry"].getInt<int64_t>();
+        } else if (obj.exists("ttl_ms") && obj["ttl_ms"].isNum()) {
+            const int64_t peer_ttl = obj["ttl_ms"].getInt<int64_t>();
+            expiry = peer_ttl <= 0 ? now_ms : now_ms + std::min(peer_ttl, ttl_ms);
+        }
+    } catch (const std::exception&) {
+        // isNum() is also true for a number outside int64 or with a fraction,
+        // and getInt() throws for those. This is a peer's message.
+        err = "expiry range";
+        return false;
     }
     if (expiry > now_ms + ttl_ms) expiry = now_ms + ttl_ms;
     if (expiry <= now_ms) {
@@ -97,6 +105,20 @@ bool ProviderExchange::Ingest(const std::string& from_endpoint,
         err = "pex message too large";
         ++m_stats.rejected;
         return false;
+    }
+    // A key is otherwise only dropped when the same peer comes back, so every
+    // distinct address that ever sent a message would stay here. Once a minute,
+    // drop the peers with no message inside the window.
+    if (now_ms < m_peer_times_pruned_ms || now_ms - m_peer_times_pruned_ms > 60000) {
+        for (auto it = m_peer_times.begin(); it != m_peer_times.end();) {
+            auto& times = it->second;
+            times.erase(std::remove_if(times.begin(), times.end(),
+                                       [&](int64_t t) { return now_ms - t > 60000; }),
+                        times.end());
+            if (times.empty()) it = m_peer_times.erase(it);
+            else ++it;
+        }
+        m_peer_times_pruned_ms = now_ms;
     }
     auto tit = m_peer_times.find(from_endpoint);
     if (tit != m_peer_times.end()) {

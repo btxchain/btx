@@ -39,6 +39,7 @@
 #include <uint256.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <array>
 #include <cstdlib>
@@ -102,18 +103,18 @@ public:
             m_original = current;
         }
         if (value != nullptr) {
-            ::setenv(name, value, /*overwrite=*/1);
+            test::SetEnv(name, value);
         } else {
-            ::unsetenv(name);
+            test::UnsetEnv(name);
         }
     }
 
     ~ScopedEnvVar()
     {
         if (m_had_original) {
-            ::setenv(m_name, m_original.c_str(), /*overwrite=*/1);
+            test::SetEnv(m_name, m_original.c_str());
         } else {
-            ::unsetenv(m_name);
+            test::UnsetEnv(m_name);
         }
     }
 

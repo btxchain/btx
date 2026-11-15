@@ -1,0 +1,9 @@
+swarm_kvplace/motion.cpp
+swarm_kvplace/quantization.cpp
+swarm_kvplace/offer.cpp
+swarm_kvplace/prefix.cpp
+swarm_kvplace/cost.cpp
+swarm_kvplace/decision.cpp
+swarm_kvplace/share.cpp
+swarm_kvplace/prefetch.cpp
+swarm_kvplace/swarm_kvplace.cpp

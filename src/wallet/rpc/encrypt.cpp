@@ -93,15 +93,10 @@ RPCHelpMan walletpassphrase()
         // cs_wallet and chain state — no shielded wallet state required.
         pwallet->AbandonStuckShieldingTransactions();
 
-        // Rehydrate shielded keys now that the wallet is unlocked.  When the
-        // node started locked, LoadPersistedState loaded only the plaintext
-        // tree-only fallback (no keys/notes).  Rehydrating here decrypts the
-        // full persisted state and rescans any blocks missed while locked.
-        bool shielded_state_rehydrated{false};
-        if (pwallet->m_shielded_wallet) {
-            LOCK(pwallet->m_shielded_wallet->cs_shielded);
-            shielded_state_rehydrated = pwallet->m_shielded_wallet->MaybeRehydrateSpendingKeys();
-        }
+        // Rehydrate shielded keys and notes now that the wallet is unlocked,
+        // and go over the mempool again when that happened. The Qt unlock
+        // (interfaces::Wallet::unlock) runs the same step.
+        const bool shielded_state_rehydrated{pwallet->RehydrateShieldedStateAfterUnlock()};
 
         // Unlock should be side-effect free when we just rehydrated historical
         // shielded state. Defer coinbase auto-shield until the next block or

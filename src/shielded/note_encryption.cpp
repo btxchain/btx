@@ -556,7 +556,9 @@ std::optional<ShieldedNote> NoteEncryption::TryDecrypt(const EncryptedNote& enc_
         return std::nullopt;
     }
 
-    mlkem::SharedSecret ss = mlkem::Decaps(enc_note.kem_ciphertext, kem_sk);
+    auto secret = mlkem::Decaps(enc_note.kem_ciphertext, kem_sk);
+    if (!secret) return std::nullopt;
+    auto& ss = *secret;
     auto aead_key = DeriveAeadKey(ss);
     const auto aead_nonce = DeriveAeadNonce(ss);
 

@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <future>
+#include <limits>
 #include <optional>
 #include <thread>
 
@@ -2478,8 +2479,14 @@ bool DescriptorScriptPubKeyMan::TopUpWithDB(WalletBatch& batch, unsigned int siz
         target_size = m_keypool_size;
     }
 
-    // Calculate the new range_end
-    int32_t new_range_end = std::max(m_wallet_descriptor.next_index + (int32_t)target_size, m_wallet_descriptor.range_end);
+    // Calculate the new range_end. next_index can be as high as 2^31-1 on an imported
+    // descriptor and target_size is user controlled, so compute the end in a wider type.
+    // The range is left unchanged if that end does not fit in the int32_t it is stored in.
+    const int64_t target_end{int64_t{m_wallet_descriptor.next_index} + target_size};
+    int32_t new_range_end = m_wallet_descriptor.range_end;
+    if (target_end <= std::numeric_limits<int32_t>::max()) {
+        new_range_end = std::max(static_cast<int32_t>(target_end), m_wallet_descriptor.range_end);
+    }
 
     // If the descriptor is not ranged, we actually just want to fill the first cache item
     if (!m_wallet_descriptor.descriptor->IsRange()) {
@@ -2909,6 +2916,18 @@ bool DescriptorScriptPubKeyMan::UnlockPQSeeds(const CKeyingMaterial& master_key)
     if (!plaintext_seed && !plaintext_map) return true;
     LogPrintf("Encrypting PQ descriptor seeds. An older wallet build that only reads plaintext seed records can open this wallet but cannot spend from it.\n");
     return WritePQSeeds(batch, &master_key);
+}
+
+void DescriptorScriptPubKeyMan::LockPQSeeds()
+{
+    LOCK(cs_desc_man);
+    m_map_signing_providers_private.clear();
+    m_map_signing_providers_private_locked.clear();
+    // Wipe the seeds only when UnlockPQSeeds() can decrypt them again. An older wallet
+    // has only a plaintext record until its first unlock, so its seeds stay loaded.
+    if (m_wallet_descriptor.descriptor && (m_crypted_pq_seed || m_crypted_pq_seed_map)) {
+        m_wallet_descriptor.descriptor->WipePQSeeds();
+    }
 }
 
 bool DescriptorScriptPubKeyMan::IsHDEnabled() const
@@ -3526,6 +3545,30 @@ void DescriptorScriptPubKeyMan::UpgradeDescriptorCache()
         // Cache upgrade is best-effort; skip without failing wallet load.
         WalletLogPrintf("%s: skipping cache upgrade because descriptor expansion is unavailable with local keys\n", __func__);
         return;
+    }
+
+    // Expand() had no read cache, so it also re-derived the PQ pubkeys at
+    // index 0, which are normally cached already. If the wallet's seed does not
+    // derive a cached PQ pubkey (for example one written by a build with a
+    // different PQ key derivation), keep the cached pubkey: this wallet's
+    // scripts and coins use it. This upgrade only adds the last hardened
+    // xpubs, so a mismatch is logged rather than failing the wallet load.
+    for (PQAlgorithm algo : {PQAlgorithm::ML_DSA_44, PQAlgorithm::SLH_DSA_128S}) {
+        const PQPubKeyExprMap derived_pubkeys = temp_cache.GetCachedDerivedPQPubKeys(algo);
+        for (const auto& [key_exp_pos, pubkeys] : derived_pubkeys) {
+            for (const auto& [der_index, derived_pubkey] : pubkeys) {
+                std::vector<unsigned char> cached_pubkey;
+                if (!m_wallet_descriptor.cache.GetCachedDerivedPQPubKey(algo, key_exp_pos, der_index, cached_pubkey) ||
+                    cached_pubkey == derived_pubkey) {
+                    continue;
+                }
+                WalletLogPrintf("Warning: descriptor %s: the cached %s pubkey at index %u is not the key this wallet's seed derives. "
+                                "Keeping the cached pubkey, which this wallet's scripts use. This wallet cannot sign with it; "
+                                "coins sent to it can only be spent through another leaf.\n",
+                                GetID().ToString(), algo == PQAlgorithm::ML_DSA_44 ? "ML-DSA-44" : "SLH-DSA-128s", der_index);
+                temp_cache.CacheDerivedPQPubKey(algo, key_exp_pos, der_index, cached_pubkey);
+            }
+        }
     }
 
     // Cache the last hardened xpubs

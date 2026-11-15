@@ -25,6 +25,10 @@
 #include <QAction>
 #include <QFileDialog>
 #include <QHBoxLayout>
+#include <QInputDialog>
+#include <QMessageBox>
+#include <QThread>
+#include <univalue.h>
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -52,6 +56,10 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     if (platformStyle->getImagesOnButtons()) {
         exportButton->setIcon(platformStyle->SingleColorIcon(":/icons/export"));
     }
+    auto* recover = new QPushButton(tr("Recover missing payments…"), this);
+    recover->setObjectName("recoverPaymentsButton");
+    connect(recover, &QPushButton::clicked, this, &WalletView::recoverPayments);
+    hbox_buttons->addWidget(recover);
     hbox_buttons->addStretch();
     hbox_buttons->addWidget(exportButton);
     vbox->addLayout(hbox_buttons);
@@ -111,7 +119,78 @@ WalletView::WalletView(WalletModel* wallet_model, const PlatformStyle* _platform
     connect(walletModel, &WalletModel::showProgress, this, &WalletView::showProgress);
 }
 
-WalletView::~WalletView() = default;
+WalletView::~WalletView()
+{
+    if (m_recovery_thread) {
+        m_recovery->cancel();
+        m_recovery_thread->wait();
+    }
+}
+
+void WalletView::recoverPayments()
+{
+    if (m_recovery) return;
+    bool accepted{false};
+    const int keys = QInputDialog::getInt(this, tr("Recover missing payments"),
+        tr("New keys per descriptor (use a range covering the addresses you used):"),
+        20, 1, 100000, 1, &accepted);
+    if (!accepted) return;
+    if (QMessageBox::question(this, tr("Recover missing payments"),
+            tr("Refill this wallet's address range and scan from genesis to the current tip? "
+               "This can take a long time. Required pruned blocks cannot be recovered. "
+               "New blocks may extend this scan. Cancel takes effect at a safe point; "
+               "the wallet may remain unlocked until the scan or cancellation completes."),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+
+    const bool relock = walletModel->getEncryptionStatus() == WalletModel::Locked;
+    try {
+        // Reserve before asking for a passphrase so a competing scan cannot
+        // acquire the wallet between unlock and recovery.
+        m_recovery = walletModel->wallet().createRecovery(relock);
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, tr("Recovery failed"), QString::fromUtf8(e.what()));
+        return;
+    }
+    if (relock) {
+        AskPassphraseDialog dialog(AskPassphraseDialog::Unlock, this);
+        dialog.setModel(walletModel);
+        if (dialog.exec() != QDialog::Accepted) {
+            m_recovery.reset();
+            return;
+        }
+    }
+    auto error = std::make_shared<QString>();
+    const auto recovery = m_recovery;
+    m_recovery_thread = QThread::create([recovery, error, keys] {
+        try {
+            recovery->run(keys);
+        } catch (const UniValue& e) {
+            *error = QString::fromStdString(e["message"].get_str());
+        } catch (const std::exception& e) {
+            *error = QString::fromUtf8(e.what());
+        }
+    });
+    m_recovery_thread->setParent(this);
+    connect(m_recovery_thread, &QThread::finished, this, [this, error] {
+        m_recovery_thread->deleteLater();
+        m_recovery_thread = nullptr;
+        if (progressDialog) {
+            progressDialog->close();
+            delete progressDialog;
+            progressDialog = nullptr;
+        }
+        m_recovery.reset();
+        if (error->isEmpty()) {
+            QMessageBox::information(this, tr("Recovery complete"),
+                tr("The requested key range was scanned through the starting chain tip. "
+                   "Addresses outside that range may still require a larger refill."));
+        } else {
+            QMessageBox::warning(this, tr("Recovery incomplete"), *error);
+        }
+    });
+    showProgress(tr("Preparing recovery…"), 0);
+    m_recovery_thread->start();
+}
 
 void WalletView::setClientModel(ClientModel *_clientModel)
 {
@@ -277,11 +356,21 @@ void WalletView::usedReceivingAddresses()
 void WalletView::showProgress(const QString &title, int nProgress)
 {
     if (nProgress == 0) {
+        if (progressDialog) {
+            progressDialog->setLabelText(title);
+            return;
+        }
         progressDialog = new QProgressDialog(title, tr("Cancel"), 0, 100);
         GUIUtil::PolishProgressDialog(progressDialog);
         progressDialog->setWindowModality(Qt::ApplicationModal);
         progressDialog->setAutoClose(false);
         progressDialog->setValue(0);
+        if (m_recovery) {
+            progressDialog->setMinimumDuration(0);
+            const auto recovery = m_recovery;
+            connect(progressDialog, &QProgressDialog::canceled, this,
+                    [recovery] { recovery->cancel(); });
+        }
     } else if (nProgress == 100) {
         if (progressDialog) {
             progressDialog->close();
@@ -290,7 +379,8 @@ void WalletView::showProgress(const QString &title, int nProgress)
         }
     } else if (progressDialog) {
         if (progressDialog->wasCanceled()) {
-            getWalletModel()->wallet().abortRescan();
+            if (m_recovery) m_recovery->cancel();
+            else getWalletModel()->wallet().abortRescan();
         } else {
             progressDialog->setValue(nProgress);
         }

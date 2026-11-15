@@ -25,6 +25,12 @@
 
 #include <boost/test/unit_test.hpp>
 
+#if defined(_WIN32)
+// Windows headers may define OPAQUE after v2_types.h has been included.
+#pragma push_macro("OPAQUE")
+#undef OPAQUE
+#endif
+
 namespace {
 
 struct ScopedShieldedSettlementMaturity
@@ -425,8 +431,6 @@ BOOST_AUTO_TEST_CASE(recovery_exit_reserves_commitment_and_nullifier)
     BOOST_CHECK(!pool.HasShieldedNullifierConflict(r2));
 }
 
-BOOST_AUTO_TEST_SUITE_END()
-
 BOOST_FIXTURE_TEST_CASE(shielded_anchor_cleanup_evicts_only_stale_transactions, TestingSetup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -691,3 +695,9 @@ BOOST_FIXTURE_TEST_CASE(shielded_v2_settlement_anchor_cleanup_preserves_valid_ma
     BOOST_CHECK(pool.exists(valid_settlement_anchor_txid));
     BOOST_CHECK(!pool.exists(invalid_settlement_anchor_txid));
 }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("OPAQUE")
+#endif

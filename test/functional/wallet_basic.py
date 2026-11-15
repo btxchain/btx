@@ -709,7 +709,10 @@ class WalletTest(BitcoinTestFramework):
                                  "vout":     baz["vout"]}
         expected_fields = frozenset({
             'amount',
+            'behind_best_header',
             'bip125-replaceable',
+            'chain_stale',
+            'competing_heavier_header',
             'confirmations',
             'details',
             'fee',

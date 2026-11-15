@@ -125,18 +125,26 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
 
     uint256 last_header;
 
-    // Filter should not be found in the index before it is started.
+    // Snapshot the chain under cs_main, then release it before index lookups:
+    // a lookup miss may wait for validation callbacks that also need cs_main.
+    std::vector<const CBlockIndex*> initial_chain;
     {
         LOCK(cs_main);
+        for (const CBlockIndex* block_index = m_node.chainman->ActiveChain().Genesis();
+             block_index != nullptr;
+             block_index = m_node.chainman->ActiveChain().Next(block_index)) {
+            initial_chain.push_back(block_index);
+        }
+    }
 
+    // Filter should not be found in the index before it is started.
+    {
         BlockFilter filter;
         uint256 filter_header;
         std::vector<BlockFilter> filters;
         std::vector<uint256> filter_hashes;
 
-        for (const CBlockIndex* block_index = m_node.chainman->ActiveChain().Genesis();
-             block_index != nullptr;
-             block_index = m_node.chainman->ActiveChain().Next(block_index)) {
+        for (const CBlockIndex* block_index : initial_chain) {
             BOOST_CHECK(!filter_index.LookupFilter(block_index, filter));
             BOOST_CHECK(!filter_index.LookupFilterHeader(block_index, filter_header));
             BOOST_CHECK(!filter_index.LookupFilterRange(block_index->nHeight, block_index, filters));
@@ -154,14 +162,8 @@ BOOST_FIXTURE_TEST_CASE(blockfilter_index_initial_sync, BuildChainTestingSetup)
     IndexWaitSynced(filter_index, *Assert(m_node.shutdown_signal));
 
     // Check that filter index has all blocks that were in the chain before it started.
-    {
-        LOCK(cs_main);
-        const CBlockIndex* block_index;
-        for (block_index = m_node.chainman->ActiveChain().Genesis();
-             block_index != nullptr;
-             block_index = m_node.chainman->ActiveChain().Next(block_index)) {
-            CheckFilterLookups(filter_index, block_index, last_header, m_node.chainman->m_blockman);
-        }
+    for (const CBlockIndex* block_index : initial_chain) {
+        CheckFilterLookups(filter_index, block_index, last_header, m_node.chainman->m_blockman);
     }
 
     // Create two forks.

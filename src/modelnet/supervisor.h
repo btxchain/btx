@@ -17,6 +17,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef WIN32
+#include <sys/types.h>
+#endif
+
 namespace modelnet {
 
 enum class HelperState : uint8_t {
@@ -37,6 +41,7 @@ struct HelperLaunchConfig {
     std::string seed{"auto"};
     bool preserve_rare{false};
     bool follow_peers{true};
+    bool lan_discovery{true};
     uint64_t auto_cap_bytes{0};
     uint64_t reserve_bytes{0};
     uint64_t upload_bps{0};
@@ -48,6 +53,14 @@ struct HelperLaunchConfig {
     HostMode host_mode{HostMode::OFF};
     /** PQ1 listen host:port. Empty = unix RPC only. Packaged btxd default is 0.0.0.0:29447. */
     std::string bind;
+    /** btxd -natpmp. When false the helper does not map the PQ1 port. */
+    bool natpmp{true};
+    /** btxd's outbound proxies as "<proxy>=<ipv4|ipv6|onion|name>"; the helper dials its peers through them. */
+    std::vector<std::string> proxies;
+    /** btxd -proxyrandomize (Tor stream isolation). */
+    bool proxy_randomize{true};
+    /** btxd -onlynet networks. Empty = every network. */
+    std::vector<std::string> onlynets;
     std::vector<std::string> peers;
     std::string watch_dir;
     std::string pwc_chain{"regtest"};
@@ -85,20 +98,37 @@ void ApplyHelperNetworkInfo(HelperStatus& st, const UniValue& result);
 bool ArgvContainsWalletMaterial(const std::vector<std::string>& argv);
 int NextBackoffMs(int fail_count, uint32_t jitter);
 
+/** File name of the packaged helper on this platform. */
+#ifdef WIN32
+inline constexpr char MODELD_FILE_NAME[]{"btx-modeld.exe"};
+#else
+inline constexpr char MODELD_FILE_NAME[]{"btx-modeld"};
+#endif
+/** Directory of the running executable. Empty where the platform gives no way to read it. */
+fs::path SelfExeDir();
+/** The helper next to a btxd in dir, or in the libexec/ and bin/ layouts around it. Empty if none. */
+fs::path FindPackagedModeldIn(const fs::path& dir);
 fs::path FindPackagedModeld(const fs::path& override_path);
 
 class HelperSupervisor {
     HelperLaunchConfig m_cfg;
     mutable std::mutex m_mu;
     HelperStatus m_st;
+#ifdef WIN32
+    int m_pid{-1}; // Helper spawning is not supported on Windows.
+#else
     pid_t m_pid{-1};
+#ifdef __linux__
+    int m_pidfd{-1};
+#endif
+#endif
     std::atomic<bool> m_stop{false};
     std::thread m_thread;
     std::function<bool()> m_shutdown;
 
     void Loop();
     bool SpawnLocked(std::string& err);
-    void ReapLocked();
+    void ClearChildLocked();
     bool WaitReady(int timeout_ms, std::string& err);
     void RequestStopOwned();
     void PollAndSyncHostBit();

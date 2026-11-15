@@ -5,12 +5,15 @@
 
 #include <util/readwritefile.h>
 
+#include <random.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <system_error>
 #include <utility>
 
 std::pair<bool,std::string> ReadBinaryFile(const fs::path &filename, size_t maxsize)
@@ -47,4 +50,53 @@ bool WriteBinaryFile(const fs::path &filename, const std::string &data)
         return false;
     }
     return true;
+}
+
+bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data)
+{
+    return WriteBinaryFileAtomically(filename, data, {});
+}
+
+bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data, const fs::path& staging_dir)
+{
+    return WriteBinaryFileAtomically(filename, [data](std::FILE* file) {
+        return data.empty() || std::fwrite(data.data(), 1, data.size(), file) == data.size();
+    }, staging_dir);
+}
+
+bool WriteBinaryFileAtomically(const fs::path& filename, const std::function<bool(std::FILE*)>& write, const fs::path& staging_dir)
+{
+    std::error_code ec;
+    const auto status = fs::symlink_status(filename, ec);
+    if (ec && ec != std::errc::no_such_file_or_directory) return false;
+    if (fs::exists(status) && !fs::is_regular_file(status)) return false;
+
+    FastRandomContext rng;
+    const fs::path tmp_dir = staging_dir.empty() ? filename.parent_path() : staging_dir;
+    const fs::path tmp = tmp_dir / fs::PathFromString(".btx-export-" + std::to_string(rng.rand64()) + ".tmp");
+    FILE* file = fsbridge::fopen(tmp, "wbx");
+    if (!file) return false;
+    bool committed;
+    try {
+        committed = write(file) && FileCommit(file);
+    } catch (...) {
+        std::fclose(file);
+        fs::remove(tmp, ec);
+        throw;
+    }
+    const bool closed = std::fclose(file) == 0;
+    ec.clear();
+#ifndef WIN32
+    if (committed && closed && fs::exists(status)) {
+        fs::permissions(tmp, status.permissions() & fs::perms::all, fs::perm_options::replace, ec);
+    }
+#endif
+    if (committed && closed && !ec && RenameOver(tmp, filename)) {
+        const auto parent = filename.parent_path();
+        // Replacement has already happened. DirectoryCommit is best-effort.
+        DirectoryCommit(parent.empty() ? fs::PathFromString(".") : parent);
+        return true;
+    }
+    fs::remove(tmp, ec);
+    return false;
 }

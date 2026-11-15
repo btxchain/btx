@@ -1,0 +1,6 @@
+swarm_artifact/artifact.cpp
+swarm_artifact/capture.cpp
+swarm_artifact/join.cpp
+swarm_artifact/offer.cpp
+swarm_artifact/pieces.cpp
+swarm_artifact/split.cpp

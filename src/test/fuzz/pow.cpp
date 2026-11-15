@@ -124,5 +124,13 @@ FUZZ_TARGET(pow_transition, .init = initialize_pow)
     }
     auto last_block{blocks.back().get()};
     unsigned int new_nbits{GetNextWorkRequired(last_block, nullptr, consensus_params)};
-    Assert(PermittedDifficultyTransition(consensus_params, last_block->nHeight + 1, last_block->nBits, new_nbits));
+    if (consensus_params.fMatMulPOW) {
+        // MatMul headers must carry exactly GetNextWorkRequired() (headers
+        // presync and ContextualCheckBlockHeader), so the 4x presync bound
+        // does not apply: on main, the fast-mine bootstrap step from genesis
+        // alone is larger. Check that the result is a valid target.
+        Assert(DeriveTarget(new_nbits, consensus_params.powLimit).has_value());
+    } else {
+        Assert(PermittedDifficultyTransition(consensus_params, last_block->nHeight + 1, last_block->nBits, new_nbits));
+    }
 }

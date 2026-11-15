@@ -2,27 +2,10 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-// Weak CPU-only stubs for the MatMul v4 device backend entry points declared in
-// matmul/accel_v4.h. Compiled into btx_matmul_backend UNCONDITIONALLY so the
-// dispatch layer (matmul/accel_v4.cpp) always links, even with no GPU backend
-// present. Each stub is:
-//
-//   * usually #if-guarded by the backend's CMake define -- when a backend is compiled in
-//     (BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL / BTX_ENABLE_HIP, all
-//     PUBLIC on btx_matmul_backend, mirroring v3's *_stub.cpp gating), the
-//     corresponding real strong definition in the
-//     device translation unit is the sole definition and this stub drops out;
-//     Ascend currently implements only the LT/RC entry points, so its generic
-//     v4/BMX4C stubs remain linked in all configurations;
-//
-//   * marked WEAK regardless, so that even if a real backend definition is
-//     linked without its guard macro matching (e.g. a differently-named define),
-//     the strong device definition still overrides this stub instead of causing
-//     a duplicate-symbol error.
-//
-// A stub simply returns false; the dispatcher then falls back to the byte-exact
-// CPU reference (matmul_v4::ComputeDigest). NO floating point, NO market/price
-// content -- pure consensus-mining plumbing.
+// Ascend currently provides only LT/RC device entry points. Keep its generic
+// v4/BMX4C fallbacks in every configuration. CUDA, Metal and HIP select their
+// device implementations or per-backend stubs in src/CMakeLists.txt; defining
+// those fallbacks here too produces duplicate strong symbols on Windows.
 
 #include <matmul/accel_v4.h>
 
@@ -31,79 +14,12 @@
 
 class CBlockHeader;
 
-// MinGW ld does not pull [[gnu::weak]] definitions out of a static archive,
-// so the CPU stubs have to be ordinary symbols there. No device backend is
-// linked into the MinGW build, so nothing strong overrides them.
+// Windows builds need ordinary archive symbols. These Ascend entry points
+// have no device implementation, including when the LT/RC backend is enabled.
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #define BTX_ACCEL_V4_WEAK
 #else
 #define BTX_ACCEL_V4_WEAK [[gnu::weak]]
-#endif
-
-#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
-namespace matmul_v4::cuda {
-BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_t,
-                                          uint256&, std::vector<unsigned char>&)
-{
-    return false;
-}
-BTX_ACCEL_V4_WEAK bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
-                                                  std::vector<uint256>&,
-                                                  std::vector<std::vector<unsigned char>>&)
-{
-    return false;
-}
-BTX_ACCEL_V4_WEAK bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
-                                                std::vector<uint256>&,
-                                                std::vector<std::vector<unsigned char>>&)
-{
-    return false;
-}
-} // namespace matmul_v4::cuda
-#endif
-
-#if !defined(BTX_ENABLE_METAL)
-namespace matmul_v4::metal {
-BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_t,
-                                          uint256&, std::vector<unsigned char>&)
-{
-    return false;
-}
-BTX_ACCEL_V4_WEAK bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
-                                                  std::vector<uint256>&,
-                                                  std::vector<std::vector<unsigned char>>&)
-{
-    return false;
-}
-BTX_ACCEL_V4_WEAK bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
-                                                std::vector<uint256>&,
-                                                std::vector<std::vector<unsigned char>>&)
-{
-    return false;
-}
-} // namespace matmul_v4::metal
-#endif
-
-#if !defined(BTX_ENABLE_HIP)
-namespace matmul_v4::hip {
-BTX_ACCEL_V4_WEAK bool ComputeDigestAccel(const CBlockHeader&, uint32_t, uint32_t,
-                                          uint256&, std::vector<unsigned char>&)
-{
-    return false;
-}
-BTX_ACCEL_V4_WEAK bool ComputeDigestsBatchedAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
-                                                  std::vector<uint256>&,
-                                                  std::vector<std::vector<unsigned char>>&)
-{
-    return false;
-}
-BTX_ACCEL_V4_WEAK bool ComputeDigestsBMX4CAccel(const std::vector<CBlockHeader>&, uint32_t, uint32_t,
-                                                std::vector<uint256>&,
-                                                std::vector<std::vector<unsigned char>>&)
-{
-    return false;
-}
-} // namespace matmul_v4::hip
 #endif
 
 namespace matmul_v4::ascend {

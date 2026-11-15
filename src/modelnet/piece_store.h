@@ -17,6 +17,11 @@
 #include <tuple>
 #include <vector>
 
+// Keep the C++ store API independent of the Windows SDK include order.
+#if defined(_WIN32) && defined(GetObject)
+#undef GetObject
+#endif
+
 namespace modelnet {
 
 /** Where a verified piece currently lives. Never encodes credentials. */

@@ -137,9 +137,11 @@ std::vector<unsigned char> BuildP2MRHTLCSha256Leaf(
     PQAlgorithm claimant_algo,
     Span<const unsigned char> claimant_pubkey);
 
-/** Previous SHA-256 claim leaf. The script is OP_SHA256 <digest>
- *  OP_EQUALVERIFY with no OP_SIZE pin, so a matching preimage of any length
- *  stays consensus-valid. Spend-only. Do not use for new locks.
+/** Previous SHA-256 claim leaf. The committed script is OP_SHA256 <digest>
+ *  OP_EQUALVERIFY, with no OP_SIZE pin. A matching preimage of any length is
+ *  consensus-valid only before the preimage-length activation height. After
+ *  that height the block flag rejects a non-32-byte preimage on this leaf.
+ *  Spend-only. Do not use for new locks.
  */
 std::vector<unsigned char> BuildP2MRHTLCSha256LegacyLeaf(
     Span<const unsigned char> preimage_sha256,

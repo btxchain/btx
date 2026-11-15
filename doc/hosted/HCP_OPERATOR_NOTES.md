@@ -1,7 +1,9 @@
-# HCP operator notes (0.34.8-dev)
+# HCP operator notes (0.35.0rc1; original HCP/1 surface)
+
+**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](../modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
 
 **Status:** development notes for the Hosted Control Plane (`btx-hcpd` /
-`btx-hosted`). Last shipping release remains **v0.34.7**. This file is not a
+`btx-hosted`). Last shipping release recorded here is **v0.34.15**. This file is not a
 go-live certificate.
 
 HCP is a **third plane**. It is not consensus, not ExactReplay, and not a
@@ -73,6 +75,19 @@ Binaries: `$BUILDDIR/bin` if `BUILDDIR` is set and contains `btx-hcpd`, else
 `$HOME/.local/opt/btx-0.34.8-regtest/bin` if that prefix exists. Do not ninja
 from the demo script.
 
+For an isolated candidate build, compile the actual gateway and client
+targets before launching the kit:
+
+```sh
+cmake --build build-native --target btx-hcpd btx-hosted -j 4
+BUILDDIR="$PWD/build-native" contrib/modelnet/hcp-gateway/run-two-instances.sh
+```
+
+`test/functional/feature_modelnet_cr12_stage_chunk.py` requires the native
+`btx-hcpd` executable. A missing-binary skip leaves that scenario unexecuted.
+The native acceptance runner records binary/source hashes and actual command
+output; a loopback gateway result establishes one-host process behavior only.
+
 Unauthenticated finance:
 
 - Walletless A: HTTP **403** `FUNDING_DISABLED`
@@ -92,7 +107,7 @@ exist without closing the row.
 | **Live custody HSM** | **NOT_RUN** | `-finance=1` uses `HcpFundingLabPreset` + `BTX_NATIVE_TEMPLATES`. No hardware signer, no production custody adapter. |
 | **Live CUDA** | **NOT_RUN** | LOCAL-06 exercises a DMA **fence** without a device. No GPU transfer, no attestor GPU, no isolated CUDA worker for HCP. Do not run CUDA goldens against the live signer GPU. |
 | Production `btxd.real` | **must not replace** | The CUDA GPU attestor stays on its current binary. HCP does not overwrite it. |
-| Second `WITH_MODELNET=OFF` cmake tree | **NOT_RUN** | Disk policy: one Release compile tree. |
+| Native `WITH_MODELNET=OFF` build | **NOT_RUN** | Source guard checks do not constitute a separately built and executed monetary-only binary. |
 | QUIC | **NONSHIPPING** | Do not advertise. |
 
 Go-live manifest (`GoLiveManifest`) must expose claimed vs proven profiles
@@ -171,8 +186,8 @@ Operator approval / date: ____
 ## Cognitive Reserve v1.1 (append — 0.34.8-dev)
 
 **Status:** negotiated HCP/1 extension notes. **Not a fifth plane.** Last
-shipping release remains **v0.34.7**. `CLIENT_VERSION_IS_RELEASE` remains
-**false**. `automatic_spend_atoms` stays **0**. This section is not a go-live
+shipping release recorded here is **v0.34.15**. The candidate is **0.35.0rc1**
+with `CLIENT_VERSION_IS_RELEASE=true`; that build flag is not a go-live certificate. `automatic_spend_atoms` stays **0**. This section is not a go-live
 certificate.
 
 Cognitive Reserve rides `btx-hcpd` / `btx-hosted`. It is **not** consensus,
@@ -281,7 +296,7 @@ filled.
 - [ ] Live CEX IdP / live HSM / live CUDA — until then **NOT_RUN**
 - [ ] Production `btxd.real` left in place (`production_binary_replaced:
       false`)
-- [ ] `CLIENT_VERSION_IS_RELEASE` still **false**
+- [ ] Candidate is 0.35.0rc1 (`CLIENT_VERSION_IS_RELEASE=true`); independent native evidence is attached
 
 ### Failure posture (CR11)
 
@@ -302,4 +317,4 @@ Parent `ProviderProfile` body ID / extension binding: ____
 Two independently configured origins demonstrated: ____  
 `automatic_spend_atoms=0` on both: ____  
 Production attestor left in place: ____  
-`CLIENT_VERSION_IS_RELEASE=false`: ____
+Candidate version, build flags, and independent qualification record: ____

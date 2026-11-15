@@ -355,9 +355,13 @@ class RawTransactionsTest(BitcoinTestFramework):
             changeAddress=change_address,
             fee_rate=2,
         )
-        watch_signed = watch.signrawtransactionwithwallet(watch_funded["hex"])
-        assert not watch_signed["complete"]
-        signer_signed = signer.signrawtransactionwithwallet(watch_signed["hex"])
+        assert_raises_rpc_error(
+            -4,
+            "Private keys are disabled for this wallet",
+            watch.signrawtransactionwithwallet,
+            watch_funded["hex"],
+        )
+        signer_signed = signer.signrawtransactionwithwallet(watch_funded["hex"])
         assert signer_signed["complete"]
         assert signer.testmempoolaccept([signer_signed["hex"]])[0]["allowed"]
 

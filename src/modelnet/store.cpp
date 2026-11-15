@@ -9,6 +9,7 @@
 #include <crypto/sha384.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
@@ -239,12 +240,12 @@ void ModelStore::RecountUsed()
     }
 }
 
-bool ModelStore::RemoveArtifact(const Digest48& artifact, std::string& err)
+uint64_t ModelStore::ArtifactBytes(const Digest48& artifact) const
 {
     const fs::path dir = ArtifactDir(m_root, artifact);
-    if (!fs::exists(dir)) return true;
+    if (!fs::exists(dir)) return 0;
     std::error_code ec;
-    uint64_t drop = 0;
+    uint64_t bytes = 0;
     for (auto it = std::filesystem::recursive_directory_iterator(dir, ec),
          end = std::filesystem::recursive_directory_iterator();
          it != end && !ec; it.increment(ec)) {
@@ -252,9 +253,18 @@ bool ModelStore::RemoveArtifact(const Digest48& artifact, std::string& err)
         const std::string name = fs::PathToString(it->path().filename());
         if (name.size() >= 6 && name.compare(name.size() - 6, 6, ".piece") == 0) {
             const auto sz = std::filesystem::file_size(it->path(), ec);
-            if (!ec) drop += sz;
+            if (!ec) bytes += sz;
         }
     }
+    return bytes;
+}
+
+bool ModelStore::RemoveArtifact(const Digest48& artifact, std::string& err)
+{
+    const fs::path dir = ArtifactDir(m_root, artifact);
+    if (!fs::exists(dir)) return true;
+    const uint64_t drop = ArtifactBytes(artifact);
+    std::error_code ec;
     std::filesystem::remove_all(dir, ec);
     if (ec) {
         err = "artifact remove failed";
@@ -294,25 +304,11 @@ bool ModelStore::PutVerifiedPiece(const Digest48& artifact, uint32_t file_index,
         err = "disk quota";
         return false;
     }
+    const std::string_view contents = bytes.empty() ? std::string_view{} :
+        std::string_view{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
     fs::create_directories(m_root / "tmp");
-    const fs::path tmp = m_root / "tmp" / (artifact.Hex() + "-" + std::to_string(file_index) + "-" + std::to_string(piece_index) + ".tmp").c_str();
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            err = "tmp write failed";
-            return false;
-        }
-        if (!bytes.empty()) out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-        out.flush();
-        if (!out) {
-            err = "tmp write failed";
-            return false;
-        }
-    }
-    std::error_code ec;
-    fs::rename(tmp, final_path, ec);
-    if (ec) {
-        err = "atomic rename failed";
+    if (!WriteBinaryFileAtomically(final_path, contents, m_root / "tmp")) {
+        err = "piece write failed";
         return false;
     }
     m_quota.used_bytes += bytes.size();
@@ -478,25 +474,9 @@ bool ModelStore::SavePieceIndex(const Digest48& artifact, uint32_t file_index, c
     for (const auto& leaf : idx.leaves) leaves.push_back(leaf.Hex());
     obj.pushKV("leaves", leaves);
     const fs::path final_path = dir / "index.json";
-    const fs::path tmp = m_root / "tmp" / (artifact.Hex() + "-" + std::to_string(file_index) + "-index.tmp").c_str();
-    fs::create_directories(tmp.parent_path());
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) {
-            err = "index tmp write failed";
-            return false;
-        }
-        out << obj.write(2, 0) << "\n";
-        out.flush();
-        if (!out) {
-            err = "index tmp write failed";
-            return false;
-        }
-    }
-    std::error_code ec;
-    fs::rename(tmp, final_path, ec);
-    if (ec) {
-        err = "index rename failed";
+    fs::create_directories(m_root / "tmp");
+    if (!WriteBinaryFileAtomically(final_path, obj.write(2, 0) + "\n", m_root / "tmp")) {
+        err = "index write failed";
         return false;
     }
     return true;
@@ -540,26 +520,9 @@ bool ModelStore::SavePieceProof(const Digest48& artifact, uint32_t file_index, u
     for (const auto& d : siblings) sibs.push_back(d.Hex());
     obj.pushKV("siblings", sibs);
     const fs::path final_path = dir / (std::to_string(piece_index) + ".proof.json").c_str();
-    const fs::path tmp = m_root / "tmp" / (artifact.Hex() + "-" + std::to_string(file_index) + "-" +
-                                            std::to_string(piece_index) + "-proof.tmp").c_str();
-    fs::create_directories(tmp.parent_path());
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        if (!out) {
-            err = "proof tmp write failed";
-            return false;
-        }
-        out << obj.write() << "\n";
-        out.flush();
-        if (!out) {
-            err = "proof tmp write failed";
-            return false;
-        }
-    }
-    std::error_code ec;
-    fs::rename(tmp, final_path, ec);
-    if (ec) {
-        err = "proof rename failed";
+    fs::create_directories(m_root / "tmp");
+    if (!WriteBinaryFileAtomically(final_path, obj.write() + "\n", m_root / "tmp")) {
+        err = "proof write failed";
         return false;
     }
     return true;

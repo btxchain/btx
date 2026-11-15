@@ -130,6 +130,7 @@ class FileStreamHydration {
     Digest48 m_expected_root;
     bool m_have_expected_sha{false};
     bool m_have_expected_root{false};
+    bool m_integrity_failed{false};
     ModelStore* m_store{nullptr};
     ModelStore* m_quarantine{nullptr};
     fs::path m_job_dir;
@@ -166,6 +167,8 @@ public:
     bool Feed(Span<const unsigned char> chunk, std::string& err);
 
     bool Finish(std::string& err);
+    /** Last finalization rejected the complete file hash or pieces root. */
+    bool IntegrityFailed() const { return m_integrity_failed; }
     bool IsAdvertisable() const { return m_st.complete && !m_st.quarantined; }
 };
 
@@ -232,6 +235,7 @@ class OriginStampedeGuard {
     mutable std::mutex m_mu;
     std::map<std::string, std::vector<int64_t>> m_peer_hits;
     std::map<std::string, std::vector<int64_t>> m_ng_hits;
+    int64_t m_pruned_ms{0};
     std::map<std::string, int> m_errors;
     std::map<std::string, int64_t> m_open_until;
 

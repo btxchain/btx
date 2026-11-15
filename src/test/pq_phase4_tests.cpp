@@ -22,12 +22,19 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <stdexcept>
 #include <cassert>
 #include <chrono>
 #include <fstream>
 #include <optional>
 #include <utility>
 #include <vector>
+
+#ifdef WIN32
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -158,12 +165,43 @@ std::string EncodePSBTForMockSigner(const PartiallySignedTransaction& psbt)
     return EncodeBase64(ss.str());
 }
 
+std::string MockSignerCommand(const fs::path& script_path)
+{
+#ifdef WIN32
+    // The command API tokenizes on whitespace. Use absolute, space-free
+    // Windows paths rather than adding unsupported shell quoting.
+    std::array<wchar_t, 32768> shell_path{};
+    if (_wsearchenv_s(L"bash.exe", L"PATH", shell_path.data(), shell_path.size()) != 0 || shell_path[0] == L'\0') {
+        throw std::runtime_error("Mock signer tests require Git Bash on PATH");
+    }
+    const auto command_path = [](const fs::path& path) {
+        std::array<wchar_t, 32768> short_path{};
+        const DWORD length = GetShortPathNameW(path.c_str(), short_path.data(), short_path.size());
+        if (length == 0 || length >= short_path.size()) {
+            throw std::runtime_error("Cannot resolve mock signer command path");
+        }
+        std::string result = fs::PathToString(fs::path{short_path.data()});
+        std::replace(result.begin(), result.end(), '\\', '/');
+        if (result.find_first_of(" \t") != std::string::npos) {
+            throw std::runtime_error("Mock signer tests require whitespace-free command paths");
+        }
+        return result;
+    };
+    return command_path(fs::path{shell_path.data()}) + " " + command_path(script_path);
+#else
+    return "/bin/sh " + fs::PathToString(script_path);
+#endif
+}
+
 fs::path WriteStaticMockSignerScriptResponse(const std::string& json_response)
 {
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path script_path = fs::temp_directory_path() / strprintf("btx_mock_signer_%lld.sh", static_cast<long long>(unique));
-    std::ofstream script_file(script_path);
+    std::ofstream script_file(script_path, std::ios::binary);
     script_file << "#!/bin/sh\n";
+#ifdef WIN32
+    script_file << "PATH=/usr/bin:/bin:$PATH\n";
+#endif
     script_file << "cat <<'EOF'\n";
     script_file << json_response << "\n";
     script_file << "EOF\n";
@@ -175,8 +213,11 @@ fs::path WriteFailingMockSignerScript()
 {
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path script_path = fs::temp_directory_path() / strprintf("btx_mock_signer_fail_%lld.sh", static_cast<long long>(unique));
-    std::ofstream script_file(script_path);
+    std::ofstream script_file(script_path, std::ios::binary);
     script_file << "#!/bin/sh\n";
+#ifdef WIN32
+    script_file << "PATH=/usr/bin:/bin:$PATH\n";
+#endif
     script_file << "cat >/dev/null\n";
     script_file << "echo mock signer failed >&2\n";
     script_file << "exit 1\n";
@@ -188,8 +229,11 @@ fs::path WriteArgDumpMockSignerScript()
 {
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     const fs::path script_path = fs::temp_directory_path() / strprintf("btx_mock_signer_args_%lld.sh", static_cast<long long>(unique));
-    std::ofstream script_file(script_path);
+    std::ofstream script_file(script_path, std::ios::binary);
     script_file << "#!/bin/sh\n";
+#ifdef WIN32
+    script_file << "PATH=/usr/bin:/bin:$PATH\n";
+#endif
     script_file << "set -eu\n";
     script_file << "first=1\n";
     script_file << "out='{\"argv\":\"'\n";
@@ -1075,13 +1119,13 @@ BOOST_AUTO_TEST_CASE(external_signer_matches_p2mr_bip32_fingerprint)
 
     const fs::path script_path = WriteFailingMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
 
     std::string error;
-    BOOST_CHECK_THROW(signer.SignTransaction(psbt, error), std::runtime_error);
+    BOOST_CHECK_EXCEPTION(signer.SignTransaction(psbt, error), std::runtime_error, [](const std::runtime_error& e) { return std::string{e.what()}.find("returned 1: mock signer failed") != std::string::npos; });
     fs::remove(script_path);
 }
 
@@ -1106,7 +1150,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_malformed_request_p2mr_bip32_origin
 
     const fs::path script_path = WriteFailingMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1144,7 +1188,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_invalid_p2mr_partial_sig_size)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1181,7 +1225,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_unexpected_p2mr_partial_sig_pubkey)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1221,7 +1265,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_partial_sig_pubkey_with_nonmatching
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1258,7 +1302,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_p2mr_partial_sig_for_unselected_lea
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1297,7 +1341,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_wrong_leaf_sig_when_signer_omits_le
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1331,7 +1375,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_conflicting_selected_leaf_metadata)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1365,7 +1409,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_unsupported_selected_leaf_version)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1403,7 +1447,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_unexpected_p2mr_bip32_derivation)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1440,7 +1484,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_conflicting_p2mr_bip32_derivation)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1479,7 +1523,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_unexpected_p2mr_csfs_message)
     const fs::path script_path = WriteStaticMockSignerScriptResponse(
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1520,7 +1564,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_conflicting_p2mr_csfs_message)
     const fs::path script_path = WriteStaticMockSignerScriptResponse(
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1560,7 +1604,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_invalid_p2mr_csfs_sig_size)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1600,7 +1644,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_p2mr_csfs_signature_without_message
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1642,7 +1686,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_unexpected_p2mr_csfs_signature_pubk
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1686,7 +1730,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_nonmatching_fingerprint_p2mr_csfs_s
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1747,7 +1791,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_request_p2mr_metadata_without_prevo
 
     const fs::path script_path = WriteFailingMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1782,7 +1826,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_request_p2mr_metadata_for_non_p2mr_
 
     const fs::path script_path = WriteFailingMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1853,7 +1897,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_conflicting_signer_p2mr_merkle_root
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -1990,7 +2034,7 @@ BOOST_AUTO_TEST_CASE(external_signer_enumerate_parses_p2mr_capabilities)
         R"([{"fingerprint":"00000001","model":"Mock","capabilities":{"p2mr":true,"pq_algorithms":["ml_dsa_44","slh_dsa_128s"]}}])");
 
     std::vector<ExternalSigner> signers;
-    BOOST_REQUIRE(ExternalSigner::Enumerate("/bin/sh " + fs::PathToString(script_path), signers, "regtest"));
+    BOOST_REQUIRE(ExternalSigner::Enumerate(MockSignerCommand(script_path), signers, "regtest"));
     BOOST_REQUIRE_EQUAL(signers.size(), 1U);
     BOOST_CHECK(signers[0].SupportsP2MR());
     BOOST_REQUIRE_EQUAL(signers[0].SupportedPQAlgorithms().size(), 2U);
@@ -2005,7 +2049,7 @@ BOOST_AUTO_TEST_CASE(external_signer_enumerate_defaults_without_p2mr_capabilitie
         R"([{"fingerprint":"00000002","model":"Mock"}])");
 
     std::vector<ExternalSigner> signers;
-    BOOST_REQUIRE(ExternalSigner::Enumerate("/bin/sh " + fs::PathToString(script_path), signers, "regtest"));
+    BOOST_REQUIRE(ExternalSigner::Enumerate(MockSignerCommand(script_path), signers, "regtest"));
     BOOST_REQUIRE_EQUAL(signers.size(), 1U);
     BOOST_CHECK(!signers[0].SupportsP2MR());
     BOOST_CHECK(signers[0].SupportedPQAlgorithms().empty());
@@ -2018,7 +2062,7 @@ BOOST_AUTO_TEST_CASE(external_signer_enumerate_rejects_invalid_fingerprint)
         R"([{"fingerprint":"bad-fp;echo pwn","model":"Mock"}])");
 
     std::vector<ExternalSigner> signers;
-    BOOST_CHECK_THROW(ExternalSigner::Enumerate("/bin/sh " + fs::PathToString(script_path), signers, "regtest"), std::runtime_error);
+    BOOST_CHECK_EXCEPTION(ExternalSigner::Enumerate(MockSignerCommand(script_path), signers, "regtest"), std::runtime_error, [](const std::runtime_error& e) { return std::string{e.what()}.find("received invalid signer fingerprint") != std::string::npos; });
     fs::remove(script_path);
 }
 
@@ -2028,7 +2072,7 @@ BOOST_AUTO_TEST_CASE(external_signer_enumerate_rejects_non_string_fingerprint)
         R"([{"fingerprint":1234,"model":"Mock"}])");
 
     std::vector<ExternalSigner> signers;
-    BOOST_CHECK_THROW(ExternalSigner::Enumerate("/bin/sh " + fs::PathToString(script_path), signers, "regtest"), std::runtime_error);
+    BOOST_CHECK_EXCEPTION(ExternalSigner::Enumerate(MockSignerCommand(script_path), signers, "regtest"), std::runtime_error, [](const std::runtime_error& e) { return std::string{e.what()}.find("received invalid signer fingerprint") != std::string::npos; });
     fs::remove(script_path);
 }
 
@@ -2038,7 +2082,7 @@ BOOST_AUTO_TEST_CASE(external_signer_enumerate_duplicate_does_not_hide_later_sig
         R"([{"fingerprint":"00000001","model":"First"},{"fingerprint":"00000001","model":"Duplicate"},{"fingerprint":"00000002","model":"Second"}])");
 
     std::vector<ExternalSigner> signers;
-    BOOST_REQUIRE(ExternalSigner::Enumerate("/bin/sh " + fs::PathToString(script_path), signers, "regtest"));
+    BOOST_REQUIRE(ExternalSigner::Enumerate(MockSignerCommand(script_path), signers, "regtest"));
     BOOST_REQUIRE_EQUAL(signers.size(), 2U);
     BOOST_CHECK_EQUAL(signers[0].m_fingerprint, "00000001");
     BOOST_CHECK_EQUAL(signers[1].m_fingerprint, "00000002");
@@ -2049,7 +2093,7 @@ BOOST_AUTO_TEST_CASE(external_signer_command_args_are_not_shell_quoted)
 {
     const fs::path script_path = WriteArgDumpMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -2071,7 +2115,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_invalid_chain_argument)
 {
     const fs::path script_path = WriteArgDumpMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest injected",
         "00000001",
         "mock"};
@@ -2083,7 +2127,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_displayaddress_descriptor_with_whit
 {
     const fs::path script_path = WriteArgDumpMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -2097,7 +2141,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_getp2mrpubkeys_descriptor_with_whit
 {
     const fs::path script_path = WriteArgDumpMockSignerScript();
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -2133,7 +2177,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_modified_unsigned_tx)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -2177,7 +2221,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_p2mr_material_for_non_p2mr_input)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -2219,7 +2263,7 @@ BOOST_AUTO_TEST_CASE(external_signer_rejects_p2mr_material_without_prevout_scrip
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};
@@ -2262,7 +2306,7 @@ BOOST_AUTO_TEST_CASE(external_signer_preserves_existing_psbt_input_metadata)
         "{\"psbt\":\"" + EncodePSBTForMockSigner(signer_response) + "\"}");
 
     ExternalSigner signer{
-        "/bin/sh " + fs::PathToString(script_path),
+        MockSignerCommand(script_path),
         "regtest",
         "00000001",
         "mock"};

@@ -214,20 +214,30 @@ bool RecipientBound(const std::string& recipient, const SubscriptionMandate& m)
     return recipient == m.publisher_id || recipient == m.owner_identity;
 }
 
+//! True only when the file is certainly not there; an error while checking
+//! counts as present, so the read below refuses it.
+bool StateFileMissing(const fs::path& path)
+{
+    try {
+        return !fs::exists(path);
+    } catch (const fs::filesystem_error&) {
+        return false;
+    }
+}
+
 bool ReadStateFile(const fs::path& path, UniValue& out)
 {
+    out = UniValue(UniValue::VOBJ);
+    // Only a missing file is an empty store. A file that is there but cannot be
+    // opened, or is empty, may have held mandates whose spent budget must not
+    // be freed, so it counts as unreadable.
+    if (StateFileMissing(path)) return true;
     std::ifstream in(path);
-    if (!in) {
-        out = UniValue(UniValue::VOBJ);
-        return true;
-    }
+    if (!in) return false;
     std::ostringstream ss;
     ss << in.rdbuf();
     const std::string text = ss.str();
-    if (text.empty()) {
-        out = UniValue(UniValue::VOBJ);
-        return true;
-    }
+    if (text.empty()) return false;
     if (!out.read(text) || !out.isObject()) {
         out = UniValue(UniValue::VOBJ);
         return false;
@@ -870,6 +880,19 @@ bool SubscriptionBudget::EvaluateAndReserve(const SubscriptionEvent& event, cons
     return true;
 }
 
+void SubscriptionBudget::Unreserve(const Reservation& r)
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    auto it = m_by_event.find(r.event_id);
+    if (it == m_by_event.end() || it->second.reservation_id != r.reservation_id) return;
+    m_by_event.erase(it);
+    m_used_principal -= r.principal_atoms;
+    m_used_fees -= r.fee_atoms;
+    m_outstanding -= r.principal_atoms + r.fee_atoms;
+    --m_action_count;
+    --m_concurrent;
+}
+
 void SubscriptionBudget::Revoke()
 {
     std::lock_guard<std::mutex> lock(m_mu);
@@ -1073,6 +1096,9 @@ bool SubscriptionBudget::LoadStateJson(const UniValue& state, std::string& err)
                 return false;
             }
             Reservation r;
+            // A budget holds the reservations of its one mandate; the file does
+            // not repeat the id per reservation.
+            r.mandate_id = m.mandate_id;
             r.reservation_id = StrField(e, "reservation_id");
             r.event_id = StrField(e, "event_id");
             r.object_id = StrField(e, "object_id");
@@ -1144,6 +1170,7 @@ bool SubscriptionStore::SetPersistPath(const fs::path& path, std::string& err)
     m_mandates.clear();
     m_budgets.clear();
     m_path = path;
+    if (StateFileMissing(m_path)) return true; // no file yet
     UniValue root;
     if (!ReadStateFile(m_path, root)) {
         // Refuse to start on a corrupt file rather than silently freeing a spent budget.
@@ -1151,7 +1178,11 @@ bool SubscriptionStore::SetPersistPath(const fs::path& path, std::string& err)
         err = "corrupt " + fs::PathToString(path);
         return false;
     }
-    if (!root.exists("mandates") || !root["mandates"].isArray()) return true;
+    if (!root.exists("mandates") || !root["mandates"].isArray()) {
+        m_path.clear();
+        err = "corrupt " + fs::PathToString(path);
+        return false;
+    }
     for (const UniValue& state : root["mandates"].getValues()) {
         auto slot = std::make_unique<SubscriptionBudget>();
         if (!slot->LoadStateJson(state, err)) {
@@ -1178,6 +1209,12 @@ bool SubscriptionStore::Persisted() const
 {
     std::lock_guard<std::mutex> lock(m_mu);
     return !m_path.empty();
+}
+
+fs::path SubscriptionStore::PersistPath() const
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    return m_path;
 }
 
 bool SubscriptionStore::SetNodeNetwork(const std::string& network_hex, std::string& err)
@@ -1321,9 +1358,15 @@ bool SubscriptionStore::Dispatch(const std::string& method, const UniValue& para
             }
         }
         Reservation r;
+        const int64_t actions_before = it->second->StatusJson()["action_count"].getInt<int64_t>();
         if (!it->second->EvaluateAndReserve(ev, terms, r, now_ms, err)) return fail("REJECTED", err);
         // Spent budget that is only in memory is spendable again after a restart.
-        if (!SaveLocked(err)) return fail("REJECTED", err);
+        if (!SaveLocked(err)) {
+            // The call is refused, so it must not leave the reservation behind: take
+            // back a new one (a replay of a saved one changed nothing).
+            if (it->second->StatusJson()["action_count"].getInt<int64_t>() > actions_before) it->second->Unreserve(r);
+            return fail("REJECTED", err);
+        }
         result = ReservationToJson(r);
         result.pushKV("used_principal_atoms", std::to_string(it->second->UsedPrincipal()));
         result.pushKV("used_fee_atoms", std::to_string(it->second->UsedFees()));

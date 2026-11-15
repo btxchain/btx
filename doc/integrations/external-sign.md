@@ -1,8 +1,8 @@
 # BCP/1 external signing
 
 **Release state.** This document describes the BCP/1 signing lifecycle that
-shipped in **v0.34.8**. This working tree is **0.34.9-dev**
-(`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=false`). It is not a published vendor HSM certification.
+shipped in **v0.34.8**. This working tree is **0.35.0rc1**. The last
+shipping tag remains **v0.34.15**. It is not a published vendor HSM certification.
 
 **Proven scope.** Isolated-regtest `feature_bcp1.py` proves a **software** ML-DSA-44 round trip: watch-only deposit pool → unsigned package → canonical digests → valid signature → `finalizeexternalsign complete=true` → `testmempoolaccept` → explicit `sendrawtransaction`. It does **not** prove a live vendor HSM, PKCS#11, KMIP, or HTTPS adapter (those classes fail closed with no client linked). `--stub-signature` remains a negative test only. See [../../contrib/bcp1/README.md](../../contrib/bcp1/README.md).
 
@@ -33,6 +33,8 @@ createpsbt
 | `finalizeexternalsign` | Coordinator | Inserts signatures; **validates** witness/digest binding locally; returns hex. **Does not send.** |
 | `testmempoolaccept` | Coordinator | Second validation: policy + consensus before broadcast. |
 | `sendrawtransaction` | Coordinator | Only after accept. |
+
+A package that is still being signed does not reserve its inputs: the next `createexchangebatch`, `createconsolidationtx` or `walletcreatefundedpsbt` call can select them again, and the two transactions then conflict. Pass `lock_unspents: true` (`lockUnspents` for `walletcreatefundedpsbt`) to lock the package's `selected_utxos`, or lock them yourself with `lockunspent false`. Broadcasting the package spends and unlocks them; for a package you drop, call `lockunspent true` on its `selected_utxos`. These locks live in memory and a restart clears them, so after a restart lock the inputs of packages still in flight again (`lockunspent false <inputs> true` writes the lock to the wallet).
 
 Do not skip `testmempoolaccept`. A corrupt ML-DSA signature, wrong prevout, wrong network, or non-canonical witness must fail before send.
 

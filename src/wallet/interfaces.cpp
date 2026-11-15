@@ -30,6 +30,7 @@
 #include <wallet/load.h>
 #include <wallet/receive.h>
 #include <wallet/rpc/wallet.h>
+#include <wallet/rpc/util.h>
 #include <wallet/spend.h>
 #include <wallet/wallet.h>
 
@@ -147,6 +148,77 @@ WalletTxOut MakeWalletTxOut(const CWallet& wallet,
     return result;
 }
 
+class WalletRecoveryImpl final : public interfaces::WalletRecovery
+{
+    std::shared_ptr<CWallet> m_wallet;
+    WalletRescanReserver m_reserver;
+    bool m_relock;
+    int64_t m_relock_time{0};
+
+    void finish()
+    {
+        LOCK2(m_wallet->m_relock_mutex, m_wallet->cs_wallet);
+        // A newer walletpassphrase call owns its own timed relock.
+        if (m_relock && (m_wallet->nRelockTime == 0 || m_wallet->nRelockTime == m_relock_time)) {
+            m_wallet->Lock();
+        }
+        m_relock = false;
+    }
+
+public:
+    WalletRecoveryImpl(std::shared_ptr<CWallet> wallet, bool relock)
+        : m_wallet(std::move(wallet)), m_reserver(*m_wallet), m_relock(relock)
+    {
+        if (!m_reserver.reserve(/*with_passphrase=*/true)) {
+            throw std::runtime_error("Wallet is already rescanning. Abort it or wait.");
+        }
+        m_relock_time = WITH_LOCK(m_wallet->cs_wallet, return m_wallet->nRelockTime);
+    }
+
+    ~WalletRecoveryImpl() override { finish(); }
+
+    void cancel() override
+    {
+        // The reservation lives until this operation is destroyed, including
+        // before run() and after completion, so another scan cannot be aborted.
+        m_wallet->AbortRescan();
+    }
+
+    void run(unsigned int keypool_size) override
+    {
+        LOCK(m_wallet->m_relock_mutex);
+        try {
+            EnsureWalletIsUnlocked(*m_wallet);
+            if (m_wallet->IsAbortingRescan()) throw std::runtime_error("Recovery cancelled.");
+            {
+                LOCK(m_wallet->cs_wallet);
+                if (!m_wallet->TopUpKeyPool(keypool_size) || m_wallet->GetKeyPoolSize() < keypool_size) {
+                    throw std::runtime_error("Could not refill the requested key range.");
+                }
+            }
+            if (m_wallet->IsAbortingRescan()) throw std::runtime_error("Recovery cancelled.");
+            m_wallet->BlockUntilSyncedToCurrentChain();
+            const auto [tip, height] = WITH_LOCK(m_wallet->cs_wallet,
+                return std::make_pair(m_wallet->GetLastBlockHash(), m_wallet->GetLastBlockHeight()));
+            UniValue params(UniValue::VARR);
+            params.push_back(0);
+            params.push_back(UniValue());
+            const UniValue scan = RescanWallet(*m_wallet, params, m_reserver);
+            const uint256 current_tip = WITH_LOCK(m_wallet->cs_wallet, return m_wallet->GetLastBlockHash());
+            uint256 ancestor;
+            if (scan["stop_height"].isNull() || scan["stop_height"].getInt<int>() < height ||
+                !m_wallet->chain().findAncestorByHeight(current_tip, height, FoundBlock().hash(ancestor)) ||
+                ancestor != tip) {
+                throw std::runtime_error("The recovery range changed during a reorganisation. Retry recovery.");
+            }
+        } catch (...) {
+            finish();
+            throw;
+        }
+        finish();
+    }
+};
+
 class WalletImpl : public Wallet
 {
 public:
@@ -158,7 +230,22 @@ public:
     }
     bool isCrypted() override { return m_wallet->IsCrypted(); }
     bool lock() override { return m_wallet->Lock(); }
-    bool unlock(const SecureString& wallet_passphrase) override { return m_wallet->Unlock(wallet_passphrase); }
+    bool unlock(const SecureString& wallet_passphrase) override
+    {
+        if (!m_wallet->Unlock(wallet_passphrase)) return false;
+        // As walletpassphrase does: a wallet loaded or scanned while locked
+        // gets its shielded keys and notes back. No auto-shield here: a Qt
+        // unlock is short and serves one action.
+        try {
+            LOCK(m_wallet->cs_wallet);
+            (void)m_wallet->RehydrateShieldedStateAfterUnlock();
+        } catch (const std::exception& e) {
+            // The wallet is unlocked; report the failure in the log instead of
+            // making the dialog say the unlock failed.
+            m_wallet->WalletLogPrintf("Shielded state rehydration after unlock failed: %s\n", e.what());
+        }
+        return true;
+    }
     bool isLocked() override { return m_wallet->IsLocked(); }
     bool changeWalletPassphrase(const SecureString& old_wallet_passphrase,
         const SecureString& new_wallet_passphrase) override
@@ -166,6 +253,10 @@ public:
         return m_wallet->ChangeWalletPassphrase(old_wallet_passphrase, new_wallet_passphrase);
     }
     void abortRescan() override { m_wallet->AbortRescan(); }
+    std::unique_ptr<interfaces::WalletRecovery> createRecovery(bool relock) override
+    {
+        return std::make_unique<WalletRecoveryImpl>(m_wallet, relock);
+    }
     bool canBackupToDbDump() override {
         return (m_wallet->GetDatabase().Format() != "bdb");
     }

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "DS-HIRE-003",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "controls can be recorded; release qualification stays false"
+  },
+  {
+    "id": "DS-HIRE-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "unmeasured warm capacity is not advertised"
+  },
+  {
+    "id": "DS-LEARN-001",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "IssueRelease stays unqualified even when gates_passed is true"
+  }
+]

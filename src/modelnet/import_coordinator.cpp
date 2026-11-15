@@ -272,6 +272,10 @@ bool ImportCoordinator::StageFromSource(ByteSource& src, const ImportFileSpec& s
     }
     io.Complete();
     out.close();
+    if (!out) {
+        err = "close";
+        return false;
+    }
     if (!spec.sha384_hex.empty()) {
         Digest48 sha, root;
         uint64_t sz = 0;

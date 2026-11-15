@@ -40,7 +40,8 @@ struct MockedTxPool : public CTxMemPool {
 
 void initialize_tx_pool()
 {
-    static const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
+    static const auto testing_setup = MakeNoLogFileContext<const TestingSetup>(
+        ChainType::REGTEST, {.extra_args = SetupChainMatMulArgs()});
     g_setup = testing_setup.get();
 
     BlockAssembler::Options options;

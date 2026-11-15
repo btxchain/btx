@@ -28,7 +28,9 @@
 #include <univalue.h>
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -59,8 +61,8 @@ struct EnvRestore {
     }
     ~EnvRestore()
     {
-        if (had) ::setenv(key, old.c_str(), 1);
-        else ::unsetenv(key);
+        if (had) test::SetEnv(key, old.c_str());
+        else test::UnsetEnv(key);
     }
 };
 
@@ -327,7 +329,7 @@ BOOST_AUTO_TEST_CASE(JIT_PEER_06)
 
     {
         EnvRestore nixl("BTX_NIXL_LIB");
-        ::unsetenv("BTX_NIXL_LIB");
+        test::UnsetEnv("BTX_NIXL_LIB");
         modelnet::PeerTransferOffer off;
         BOOST_REQUIRE(modelnet::ProbePeerBackends(off));
         AssertProbeHonesty(off);
@@ -341,7 +343,7 @@ BOOST_AUTO_TEST_CASE(JIT_PEER_06)
     {
         EnvRestore nixl("BTX_NIXL_LIB");
 #ifdef __APPLE__
-        ::setenv("BTX_NIXL_LIB", "/bin/sh", 1);
+        test::SetEnv("BTX_NIXL_LIB", "/bin/sh");
         modelnet::PeerTransferOffer off;
         BOOST_REQUIRE(modelnet::ProbePeerBackends(off));
         AssertProbeHonesty(off);
@@ -349,7 +351,11 @@ BOOST_AUTO_TEST_CASE(JIT_PEER_06)
         BOOST_CHECK_EQUAL(std::string(modelnet::TransportAssuranceName(off.assurance)), "HOST_BUFFER");
         BOOST_TEST_MESSAGE("JIT-PEER-06 Apple: Linux NIXL is not a macOS path (NOT_RUN)");
 #else
-        ::setenv("BTX_NIXL_LIB", "/proc/self/exe", 1);
+        const fs::path present = m_path_root / "nixl-presence-fixture";
+        std::FILE* fixture = fsbridge::fopen(present, "wb");
+        BOOST_REQUIRE(fixture != nullptr);
+        BOOST_REQUIRE_EQUAL(std::fclose(fixture), 0);
+        test::SetEnv("BTX_NIXL_LIB", fs::PathToString(present).c_str());
         modelnet::PeerTransferOffer off;
         BOOST_REQUIRE(modelnet::ProbePeerBackends(off));
         AssertProbeHonesty(off);
@@ -364,7 +370,7 @@ BOOST_AUTO_TEST_CASE(JIT_PEER_06)
 
     {
         EnvRestore nixl("BTX_NIXL_LIB");
-        ::setenv("BTX_NIXL_LIB", "/no/such/nixl-lib-btx-0348.so", 1);
+        test::SetEnv("BTX_NIXL_LIB", "/no/such/nixl-lib-btx-0348.so");
         modelnet::PeerTransferOffer off;
         BOOST_REQUIRE(modelnet::ProbePeerBackends(off));
         AssertProbeHonesty(off);

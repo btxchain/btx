@@ -71,6 +71,12 @@ typedef u_short sa_family_t;
 #ifdef interface
 #undef interface
 #endif
+// FAR/NEAR use the empty Win32 far/near macros. Preserve their SDK
+// meaning when removing the lowercase macros used as BTX identifiers.
+#undef FAR
+#define FAR
+#undef NEAR
+#define NEAR
 #ifdef near
 #undef near
 #endif

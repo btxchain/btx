@@ -1,0 +1,34 @@
+{
+  "python": {
+    "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+    "sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+  },
+  "llvm": {
+    "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-win64.exe",
+    "sha256": "3197846a2b19063687dd56e93e34cd941e3548d907f23a6131571321bdf9fe7b"
+  },
+  "llvm_license": {
+    "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-20.1.8/openmp/LICENSE.TXT",
+    "sha256": "fdad1758a9e1f9d5a81e18879b3406772115edc92c24bfa36b70c654f325e8e4"
+  },
+  "wheels": [
+    {
+      "filename": "cryptography-46.0.4-cp311-abi3-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/2d/12/652c84b6f9873f0909374864a57b003686c642ea48c84d6c7e2c515e6da5/cryptography-46.0.4-cp311-abi3-win_amd64.whl",
+      "sha256": "6225d3ebe26a55dbc8ead5ad1265c0403552a63336499564675b29eb3184c09b",
+      "size": 3478614
+    },
+    {
+      "filename": "cffi-2.0.0-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/f8/ed/13bd4418627013bec4ed6e54283b1959cf6db888048c7cf4b4c3b5b36002/cffi-2.0.0-cp312-cp312-win_amd64.whl",
+      "sha256": "da68248800ad6320861f129cd9c1bf96ca849a2771a59e0344e88681905916f5",
+      "size": 183557
+    },
+    {
+      "filename": "pycparser-2.23-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a0/e3/59cd50310fc9b59512193629e1984c1f95e5c8ae6e5d8c69532ccc65a7fe/pycparser-2.23-py3-none-any.whl",
+      "sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934",
+      "size": 118140
+    }
+  ]
+}

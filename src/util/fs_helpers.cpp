@@ -454,3 +454,20 @@ bool IsSymlink(const fs::path& path)
     return fs::is_symlink(path);
 #endif
 }
+
+bool IsSymlink(const fs::path& path, std::error_code& ec)
+{
+#ifdef WIN32
+    // MinGW's libstdc++ implements symlink_status() with stat(), so it never
+    // reports a link. Read the reparse attribute of the path itself.
+    const DWORD file_attrs{GetFileAttributesW(path.wstring().c_str())};
+    if (file_attrs == INVALID_FILE_ATTRIBUTES) {
+        ec.assign(static_cast<int>(GetLastError()), std::system_category());
+        return false;
+    }
+    ec.clear();
+    return (file_attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    return fs::is_symlink(fs::symlink_status(path, ec));
+#endif
+}

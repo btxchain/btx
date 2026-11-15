@@ -1,0 +1,31 @@
+{
+  "source": "36ab43008cac48aa5c8410e4b70d90a249196a33",
+  "product_commit": "f16b502ec28dc91cec236bc4fb2195709b045a16",
+  "product_files": {
+    "scripts/release/bundle_qt_gui.py": {
+      "sha256": "25f3c9ff49a54522333608a617793c50ff91572754cfd77a5d36aa64494b3ce4",
+      "blob": "1524927fbc32241279f1ff00434fdf9a798041da",
+      "mode": "100644"
+    },
+    "test/util/package_release_archive_test.py": {
+      "sha256": "3cd74c02128263940315883dfba8366cfc1b0e104de58cc7dd32b9980c19e857",
+      "blob": "449aa100328bb0c4111c011ffb25d87aaf208294",
+      "mode": "100644"
+    }
+  },
+  "native_fixture": "28196c4409f201ae9fedf0628ad466670dc1e072",
+  "prerequisite_runs": {
+    "cmake": 42527268859,
+    "atlas": 42530911365
+  },
+  "evidence_files": {
+    "README.md": "8bd331ef523fddeb6b1381f7c802c4edfc796cf2381a573458a2210789df6cbf",
+    "deployment.json": "c21b91464ab9138337ab20872cc3cdedf52114d767d7d1c5636989d555df526b",
+    "combined.json": "3ea0c4fa55f160941d67eee571060ae1b5a4b8ea39e11df21ab6fbb7de666e5e",
+    "maintained-unit-suite.log": "b4d0e5ee7a69b46d6bf69e91ba881c886509a7823bf437d719ae6222f39fd8d6",
+    "atlas-window.png": "15c874a20ac4e2590270135f9796e6a9200c3987e52ebff13eeabbb208f6acd6",
+    "qt-window.png": "ef6ac9f648971c01f7f5f38c7a1281558079b77b3a6d36e41a9543c02a34a3f8"
+  },
+  "new_tests_for_publication": 0,
+  "credit": "Jpp-matata owns the separate #452 guard change; no reused guard code in this PR."
+}

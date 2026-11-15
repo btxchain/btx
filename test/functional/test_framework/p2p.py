@@ -44,6 +44,7 @@ from test_framework.messages import (
     msg_cfilter,
     msg_cmpctblock,
     msg_dandelionacc,
+    msg_dltx,
     msg_feefilter,
     msg_filteradd,
     msg_filterclear,
@@ -75,6 +76,13 @@ from test_framework.messages import (
     msg_sendblkchnk,
     msg_sendheaders,
     msg_sendtxrcncl,
+    msg_swget,
+    msg_swhello,
+    msg_swprov,
+    msg_swquote,
+    msg_swreceipt,
+    msg_swrfq,
+    msg_swterms,
     msg_tx,
     MSG_TX,
     MSG_TYPE_MASK,
@@ -134,6 +142,7 @@ MESSAGEMAP = {
     b"cfilter": msg_cfilter,
     b"cmpctblock": msg_cmpctblock,
     b"dandelionacc": msg_dandelionacc,
+    b"dltx": msg_dltx,
     b"feefilter": msg_feefilter,
     b"filteradd": msg_filteradd,
     b"filterclear": msg_filterclear,
@@ -164,6 +173,13 @@ MESSAGEMAP = {
     b"sendblkchnk": msg_sendblkchnk,
     b"sendheaders": msg_sendheaders,
     b"sendtxrcncl": msg_sendtxrcncl,
+    b"swget": msg_swget,
+    b"swhello": msg_swhello,
+    b"swprov": msg_swprov,
+    b"swquote": msg_swquote,
+    b"swreceipt": msg_swreceipt,
+    b"swrfq": msg_swrfq,
+    b"swterms": msg_swterms,
     b"tx": msg_tx,
     b"verack": msg_verack,
     b"version": msg_version,
@@ -557,6 +573,7 @@ class P2PInterface(P2PConnection):
     def on_cfilter(self, message): pass
     def on_cmpctblock(self, message): pass
     def on_dandelionacc(self, message): pass
+    def on_dltx(self, message): pass
     def on_feefilter(self, message): pass
     def on_filteradd(self, message): pass
     def on_filterclear(self, message): pass
@@ -582,6 +599,13 @@ class P2PInterface(P2PConnection):
     def on_sendblkchnk(self, message): pass
     def on_sendheaders(self, message): pass
     def on_sendtxrcncl(self, message): pass
+    def on_swget(self, message): pass
+    def on_swhello(self, message): pass
+    def on_swprov(self, message): pass
+    def on_swquote(self, message): pass
+    def on_swreceipt(self, message): pass
+    def on_swrfq(self, message): pass
+    def on_swterms(self, message): pass
     def on_tx(self, message): pass
     def on_wtxidrelay(self, message): pass
 

@@ -1172,7 +1172,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"2cfa629907fbc18f3edc1dbb8b33fda651ad3655fb88a9dffe7a67ead580a102"}},
                 .m_chain_tx_count = 158'299,
                 .blockhash = consteval_ctor(uint256{"d95c8b565fefcda79efe47acad98648b0a24899f22facba9eedeb02c8bffd4d2"}),
-                .shielded_state_commitment = uint256{"827f8bf52ddf6de1e780a0917179dac715abeb428580744505dc30fbd6be5f9d"},
+                .shielded_state_commitment = consteval_ctor(uint256{"827f8bf52ddf6de1e780a0917179dac715abeb428580744505dc30fbd6be5f9d"}),
             },
             {
                 // main assumeutxo snapshot at height 130'089
@@ -1180,7 +1180,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"8c0b10247fe9a6a95a28744b7d80b96f1647db71bbc8cc5ba67f766ecd667310"}},
                 .m_chain_tx_count = 161'703,
                 .blockhash = consteval_ctor(uint256{"e3820082934a2b239142896d9d1f72fd23cd8930105073d792048a04f95bf3ba"}),
-                .shielded_state_commitment = uint256{"7b9fce2384229984f916cdab106d6d29c2b38e206ff1045eb82b882d6adf28b2"},
+                .shielded_state_commitment = consteval_ctor(uint256{"7b9fce2384229984f916cdab106d6d29c2b38e206ff1045eb82b882d6adf28b2"}),
             },
             {
                 // main assumeutxo snapshot at height 130'501 (snapshot v9)
@@ -1188,7 +1188,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"a86a235db93442efa1138b2756dac0ecbb3642965a72044af898bd3e4d3d417b"}},
                 .m_chain_tx_count = 162'361,
                 .blockhash = consteval_ctor(uint256{"1304900157e110b987ed7aab72d5d00d87046866a6fd80b3992721e3fd48f851"}),
-                .shielded_state_commitment = uint256{"be3840420a5081b209567c31124a291d43290e9f8842dd5f47dc306ae05a68a1"},
+                .shielded_state_commitment = consteval_ctor(uint256{"be3840420a5081b209567c31124a291d43290e9f8842dd5f47dc306ae05a68a1"}),
             },
             {
                 // main assumeutxo snapshot at height 132'142 (snapshot v9)
@@ -1196,7 +1196,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"b8d8e09ed5a87ef2395013f4f9d7a2e1e45ae207c30ca6f9e349187926f8afdf"}},
                 .m_chain_tx_count = 169'351,
                 .blockhash = consteval_ctor(uint256{"6622f5f045e13160716e743255dd77684284c68d1feeab02844a8f5cb467ce3f"}),
-                .shielded_state_commitment = uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"},
+                .shielded_state_commitment = consteval_ctor(uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"}),
             },
             {
                 // main assumeutxo snapshot at height 132'173 (snapshot v9)
@@ -1204,7 +1204,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"088b124e34af88441ce485deb0418d92c090983253956cb6c7c0d8249a747be2"}},
                 .m_chain_tx_count = 169'410,
                 .blockhash = consteval_ctor(uint256{"010aad22cd3c10caf33c049b08c34c46c86ec812c74ec5962a477916850ffb5b"}),
-                .shielded_state_commitment = uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"},
+                .shielded_state_commitment = consteval_ctor(uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"}),
             },
             {
                 // main assumeutxo snapshot at height 132'209 (snapshot v9)
@@ -1212,7 +1212,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"56139bf25e3749650ec9f5608b417b0842fb99775b61b7433cfdee1768e40a0e"}},
                 .m_chain_tx_count = 169'454,
                 .blockhash = consteval_ctor(uint256{"9e6776ee8c5e8dceefcb108b429838be8bda3d66a6553d8b4c8cef613840c940"}),
-                .shielded_state_commitment = uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"},
+                .shielded_state_commitment = consteval_ctor(uint256{"5d215cf4ed8cb9fbaddd2321cc996e0b754da0cfbd6055514a3cca78f7aa2792"}),
             },
             {
                 // main assumeutxo snapshot at height 155'700 (snapshot v9)
@@ -1220,7 +1220,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"177c88216b700618cee432a3ca4f7c30c79fa3733666553484c5a22e283b777f"}},
                 .m_chain_tx_count = 213'654,
                 .blockhash = consteval_ctor(uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}),
-                .shielded_state_commitment = uint256{"d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d"},
+                .shielded_state_commitment = consteval_ctor(uint256{"d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d"}),
             },
             {
                 // main assumeutxo snapshot at height 176'600 (snapshot v9)
@@ -1228,7 +1228,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"d2bee157092f877553d0651d79922eb97293161d7515147421fe63102048ff93"}},
                 .m_chain_tx_count = 271'654,
                 .blockhash = consteval_ctor(uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"}),
-                .shielded_state_commitment = uint256{"c0f3bde58e1138367a6cd2b0131975de8fad9c90a991f88a42e9397d742b77ce"},
+                .shielded_state_commitment = consteval_ctor(uint256{"c0f3bde58e1138367a6cd2b0131975de8fad9c90a991f88a42e9397d742b77ce"}),
             },
             {
                 // main assumeutxo snapshot at height 179'000 (snapshot v9)
@@ -1236,7 +1236,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"eaefa544df815ca35037024923166be89232884faa541d8a40c57481be30857c"}},
                 .m_chain_tx_count = 274'878,
                 .blockhash = consteval_ctor(uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"}),
-                .shielded_state_commitment = uint256{"74a131a91f71cb7e488c1826eb3d5676802a586bddb8082b33356568d7def0b5"},
+                .shielded_state_commitment = consteval_ctor(uint256{"74a131a91f71cb7e488c1826eb3d5676802a586bddb8082b33356568d7def0b5"}),
             },
             {
                 // main assumeutxo snapshot at height 189'307 (snapshot v9)
@@ -1244,7 +1244,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"48da3da953130984036435da93847ebe7d1a20fc5464d789b07f49b79178e074"}},
                 .m_chain_tx_count = 287'404,
                 .blockhash = consteval_ctor(uint256{"bd8c44a30103613a34ac271b7cfffb4334b70aae9c41cf12831d98a98313e6c8"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             {
                 // main assumeutxo snapshot at height 190'467 (snapshot v9)
@@ -1252,7 +1252,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"6ec3e0f1c6377962012e31c030a54e481ff419929d6beae0c2f3aaae82429d3a"}},
                 .m_chain_tx_count = 288'575,
                 .blockhash = consteval_ctor(uint256{"5799b5a4dd00a86947305239341896b595c33684e168216963516acf1cc312da"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             {
                 // main assumeutxo snapshot at height 190'507 (snapshot v9)
@@ -1260,7 +1260,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"2563ecff2b06ef20e592a57deb47d52b4ffe7e1fb1fdda1746adf4f33a9dec81"}},
                 .m_chain_tx_count = 288'615,
                 .blockhash = consteval_ctor(uint256{"9142fe23aca98fa3a79c31ed2a0af74d41d0915f9914998e6a40808009496fe5"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             {
                 // main assumeutxo snapshot at height 191'266 (snapshot v9)
@@ -1268,7 +1268,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"05be21ac1772c4ae806eec8994fd82f0082b4004ccbedb606dcdfd3c71ae2a68"}},
                 .m_chain_tx_count = 289'382,
                 .blockhash = consteval_ctor(uint256{"de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             {
                 // main assumeutxo snapshot at height 201'500 (snapshot v9).
@@ -1278,7 +1278,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"4743962b836a3ed1e541bb6da747fc28a7d98926b5d6bc8e23928ed3b1981d93"}},
                 .m_chain_tx_count = 301'211,
                 .blockhash = consteval_ctor(uint256{"3dd0fa677029f0b6869b64f09d8673edf3902460767bd6a1ecf6c633b0c6398c"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             {
                 // main assumeutxo snapshot at height 203'000 (0.34.5 release
@@ -1289,7 +1289,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"6754314323ab5575c0069b7973ac11d36fa6dce43c5f451df3808402a7962040"}},
                 .m_chain_tx_count = 302'712,
                 .blockhash = consteval_ctor(uint256{"89cfe9904a27be73467c25044e3c13d97bae512e02e4172def1a6c29f87999ef"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             {
                 // main assumeutxo snapshot at height 219'000 (0.34.7 release
@@ -1299,7 +1299,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"3c065aabb529eaab5646825927d9f20a91426dc7e83b4890b575324f5bfccc99"}},
                 .m_chain_tx_count = 320'540,
                 .blockhash = consteval_ctor(uint256{"dc51220bc7e5db96e29df9d817ae6179245d33eb8adcaaff765cfec83fdb87c3"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             {
                 // main assumeutxo snapshot at height 228'000 (0.34.12
@@ -1309,7 +1309,7 @@ public:
                 .hash_serialized = AssumeutxoHash{uint256{"c53b264565f1fdafdcb4de605c90d9a09ca2bdb484494688acd09e8738fec398"}},
                 .m_chain_tx_count = 330'421,
                 .blockhash = consteval_ctor(uint256{"0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+                .shielded_state_commitment = consteval_ctor(uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"}),
             },
             // 199299 (f12a27d0) and 199300 (ff80e629) were dumped from the
             // withdrawn 0.34.1 branch. Last common majority block is 199298

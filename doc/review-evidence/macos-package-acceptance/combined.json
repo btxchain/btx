@@ -1,0 +1,129 @@
+{
+  "utc": "2026-11-09T00:29:15.821427+00:00",
+  "verdict": "scoped_mac_package_acceptance_passed",
+  "source": "36ab43008cac48aa5c8410e4b70d90a249196a33",
+  "combined_guard_packager_from": "Jpp-matata #452 head4a5a4db86bfb7d698f6cad788666e872d65e171e, package_release_archive.py blob88a876fed7531fca359660c9bed8d3299b17eaa7; guard-file change only, not whole PR",
+  "deployment_patch_receipt": "../deployment-fix/completion-receipt.json",
+  "archive_sha256": "06f13142517636345f82ab6e2121e305acc6d0b584a046327856afd7fa0c7bc7",
+  "archive_artifact": 13640905970,
+  "combined_patch_sha256": "3f4fb5e6db798b8020325ceec9770ba127c63a961b7032305d349a8ad9253c55",
+  "runs": {
+    "archive_admission": 42538530491,
+    "physical_path_lifecycle_and_atlas": 42539622275,
+    "stable_qt_window": 42540231795
+  },
+  "image_count": 86,
+  "plugins_loaded": 20,
+  "effective_maximum_declared_os_floor": "15.0",
+  "actual_host": "pinned macos-15 ARM64 image20261104.0514.1/macOS15.8.2",
+  "guard_control_before": {
+    "exit": 1,
+    "passed": false,
+    "guard_contract_pass": false,
+    "boots": 2,
+    "runtime_removed": true
+  },
+  "after": {
+    "exit": 0,
+    "passed": true,
+    "guard_contract_pass": true,
+    "boots": 2,
+    "runtime_removed": true
+  },
+  "health_polls": 20,
+  "guard_polls": 20,
+  "identity_persistence": true,
+  "new_node_helper_guard_boots": true,
+  "guard_path_control": [
+    {
+      "path": "/tmp/btx-guard-path-42539622275/security",
+      "exit": 2,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "path": "/private/tmp/btx-guard-path-42539622275/security",
+      "exit": 0,
+      "stdout": "READY BTX_GUARD/1\n",
+      "stderr": ""
+    }
+  ],
+  "gui": {
+    "atlas": {
+      "window": "BTX Atlas \u00b7 Source candidate",
+      "capture": "retry1/run-42539622275/package-records/atlas-window.png",
+      "visual_review": "Main Atlas screen visibly rendered, NOT CONNECTED; no wallet/node connection claimed"
+    },
+    "qt": {
+      "window": "BTX - [regtest]",
+      "capture": "qt-window/run-42540231795/package-records/qt-window.png",
+      "visual_review": "Main Qt regtest interface visibly rendered; height0/network disabled/wallet disabled"
+    }
+  },
+  "qualification": {
+    "archive_admission": true,
+    "node_helper_lifecycle": true,
+    "gui": {
+      "atlas": {
+        "captured": true,
+        "visually_verified": true
+      },
+      "qt": {
+        "captured": true,
+        "visually_verified": true
+      }
+    },
+    "scoped_acceptance": true
+  },
+  "artifacts": {
+    "42538530491": [
+      {
+        "id": 13640905970,
+        "name": "mac-combined-acceptance-candidates",
+        "digest": "sha256:37967268a92f27ae588a5a1859f31d2d57269e5f1d1297a113df637447ca958b",
+        "size_in_bytes": 84747074,
+        "expires_at": "2026-11-23T00:16:53Z"
+      },
+      {
+        "id": 13640528312,
+        "name": "mac-combined-acceptance-records",
+        "digest": "sha256:19c57d439d61964939136b92969783085b22085283ea7a700ae7aa5313f59be8",
+        "size_in_bytes": 3329964,
+        "expires_at": "2026-11-23T00:16:52Z"
+      }
+    ],
+    "42539622275": [
+      {
+        "id": 13641040857,
+        "name": "mac-physical-lifecycle-records",
+        "digest": "sha256:ec61d88823ca098aff139ffefc48610a5131267f1d43a6a4e17be83f70238a4e",
+        "size_in_bytes": 3163994,
+        "expires_at": "2026-11-23T00:25:12Z"
+      }
+    ],
+    "42540231795": [
+      {
+        "id": 13640508333,
+        "name": "mac-qt-window-records",
+        "digest": "sha256:a773bae931e44377b41d731d43c246c5d163be25dc92a660602a81a0ef5cf204",
+        "size_in_bytes": 420321,
+        "expires_at": "2026-11-23T00:27:30Z"
+      }
+    ]
+  },
+  "runtime_cleanup": {
+    "node_cases": true,
+    "GUI_tracked_processes_remaining": [],
+    "package_bytes_unchanged": true
+  },
+  "producer_binaries_and_caches_preserved": true,
+  "working_node_untouched": true,
+  "upstream_publication": false,
+  "scope_limits": [
+    "No Atlas RPC connection or wallet signing/spending",
+    "No GPU/ExactReplay workload, mining, mainnet, throughput or full test suite",
+    "No installer, URI/Launch Services/Finder-open qualification; Atlas is raw executable, Qt launched via shipped wrapper",
+    "No Developer ID, notarization, Gatekeeper release signoff or older macOS execution"
+  ],
+  "record_caveat": "Initial top-level node_started/app_launched fields are untouched wrapper defaults; authoritative execution evidence is the child lifecycle records and observed window/captures, summarized here. Raw records are unmodified."
+}

@@ -2,7 +2,7 @@
 
 BTX Custody Profile 1 / `BTX_EXCHANGE_PROFILE_V1`: a **regtest** environment that exercises the monetary custody surface without HCP, Model Network, mining, GUI, or GPU.
 
-**Release state.** This harness targets the **0.34.9-dev** tree (`CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=false`); last shipping tag is **v0.34.8**. It is development tooling, not a listing attestation.
+**Release state.** This harness targets the **0.35.0rc1** tree. The last shipping tag remains **v0.34.15**. It is development tooling, not a listing attestation.
 
 **No listing claim.** Nothing here states or implies that any exchange, custodian, or venue has listed, integrated, or approved BTX.
 
@@ -55,11 +55,11 @@ The functional harness (`test/functional/feature_bcp1.py`) still covers watch-on
 
 ---
 
-## `./run-certification`
+## `./run-certification.sh`
 
 ```bash
 cd contrib/bcp1
-./run-certification
+./run-certification.sh
 ```
 
 The script drives the compose stack (or an already-running local regtest) and prints `PASS` / `FAIL` per case. Named cases:
@@ -104,7 +104,7 @@ Same contract, isolated regtest:
 btxd -regtest -txindex=1 -exchange-watchonly \
   -zmqpubsequence=tcp://127.0.0.1:28332 \
   -signer=./contrib/bcp1/mock_signer.py
-./contrib/bcp1/run-certification
+./contrib/bcp1/run-certification.sh
 ```
 
 Functional coverage also lives in `test/functional/feature_bcp1.py` (`--timeout-factor=1`). One `test_runner.py` at a time. Delete `/tmp/test_runner_*` when finished.

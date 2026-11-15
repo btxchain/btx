@@ -825,7 +825,12 @@ bool ExtractPackageDocuments(const UniValue& core, const std::string& dest_dir, 
             }
             rest = rest.substr(slash + 1);
         }
-        const int fd = ::open(cur.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+        int flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+#ifdef WIN32
+        // Documents are hash-checked UTF-8 bytes; CRT newline translation changes them.
+        flags |= _O_BINARY;
+#endif
+        const int fd = ::open(cur.c_str(), flags, 0644);
         if (fd < 0) {
             err_code = (errno == EEXIST) ? "OVERWRITE_REFUSED" : "IO_ERROR";
             err = (errno == EEXIST) ? "overwrite refused" : "extract open failed";

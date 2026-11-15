@@ -1,0 +1,14 @@
+[
+  {
+    "id": "ASR-CAP-002",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "proc08 hashes a caller-supplied directory; a temp dir is not a release environment"
+  },
+  {
+    "id": "ASR-PUB-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "proc08 refuses a path inside the worktree root and accepts an existing path outside it"
+  }
+]

@@ -256,6 +256,16 @@ class TestNode():
         if extra_args is None:
             extra_args = self.extra_args
 
+        # A restart often passes the test's own argument list, which does not
+        # include the defaults add_nodes applied. Height 100 stays deferred
+        # under consensus mode until ExactReplay, so regtest nodes keep the
+        # cache miner's economic mode unless the test set one itself.
+        if self.chain == 'regtest':
+            if not any(str(arg).startswith('-matmulvalidation') for arg in extra_args):
+                extra_args.append('-matmulvalidation=economic')
+            if not any(str(arg).startswith('-matmulrcexecution') for arg in extra_args):
+                extra_args.append('-matmulrcexecution=cpu-diagnostic')
+
         # If listening and no -bind is given, then bitcoind would bind P2P ports on
         # 0.0.0.0:P and 127.0.0.1:P+1 (for incoming Tor connections), where P is
         # a unique port chosen by the test framework and configured as port=P in
@@ -528,7 +538,8 @@ class TestNode():
         # Check that stderr is as expected
         self.stderr.seek(0)
         stderr = self.stderr.read().decode('utf-8').strip()
-        if stderr != expected_stderr:
+        allowed_stderr = expected_stderr if isinstance(expected_stderr, tuple) else (expected_stderr,)
+        if stderr not in allowed_stderr:
             raise AssertionError("Unexpected stderr {} != {}".format(stderr, expected_stderr))
 
         self.stdout.close()

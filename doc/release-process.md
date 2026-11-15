@@ -35,6 +35,44 @@ Release Process
   Do not ship a binary that contains `-zmqpubhashblock` strings without linking
   libzmq. Default ON plus this executed gate is the durable fix;
   recutting one archive was not.
+* **Cut every candidate and final archive with `package_release_archive.py`
+  and gate the exact file you upload** with
+  `python3 scripts/release/verify_release_btxd.py --archive <file> --require-model-helpers`
+  (drop `--require-model-helpers` only for a `-DWITH_MODELNET=OFF` build).
+  On top of the btxd checks, the GLIBC ceiling and `codesign --verify --strict`,
+  `--archive` reads every file in the archive and fails it when:
+  an executable NEEDs a library the archive ships but no RUNPATH (or the
+  packaged wrapper) reaches it; an ELF needs a `GLIBCXX_`/`CXXABI_`/`GCC_`/`OPENSSL_`
+  version above the floor from a host library (`--floor [SONAME:]NAME=VERSION`;
+  the OpenSSL floor is per library, because Ubuntu 24.04's `libssl.so.3` defines
+  only `OPENSSL_3.0.0` and its `libcrypto.so.3` up to `OPENSSL_3.0.9`); a Windows
+  `.exe`/`.dll` imports a DLL that is neither a Windows system DLL nor next to
+  it (`libgomp-1.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` must ship
+  beside `btxd.exe`); a Mach-O dependency or runpath points outside system
+  libraries and dyld-relative paths (every bundled image and universal slice
+  is inspected); a thin 64-bit Mach-O has ML-DSA keygen but does not define
+  `_btx_mldsa_randombytes` (the 17c2da89 rename; six files in the official
+  v0.34.15 macOS archive fail this); a member is not `root:root`, is
+  group/world-writable, or a directory is empty.
+  0.35.0rc1 was repacked outside `package_release_archive.py`; the btxd-only
+  gate passed all three archives, and all three fail this one (#235, #237).
+  That gate runs on the machine that cut the archive, which has the libraries the
+  build used. Also start the exact Linux `.tar.gz` you upload in clean images,
+  once with `--btxd-arg=-swapnet=0` and once with `--btxd-arg=-swapnet=1`, for
+  example `python3 scripts/release/verify_archive_clean_start.py --archive <file>
+  --engine proot --image /srv/noble --image /srv/trixie --btxd-arg=-swapnet=1`
+  (root directories from `debootstrap --variant=minbase`; a proot built from the
+  v5.4.0 tag, since Ubuntu 24.04's 5.1.0 cannot see files in the root;
+  `--engine chroot` needs root and `/proc` mounted in each root). It unpacks
+  the archive, requires `btxd -version` to exit 0 and a regtest node to answer
+  `getblockchaininfo`, then stops it. A `-swapnet=1` node that cannot start
+  SwapNet stops during init, so it fails here.
+  On a gate host that can run the archive's `btxd` (a Mac for the macOS
+  archive, Linux for the Linux ones), add `--run-wallet-check`: it starts that
+  `btxd` on regtest in a temporary datadir and fails when a new wallet's own
+  private receive descriptor does not derive the wallet's first address, twice.
+  The official v0.34.15 macOS `btxd` fails it (ML-DSA keygen linked libsodium's
+  `randombytes`, #253); `test_btx` is a separate link and cannot show that.
 * Complete the Profile-1 ExactReplay golden corpus and seal described below.
   Any change under `CMakeLists.txt`, `cmake/`, `src/`, or `contrib/matmul-v4/`
   (except the inert manifest `.data` file) invalidates the previous seal.
@@ -394,6 +432,7 @@ false until the corresponding campaign bits are actually set.
     - `python3 test/util/publish_github_release_test.py`
     - `python3 test/util/sign_release_bundle_test.py`
     - `python3 test/util/verify_release_btxd_test.py`
+    - `python3 test/util/verify_archive_clean_start_test.py`
     - `python3 test/util/package_release_archive_test.py`
     - `python3 test/util/cut_release_test.py`
     - `python3 test/util/cut_local_release_test.py`

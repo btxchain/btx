@@ -1,0 +1,15 @@
+swarm_natpub/blank.cpp
+swarm_natpub/name.cpp
+swarm_natpub/record.cpp
+swarm_natpub/book.cpp
+swarm_natpub/replay.cpp
+swarm_natpub/gate.cpp
+swarm_natpub/hold.cpp
+swarm_natpub/shelf.cpp
+swarm_natpub/claim.cpp
+swarm_natpub/keep.cpp
+swarm_natpub/discover.cpp
+swarm_natpub/link.cpp
+swarm_natpub/seeds.cpp
+swarm_natpub/quiet.cpp
+swarm_natpub/swarm_natpub.cpp

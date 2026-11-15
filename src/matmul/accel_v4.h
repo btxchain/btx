@@ -208,27 +208,16 @@ void ResetStats();
 // ---------------------------------------------------------------------------
 // DEVICE BACKEND ENTRY POINTS (the plug-in surface).
 //
-// Each device backend implements exactly ONE of these functions -- a strong
-// definition compiled into btx_matmul_backend when the backend's CMake define
-// is enabled (BTX_ENABLE_CUDA_EXPERIMENTAL / BTX_ENABLE_METAL /
-// BTX_ENABLE_HIP / BTX_ENABLE_ASCEND). When a backend is NOT compiled in, a
-// weak stub (matmul/accel_v4_stub.cpp) provides a definition that returns
-// false, so the dispatch layer links and runs CPU-only. The signatures match
-// AccelFn exactly.
+// CMake selects either a device implementation or its per-backend stub for
+// CUDA, Metal and HIP. A disabled backend returns false so the dispatcher can
+// fall back to the CPU reference. Ascend currently provides only LT/RC device
+// entry points; accel_v4_stub.cpp supplies its generic v4/BMX4C fallbacks.
+// The signatures match AccelFn and BatchAccelFn above.
+//
+// Each ENC-BMX4C result (digest,payload) MUST reproduce
+// matmul::v4::bmx4::ComputeDigestBMX4C(headers[i]) BYTE-FOR-BYTE, so it passes
+// matmul::v4::bmx4::VerifySketchBMX4C.
 // ---------------------------------------------------------------------------
-
-// Each backend also implements the BATCHED entry point ComputeDigestsBatchedAccel
-// (the fixed BatchAccelFn signature, §K.2b). Same weak-stub gating as the
-// per-nonce ComputeDigestAccel: a strong device definition when the backend's
-// CMake define is set, else the weak stub (accel_v4_stub.cpp) returns false.
-
-// Each backend ALSO implements the ENC-BMX4C batched entry point
-// ComputeDigestsBMX4CAccel (MatMul v4.2 profile; same fixed signature as
-// ComputeDigestsBatchedAccel, one nonce window at a time). Same weak-stub
-// gating: a strong device definition when the backend's CMake define is set,
-// else the weak stub (accel_v4_stub.cpp) returns false. Each returned
-// (digest,payload) MUST reproduce matmul::v4::bmx4::ComputeDigestBMX4C(headers[i])
-// BYTE-FOR-BYTE, so it passes matmul::v4::bmx4::VerifySketchBMX4C.
 
 namespace matmul_v4::cuda {
 [[nodiscard]] bool ComputeDigestAccel(const CBlockHeader& header, uint32_t n, uint32_t rounds,

@@ -1,0 +1,146 @@
+[
+  {
+    "id": "ASR-EXE-007",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmLeaseFence keeps until 100. A later longer bound is REPLAY. Use at 101 is LEASE_EXPIRED. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-NET-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmDiscover::Scan returns NOT_SCAN, connected stays false, and bytes_moved stays 0. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-NET-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmDiscover::Route rejects a lower rtt when the grant differs and leaves grant-1 in place. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-NET-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "A same-grant lower rtt moves the peer to peer-b and keeps object obj and grant-1. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-NET-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "NifDrain::Release is PINNED while 4 bytes are held. After Drain, physical_bytes is 0 and Release succeeds. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-NET-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmDiscover::Partition(false) sets PARTITION, returns false, and leaves connected false. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-HND-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmHandoff::Begin issues a fresh scoped authority for dest-ok before ownership moves. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-HND-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmHandoff::Fence commits move-ok. owner is dest-ok and atomic is true only after that commit. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-HND-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "A refused SwarmHandoff::Fence leaves move-cross AMBIGUOUS, not atomic, and a second Fence does not retry it. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-HND-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "After the committed handoff, IntegerTrainer::Resume continues a real step. step is 2 and the weight changed. A zero step is not resumable. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-PRG-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmProgress::Sample keeps the change from loss 1000 step 1 to loss 800 step 2 and sets meaningful. An identical sample is REPLAY. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-PRG-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmProgress::Stall below 3 stays a plateau. At 3 it sets correcting and Correct stores one recipe. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-PRG-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmProgress::Correct of a different recipe is SECRET and the stored recipe stays recipe-a. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-PRG-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmProgress::Stall below 3 returns PLATEAU and killed stays false. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-EVD-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmEvidence::Store of the raw trace is not shareable. Share returns NOT_VISIBLE. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-EVD-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmEvidence::Summarize keeps summary_source at the stored trace. A promise is not a source. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-EVD-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmEvidence::Inject returns NOT_AUTHORITY, keeps the text tainted, and does not launch. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-EVD-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "After the resumed step, SwarmReadAfterRevoke returns REVOKED, allowed false, and bytes_moved false. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-EVD-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmEvidence::Promise records the replica promise. Retrieve returns NOT_RETRIEVABLE and hands back no bytes. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-CAP-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmHostInterp::Admit of a host interpreter returns HOST, stores nothing, and launched stays false. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-CAP-002",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Qualify returns UNQUALIFIED. No real environment evidence was collected, so the row is not closed."
+  },
+  {
+    "id": "ASR-CAP-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "RealmRollout::ApprovePromotion rejects equal authorities and accepts runtime distinct from model. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-CAP-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmSandboxFs allows /work/unit and rejects an outside path and a dot-dot escape. launched stays false. acc02_tests pass_latches."
+  },
+  {
+    "id": "ASR-ART-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SwarmManifestOk admits root and root-b only after every child digest is verified. root-open stays unusable and bytes_streamed stays false. acc02_tests pass_latches."
+  }
+]

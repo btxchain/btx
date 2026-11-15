@@ -1,0 +1,6 @@
+swarm_kvmove/bytes.cpp
+swarm_kvmove/quant.cpp
+swarm_kvmove/engine.cpp
+swarm_kvmove/slot.cpp
+swarm_kvmove/copy.cpp
+swarm_kvmove/swarm_kvmove.cpp

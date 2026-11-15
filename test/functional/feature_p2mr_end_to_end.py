@@ -616,8 +616,12 @@ class P2MREndToEndTest(BitcoinTestFramework):
         self.assert_p2mr_address(dest)
         raw = n0.createrawtransaction([{"txid": fund_txid, "vout": vout}], {dest: 0.1})
 
-        signed = w_watch.signrawtransactionwithwallet(raw)
-        assert_equal(signed["complete"], False)
+        assert_raises_rpc_error(
+            -4,
+            "Private keys are disabled for this wallet",
+            w_watch.signrawtransactionwithwallet,
+            raw,
+        )
 
     def run_test(self):
         n0 = self.nodes[0]

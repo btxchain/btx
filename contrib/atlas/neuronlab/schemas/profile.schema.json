@@ -1,0 +1,651 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "btx.neuronlab.profile/1"
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 160,
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2048,
+      "minLength": 1
+    },
+    "binding": {
+      "type": "object",
+      "properties": {
+        "weights_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "config_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "tokenizer_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "execution_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{96}$"
+        },
+        "architecture": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "adapter": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "layers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 512
+        },
+        "hidden_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "intermediate_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 131072
+        },
+        "heads": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "activation": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "representation": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "btx_model_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "weights_hash",
+        "config_hash",
+        "tokenizer_hash",
+        "execution_fingerprint",
+        "architecture",
+        "adapter",
+        "layers",
+        "hidden_size",
+        "intermediate_size",
+        "heads",
+        "activation",
+        "representation",
+        "btx_model_id"
+      ],
+      "additionalProperties": false
+    },
+    "training_recipe": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "btx.neuronlab.training-recipe/1"
+        },
+        "facts": {
+          "type": "object",
+          "properties": {
+            "pretraining_dropout": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "finetuning_dropout": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "optimizer": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "weight_decay": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "training_tokens": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "training_data": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "normalization": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "activation": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            "post_training": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unknown",
+                    "reported",
+                    "measured_in_this_study"
+                  ]
+                },
+                "value": {},
+                "source": {
+                  "type": "string",
+                  "maxLength": 512
+                }
+              },
+              "required": [
+                "status",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "pretraining_dropout",
+            "finetuning_dropout",
+            "optimizer",
+            "weight_decay",
+            "training_tokens",
+            "training_data",
+            "normalization",
+            "activation",
+            "post_training"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "facts"
+      ],
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "kind": {
+            "enum": [
+              "neuron_add",
+              "neuron_scale",
+              "neuron_clamp",
+              "head_scale",
+              "residual_add",
+              "residual_project_out",
+              "sae_feature_add"
+            ]
+          },
+          "layer": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 511
+          },
+          "indices": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 131071
+            },
+            "maxItems": 256,
+            "uniqueItems": true
+          },
+          "coefficient_ppm": {
+            "type": "integer",
+            "minimum": -8000000,
+            "maximum": 8000000
+          },
+          "normalization": {
+            "enum": [
+              "absolute",
+              "token_l2",
+              "residual_median_downcol"
+            ]
+          },
+          "phase": {
+            "enum": [
+              "both",
+              "prefill",
+              "decode"
+            ]
+          },
+          "token_start": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1048576
+          },
+          "token_end": {
+            "type": "integer",
+            "minimum": -1,
+            "maximum": 1048576
+          },
+          "tensor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 96
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "calibration": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "corpus_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{96}$"
+                  },
+                  "capture_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{96}$"
+                  },
+                  "residual_median_millionths": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100000000000000
+                  },
+                  "down_column_norms_millionths": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 100000000000000
+                    },
+                    "maxItems": 256
+                  }
+                },
+                "required": [
+                  "corpus_hash",
+                  "capture_hash",
+                  "residual_median_millionths",
+                  "down_column_norms_millionths"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "bounds_ppm": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": -100000000,
+                  "maximum": 100000000
+                },
+                "maxItems": 2,
+                "minItems": 2
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sae": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "artifact_hash": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{96}$"
+                  },
+                  "encoder": {
+                    "type": "string",
+                    "maxLength": 96
+                  },
+                  "decoder": {
+                    "type": "string",
+                    "maxLength": 96
+                  },
+                  "bias": {
+                    "type": "string",
+                    "maxLength": 96
+                  },
+                  "feature": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  }
+                },
+                "required": [
+                  "artifact_hash",
+                  "encoder",
+                  "decoder",
+                  "bias",
+                  "feature"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "layer",
+          "indices",
+          "coefficient_ppm",
+          "normalization",
+          "phase",
+          "token_start",
+          "token_end",
+          "tensor",
+          "calibration",
+          "bounds_ppm",
+          "sae"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 64,
+      "minItems": 1
+    },
+    "parent_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{96}$"
+      },
+      "maxItems": 8
+    },
+    "privacy": {
+      "enum": [
+        "private",
+        "realm",
+        "public"
+      ]
+    },
+    "license": {
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1
+          },
+          "status": {
+            "enum": [
+              "hypothesis",
+              "observed_on_declared_suite"
+            ]
+          },
+          "evidence_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{96}$"
+            },
+            "maxItems": 32
+          }
+        },
+        "required": [
+          "label",
+          "status",
+          "evidence_refs"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 16
+    },
+    "created_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "composition": {
+      "const": "ordered/pre-site-norm/v1"
+    },
+    "tensors": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9._-]{1,96}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "dtype": {
+            "const": "F32"
+          },
+          "shape": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 131072
+            },
+            "maxItems": 2,
+            "minItems": 1
+          },
+          "sha384": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{96}$"
+          }
+        },
+        "required": [
+          "dtype",
+          "shape",
+          "sha384"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "title",
+    "description",
+    "binding",
+    "training_recipe",
+    "operations",
+    "parent_profiles",
+    "privacy",
+    "license",
+    "claims",
+    "created_ms",
+    "composition",
+    "tensors"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:atlas:neuronlab:profile:1",
+  "title": "BTX NeuronLab Intervention Profile v1",
+  "description": "Structural validation only. Native/Python validators enforce canonical signed bytes, semantic operator constraints, tensor identities, exact runtime binding and local authority."
+}

@@ -52,6 +52,7 @@
 
 namespace wallet {
 RPCHelpMan gethdkeys();
+UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys, const std::vector<std::array<unsigned char, 32>>& pq_master_seeds) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const int64_t timestamp, const std::vector<CExtKey>& master_keys = {}) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 namespace {
 
@@ -968,6 +969,49 @@ BOOST_AUTO_TEST_CASE(p2mr_primary_estimator_covers_actual_weight)
     BOOST_CHECK_LT(estimated.weight - actual_weight, 5000);
 }
 
+BOOST_AUTO_TEST_CASE(p2mr_fee_sizing_counts_pq_sigops)
+{
+    // One SLH-DSA checksig costs 500 sigops, i.e. 10,000 vbytes under the
+    // default -bytespersigop, while the signed input weighs about 8,000. Fee
+    // sizing must cover the vsize the mempool charges, or the spend pays about
+    // 80% of the requested rate and is refused near the relay floor.
+    const auto seed = MakePQSeed(0x5f);
+    const std::string receive_desc = AddChecksum("mr(pk_slh(" + MakeP2MRKeyPathExpr(seed, /*internal=*/false) + "))");
+    const std::string change_desc = AddChecksum("mr(pk_slh(" + MakeP2MRKeyPathExpr(seed, /*internal=*/true) + "))");
+    const auto wallet = CreateP2MRDescriptorWalletFromStrings(*this, receive_desc, change_desc);
+
+    const CTxDestination from_dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    const CTxDestination to_dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    const COutPoint prevout{Txid::FromUint256(uint256{24}), 0};
+    const CAmount input_value{10 * COIN};
+    Coin prev_coin{CTxOut{input_value, GetScriptForDestination(from_dest)}, /*nHeight=*/1, /*fCoinBase=*/false};
+
+    CMutableTransaction tx;
+    tx.vin.emplace_back(prevout);
+    tx.vout.emplace_back(input_value - 20000, GetScriptForDestination(to_dest));
+
+    const int input_estimate = WITH_LOCK(wallet->cs_wallet,
+        return CalculateMaximumSignedInputSize(prev_coin.out, wallet.get(), /*coin_control=*/nullptr));
+    const TxSize estimated = CalculateMaximumSignedTxSize(CTransaction{tx}, wallet.get(), std::vector<CTxOut>{prev_coin.out});
+    BOOST_REQUIRE(estimated.vsize > 0);
+
+    BOOST_REQUIRE(SignAndCheckP2MRTransaction(wallet, tx, prev_coin));
+    BOOST_CHECK_EQUAL(SignedP2MRLeafOpcode(tx), static_cast<unsigned char>(OP_CHECKSIG_SLHDSA));
+
+    const CTransaction tx_signed{tx};
+    const int64_t sigops = CountWitnessSigOps(
+        tx.vin[0].scriptSig, prev_coin.out.scriptPubKey, &tx.vin[0].scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS);
+    BOOST_CHECK_EQUAL(sigops, VALIDATION_WEIGHT_PER_SLHDSA_SIGOP);
+    const int64_t weight = GetTransactionWeight(tx_signed);
+    const int64_t policy_vsize = GetVirtualTransactionSize(weight, sigops, DEFAULT_BYTES_PER_SIGOP);
+    // The sigop term, not the weight, sets this spend's vsize.
+    BOOST_CHECK_GT(policy_vsize, weight);
+    BOOST_CHECK_GE(estimated.vsize, policy_vsize);
+    BOOST_CHECK_LT(estimated.vsize - policy_vsize, 100);
+    BOOST_CHECK_GE(estimated.weight, weight);
+    BOOST_CHECK_GE(input_estimate, sigops * DEFAULT_BYTES_PER_SIGOP);
+}
+
 BOOST_AUTO_TEST_CASE(p2mr_transaction_weight_calculation)
 {
     const auto wallet = CreateP2MRDescriptorWallet(*this);
@@ -1354,6 +1398,126 @@ BOOST_AUTO_TEST_CASE(encrypted_import_persists_pq_seed_as_ciphertext)
         BOOST_REQUIRE(recovered.has_value());
         BOOST_CHECK(*recovered == pq_seed);
     }
+}
+
+BOOST_AUTO_TEST_CASE(mismatched_pq_cache_does_not_leave_wallet_unlocked)
+{
+    // CWallet::Unlock() runs UpgradeDescriptorCache() after the master key is
+    // already in memory. For a wallet whose cached index-0 ML-DSA pubkey is not
+    // the one its seed derives, that upgrade used to throw from
+    // DescriptorCache::MergeAndDiff(), and the exception left Unlock() with the
+    // wallet unlocked: EncryptWallet() skipped its final Lock(), and the
+    // walletpassphrase and exportwalletbundle callers skipped their relock.
+    // EncryptWallet() must finish with the wallet locked, and Unlock() must
+    // succeed.
+    const std::array<unsigned char, 32> pq_seed = MakePQSeed(0xD5);
+
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    {
+        LOCK(wallet->cs_wallet);
+        wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet->m_keypool_size = 2;
+        for (const bool internal : {false, true}) {
+            WalletDescriptor w_desc = GeneratePQWalletDescriptor(pq_seed, internal);
+            BOOST_REQUIRE(w_desc.descriptor);
+
+            // Cache index 0 as the seed derives it, then change the cached
+            // ML-DSA pubkey so that re-deriving index 0 no longer matches.
+            FlatSigningProvider out_keys;
+            std::vector<CScript> scripts;
+            BOOST_REQUIRE(w_desc.descriptor->Expand(0, DUMMY_SIGNING_PROVIDER, scripts, out_keys, &w_desc.cache));
+            size_t changed{0};
+            for (const auto& [key_exp_pos, by_index] : w_desc.cache.GetCachedDerivedPQPubKeys(PQAlgorithm::ML_DSA_44)) {
+                for (const auto& [der_index, pubkey] : by_index) {
+                    std::vector<unsigned char> other_pubkey{pubkey};
+                    other_pubkey.back() ^= 0x01;
+                    w_desc.cache.CacheDerivedPQPubKey(PQAlgorithm::ML_DSA_44, key_exp_pos, der_index, other_pubkey);
+                    ++changed;
+                }
+            }
+            BOOST_REQUIRE_EQUAL(changed, 1U);
+
+            auto* spkm = wallet->AddWalletDescriptor(w_desc, FlatSigningProvider{}, "", internal);
+            BOOST_REQUIRE(spkm != nullptr);
+            wallet->AddActiveScriptPubKeyMan(spkm->GetID(), OutputType::P2MR, internal);
+        }
+        // The descriptor cache upgrade has not run yet, so the next unlock runs it.
+        BOOST_REQUIRE(!wallet->IsWalletFlagSet(WALLET_FLAG_LAST_HARDENED_XPUB_CACHED));
+    }
+
+    // EncryptWallet() commits the master key, then locks and unlocks again.
+    // It must still finish and leave the wallet locked.
+    bool encrypted{false};
+    BOOST_CHECK_NO_THROW(encrypted = wallet->EncryptWallet("encrypt"));
+    BOOST_CHECK(encrypted);
+    BOOST_CHECK(wallet->IsCrypted());
+    BOOST_CHECK(wallet->IsLocked());
+
+    // The right passphrase unlocks without an error, and the wallet locks again.
+    bool unlocked{false};
+    BOOST_CHECK_NO_THROW(unlocked = wallet->Unlock("encrypt"));
+    BOOST_CHECK(unlocked);
+    BOOST_CHECK(!wallet->IsLocked());
+    BOOST_CHECK(wallet->Lock());
+    BOOST_CHECK(wallet->IsLocked());
+
+    // A wrong passphrase is still rejected.
+    BOOST_CHECK(!wallet->Unlock("wrong passphrase"));
+    BOOST_CHECK(wallet->IsLocked());
+}
+
+BOOST_AUTO_TEST_CASE(wallet_lock_drops_pq_seeds_and_private_signing_cache)
+{
+    // CWallet::Lock() used to wipe only the master key. The PQ seeds stayed in
+    // the descriptors and the cached signing providers kept the derived PQ
+    // secret keys, so CWallet::SignTransaction() still signed after a lock.
+    const auto wallet = CreateP2MRDescriptorWallet(*this);
+    const CTxDestination coin_dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    const CTxDestination change_dest = *Assert(wallet->GetNewChangeDestination(OutputType::P2MR));
+    const CAmount coin_value{3 * COIN};
+    const Coin prev_coin{CTxOut{coin_value, GetScriptForDestination(coin_dest)}, /*nHeight=*/7, /*fCoinBase=*/false};
+
+    const auto can_sign = [&] {
+        // Hold cs_wallet like the signing RPCs (cs_wallet before cs_desc_man).
+        LOCK(wallet->cs_wallet);
+        CMutableTransaction tx;
+        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{0x4c}), 1});
+        tx.vout.emplace_back(coin_value - 5000, GetScriptForDestination(change_dest));
+        return SignAndCheckP2MRTransaction(wallet, tx, prev_coin);
+    };
+    const auto pq_seed_loaded = [&] {
+        for (ScriptPubKeyMan* spkm : wallet->GetAllScriptPubKeyMans()) {
+            auto* desc_spkm = dynamic_cast<DescriptorScriptPubKeyMan*>(spkm);
+            BOOST_REQUIRE(desc_spkm != nullptr);
+            LOCK(desc_spkm->cs_desc_man);
+            if (!desc_spkm->GetWalletDescriptor().descriptor->ExtractAllPQSeeds().empty()) return true;
+        }
+        return false;
+    };
+
+    // Sign once before encrypting, so a private signing provider is cached.
+    BOOST_REQUIRE(pq_seed_loaded());
+    BOOST_REQUIRE(can_sign());
+
+    // EncryptWallet() locks, unlocks and locks the wallet again.
+    BOOST_REQUIRE(wallet->EncryptWallet("lock test"));
+    BOOST_REQUIRE(wallet->IsLocked());
+    BOOST_CHECK(!pq_seed_loaded());
+    BOOST_CHECK(!can_sign());
+
+    BOOST_REQUIRE(wallet->Unlock("lock test"));
+    BOOST_CHECK(pq_seed_loaded());
+    BOOST_CHECK(can_sign());
+
+    BOOST_REQUIRE(wallet->Lock());
+    BOOST_REQUIRE(wallet->IsLocked());
+    BOOST_CHECK(!pq_seed_loaded());
+    BOOST_CHECK(!can_sign());
+
+    // The next unlock decrypts the seeds again.
+    BOOST_REQUIRE(wallet->Unlock("lock test"));
+    BOOST_CHECK(pq_seed_loaded());
+    BOOST_CHECK(can_sign());
 }
 
 // =============================================================================
@@ -1829,6 +1993,56 @@ BOOST_AUTO_TEST_CASE(importdescriptors_rejects_wpkh_on_enforcing_chain)
     BOOST_CHECK(importmulti_rejected);
 
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
+}
+
+BOOST_AUTO_TEST_CASE(importdescriptors_refuses_pq_seed_when_private_keys_disabled)
+{
+    // A wallet with private keys disabled must not take a PQ seed, neither
+    // from pqhd(<seed>) nor from pq_master_seeds for a fingerprint descriptor.
+    const auto embedded_seed = MakePQSeed(0x61);
+    const auto injected_seed = MakePQSeed(0x62);
+    const WalletDescriptor embedded = MakeRangedDescriptor(embedded_seed, /*internal=*/false);
+    const WalletDescriptor by_fingerprint = MakeRangedDescriptor(injected_seed, /*internal=*/false);
+    std::string embedded_desc;
+    BOOST_REQUIRE(embedded.descriptor->ToPrivateString(DUMMY_SIGNING_PROVIDER, embedded_desc));
+    BOOST_REQUIRE(embedded_desc.find(HexStr(embedded_seed)) != std::string::npos);
+    const std::string fingerprint_desc = by_fingerprint.descriptor->ToString();
+    BOOST_REQUIRE(fingerprint_desc.find(HexStr(injected_seed)) == std::string::npos);
+
+    auto wallet = std::make_shared<CWallet>(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    LOCK(wallet->cs_wallet);
+    wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+    wallet->m_keypool_size = P2MR_TEST_RANGE_END;
+
+    const auto expect_refused = [&](const std::string& desc,
+                                    const std::vector<std::array<unsigned char, 32>>& pq_master_seeds,
+                                    const uint256& desc_id) EXCLUSIVE_LOCKS_REQUIRED(wallet->cs_wallet) {
+        UniValue data(UniValue::VOBJ);
+        data.pushKV("desc", desc);
+        data.pushKV("range", P2MR_TEST_RANGE_END - 1);
+        const UniValue result = ProcessDescriptorImport(*wallet, data, /*timestamp=*/1, /*master_keys=*/{}, pq_master_seeds);
+        BOOST_CHECK(!result["success"].get_bool());
+        BOOST_CHECK_EQUAL(result["error"]["message"].getValStr(), "Cannot import private keys to a wallet with private keys disabled");
+        BOOST_CHECK(wallet->GetAllScriptPubKeyMans().empty());
+
+        WalletBatch batch(wallet->GetDatabase());
+        std::vector<unsigned char> seed;
+        std::vector<std::pair<std::array<unsigned char, 4>, std::vector<unsigned char>>> seed_map;
+        BOOST_CHECK(!batch.ReadPQDescriptorSeed(desc_id, seed));
+        BOOST_CHECK(!batch.ReadPQDescriptorSeedMap(desc_id, seed_map));
+    };
+
+    expect_refused(embedded_desc, /*pq_master_seeds=*/{}, embedded.id);
+    expect_refused(fingerprint_desc, /*pq_master_seeds=*/{injected_seed}, by_fingerprint.id);
+
+    // A fixed public key carries no seed and still imports.
+    const size_t spkm_count{wallet->GetAllScriptPubKeyMans().size()};
+    UniValue public_data(UniValue::VOBJ);
+    public_data.pushKV("desc", AddChecksum("mr(" + HexStr(MakePattern(MLDSA44_PUBKEY_SIZE, 0x63)) + ")"));
+    const UniValue public_result = ProcessDescriptorImport(*wallet, public_data, /*timestamp=*/1);
+    BOOST_CHECK(public_result["success"].get_bool());
+    BOOST_CHECK_EQUAL(wallet->GetAllScriptPubKeyMans().size(), spkm_count + 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

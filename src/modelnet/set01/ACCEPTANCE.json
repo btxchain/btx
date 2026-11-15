@@ -1,0 +1,8 @@
+[
+  {
+    "id": "P2P-SCN-M",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "set01 treats an unsigned plan as not settled; the functional test records whether isolated regtest could submit one"
+  }
+]

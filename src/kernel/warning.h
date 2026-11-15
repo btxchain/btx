@@ -17,6 +17,9 @@ enum class Warning {
     //! This is a loud alarm only; it never changes consensus. See the deep-reorg
     //! handling in Chainstate::ActivateBestChainStep.
     DEEP_REORG_DETECTED,
+    //! A deep reorg was parked (see DEEP_REORG_DETECTED). Its own entry, so a
+    //! later warn-only or recovery alarm does not replace the record of a park.
+    DEEP_REORG_PARKED,
     //! A live-tip header burst would connect faster than nPowTargetSpacing
     //! (90s) allows. Local cadence hold: GETDATA/ConnectTip are paced; the
     //! headers stay valid. See CadenceHoldShouldHold.

@@ -46,6 +46,8 @@ struct ShieldedKeySet
     uint256 kem_pk_hash;
     uint32_t account{0};
     uint32_t index{0};
+    // The spending key was derived and matched spending_pk_hash. While the
+    // wallet is locked the key itself is wiped (spending_key.IsValid() is false).
     bool spending_key_loaded{false};
     bool has_spending_key{true};
 };
@@ -499,6 +501,12 @@ public:
     [[nodiscard]] std::optional<ShieldedTxView> GetCachedTransactionView(const uint256& txid) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** Cached view, or the view rebuilt from the note's already-scanned block.
+     *  The rebuilt row is kept in memory only; the persisted shielded state is
+     *  not rewritten. */
+    [[nodiscard]] std::optional<ShieldedTxView> GetTransactionView(const uint256& txid)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Return KEM public key for a local address. */
     [[nodiscard]] bool GetKEMPublicKey(const ShieldedAddress& addr, mlkem::PublicKey& out_pk) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
@@ -541,6 +549,11 @@ public:
      *  Also reloads the full persisted state if keys/notes were lost due to
      *  a locked-wallet startup (tree-only fallback). */
     bool MaybeRehydrateSpendingKeys() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
+    /** Wipe the spending keys held in memory, for CWallet::Lock(). The viewing
+     *  keys, notes and spend-authority flags stay, and the next
+     *  MaybeRehydrateSpendingKeys() after an unlock derives the keys again. */
+    void LockSpendingKeys() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
     /** Flush in-memory shielded state to the wallet database.
      *  Must be called before backupwallet to ensure a consistent snapshot. */
@@ -594,6 +607,11 @@ private:
     // M4 audit fix: mutable so const member functions can clean up stale
     // pending-spend reservations without const_cast UB.
     mutable std::set<Nullifier> m_pending_spends GUARDED_BY(cs_shielded);
+    // Nullifiers reserved by ReservePendingSpends whose transaction has not
+    // reached the mempool yet. PruneStalePendingSpends keeps these: it drops
+    // pending spends that no wallet transaction in the mempool backs, which a
+    // send that is still being built or committed does not have yet.
+    std::set<Nullifier> m_inflight_spends GUARDED_BY(cs_shielded);
     std::vector<uint64_t> m_recent_ring_exclusions GUARDED_BY(cs_shielded);
     uint32_t m_next_spending_index GUARDED_BY(cs_shielded){0};
     uint32_t m_next_kem_index GUARDED_BY(cs_shielded){0};
@@ -608,6 +626,10 @@ private:
      *  tree-only fallback state and full note/key accounting is unavailable
      *  until the shielded state is rehydrated after unlock. */
     bool m_locked_state_incomplete GUARDED_BY(cs_shielded){false};
+    /** A finished gap search found no note and no address had been issued.
+     *  Later unlocks must not derive that gap again. Persisted with shielded
+     *  state version 5. */
+    bool m_empty_gap_search_done GUARDED_BY(cs_shielded){false};
 
     [[nodiscard]] std::vector<unsigned char> GetMasterSeed() const;
     [[nodiscard]] int GetChainTipHeight() const;
@@ -670,6 +692,23 @@ private:
                              const std::vector<unsigned char>& master_seed,
                              ShieldedTxView& tx_view,
                              bool& tx_has_local_visibility)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    /** Fill one output row of a rebuilt view. Does not append to the tree or notes. */
+    void AppendRebuiltOutputView(const uint256& commitment,
+                                 const shielded::EncryptedNote& enc_note,
+                                 const std::optional<smile2::CompactPublicAccount>& smile_account,
+                                 ShieldedTxView& tx_view,
+                                 bool& tx_has_local_visibility) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    void AppendRebuiltOutputView(const shielded::v2::OutputDescription& output,
+                                 ShieldedTxView& tx_view,
+                                 bool& tx_has_local_visibility) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    [[nodiscard]] std::optional<ShieldedTxView> BuildLocalTransactionView(const CTransaction& tx) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+    /** On a cache miss, rebuild one transaction from a block this wallet already
+     *  scanned: the block that confirmed one of its notes, or the block that spent one. */
+    [[nodiscard]] std::optional<ShieldedTxView> RebuildTransactionViewFromNoteAnchor(const uint256& txid)
         EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
     [[nodiscard]] std::vector<ShieldedCoin> SelectNotes(CAmount target,
                                                         CAmount fee,

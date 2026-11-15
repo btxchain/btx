@@ -1,0 +1,14 @@
+swarm_decode/names.cpp
+swarm_decode/record.cpp
+swarm_decode/book.cpp
+swarm_decode/output.cpp
+swarm_decode/status.cpp
+swarm_decode/open_kind.cpp
+swarm_decode/open.cpp
+swarm_decode/prompt_kind.cpp
+swarm_decode/prompt.cpp
+swarm_decode/cursor.cpp
+swarm_decode/memory.cpp
+swarm_decode/absent.cpp
+swarm_decode/pull.cpp
+swarm_decode/swarm_decode_run.cpp

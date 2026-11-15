@@ -36,9 +36,11 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace modelnet {
 namespace {
@@ -56,7 +58,9 @@ struct RuntimeSession {
     bool remapped_only{false};
     bool sleeping{false};
     bool ready{false};
+#ifndef _WIN32
     pid_t loader_pid{0};
+#endif
     fs::path checkout;
 };
 
@@ -97,6 +101,13 @@ std::string NormKey(std::string s)
 
 bool CommandOutputContains(const char* cmd, const char* needle)
 {
+#ifdef _WIN32
+    // These shell probes and the resident CUDA loader require POSIX process APIs.
+    // Do not report hardware readiness when no native Windows probe has run.
+    (void)cmd;
+    (void)needle;
+    return false;
+#else
     FILE* fp = popen(cmd, "r");
     if (!fp) return false;
     std::string out;
@@ -106,6 +117,7 @@ bool CommandOutputContains(const char* cmd, const char* needle)
     if (rc != 0) return false;
     if (needle == nullptr || needle[0] == '\0') return !out.empty();
     return out.find(needle) != std::string::npos;
+#endif
 }
 
 bool HardcodedExeProbe(const char* path, const char* args, const char* needle)
@@ -320,6 +332,7 @@ Digest48 RebuildKvDigest(const std::vector<unsigned char>& weights)
     return out;
 }
 
+#ifndef _WIN32
 bool LooksLikeSafeTensors(Span<const unsigned char> v)
 {
     if (v.size() < 8) return false;
@@ -434,6 +447,8 @@ bool WriteTempSafeTensors(Span<const unsigned char> verified, fs::path& dir, std
     return true;
 }
 
+#endif // !_WIN32
+
 } // namespace
 
 std::vector<RuntimeAdapterStatus> ProbeAcceleratedAdapters()
@@ -523,6 +538,7 @@ bool LoadTrustedRuntime(const std::string& runtime_id, Span<const unsigned char>
         if (!CudaUsable(d)) {
             return FailReceipt(receipt, err_code, err, "HARDWARE_NOT_RUN", d);
         }
+#ifndef _WIN32
         const char* loader = std::getenv("BTX_MODEL_CUDA_LOADER");
         fs::path checkout;
         const std::string checkout_s = ParamStr(typed_params, "checkout_dir");
@@ -572,6 +588,7 @@ bool LoadTrustedRuntime(const std::string& runtime_id, Span<const unsigned char>
                 return true;
             }
         }
+#endif // !_WIN32
         return FailReceipt(receipt, err_code, err, "LIVE_RUNTIME_NOT_RUN",
                            "CUDA usable but BTX_MODEL_CUDA_LOADER was not executed on a SafeTensors checkout; mock is not PASS; NOT_RUN");
     }
@@ -686,9 +703,14 @@ bool WakeRuntimeRebuildKv(const std::string& lease_id, ReadyReceipt& receipt, st
     auto it = g_sessions.find(lease_id);
     if (it == g_sessions.end()) return Fail(err_code, err, "UNKNOWN_LEASE", lease_id);
     RuntimeSession& s = it->second;
+#ifdef _WIN32
+    if (!s.weights_resident || s.weights.empty()) {
+#else
     if (!s.weights_resident || (s.weights.empty() && s.loader_pid <= 0)) {
+#endif
         return FailReceipt(receipt, err_code, err, "UNVERIFIED_RANGE", "preserved weights missing");
     }
+#ifndef _WIN32
     if (s.loader_pid > 0) {
         if (::kill(s.loader_pid, 0) != 0 && errno != EPERM) {
             return FailReceipt(receipt, err_code, err, "UNVERIFIED_RANGE", "CUDA loader no longer resident");
@@ -707,6 +729,7 @@ bool WakeRuntimeRebuildKv(const std::string& lease_id, ReadyReceipt& receipt, st
         receipt.json.pushKV("weights_resident", true);
         return true;
     }
+#endif // !_WIN32
     if (s.remapped_only && !s.kv_rebuilt) {
         // Remap may have happened; it is not success. Rebuild is mandatory.
     }

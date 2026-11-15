@@ -8,9 +8,12 @@
 #include <modelnet/crypto.h>
 #include <modelnet/identity.h>
 #include <modelnet/search.h>
+#include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -304,33 +307,42 @@ bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err)
     return true;
 }
 
-bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err)
+bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err,
+                   std::vector<std::string>* skipped_release_ids)
 {
     out.clear();
     const fs::path path = dir / "campaigns.json";
     if (!fs::exists(path)) return true;
+    // A file that is there but is not a campaign list is an error, not an
+    // empty list: the caller must not treat its campaigns as gone.
     std::ifstream in(path);
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     UniValue o;
-    if (!o.read(raw) || !o.isObject() || !o.exists("campaigns")) return true;
-    if (!o["campaigns"].isArray()) {
-        LogSkippedCampaign("campaigns type");
-        return true;
+    if (!in.is_open() || !o.read(raw) || !o.isObject() || !o.exists("campaigns") || !o["campaigns"].isArray()) {
+        err = "campaigns.json cannot be read";
+        LogSkippedCampaign(err);
+        return false;
     }
+    const auto skipped = [&](const UniValue& cj, const std::string& why) {
+        LogSkippedCampaign(why);
+        if (skipped_release_ids && cj.isObject() && cj.exists("release_id") && cj["release_id"].isStr()) {
+            skipped_release_ids->push_back(ToLower(cj["release_id"].get_str()));
+        }
+    };
     try {
         for (const auto& cj : o["campaigns"].getValues()) {
             ReleaseCampaign c;
             std::string ierr;
             try {
                 if (!CampaignFromJson(cj, c, ierr)) {
-                    LogSkippedCampaign(ierr.empty() ? "campaign" : ierr);
+                    skipped(cj, ierr.empty() ? "campaign" : ierr);
                     continue;
                 }
             } catch (const std::exception& ex) {
-                LogSkippedCampaign(ex.what());
+                skipped(cj, ex.what());
                 continue;
             } catch (...) {
-                LogSkippedCampaign("campaign");
+                skipped(cj, "campaign");
                 continue;
             }
             out.push_back(std::move(c));
@@ -338,11 +350,11 @@ bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::
     } catch (const std::exception& ex) {
         LogSkippedCampaign(ex.what());
         err = ex.what();
-        return true;
+        return false;
     } catch (...) {
         err = "campaigns";
         LogSkippedCampaign(err);
-        return true;
+        return false;
     }
     return true;
 }
@@ -353,13 +365,69 @@ bool SaveCampaigns(const fs::path& dir, const std::vector<ReleaseCampaign>& camp
     UniValue arr(UniValue::VARR);
     for (const auto& c : campaigns) arr.push_back(CampaignToJson(c));
     o.pushKV("campaigns", arr);
-    std::ofstream out(dir / "campaigns.json", std::ios::trunc);
-    if (!out) {
+    // Write a temp file, sync it and rename it over campaigns.json. Writing the
+    // file in place lost the previous campaigns when the write failed (a full
+    // disk fails only the flush at close), and every caller was told it saved.
+    const fs::path path = dir / "campaigns.json";
+    const fs::path tmp = path + ".tmp";
+    const std::string text = o.write() + "\n";
+    FILE* file = fsbridge::fopen(tmp, "wb");
+    if (!file) {
         err = "campaigns.json write";
         return false;
     }
-    out << o.write() << "\n";
+    const bool written{fwrite(text.data(), 1, text.size(), file) == text.size()};
+    const bool committed{written && FileCommit(file)};
+    const bool closed{fclose(file) == 0};
+    if (!committed || !closed || !RenameOver(tmp, path)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        err = "campaigns.json write";
+        return false;
+    }
     return true;
+}
+
+bool CampaignHasLocalState(const ReleaseCampaign& c)
+{
+    return c.signed_ok || !c.pubkey.empty() || !c.sig.empty() || c.pledged_atoms != 0 || c.funded_atoms != 0 ||
+           c.latest_funding_height != 0 || !c.output_script_hex.empty() || !c.funding_outpoints.empty() ||
+           c.frozen || c.secret_disclosed || c.plaintext_verified;
+}
+
+bool CampaignIndex::Droppable(const ReleaseCampaign& c, const KeepFn& keep) const
+{
+    return !CampaignHasLocalState(c) && !(keep && keep(c));
+}
+
+void CampaignIndex::Touch(const std::string& release_hex)
+{
+    auto age = m_age.find(release_hex);
+    if (age == m_age.end()) return;
+    m_by_age.erase(age->second.last_seen);
+    age->second.last_seen = m_next_age++;
+    m_by_age.emplace(age->second.last_seen, release_hex);
+}
+
+void CampaignIndex::RemoveModelLookup(const std::string& release_hex, const Digest48& model_id)
+{
+    if (model_id.IsNull()) return;
+    auto model = m_model_releases.find(model_id.Hex());
+    model->second.erase(m_age.at(release_hex).model_put);
+    if (model->second.empty()) m_model_releases.erase(model);
+}
+
+void CampaignIndex::Erase(const std::string& release_hex)
+{
+    auto it = m_by_release.find(release_hex);
+    if (it == m_by_release.end()) return;
+    RemoveModelLookup(release_hex, it->second.model_id);
+    auto age = m_age.find(release_hex);
+    if (age != m_age.end()) {
+        m_by_age.erase(age->second.last_seen);
+        m_age.erase(age);
+    }
+    m_by_release.erase(it);
 }
 
 bool CampaignIndex::Put(const ReleaseCampaign& c, std::string& err)
@@ -369,8 +437,16 @@ bool CampaignIndex::Put(const ReleaseCampaign& c, std::string& err)
         return false;
     }
     const std::string rid = c.release_id.Hex();
+    const auto order = m_next_age++;
+    auto [age, inserted] = m_age.try_emplace(rid, ReleaseOrder{order, order});
+    if (inserted) {
+        m_by_age.emplace(order, rid);
+    } else {
+        RemoveModelLookup(rid, m_by_release.at(rid).model_id);
+        age->second.model_put = order;
+    }
     m_by_release[rid] = c;
-    if (!c.model_id.IsNull()) m_model_to_release[c.model_id.Hex()] = rid;
+    if (!c.model_id.IsNull()) m_model_releases[c.model_id.Hex()].emplace(order, rid);
     return true;
 }
 
@@ -386,9 +462,16 @@ const ReleaseCampaign* CampaignIndex::GetByReleaseHex(const std::string& hex) co
 }
 const ReleaseCampaign* CampaignIndex::GetByModel(const Digest48& model_id) const
 {
-    auto it = m_model_to_release.find(model_id.Hex());
-    if (it == m_model_to_release.end()) return nullptr;
-    return GetByReleaseHex(it->second);
+    auto it = m_model_releases.find(model_id.Hex());
+    if (it == m_model_releases.end()) return nullptr;
+    return GetByReleaseHex(it->second.rbegin()->second);
+}
+const ReleaseCampaign* CampaignIndex::Find(const std::function<bool(const ReleaseCampaign&)>& match) const
+{
+    for (const auto& kv : m_by_release) {
+        if (match(kv.second)) return &kv.second;
+    }
+    return nullptr;
 }
 std::vector<ReleaseCampaign> CampaignIndex::List() const
 {
@@ -398,7 +481,7 @@ std::vector<ReleaseCampaign> CampaignIndex::List() const
     return out;
 }
 
-void CampaignIndex::IngestFromSearchRecord(const ModelSearchRecord& r)
+void CampaignIndex::IngestFromSearchRecord(const ModelSearchRecord& r, const KeepFn& keep)
 {
     if (r.release_id.empty()) return;
     ReleaseCampaign c;
@@ -421,7 +504,26 @@ void CampaignIndex::IngestFromSearchRecord(const ModelSearchRecord& r)
         if (existing->ciphertext_artifact_id.IsNull() && !c.ciphertext_artifact_id.IsNull()) {
             existing->ciphertext_artifact_id = c.ciphertext_artifact_id;
         }
+        Touch(existing->release_id.Hex());
         return;
+    }
+    // A record re-signed with a new release_id needs no new index slot, so the
+    // campaign from the model's earlier record would otherwise never go.
+    const ReleaseCampaign* prev = GetByModel(c.model_id);
+    if (prev && prev->model_id == c.model_id && Droppable(*prev, keep)) Erase(prev->release_id.Hex());
+    // At the cap, drop the campaign named least recently. One that must stay
+    // moves to the newest end, so later inserts do not pass over it again;
+    // after CAMPAIGN_INDEX_KEPT_SCAN of those the new campaign is skipped.
+    size_t kept_seen{0};
+    while (m_by_release.size() >= m_cap) {
+        if (m_by_age.empty() || kept_seen >= std::min(CAMPAIGN_INDEX_KEPT_SCAN, m_by_age.size())) return;
+        const std::string oldest{m_by_age.begin()->second};
+        if (Droppable(m_by_release.at(oldest), keep)) {
+            Erase(oldest);
+        } else {
+            Touch(oldest);
+            ++kept_seen;
+        }
     }
     (void)Put(c, err);
 }

@@ -931,7 +931,7 @@ BOOST_AUTO_TEST_CASE(lab_methods_keep_state_and_reject_bad_transitions)
     execute.pushKV("one_use_permit", permit);
     execute.pushKV("idempotency_key", "idempotency-execute");
     execute.pushKV("expected_state", UniValue());
-    BOOST_CHECK_EQUAL(LabResult("lab.action_execute", execute)["state"].get_str(), "EXECUTED");
+    BOOST_CHECK_EQUAL(LabResult("lab.action_execute", execute)["state"].get_str(), "PERMIT_CONSUMED");
     execute.pushKV("idempotency_key", "idempotency-execute-2");
     BOOST_CHECK(!modelnet::DispatchLab035("lab.action_execute", execute.write(), response, err));
     BOOST_CHECK_EQUAL(err, "BTX035_REPLAY");
@@ -966,7 +966,13 @@ BOOST_AUTO_TEST_CASE(lab_methods_keep_state_and_reject_bad_transitions)
     resume.pushKV("expected_state", UniValue());
     BOOST_CHECK_EQUAL(LabResult("lab.runtime_resume", resume)["state"].get_str(), "RESUMED");
     execute.pushKV("idempotency_key", "idempotency-after-resume");
-    BOOST_CHECK_EQUAL(LabResult("lab.action_execute", execute)["state"].get_str(), "EXECUTED");
+    BOOST_CHECK(!modelnet::DispatchLab035("lab.action_execute", execute.write(), response, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_REVOKED");
+    prepare.pushKV("idempotency_key", "idempotency-prepare-after-resume");
+    const auto fresh = LabResult("lab.action_prepare", prepare);
+    execute.pushKV("one_use_permit", fresh["one_use_permit"]);
+    execute.pushKV("idempotency_key", "idempotency-fresh-after-resume");
+    BOOST_CHECK_EQUAL(LabResult("lab.action_execute", execute)["state"].get_str(), "PERMIT_CONSUMED");
 
     UniValue ws(UniValue::VOBJ);
     ws.pushKV("snapshot_id", hex_a);

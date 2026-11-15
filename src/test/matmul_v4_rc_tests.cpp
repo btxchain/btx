@@ -133,9 +133,9 @@ bool ScaleSelectiveGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8
     return OracleGemmS8S8(L, R, rows, inner, cols, out);
 }
 
-/** Deliberately separate test entry point for the alternate-provider state
- * machine. Production independence is canary-bound to actual backend entry
- * points; two labels using OracleGemmS8S8 itself remain correlated. */
+/** Use a separate scalar implementation for the alternate-provider fixture.
+ * Identical forwarding wrappers can be folded to one address by an optimized
+ * linker; two labels using the same callback must still remain correlated. */
 bool IndependentOracleGemmS8S8(
     const std::vector<int8_t>& L,
     const std::vector<int8_t>& R,
@@ -144,7 +144,17 @@ bool IndependentOracleGemmS8S8(
     uint32_t cols,
     std::vector<int32_t>& out)
 {
-    out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    out.assign(static_cast<size_t>(rows) * cols, 0);
+    for (uint32_t i = 0; i < rows; ++i) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            int32_t sum{0};
+            for (uint32_t k = 0; k < inner; ++k) {
+                sum += static_cast<int32_t>(L[static_cast<size_t>(i) * inner + k]) *
+                       static_cast<int32_t>(R[static_cast<size_t>(k) * cols + c]);
+            }
+            out[static_cast<size_t>(i) * cols + c] = sum;
+        }
+    }
     return true;
 }
 
@@ -1969,7 +1979,8 @@ BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_cpu_confirms_invalid_not_quarantined
     BOOST_CHECK(!rejected.device_mismatch_retried);
     BOOST_CHECK_EQUAL(rejected.digest, honest_digest);
     BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
-    BOOST_CHECK(!rejected.fully_accelerated);
+    // No portable CPU replay ran (5be6edd6): the device did every GEMM.
+    BOOST_CHECK(rejected.fully_accelerated);
     BOOST_CHECK_EQUAL(rejected.provider_attempts, 1U);
     BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 0U);
     BOOST_CHECK(!rejected.provider_quarantined);
@@ -1988,6 +1999,21 @@ BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_cpu_confirms_invalid_not_quarantined
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
     rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_independent_oracle_matches_reference)
+{
+    const std::vector<int8_t> left{0, 1, -1, 127, -128, 2};
+    const std::vector<int8_t> right{1, -2, 3, 4, -5, 6};
+    const std::vector<int32_t> expected{8, -2, -267, -754};
+    std::vector<int32_t> out{123};
+    BOOST_REQUIRE(IndependentOracleGemmS8S8(left, right, 2, 3, 2, out));
+    BOOST_CHECK(out == expected);
+    BOOST_CHECK(out == lt::ExactGemmS8S8(left, right, 2, 3, 2));
+
+    BOOST_REQUIRE(IndependentOracleGemmS8S8({7}, {-3}, 1, 1, 1, out));
+    BOOST_REQUIRE_EQUAL(out.size(), 1U);
+    BOOST_CHECK_EQUAL(out[0], -21);
 }
 
 BOOST_AUTO_TEST_CASE(rc_strict_independent_same_digest_rejects_false_header)
@@ -2550,7 +2576,8 @@ BOOST_AUTO_TEST_CASE(rc_strict_faulty_device_cpu_recovers_honest_header)
     BOOST_CHECK(!recovered.device_mismatch_retried);
     BOOST_CHECK(!recovered.device_mismatch_confirmed);
     BOOST_CHECK_EQUAL(recovered.cpu_gemm_calls, 0U);
-    BOOST_CHECK(!recovered.fully_accelerated);
+    // No portable CPU replay ran (5be6edd6): the device did every GEMM.
+    BOOST_CHECK(recovered.fully_accelerated);
     BOOST_CHECK(!recovered.provider_quarantined);
     BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
     rc::ClearRCExactReplayAlternateProviders();
@@ -2559,6 +2586,9 @@ BOOST_AUTO_TEST_CASE(rc_strict_faulty_device_cpu_recovers_honest_header)
 
 BOOST_AUTO_TEST_CASE(rc_device_mismatch_auto_fallback_remains_diagnostic_only)
 {
+    // The inline portable retry runs only with -matmulrcconfirmcpu=1, which
+    // is off by default since fa878338 (the fixture applies that default).
+    ConfirmationPolicyGuard confirmation{true};
     auto header{MakeRCHeader(0x4350555245545259)};
     const auto params{rc::MakeToyRCEpisodeParams()};
     const uint256 honest_digest{
@@ -3042,9 +3072,9 @@ BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
 
 BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_slot_reuse_ordering)
 {
-    // The CUDA implementation inserts a synthetic event before the layer-0
-    // consumer and verifies that the real per-slot H2D wait prevents the
-    // layer-2 overwrite from crossing it. Removing the wait, or waiting on the
+    // The CUDA implementation holds layer_done[0] behind a synthetic event
+    // and verifies that the real per-slot H2D wait prevents the layer-2
+    // overwrite from crossing it. Removing the wait, or waiting on the
     // unrecorded wrong slot, makes this fail deterministically.
     if (!matmul_v4::cuda::IsRcExactReplayCudaAvailable()) {
         BOOST_TEST_MESSAGE("CUDA ExactReplay unavailable; skip slot ordering test");

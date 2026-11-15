@@ -64,6 +64,10 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         ingress_wallet = encrypt_and_unlock_wallet(node, "ingress")
         ingress_multishard_wallet = encrypt_and_unlock_wallet(node, "ingress_multishard")
 
+        self.log.info("z_validateaddress: an invalid address returns only isvalid")
+        assert_equal(wallet.z_validateaddress("btxs1invalid"), {"isvalid": False})
+        assert_equal(wallet.z_validateaddress(""), {"isvalid": False})
+
         self.log.info("Edge case: z_shieldcoinbase rejects when no mature coinbase exists")
         assert_raises_rpc_error(-4, "No mature coinbase outputs available", wallet.z_shieldcoinbase)
 

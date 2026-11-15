@@ -1,0 +1,146 @@
+[
+  {
+    "id": "DS-MODEL-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "PutIncidentKv stores a value only after SwarmLookupTenantAccess notes the same tenant, and ReadIncidentKv returns it only for that tenant and epoch."
+  },
+  {
+    "id": "DS-MODEL-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "ApprovePublic stores a body only when the approver differs from the author and the body is public, and ReusePublic reaches another case only for that record."
+  },
+  {
+    "id": "DS-MODEL-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "MeasureCache copies the cache bytes and reports that length, and CompleteCheckpoint restores an exact DtCkpt closure while a moment-free save stays partial."
+  },
+  {
+    "id": "DS-MODEL-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "OpenIncident pins one generation, and SwapGeneration of a different generation leaves that pin in place until CloseIncident."
+  },
+  {
+    "id": "DS-MODEL-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "Place is refused until RestrictPlacement records location and processor, and a mismatched processor is refused."
+  },
+  {
+    "id": "DS-MODEL-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "PoisonCache calls SwarmNoteNotNoPoison and withdraws use, and FailRuntimeQualification withdraws use the same way."
+  },
+  {
+    "id": "DS-LEARN-001",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "IssueLearningRelease returns UNQUALIFIED. release_qualified stays false. No learning release is issued."
+  },
+  {
+    "id": "DS-LEARN-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "AssignHoldout keeps time, campaign, tenant, and lineage partitions apart, and the same lineage key cannot enter a second partition."
+  },
+  {
+    "id": "DS-LEARN-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "PreserveCase keeps provenance and license for synthetic and public cases, calls SwarmGenerationEngine::Eligible, and refuses a private kind."
+  },
+  {
+    "id": "DS-LEARN-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "JointDecision accepts a candidate only when utility and benign-case harm both pass, and qualified stays false."
+  },
+  {
+    "id": "DS-LEARN-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "TrainCompeting runs IntegerTrainer from a parent into two different descendants, and EvaluateDescendant refuses the author and accepts a different evaluator."
+  },
+  {
+    "id": "DS-LEARN-006",
+    "final_acceptance": "DEFINED_NEEDS_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SecondResearchCycle calls SwarmGenerationEngine::Continue, which stays unqualified, and no second research cycle is executed."
+  },
+  {
+    "id": "DS-POOL-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "FundPool uses SwarmDefBudget so readiness, incident, and improvement balances stay separate when one pool pays a milestone."
+  },
+  {
+    "id": "DS-POOL-002",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "FundPool of one outpoint on a second pool returns OUTPOINT and leaves the first pool's collateral in place."
+  },
+  {
+    "id": "DS-POOL-003",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "ReconcileAtoms requires confirmed atoms to cover fees, settled atoms, earned unpaid atoms, and reserved new work, and refuses a negative remainder."
+  },
+  {
+    "id": "DS-POOL-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "JoinPool records membership with NOT_PAID, and EarnWork records accepted work without paying membership alone."
+  },
+  {
+    "id": "DS-POOL-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "AllocateMilestones uses floor division, largest-remainder order, and per-contract caps, and a zero weight sum leaves the pool unallocated."
+  },
+  {
+    "id": "DS-POOL-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "SelfDeal refuses the payer, EarnWork refuses a repeated receipt, Milestone refuses a payout above the balance, and an urgent label does not raise the rate."
+  },
+  {
+    "id": "DS-PAY-001",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "DisclosePayment reports SwarmPayReg mode REGTEST_UNBROADCAST, enforceable false, and oracle trust ORACLE_NOT_SETTLEMENT."
+  },
+  {
+    "id": "DS-PAY-002",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "QualifyNativeFunding calls SwarmPayReg::Settle and leaves qualified and spendable false."
+  },
+  {
+    "id": "DS-PAY-003",
+    "final_acceptance": "UNQUALIFIED",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "ProvePaymentPaths returns UNQUALIFIED. hosts stays 1. Unilateral exit, expiry, fee, stale state, and watchtower paths are not proven."
+  },
+  {
+    "id": "DS-PAY-004",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "ReserveBacking funds one pool, NoteCredit returns NOT_BACKING without raising that balance, and RouteTerms stores route atoms apart from both."
+  },
+  {
+    "id": "DS-PAY-005",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "PromiseEmergency succeeds only when the readiness balance already covers the tier, and a credit note does not cover it."
+  },
+  {
+    "id": "DS-PAY-006",
+    "final_acceptance": "CLOSED_IN_PROCESS",
+    "native_status": "NOT_RUN_NATIVE",
+    "evidence": "KeepClaim uses SwarmPayReg::Claim, FailCompute leaves the claim, and Reorganize drops only pending work."
+  }
+]

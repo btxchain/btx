@@ -1915,7 +1915,7 @@ struct BoundedReader {
         if (!Compact(cnt, kRCCarrierMaxVecElems)) return false;
         if (!need(cnt)) return false;
         v.resize(cnt);
-        std::memcpy(v.data(), p, cnt);
+        if (cnt != 0) std::memcpy(v.data(), p, cnt);
         p += cnt; remaining -= cnt; return true;
     }
 };

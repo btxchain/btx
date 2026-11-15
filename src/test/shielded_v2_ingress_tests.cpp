@@ -29,6 +29,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+// Windows headers may define OPAQUE after v2_types.h has been included.
+#pragma push_macro("OPAQUE")
+#undef OPAQUE
+#endif
+
 namespace {
 
 using shielded::BridgeBatchLeaf;
@@ -1367,3 +1373,7 @@ BOOST_AUTO_TEST_CASE(proof_check_rejects_v2_ingress_credit_commitment_mismatch)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+#if defined(_WIN32)
+#pragma pop_macro("OPAQUE")
+#endif

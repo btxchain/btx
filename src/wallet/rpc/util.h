@@ -20,6 +20,7 @@ class UniValue;
 struct bilingual_str;
 
 namespace wallet {
+class CCoinControl;
 class LegacyScriptPubKeyMan;
 enum class DatabaseStatus;
 struct WalletContext;
@@ -46,6 +47,10 @@ bool GetWalletNameFromJSONRPCRequest(const JSONRPCRequest& request, std::string&
 std::string EnsureUniqueWalletName(const JSONRPCRequest& request, const std::string* wallet_name);
 
 void EnsureWalletIsUnlocked(const CWallet&);
+
+/** Shared implementation used by the RPC and explicit Qt recovery.
+ * Caller owns the scan reservation; this function acquires m_relock_mutex. */
+UniValue RescanWallet(CWallet& wallet, const UniValue& params, const WalletRescanReserver& reserver);
 WalletContext& EnsureWalletContext(const std::any& context);
 LegacyScriptPubKeyMan& EnsureLegacyScriptPubKeyMan(CWallet& wallet, bool also_create = false);
 const LegacyScriptPubKeyMan& EnsureConstLegacyScriptPubKeyMan(const CWallet& wallet);
@@ -65,6 +70,8 @@ void EnsureUniqueWalletBundleArchiveRelativePaths(const std::vector<std::string>
 void EnsureNoHistoricalShieldedPartialRescan(const CWallet& wallet, int start_height);
 void AppendLastProcessedBlock(UniValue& entry, const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 void AppendChainStaleness(UniValue& entry, const CWallet& wallet) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
+/** Whether a locked wallet left coins of its own out of this coin selection (rpc/spend.cpp). */
+bool LockedWalletLeftOutOwnCoins(const CWallet& wallet, const CCoinControl& coin_control) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 } //  namespace wallet
 
 #endif // BITCOIN_WALLET_RPC_UTIL_H

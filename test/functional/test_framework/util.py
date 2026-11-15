@@ -7,6 +7,7 @@
 from base64 import b64encode
 from decimal import Decimal
 from subprocess import CalledProcessError
+import atexit
 import hashlib
 import inspect
 import json
@@ -16,6 +17,9 @@ import pathlib
 import platform
 import random
 import re
+import shutil
+import sys
+import tempfile
 import time
 
 from . import coverage
@@ -467,6 +471,11 @@ def write_config(config_path, *, n, chain, extra_config="", disable_autoconnect=
         f.write("printtoconsole=0\n")
         f.write("upnp=0\n")
         f.write("natpmp=0\n")
+        # The node-owned btx-modeld listens on 0.0.0.0:29447 unless told
+        # otherwise. One fixed port collides between the nodes of a test and
+        # between parallel tests. Tests that need the PQ1 listener pass their
+        # own -modelbind=127.0.0.1:<port>.
+        f.write("modelbind=0\n")
         f.write("shrinkdebugfile=0\n")
         f.write("deprecatedrpc=create_bdb\n")  # Required to run the tests
         # To improve SQLite wallet performance so that the tests don't timeout, use -unsafesqlitesync
@@ -489,6 +498,37 @@ def write_config(config_path, *, n, chain, extra_config="", disable_autoconnect=
 
 def get_datadir_path(dirname, n):
     return pathlib.Path(dirname) / f"node{n}"
+
+
+# Size of sun_path, including the trailing NUL.
+if sys.platform.startswith("linux"):
+    UNIX_PATH_MAX = 108
+elif sys.platform.startswith(("darwin", "freebsd", "netbsd", "openbsd")):
+    UNIX_PATH_MAX = 104
+else:
+    UNIX_PATH_MAX = 92
+
+
+_short_socket_paths = {}
+
+
+def unix_socket_path(preferred):
+    """Return preferred if it fits in sun_path. Otherwise return a path with the
+    same file name in a short temporary directory, removed at exit. The same
+    preferred path always maps to the same result, so a helper restarted on it
+    binds where the node already looks.
+
+    The test_runner directory (test_runner_<unicode>_<date>_<random>/<test>_<n>)
+    can leave no room in sun_path for <datadir>/.../<name>.sock."""
+    preferred = pathlib.Path(preferred)
+    key = os.fsencode(preferred)
+    if len(key) < UNIX_PATH_MAX:
+        return preferred
+    if key not in _short_socket_paths:
+        short_dir = tempfile.mkdtemp(prefix="btxsock")
+        atexit.register(shutil.rmtree, short_dir, ignore_errors=True)
+        _short_socket_paths[key] = pathlib.Path(short_dir) / preferred.name
+    return _short_socket_paths[key]
 
 
 def get_temp_default_datadir(temp_dir: pathlib.Path) -> tuple[dict, pathlib.Path]:

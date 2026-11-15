@@ -5,16 +5,14 @@
 
 #include <test/modelnet_cr12_test.h>
 #include <test/util/setup_common.h>
+#include <test/util/sdk_process.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
 
-#include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 
 namespace {
 
@@ -28,44 +26,10 @@ fs::path SdkRoot()
 #endif
 }
 
-std::string ShellQuote(const std::string& s)
-{
-    std::string q = "'";
-    for (char c : s) {
-        if (c == '\'') q += "'\\''";
-        else q += c;
-    }
-    q += "'";
-    return q;
-}
+using sdk_test::Python3;
+using sdk_test::Spawn;
+using sdk_test::Which;
 
-int Spawn(const std::string& cmd, std::string& combined)
-{
-    FILE* fp = ::popen(cmd.c_str(), "r");
-    if (!fp) return -1;
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), fp) != nullptr) combined.append(buf);
-    const int st = ::pclose(fp);
-    if (st == -1) return -1;
-    if (WIFEXITED(st)) return WEXITSTATUS(st);
-    return 127;
-}
-
-std::string Which(const char* name)
-{
-    std::string out;
-    const int rc = Spawn(std::string("command -v ") + name + " 2>/dev/null", out);
-    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
-    if (rc != 0) return {};
-    return out;
-}
-
-std::string Python3()
-{
-    std::string exe = "/usr/bin/python3";
-    if (::access(exe.c_str(), X_OK) != 0) exe = Which("python3");
-    return exe;
-}
 
 std::string ReadFile(const fs::path& p)
 {
@@ -82,6 +46,29 @@ void TrimNl(std::string& s)
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_cr12_sdk_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(cr12_sdk_process_launcher_controls)
+{
+    const std::string python = Python3();
+    BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
+    std::string out;
+    BOOST_CHECK_EQUAL(Spawn({python, "-c", "import sys; print('stdout-marker'); print('stderr-marker', file=sys.stderr); sys.exit(7)"}, out), 7);
+    BOOST_CHECK(out.find("stdout-marker") != std::string::npos);
+    BOOST_CHECK(out.find("stderr-marker") != std::string::npos);
+    out.clear();
+    BOOST_CHECK_EQUAL(Spawn({python, "-c", "import sys; sys.stdout.write('o'*65536); sys.stderr.write('e'*65536)"}, out, false), 0);
+    BOOST_CHECK_EQUAL(out, std::string(65536, 'o'));
+    const fs::path script = m_path_root / "script with spaces.py";
+    {
+        std::ofstream file(fs::PathToString(script));
+        BOOST_REQUIRE(file.good());
+        file << "import sys\nassert sys.argv[1:] == ['space argument', '']\nprint('argv-ok')\n";
+    }
+    out.clear();
+    BOOST_REQUIRE_EQUAL(Spawn({python, fs::PathToString(script), "space argument", ""}, out), 0);
+    TrimNl(out);
+    BOOST_CHECK_EQUAL(out, "argv-ok");
+}
 
 BOOST_AUTO_TEST_CASE(cr12_sdk_01_spawn_body_id)
 {
@@ -100,7 +87,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_01_spawn_body_id)
     const fs::path py = sdk / "python" / "compute_body_id.py";
     BOOST_REQUIRE_MESSAGE(fs::exists(py), fs::PathToString(py) + " missing");
     const std::string python = Python3();
-    BOOST_REQUIRE_MESSAGE(!python.empty() && ::access(python.c_str(), X_OK) == 0, "python3 required");
+    BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
 
     const fs::path envp = m_path_root / "cr12-sdk-envelope.json";
     {
@@ -109,8 +96,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_01_spawn_body_id)
         out << r.body;
     }
     std::string py_out;
-    const std::string py_cmd = ShellQuote(python) + " " + ShellQuote(fs::PathToString(py)) + " " +
-                               ShellQuote(fs::PathToString(envp)) + " 2>&1";
+    const std::vector<std::string> py_cmd{python, fs::PathToString(py), fs::PathToString(envp)};
     const int py_rc = Spawn(py_cmd, py_out);
     TrimNl(py_out);
     BOOST_REQUIRE_MESSAGE(py_rc == 0, "compute_body_id.py rc=" + std::to_string(py_rc) + "\n" + py_out);
@@ -123,10 +109,8 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_01_spawn_body_id)
         const fs::path ts = sdk / "typescript" / "src" / "compute_body_id.ts";
         BOOST_REQUIRE_MESSAGE(fs::exists(ts), fs::PathToString(ts) + " missing");
         std::string ts_out;
-        const std::string ts_cmd = "env NODE_NO_WARNINGS=1 " + ShellQuote(node) + " --experimental-strip-types " +
-                                   ShellQuote(fs::PathToString(ts)) + " " + ShellQuote(fs::PathToString(envp)) +
-                                   " 2>/dev/null";
-        const int ts_rc = Spawn(ts_cmd, ts_out);
+        const std::vector<std::string> ts_cmd{node, "--no-warnings", "--experimental-strip-types", fs::PathToString(ts), fs::PathToString(envp)};
+        const int ts_rc = Spawn(ts_cmd, ts_out, false);
         TrimNl(ts_out);
         BOOST_REQUIRE_MESSAGE(ts_rc == 0, "compute_body_id.ts rc=" + std::to_string(ts_rc) + "\n" + ts_out);
         BOOST_CHECK_EQUAL(ts_out, env["body_id"].get_str());
@@ -139,8 +123,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_02_refuse_export_secrets)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(sdk)) + " && " + ShellQuote(python) +
-                            " python/test_body_id.py TestCrl12BodyId.test_refuse_export_secrets 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(sdk / "python/test_body_id.py"), "TestCrl12BodyId.test_refuse_export_secrets"};
     const int rc = Spawn(cmd, out);
     BOOST_REQUIRE_MESSAGE(rc == 0, "SDK export-secret test rc=" + std::to_string(rc) + "\n" + out);
 
@@ -179,8 +162,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_03_refuse_execute_from_analytics)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_body_id.py TestCrl12BodyId.test_refuse_execute_from_analytics 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_body_id.py"), "TestCrl12BodyId.test_refuse_execute_from_analytics"};
     const int rc = Spawn(cmd, out);
     BOOST_REQUIRE_MESSAGE(rc == 0, "SDK analytics execute test rc=" + std::to_string(rc) + "\n" + out);
 }
@@ -199,8 +181,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_04_typed_paths_no_rpc)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_body_id.py TestCrl12BodyId.test_no_rpc_passthrough 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_body_id.py"), "TestCrl12BodyId.test_no_rpc_passthrough"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 }
 
@@ -220,9 +201,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_06_catalog_forty_three)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_body_id.py TestCrl12BodyId.test_ops_catalog_count "
-                            "TestCrl12BodyId.test_forty_three_operation_ids_on_client 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_body_id.py"), "TestCrl12BodyId.test_ops_catalog_count", "TestCrl12BodyId.test_forty_three_operation_ids_on_client"};
     const int rc = Spawn(cmd, out);
     BOOST_REQUIRE_MESSAGE(rc == 0, out);
 
@@ -232,9 +211,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_06_catalog_forty_three)
     } else {
         std::string ts_out;
         const fs::path tdir = SdkRoot() / "typescript";
-        const std::string ts_cmd = "cd " + ShellQuote(fs::PathToString(tdir)) +
-                                   " && env NODE_NO_WARNINGS=1 " + ShellQuote(node) +
-                                   " --experimental-strip-types --test src/body_id.test.ts src/desktop_context.test.ts 2>&1";
+        const std::vector<std::string> ts_cmd{node, "--no-warnings", "--experimental-strip-types", "--test", fs::PathToString(tdir / "src/body_id.test.ts"), fs::PathToString(tdir / "src/desktop_context.test.ts")};
         const int ts_rc = Spawn(ts_cmd, ts_out);
         BOOST_REQUIRE_MESSAGE(ts_rc == 0, "typescript SDK tests rc=" + std::to_string(ts_rc) + "\n" + ts_out);
     }
@@ -263,8 +240,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_08_https_default)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_body_id.py TestCrl12BodyId.test_https_default_rejects_http 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_body_id.py"), "TestCrl12BodyId.test_https_default_rejects_http"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 }
 
@@ -273,8 +249,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_09_import_not_custody)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_body_id.py TestCrl12BodyId.test_import_not_custody_credit 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_body_id.py"), "TestCrl12BodyId.test_import_not_custody_credit"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 
     auto e = cr12_test::Lab();
@@ -301,9 +276,7 @@ BOOST_AUTO_TEST_CASE(cr12_sdk_10_no_brand_dispatch)
     const std::string python = Python3();
     BOOST_REQUIRE_MESSAGE(!python.empty(), "python3 required");
     std::string out;
-    const std::string cmd = "cd " + ShellQuote(fs::PathToString(SdkRoot())) + " && " + ShellQuote(python) +
-                            " python/test_body_id.py TestCrl12BodyId.test_no_brand_dispatch "
-                            "TestCrl12BodyId.test_no_invented_aum_auc 2>&1";
+    const std::vector<std::string> cmd{python, fs::PathToString(SdkRoot() / "python/test_body_id.py"), "TestCrl12BodyId.test_no_brand_dispatch", "TestCrl12BodyId.test_no_invented_aum_auc"};
     BOOST_REQUIRE_EQUAL(Spawn(cmd, out), 0);
 }
 

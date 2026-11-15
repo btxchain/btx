@@ -1,0 +1,66 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/license/mit/.
+
+#ifndef BITCOIN_MODELNET_REALM_PROMOTION_REALM_PROMOTION_H
+#define BITCOIN_MODELNET_REALM_PROMOTION_REALM_PROMOTION_H
+
+#include <modelnet/nifdt_contract/contract.h>
+
+#include <cstdint>
+#include <string>
+
+namespace modelnet {
+
+/**
+ * One realm-promotion candidate. qualified() stays false.
+ * This class opens no socket and starts no process.
+ *
+ * Propose: an empty id or an empty text returns FIELD and stores
+ * nothing. Text exactly one returns QUORUM and stores nothing. Text
+ * containing private returns NIFDT_PRIVATE_DATA and stores nothing.
+ * Text exactly vllm, sglang, lmcache, nixl, mooncake, rdma, deepinfer,
+ * dualpipe, fp8, or fp4 returns NIFDT_ENGINE_ABSENT and stores nothing.
+ * The first id/text pair is stored. The same text again returns
+ * NIFDT_REPLAY. A different text returns UNCHANGED. The stored pair
+ * stays.
+ * Hosts: n other than 1 returns HOSTS. hosts() and physical_hosts()
+ * stay 1. bytes_moved() stays 0. automatic_spend() is
+ * NIFDT_AUTOMATIC_SPEND. launched(), gpu(), broadcast(), qualified(),
+ * release_qualified(), hardware_qualified(), and passed() stay false.
+ * Release returns NIFDT_UNQUALIFIED. Spend returns
+ * NIFDT_AUTOMATIC_SPEND. Vendor and Gpu return NIFDT_ENGINE_ABSENT.
+ */
+class RealmPromotion {
+public:
+    bool Propose(const std::string& id, const std::string& text, std::string& err);
+    bool Hosts(int64_t n, std::string& err);
+    bool Release(std::string& err);
+    bool Gpu(std::string& err);
+    bool Vendor(std::string& err);
+    bool Spend(std::string& err);
+
+    bool stored(const std::string& id) const;
+    std::string text(const std::string& id) const;
+
+    bool launched() const { return false; }
+    bool gpu() const { return false; }
+    bool broadcast() const { return false; }
+    bool qualified() const { return false; }
+    bool release_qualified() const { return false; }
+    bool hardware_qualified() const { return false; }
+    bool passed() const { return false; }
+    int64_t hosts() const { return static_cast<int64_t>(1); }
+    int64_t physical_hosts() const { return static_cast<int64_t>(1); }
+    int64_t bytes_moved() const { return static_cast<int64_t>(0); }
+    std::string automatic_spend() const { return NIFDT_AUTOMATIC_SPEND; }
+
+private:
+    bool m_stored{false};
+    std::string m_id;
+    std::string m_text;
+};
+
+} // namespace modelnet
+
+#endif // BITCOIN_MODELNET_REALM_PROMOTION_REALM_PROMOTION_H

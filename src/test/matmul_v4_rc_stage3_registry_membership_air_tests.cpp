@@ -266,14 +266,45 @@ BOOST_AUTO_TEST_CASE(
         const auto verifier =
             OneColumnProgram(
                 RCStage3RelationRole::CompositionLink);
+        // The family phase descriptor commits to the program root, so the
+        // registry builder refuses a stub that keeps the old descriptor and
+        // the product fails its shape check before counting violations.
         const auto stubbed =
             ut::BuildProductionProgramRegistryV1(
                 manifest, schedule, sources,
                 verifier, verifier);
+        BOOST_CHECK(stubbed.families.empty());
         const auto product =
             BuildProductV1(stubbed, statement);
         BOOST_CHECK(!product.valid);
-        BOOST_CHECK_GT(product.violations, 0U);
+        BOOST_CHECK_EQUAL(
+            product.note,
+            "stage3:registry_membership:statement_shape");
+
+        // With a descriptor that matches the stub the registry builds, and
+        // the membership AIR rejects it against the honest root.
+        auto& phase = sources[7].phase;
+        phase.program_root =
+            cb::CommitProgramTable(sources[7].program);
+        phase.current_width =
+            sources[7].program.current_width;
+        phase.challenge_width =
+            sources[7].program.challenge_width;
+        phase.challenge_epoch =
+            ut::ProductionChallengeEpochV1::None;
+        phase.producer_manifest_exported = true;
+        phase.r0_base_columns = {0};
+        const auto rebound =
+            ut::BuildProductionProgramRegistryV1(
+                manifest, schedule, sources,
+                verifier, verifier);
+        BOOST_REQUIRE_EQUAL(
+            rebound.families.size(),
+            ut::kProductionProgramFamilyCountV1);
+        const auto rebound_product =
+            BuildProductV1(rebound, statement);
+        BOOST_CHECK(!rebound_product.valid);
+        BOOST_CHECK_GT(rebound_product.violations, 0U);
     }
     {
         auto columns = honest.columns;

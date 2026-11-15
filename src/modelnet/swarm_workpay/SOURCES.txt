@@ -1,0 +1,6 @@
+swarm_workpay/receipt.cpp
+swarm_workpay/earned.cpp
+swarm_workpay/spend_policy.cpp
+swarm_workpay/fiat_quote.cpp
+swarm_workpay/merge.cpp
+swarm_workpay/workpay.cpp

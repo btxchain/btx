@@ -9,15 +9,18 @@
 #include <util/fs.h>
 #include <util/strencodings.h>
 
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <sstream>
 #include <sys/wait.h>
 #include <unistd.h>
 
 namespace modelnet {
+#ifndef _WIN32
 namespace {
 
 bool FileSha384(const fs::path& p, Digest48& out, uint64_t& size, std::string& err)
@@ -74,6 +77,7 @@ bool EvalArtifactPath(const fs::path& root, const std::string& name, fs::path& o
 }
 
 } // namespace
+#endif
 
 bool EvaluationProfileReady(const std::string& profile_id)
 {
@@ -132,6 +136,12 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
         err = "unexecuted profile";
         return false;
     }
+#ifdef _WIN32
+    // This executor requires an isolated POSIX child; native fork is unavailable.
+    job.pushKV("state", "FAILED");
+    err = "isolated evaluation process is not supported on this platform";
+    return false;
+#else
     job.pushKV("state", "RUNNING");
     const fs::path dir = fs::PathFromString(plan["artifact_dir"].get_str());
     const UniValue spec = plan.exists("spec") ? plan["spec"] : UniValue(UniValue::VOBJ);
@@ -203,12 +213,31 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
     }
     close(pipefd[1]);
     job.pushKV("pid", pid);
+    // Read the report while the child runs. The child writes it in one
+    // write() before it exits; a report larger than the pipe buffer would
+    // block that write until the timeout below kills the child.
+    std::string raw;
+    char buf[4096];
+    const int pipe_flags = fcntl(pipefd[0], F_GETFL, 0);
+    const bool drain_while_running = pipe_flags >= 0 && fcntl(pipefd[0], F_SETFL, pipe_flags | O_NONBLOCK) == 0;
+    auto drain = [&]() {
+        for (;;) {
+            const ssize_t got = read(pipefd[0], buf, sizeof(buf));
+            if (got > 0) {
+                raw.append(buf, static_cast<size_t>(got));
+                continue;
+            }
+            if (got < 0 && errno == EINTR) continue;
+            return;
+        }
+    };
     const int64_t start = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count();
     int status = 0;
     bool cancelled = job.exists("cancel") && job["cancel"].get_bool();
     while (true) {
+        if (drain_while_running) drain();
         if (job.exists("cancel") && job["cancel"].get_bool()) cancelled = true;
         if (cancelled) {
             kill(pid, SIGKILL);
@@ -234,10 +263,8 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
         }
         usleep(20 * 1000);
     }
-    std::string raw;
-    char buf[4096];
-    ssize_t n;
-    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) raw.append(buf, static_cast<size_t>(n));
+    // The child has exited: read what is left up to end of file.
+    drain();
     close(pipefd[0]);
     UniValue report;
     if (!report.read(raw) || !report.isObject()) {
@@ -251,11 +278,20 @@ bool RunEvaluationJob(UniValue& job, std::string& err)
     job.pushKV("isolated_process", true);
     job.pushKV("wallet", false);
     return true;
+#endif
 }
 
 bool CancelEvaluationJob(UniValue& job, std::string& err)
 {
+    // A job that is no longer running keeps its state. The pid it recorded
+    // belongs to a child that was already reaped, and the bounty store keeps
+    // that pid across restarts, so by now it may name an unrelated process.
+    if (!job.exists("state") || !job["state"].isStr() || job["state"].get_str() != "RUNNING") {
+        err.clear();
+        return true;
+    }
     job.pushKV("cancel", true);
+#ifndef _WIN32
     if (job.exists("pid") && job["pid"].isNum()) {
         const pid_t pid = static_cast<pid_t>(job["pid"].getInt<int64_t>());
         if (pid > 1) {
@@ -264,6 +300,7 @@ bool CancelEvaluationJob(UniValue& job, std::string& err)
             waitpid(pid, &status, 0);
         }
     }
+#endif
     job.pushKV("state", "CANCELLED");
     err.clear();
     return true;

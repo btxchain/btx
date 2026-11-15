@@ -846,12 +846,22 @@ private:
                 m_queue.pop_front();
             }
 
+            std::optional<matmul::accelerated::PreparedDigestInputs> prepared;
+            std::exception_ptr error;
             try {
-                item.promise.set_value(item.task());
+                prepared.emplace(item.task());
             } catch (...) {
-                item.promise.set_exception(std::current_exception());
+                error = std::current_exception();
             }
+            // Count the completion before fulfilling the promise: future::get()
+            // can return as soon as the promise is satisfied, so a caller that
+            // reads the counters after its last get() would otherwise miss it.
             g_matmul_async_prepare_completions.fetch_add(1, std::memory_order_relaxed);
+            if (error) {
+                item.promise.set_exception(error);
+            } else {
+                item.promise.set_value(std::move(*prepared));
+            }
         }
     }
 

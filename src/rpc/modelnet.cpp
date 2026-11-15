@@ -5,6 +5,14 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <common/args.h>
+#include <addresstype.h>
+#include <coins.h>
+#include <key_io.h>
+#include <modelnet/pay02/pay02.h>
+#include <node/blockstorage.h>
+#include <script/descriptor.h>
+#include <script/pqm.h>
+#include <script/signingprovider.h>
 #include <modelnet/catalog.h>
 #include <modelnet/helper.h>
 #include <modelnet/research_rpc.h>
@@ -13,7 +21,9 @@
 #include <modelnet/policy.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/supervisor.h>
+#include <modelnet/security_v2/native.h>
 #include <core_io.h>
+#include <httpserver.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <net.h>
 #include <node/context.h>
@@ -27,6 +37,8 @@
 #include <txmempool.h>
 #include <uint256.h>
 #include <validation.h>
+#include <algorithm>
+#include <atomic>
 #include <limits>
 #include <map>
 #include <memory>
@@ -61,6 +73,19 @@ fs::path ModelRpcSocket()
 
 bool HelperCall(const std::string& method, const UniValue& params, UniValue& result, std::string& err)
 {
+    // Each call holds an RPC worker until the helper answers (up to 120 s, or
+    // 24 h for long methods). Let at most half of the workers wait on the
+    // helper, so a stuck helper cannot take every worker from the monetary RPCs.
+    static std::atomic<int> g_in_flight{0};
+    const int limit{static_cast<int>(std::max<int64_t>(1, gArgs.GetIntArg("-rpcthreads", DEFAULT_HTTP_THREADS) / 2))};
+    if (g_in_flight.fetch_add(1) >= limit) {
+        g_in_flight.fetch_sub(1);
+        err = strprintf("model helper busy: %d calls already waiting for it", limit);
+        return false;
+    }
+    struct Release {
+        ~Release() { g_in_flight.fetch_sub(1); }
+    } release;
     return modelnet::CallUnixRpc(ModelRpcSocket(), method, params, result, err);
 }
 
@@ -102,6 +127,26 @@ std::shared_ptr<wallet::CWallet> WalletForModelFunding(const JSONRPCRequest& req
     return wallet::GetWalletForJSONRPCRequest(wallet_req);
 }
 
+/** Wallets a release card may be joined against for this caller. An -rpcauth
+ *  wallet restriction limits the join to the authorized wallet, and "-" to none.
+ *  Never throws. */
+std::vector<std::shared_ptr<wallet::CWallet>> WalletsForObservation(const JSONRPCRequest& request)
+{
+    try {
+        node::NodeContext& node = EnsureAnyNodeContext(request.context);
+        if (!node.wallet_loader || !node.wallet_loader->context()) return {};
+        JSONRPCRequest wallet_req = request;
+        node.wallet_loader->assignContextHACK(wallet_req.context);
+        wallet::WalletContext& context = wallet::EnsureWalletContext(wallet_req.context);
+        std::string authorized;
+        if (!GetWalletRestrictionFromJSONRPCRequest(request, authorized)) return wallet::GetWallets(context);
+        if (authorized == "-") return {};
+        if (auto w = wallet::GetWallet(context, authorized)) return {w};
+    } catch (...) {
+    }
+    return {};
+}
+
 wallet::FrozenFundingQuote QuoteFromRequest(const std::string& release_id, const UniValue& options)
 {
     wallet::FrozenFundingQuote q;
@@ -122,6 +167,7 @@ wallet::FrozenFundingQuote QuoteFromRequest(const std::string& release_id, const
 }
 #endif
 
+// A method whose request names a server path belongs in modelnet::IsServerPathMethod.
 RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::vector<RPCArg> args)
 {
     return RPCHelpMan{
@@ -134,6 +180,9 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
         RPCExamples{HelpExampleCli(name, "")},
         [name](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
+            // A server path is outside any wallet: refuse it before the helper
+            // sees the request, like the wallet file RPCs.
+            if (modelnet::IsServerPathMethod(name)) EnsureNotWalletRestricted(request);
             UniValue params(UniValue::VARR);
             for (size_t i = 0; i < request.params.size(); ++i) params.push_back(request.params[i]);
             UniValue req(UniValue::VOBJ);
@@ -141,7 +190,26 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
             req.pushKV("params", params);
             UniValue result;
             std::string err;
-            if (HelperCall(name, params, result, err)) {
+            std::string wallet_restriction;
+            const bool restricted_view = modelnet::IsWalletObservationRead(name) &&
+                GetWalletRestrictionFromJSONRPCRequest(request, wallet_restriction);
+            UniValue scoped_params(UniValue::VARR);
+            if (restricted_view) {
+                scoped_params.push_back(name);
+                scoped_params.push_back(params);
+            }
+            const bool helper_ok = restricted_view
+                ? HelperCall("getrestrictedmodelview", scoped_params, result, err)
+                : HelperCall(name, params, result, err);
+            UniValue helper_error;
+            if (!helper_ok && restricted_view && helper_error.read(err) &&
+                helper_error.isObject() && helper_error["code"].isStr() &&
+                helper_error["code"].get_str() == "METHOD_NOT_FOUND") {
+                throw JSONRPCError(RPC_MISC_ERROR,
+                    "Restricted model view failed. The node and external helper must both support "
+                    "getrestrictedmodelview. No unrestricted retry was made: " + err);
+            }
+            if (helper_ok) {
                 if (name == "getmodelnetworkinfo") {
                     const auto helper = modelnet::SnapshotManagedHelper();
                     result.pushKV("helper_managed_by_btxd", helper.managed_by_btxd);
@@ -172,7 +240,9 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
                             kh = (*rel)["key_hash_sha256"].get_str();
                         }
                         if (rel->exists("refund_height") && (*rel)["refund_height"].isNum()) {
-                            rh = static_cast<uint32_t>((*rel)["refund_height"].getInt<int64_t>());
+                            // Out of range stays 0 (refund_status UNKNOWN), never a wrapped height.
+                            std::string rh_err;
+                            if (!ParseUint32Index((*rel)["refund_height"].getInt<int64_t>(), rh, "refund_height", rh_err)) rh = 0;
                         }
                         std::vector<CScript> scripts;
                         auto add_script = [&](const std::string& hex) {
@@ -198,21 +268,10 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
                             }
                         }
                         if (kh.empty() && scripts.empty() && funding_ops.empty()) return;
+                        const std::vector<std::shared_ptr<wallet::CWallet>> held = WalletsForObservation(request);
                         std::vector<wallet::CWallet*> wallets;
-                        std::vector<std::shared_ptr<wallet::CWallet>> held;
-                        try {
-                            node::NodeContext& node = EnsureAnyNodeContext(request.context);
-                            if (node.wallet_loader && node.wallet_loader->context()) {
-                                JSONRPCRequest wallet_req = request;
-                                node.wallet_loader->assignContextHACK(wallet_req.context);
-                                wallet::WalletContext& context = wallet::EnsureWalletContext(wallet_req.context);
-                                held = wallet::GetWallets(context);
-                                for (const auto& w : held) {
-                                    if (w) wallets.push_back(w.get());
-                                }
-                            }
-                        } catch (...) {
-                            wallets.clear();
+                        for (const auto& w : held) {
+                            if (w) wallets.push_back(w.get());
                         }
                         if (wallets.empty()) return;
                         UniValue obs = wallet::ObserveReleaseFunding(wallets, kh, rh, scripts, funding_ops);
@@ -222,7 +281,11 @@ RPCHelpMan ProxyOrLocal(const std::string& name, const std::string& help, std::v
                             obs.pushKV("release_id", card["release_id"].get_str());
                         }
                         modelnet::ApplyChainObservationJson(card, obs);
-                        if (obs.exists("confirmed_known") && obs["confirmed_known"].isTrue()) {
+                        // The helper keeps one shared view. A wallet-restricted
+                        // caller saw only part of the wallets: do not store that.
+                        std::string restriction;
+                        if (!GetWalletRestrictionFromJSONRPCRequest(request, restriction) &&
+                            obs.exists("confirmed_known") && obs["confirmed_known"].isTrue()) {
                             UniValue ingest_params(UniValue::VARR);
                             ingest_params.push_back(obs);
                             UniValue ign;
@@ -303,6 +366,7 @@ static RPCHelpMan decoderesource()
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "", {
+                {RPCResult::Type::NUM, "schema_version", "2"},
                 {RPCResult::Type::STR, "uri", "canonical URI"},
                 {RPCResult::Type::STR, "kind", "resource class"},
                 {RPCResult::Type::STR, "digest", "SHA-384 hex"},
@@ -376,14 +440,18 @@ static RPCHelpMan getmodel()
 
 static RPCHelpMan listmodels()
 {
-    return ProxyOrLocal("listmodels", "List locally known models. Remote coverage is always incomplete.\n", {});
+    return ProxyOrLocal("listmodels", "List locally known models. Remote coverage is always incomplete.\n",
+                        {{"filter", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "list only models with these states", {
+                            {"pinned", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "pinned state"},
+                            {"seeded", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "seeded state"},
+                        }}});
 }
 
 static RPCHelpMan searchmodels()
 {
     return ProxyOrLocal("searchmodels",
                         "Bounded decentralized model search. Coverage is always incomplete (current network view, not a global directory).\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "query object or text string", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "query object or text string", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "query", .type_str = {"", "string or json object"}}}});
 }
 
 static RPCHelpMan getmodelsearchrecord()
@@ -395,13 +463,13 @@ static RPCHelpMan publishmodelsearchrecord()
 {
     return ProxyOrLocal("publishmodelsearchrecord", "Sign and announce ModelSearchRecord. Creates a local research identity if none exists. Not a wallet spend.\n",
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "model_id or btx://"},
-                         {"metadata", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "searchable metadata object", RPCArgOptions{.skip_type_check = true}}});
+                         {"metadata", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "searchable metadata object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan updatemodelsearchrecord()
 {
     return ProxyOrLocal("updatemodelsearchrecord", "Publish next sequence of ModelSearchRecord. Does not mutate in place.\n",
                         {{"id", RPCArg::Type::STR, RPCArg::Optional::NO, "model_id or btx://"},
-                         {"patch", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "metadata patch object", RPCArgOptions{.skip_type_check = true}}});
+                         {"patch", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "metadata patch object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan removemodelsearchrecord()
 {
@@ -411,7 +479,7 @@ static RPCHelpMan removemodelsearchrecord()
 static RPCHelpMan listmodelsearchrecords()
 {
     return ProxyOrLocal("listmodelsearchrecords", "Paginated local search index.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "cursor/limit/updated_after", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "cursor/limit/updated_after", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodeldirectoryentry()
 {
@@ -421,7 +489,7 @@ static RPCHelpMan getmodeldirectoryentry()
 static RPCHelpMan getmodeldirectory()
 {
     return ProxyOrLocal("getmodeldirectory", "Browse directory view (current network view).\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "filters/sort/cursor", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "filters/sort/cursor", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodelproviders()
 {
@@ -450,7 +518,7 @@ static RPCHelpMan getmodelaliases()
 static RPCHelpMan searchpublishers()
 {
     return ProxyOrLocal("searchpublishers", "Search publisher/research identities in the local index.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "text/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "text/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "query", .type_str = {"", "string or json object"}}}});
 }
 static RPCHelpMan getpublisher()
 {
@@ -460,7 +528,7 @@ static RPCHelpMan getpublisher()
 static RPCHelpMan searchcollections()
 {
     return ProxyOrLocal("searchcollections", "Search signed collections.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "text/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "text/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "query", .type_str = {"", "string or json object"}}}});
 }
 static RPCHelpMan getcollection()
 {
@@ -470,27 +538,27 @@ static RPCHelpMan getcollection()
 static RPCHelpMan browsemodels()
 {
     return ProxyOrLocal("browsemodels", "Directory browse without requiring a text query. Popularity is local observation, not global truth.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "sort/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "sort/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan gettrendingmodels()
 {
     return ProxyOrLocal("gettrendingmodels", "Local/network-sample trend. No user telemetry.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getsimilarmodels()
 {
     return ProxyOrLocal("getsimilarmodels", "Metadata similarity only (family/tags/arch). No remote embeddings.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "family/tags", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "family/tags", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getnewmodels()
 {
     return ProxyOrLocal("getnewmodels", "Recently published models from this node's index.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "since/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "since/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getrecentreleases()
 {
     return ProxyOrLocal("getrecentreleases", "Public release-campaign coordination data. scope=NETWORK uses the current decentralized view; scope=LOCAL is local campaigns.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "limit/scope", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "limit/scope", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodeleconomyentry()
 {
@@ -500,7 +568,7 @@ static RPCHelpMan getmodeleconomyentry()
 static RPCHelpMan getmodelfeed()
 {
     return ProxyOrLocal("getmodelfeed", "Decentralized current-network model/campaign feed. Not a global chronology. Default scope NETWORK.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "scope/mode/since/limit/cursor/filters", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "scope/mode/since/limit/cursor/filters", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodelfeedstatus()
 {
@@ -513,7 +581,7 @@ static RPCHelpMan getmodelfeedsequence()
 static RPCHelpMan getfundablemodels()
 {
     return ProxyOrLocal("getfundablemodels", "Campaigns that can still accept a meaningful contribution. Pledged is not funded.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "sort/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "sort/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getmodelreleaseeconomics()
 {
@@ -523,18 +591,58 @@ static RPCHelpMan getmodelreleaseeconomics()
 static RPCHelpMan getrecentlyunlockedmodels()
 {
     return ProxyOrLocal("getrecentlyunlockedmodels", "Models whose campaign secret was recently disclosed (network-capable feed).\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "since/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "since/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan getreleasefeed()
 {
     return ProxyOrLocal("getreleasefeed", "Convenience wrapper over getmodelfeed for release campaigns.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "mode/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "mode/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
+static RPCHelpMan preparemodelfunding();
+
 static RPCHelpMan preparefundmodelrelease()
 {
-    return ProxyOrLocal("preparefundmodelrelease", "Unsigned funding plan for a campaign. Never spends. automatic_spend_atoms=0. Wallet must sign/submit separately.\n",
-                        {{"release_id", RPCArg::Type::STR, RPCArg::Optional::NO, "release_id"},
-                         {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "amount or options object", RPCArgOptions{.skip_type_check = true}}});
+    return RPCHelpMan{
+        "preparefundmodelrelease",
+        "Prepare a release funding transaction. An options object invokes the local wallet coin selector and returns a signable unsigned transaction.\n"
+        "Explicit key_hash, claimant, refund_height, and amount_atoms are required; the wallet owns the refund key. Never signs or broadcasts.\n"
+        "The legacy release-id / amount form remains a helper preview and does not authorize wallet funding.\n",
+        {
+            {"release_id", RPCArg::Type::STR, RPCArg::Optional::NO, "Campaign or objective release id"},
+            {"amount_atoms", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Canonical amount (legacy preview) or explicit wallet funding options object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "amount_atoms", .type_str = {"", "string, number or json object"}}},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "Funding plan or legacy helper preview", {
+            {RPCResult::Type::ELISION, "", "Unsigned wallet quote or helper preview fields"},
+        }},
+        RPCExamples{HelpExampleCli("preparefundmodelrelease", "\"<release_id>\" '{\"amount_atoms\":\"10000000\",...}'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            if (request.params[1].isObject()) {
+                JSONRPCRequest wallet_request = request;
+                wallet_request.strMethod = "preparemodelfunding";
+                UniValue result = preparemodelfunding().HandleRequest(wallet_request);
+                // The new objective-facing plan uses canonical atom strings.
+                // preparemodelfunding keeps its legacy numeric result contract.
+                for (const char* field : {"amount_atoms", "fee_atoms", "fee_cap_atoms"}) {
+                    if (result[field].isNum()) result.pushKV(field, result[field].getValStr());
+                }
+                result.pushKV("plan_stage", "WALLET_PREPARED");
+                result.pushKV("automatic_spend_atoms", "0");
+                result.pushKV("wallet_authorization_required", true);
+                result.pushKV("signing_rpc", "signmodelfunding");
+                result.pushKV("submission_rpc", "submitmodelfunding");
+                return result;
+            }
+            UniValue result;
+            std::string err;
+            if (!HelperCall("preparefundmodelrelease", request.params, result, err)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Release preview unavailable. Pass an explicit funding options object to prepare a wallet transaction: " + err);
+            }
+            result.pushKV("plan_stage", "HELPER_PREVIEW");
+            result.pushKV("wallet_prepared", false);
+            result.pushKV("signing_rpc", "preparemodelfunding");
+            return result;
+        },
+    };
 }
 static RPCHelpMan cacheencryptedmodel()
 {
@@ -568,12 +676,12 @@ static RPCHelpMan removemodelindex()
 static RPCHelpMan exportmodelindex()
 {
     return ProxyOrLocal("exportmodelindex", "Export public signed search records. No secrets.\n",
-                        {{"query", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "since/limit", RPCArgOptions{.skip_type_check = true}}});
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "since/limit", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan importmodelindex()
 {
     return ProxyOrLocal("importmodelindex", "Import signed records; every signature is revalidated.\n",
-                        {{"snapshot", RPCArg::Type::STR, RPCArg::Optional::NO, "records snapshot object", RPCArgOptions{.skip_type_check = true}}});
+                        {{"snapshot", RPCArg::Type::OBJ, RPCArg::Optional::NO, "records snapshot object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}});
 }
 static RPCHelpMan hidesearchmodel()
 {
@@ -645,7 +753,11 @@ static RPCHelpMan getmodelsharecard()
 
 static RPCHelpMan getmodeltransfers()
 {
-    return ProxyOrLocal("getmodeltransfers", "Local torrent-style transfer list: state, ratio, seeded, pinned.\n", {});
+    return ProxyOrLocal("getmodeltransfers", "Local torrent-style transfer list: state, ratio, seeded, pinned.\n",
+                        {{"filter", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "list only models with these states", {
+                            {"pinned", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "pinned state"},
+                            {"seeded", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "seeded state"},
+                        }}});
 }
 
 static RPCHelpMan setmodelalias()
@@ -892,12 +1004,17 @@ static RPCHelpMan getmodelrelease()
 
 static RPCHelpMan claimmodelrelease()
 {
-    return ProxyOrLocal("claimmodelrelease", "Local campaign pointer; monetary claim is buildmodelhtlcclaim (0.34.6 htlc_sha256).\n", {});
+    return ProxyOrLocal("claimmodelrelease", "Local campaign pointer; monetary claim is buildmodelhtlcclaim (0.34.6 htlc_sha256).\n",
+                        {
+                            {"release_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "release id or model id (digest48 hex)"},
+                            {"secret32_hex", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "32-byte release secret hex; must match the campaign key_hash"},
+                        });
 }
 
 static RPCHelpMan refundmodelrelease()
 {
-    return ProxyOrLocal("refundmodelrelease", "Local campaign pointer; monetary refund is buildmodelhtlcrefund (0.34.6 htlc_sha256). HASH160 htlc_tx is recovery-only.\n", {});
+    return ProxyOrLocal("refundmodelrelease", "Local campaign pointer; monetary refund is buildmodelhtlcrefund (0.34.6 htlc_sha256). HASH160 htlc_tx is recovery-only.\n",
+                        {{"release_id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "release id or model id (digest48 hex)"}});
 }
 
 static RPCHelpMan decoderesourceuri()
@@ -924,9 +1041,11 @@ static RPCHelpMan openbtxuri()
 static RPCHelpMan resolveresource()
 {
     return ProxyOrLocal("resolveresource", "Typed lookup with incomplete coverage. Local catalog first.\n",
-                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "digest48 / text", {
-                            {"digest48", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "96-hex"},
-                            {"text", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "search text"},
+                        {{"query", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "digest48, id or uri, and kind", {
+                            {"digest48", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "96-hex digest of the object"},
+                            {"id", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Same as digest48"},
+                            {"uri", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "btx:// URI; its kind is used"},
+                            {"kind", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Resource kind as a number or a name such as \"MODEL\" (default: MODEL)"},
                         }}});
 }
 
@@ -1128,9 +1247,9 @@ static RPCHelpMan preparemodelfunding()
                 {"claimant_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Alias of claimant"},
                 {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "PQ refund pubkey hex"},
                 {"refund_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "CLTV refund height"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value in atoms"},
-                {"fee_cap_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Maximum network fee in atoms"},
-                {"max_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Alias of amount_atoms / approval ceiling"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value in atoms; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
+                {"fee_cap_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Maximum network fee in atoms; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
+                {"max_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Alias of amount_atoms / approval ceiling; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                 {"auto_pay", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Must be false; automatic spend is zero"},
             }},
         },
@@ -1210,7 +1329,7 @@ static RPCHelpMan signmodelfunding()
                 {"unsigned_txid", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen unsigned txid"},
                 {"descriptor", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "mr(htlc_sha256(...),refund(...))"},
                 {"output_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC scriptPubKey hex"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Frozen HTLC output value"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                 {"key_hash", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "SHA-256 hex"},
                 {"claimant", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "claimant pubkey"},
                 {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "refund pubkey"},
@@ -1279,15 +1398,16 @@ static RPCHelpMan submitmodelfunding()
     return RPCHelpMan{
         "submitmodelfunding",
         "Revalidate a signed model-funding transaction and broadcast it.\n"
+        "Pass the complete frozen options returned by preparemodelfunding.\n"
         "A duplicate txid is reported and is not double-spent.\n",
         {
             {"hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Signed funding transaction hex"},
-            {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "Frozen quote from preparemodelfunding", {
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Frozen quote from preparemodelfunding", {
                 {"unsigned_hex", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Exact unsigned template hex from prepare"},
                 {"unsigned_txid", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen unsigned txid"},
                 {"descriptor", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "mr(htlc_sha256(...),refund(...))"},
                 {"output_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC scriptPubKey hex"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Frozen HTLC output value"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Frozen HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                 {"auto_pay", RPCArg::Type::BOOL, RPCArg::Optional::OMITTED, "Must be false"},
             }},
         },
@@ -1300,7 +1420,7 @@ static RPCHelpMan submitmodelfunding()
             {RPCResult::Type::NUM, "automatic_spend", "Always 0"},
             {RPCResult::Type::STR, "htlc", "Always htlc_sha256"},
         }},
-        RPCExamples{HelpExampleCli("submitmodelfunding", "\"<hex>\"")},
+        RPCExamples{HelpExampleCli("submitmodelfunding", "\"<signed_hex>\" '<frozen_options_json>'")},
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             (void)self;
 #ifdef ENABLE_WALLET
@@ -1334,6 +1454,9 @@ static RPCHelpMan submitmodelfunding()
                     }
                 }
             }
+            if (!have_quote) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Frozen funding options from preparemodelfunding are required");
+            }
             int funding_vout = -1;
             if (have_quote && !frozen.output_script.empty()) {
                 for (size_t i = 0; i < mtx.vout.size(); ++i) {
@@ -1357,6 +1480,17 @@ static RPCHelpMan submitmodelfunding()
                 if (pwallet->GetWalletTx(txid)) duplicate = true;
             }
             if (node.mempool && node.mempool->exists(GenTxid::Txid(txid))) duplicate = true;
+            if (!pwallet) {
+                throw JSONRPCError(RPC_WALLET_NOT_FOUND, "The funding wallet is required to validate ownership and fees");
+            }
+            if (!wallet::ValidateFrozenFundingSubmission(*pwallet, frozen, mtx, duplicate, err)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            }
+            // Rebuilt terms, rather than the caller's output_script, identify the lot.
+            funding_vout = -1;
+            for (size_t i = 0; i < mtx.vout.size(); ++i) {
+                if (mtx.vout[i].scriptPubKey == frozen.output_script) funding_vout = static_cast<int>(i);
+            }
 
             auto result_obj = [&](bool submitted, bool dup) {
                 UniValue o(UniValue::VOBJ);
@@ -1431,6 +1565,211 @@ static RPCHelpMan submitmodelfunding()
     };
 }
 
+#ifdef ENABLE_WALLET
+class NativeNodePaymentView final : public modelnet::NativePaymentChainView {
+public:
+    NativeNodePaymentView(node::NodeContext& node, wallet::CWallet& wallet,
+                          std::map<Txid, uint256> hints)
+        : m_node(node), m_wallet(wallet), m_hints(std::move(hints)) {}
+
+    uint256 Tip() const override
+    {
+        LOCK(cs_main);
+        const auto* tip = EnsureChainman(m_node).ActiveChain().Tip();
+        return tip ? tip->GetBlockHash() : uint256{};
+    }
+    int Height() const override
+    {
+        LOCK(cs_main);
+        return EnsureChainman(m_node).ActiveChain().Height();
+    }
+    bool Lookup(const Txid& txid, modelnet::NativePaymentTransaction& out, std::string& err) const override
+    {
+        out = {};
+        uint256 block_hash;
+        {
+            LOCK(m_wallet.cs_wallet);
+            if (const wallet::CWalletTx* wtx = m_wallet.GetWalletTx(txid.ToUint256())) {
+                out.tx = wtx->tx;
+                if (const auto* confirmed = wtx->state<wallet::TxStateConfirmed>()) {
+                    block_hash = confirmed->confirmed_block_hash;
+                }
+            }
+        }
+        ChainstateManager& chainman = EnsureChainman(m_node);
+        const CBlockIndex* index = nullptr;
+        if (const auto hint = m_hints.find(txid); hint != m_hints.end()) {
+            LOCK(cs_main);
+            index = chainman.m_blockman.LookupBlockIndex(hint->second);
+            if (!index) {
+                err = "NATIVE_PAYMENT_BLOCK_UNKNOWN";
+                return false;
+            }
+            block_hash = hint->second;
+            // A user block hint is checked against actual on-disk bytes even
+            // when a wallet happens to know a transaction with that txid.
+            out.tx.reset();
+        }
+        if (!out.tx) {
+            auto found = node::GetTransaction(index, m_node.mempool.get(), txid.ToUint256(), block_hash, chainman.m_blockman);
+            if (!found || !*found) {
+                err = found ? "NATIVE_PAYMENT_TRANSACTION_UNKNOWN; provide its block hash or enable txindex" : found.error();
+                return false;
+            }
+            out.tx = *found;
+        }
+        if (!block_hash.IsNull()) {
+            LOCK(cs_main);
+            const CBlockIndex* block = chainman.m_blockman.LookupBlockIndex(block_hash);
+            if (block && chainman.ActiveChain().Contains(block)) {
+                out.block_hash = block_hash;
+                out.confirmations = chainman.ActiveChain().Height() - block->nHeight + 1;
+            }
+        }
+        err.clear();
+        return true;
+    }
+    bool Unspent(const COutPoint& point, CTxOut& out) const override
+    {
+        LOCK(cs_main);
+        if (m_node.mempool && m_node.mempool->isSpent(point)) return false;
+        const Coin& coin = EnsureChainman(m_node).ActiveChainstate().CoinsTip().AccessCoin(point);
+        if (coin.IsSpent()) return false;
+        out = coin.out;
+        return true;
+    }
+private:
+    node::NodeContext& m_node;
+    wallet::CWallet& m_wallet;
+    std::map<Txid, uint256> m_hints;
+};
+#endif
+
+static RPCHelpMan getmodelfundingsettlement()
+{
+    return RPCHelpMan{
+        "getmodelfundingsettlement",
+        "Observe an exact native model/objective HTLC against the local active chain. Never signs or broadcasts.\n"
+        "An unsigned plan, a mempool acknowledgement, an orphaned block, and a peer receipt are not settlement.\n"
+        "The settlement profile is one HTLC input and one explicit destination; quote terms are rebuilt locally.\n",
+        {
+            {"funding_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Funding transaction id"},
+            {"options", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Frozen quote plus observation expectations", {
+                {"key_hash", RPCArg::Type::STR, RPCArg::Optional::NO, "SHA-256 hashlock"},
+                {"claimant", RPCArg::Type::STR, RPCArg::Optional::NO, "Claimant PQ public key"},
+                {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::NO, "Owner refund PQ public key"},
+                {"refund_height", RPCArg::Type::NUM, RPCArg::Optional::NO, "CLTV block height"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::NO, "Canonical principal atoms or legacy integer", RPCArgOptions{.skip_type_check = true}},
+                {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Expected claim/refund destination address; required with settlement_txid"},
+                {"max_settlement_fee_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Explicit settlement fee ceiling; required with settlement_txid", RPCArgOptions{.skip_type_check = true}},
+                {"min_confirmations", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Minimum active-chain depth, default 1"},
+                {"funding_blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional funding block location when txindex is disabled"},
+                {"settlement_blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Optional spending block location when txindex is disabled"},
+            }},
+            {"settlement_txid", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "Exact claim/refund transaction to observe"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "Chain-tip-bound settlement observation", {
+            {RPCResult::Type::ELISION, "", "Exact funding, branch, principal, fees, confirmations and chain tip"},
+        }},
+        RPCExamples{HelpExampleCli("getmodelfundingsettlement", "\"<funding_txid>\" '<frozen quote>'")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+#ifdef ENABLE_WALLET
+            auto pwallet = WalletForModelFunding(request);
+            pwallet->BlockUntilSyncedToCurrentChain();
+            node::NodeContext& node = EnsureAnyNodeContext(request.context);
+            const UniValue& opts = request.params[1];
+            auto quote = QuoteFromRequest("", opts);
+            std::string err;
+            if (!wallet::ValidateFundingAmount(quote.amount_atoms, err) || !wallet::BuildHtlcSha256Descriptor(quote, err)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            }
+            const Txid funding = Txid::FromUint256(ParseHashV(request.params[0], "funding_txid"));
+            std::optional<Txid> settlement;
+            if (!request.params[2].isNull()) settlement = Txid::FromUint256(ParseHashV(request.params[2], "settlement_txid"));
+            std::map<Txid, uint256> hints;
+            if (opts.exists("funding_blockhash")) hints.emplace(funding, ParseHashV(opts["funding_blockhash"], "funding_blockhash"));
+            if (settlement && opts.exists("settlement_blockhash")) hints.emplace(*settlement, ParseHashV(opts["settlement_blockhash"], "settlement_blockhash"));
+            NativeNodePaymentView chain(node, *pwallet, std::move(hints));
+            modelnet::NativePaymentTransaction funding_tx;
+            if (!chain.Lookup(funding, funding_tx, err)) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, err);
+            modelnet::NativePaymentTerms terms;
+            terms.objective = quote.release_id.empty() ? funding.GetHex() : quote.release_id;
+            terms.funding_script = quote.output_script;
+            terms.principal_atoms = quote.amount_atoms;
+            terms.refund_height = quote.refund_height;
+            if (opts.exists("min_confirmations")) terms.min_confirmations = opts["min_confirmations"].getInt<int>();
+            if (settlement) {
+                if (!opts.exists("destination") || !opts["destination"].isStr() || !opts.exists("max_settlement_fee_atoms")) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "destination and max_settlement_fee_atoms are required for settlement");
+                }
+                const CTxDestination dest = DecodeDestination(opts["destination"].get_str(), err);
+                if (!IsValidDestination(dest)) throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid settlement destination");
+                terms.destination = GetScriptForDestination(dest);
+                if (!wallet::ParseFundingAtoms(opts["max_settlement_fee_atoms"], terms.max_settlement_fee_atoms, err)) {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+                }
+            }
+            size_t matches = 0;
+            for (size_t i = 0; i < funding_tx.tx->vout.size(); ++i) {
+                if (funding_tx.tx->vout[i].scriptPubKey == quote.output_script && funding_tx.tx->vout[i].nValue == quote.amount_atoms) {
+                    terms.funding = COutPoint(funding, static_cast<uint32_t>(i));
+                    ++matches;
+                }
+            }
+            if (matches != 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "Exactly one funding output must match the rebuilt terms");
+            FlatSigningProvider parse_provider, expanded;
+            auto descriptors = Parse(quote.descriptor, parse_provider, err, false);
+            std::vector<CScript> scripts;
+            if (descriptors.empty() || !descriptors[0]->Expand(0, DUMMY_SIGNING_PROVIDER, scripts, expanded)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Unable to expand rebuilt funding descriptor");
+            }
+            int version = -1;
+            std::vector<unsigned char> program;
+            P2MRSpendData spend;
+            if (!quote.output_script.IsWitnessProgram(version, program) || program.size() != 32 ||
+                !expanded.GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spend)) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid rebuilt funding script");
+            }
+            for (const auto& entry : spend.scripts) {
+                std::vector<unsigned char> hash, key;
+                PQAlgorithm algorithm;
+                int64_t height = 0;
+                if (ParseP2MRHTLCSha256Leaf(entry.first, hash, algorithm, key)) terms.claim_leaf = CScript(entry.first.begin(), entry.first.end());
+                else if (ParseP2MRRefundLeaf(entry.first, height, algorithm, key)) terms.refund_leaf = CScript(entry.first.begin(), entry.first.end());
+            }
+            modelnet::Pay02 observer;
+            if (!observer.ObserveNative(chain, terms, settlement, err)) throw JSONRPCError(RPC_INVALID_PARAMETER, err);
+            const auto& receipt = observer.native_receipt();
+            UniValue result(UniValue::VOBJ);
+            result.pushKV("schema_version", 1);
+            result.pushKV("objective", receipt.objective);
+            result.pushKV("state", receipt.state);
+            result.pushKV("branch", receipt.branch);
+            result.pushKV("funding_txid", funding.GetHex());
+            result.pushKV("funding_vout", static_cast<int64_t>(receipt.funding.n));
+            result.pushKV("funding_output_script", HexStr(terms.funding_script));
+            result.pushKV("claim_leaf", HexStr(terms.claim_leaf));
+            result.pushKV("refund_leaf", HexStr(terms.refund_leaf));
+            result.pushKV("funding_confirmations", receipt.funding_confirmations);
+            result.pushKV("settlement_confirmations", receipt.settlement_confirmations);
+            if (settlement) result.pushKV("settlement_txid", settlement->GetHex());
+            result.pushKV("chain_tip", receipt.chain_tip.GetHex());
+            result.pushKV("chain_height", receipt.chain_height);
+            result.pushKV("principal_atoms", std::to_string(receipt.principal_atoms));
+            result.pushKV("paid_atoms", std::to_string(receipt.paid_atoms));
+            result.pushKV("fee_atoms", std::to_string(receipt.fee_atoms));
+            result.pushKV("funded", receipt.funded);
+            result.pushKV("settled", receipt.settled);
+            result.pushKV("automatic_spend_atoms", "0");
+            result.pushKV("release_qualified", false);
+            return result;
+#else
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet support is not compiled into this btxd");
+#endif
+        },
+    };
+}
+
 static RPCHelpMan exportmodelrecovery()
 {
     return RPCHelpMan{
@@ -1445,7 +1784,7 @@ static RPCHelpMan exportmodelrecovery()
                 {"claimant", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "PQ claimant pubkey hex"},
                 {"refund_pubkey", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "PQ refund pubkey hex"},
                 {"refund_height", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "CLTV refund height"},
-                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value"},
+                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
@@ -1516,7 +1855,7 @@ static RPCHelpMan buildmodelhtlcclaim()
                                 }},
                                 {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Claim destination address"},
                                 {"destination_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Claim scriptPubKey hex"},
-                                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value"},
+                                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                                 {"fee_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Absolute fee"},
                             }},
                         });
@@ -1536,12 +1875,13 @@ static RPCHelpMan buildmodelhtlcrefund()
                                 }},
                                 {"destination", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Refund destination address"},
                                 {"destination_script", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "Refund scriptPubKey hex"},
-                                {"amount_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "HTLC output value"},
+                                {"amount_atoms", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "HTLC output value; canonical decimal string or legacy integer", RPCArgOptions{.skip_type_check = true}},
                                 {"fee_atoms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Absolute fee"},
                             }},
                         });
 }
 
+// A method whose request names a server path belongs in modelnet::IsServerPathMethod.
 #define BOUNTY_PROXY(n, h) \
     static RPCHelpMan n() \
     { \
@@ -1998,10 +2338,12 @@ static RPCHelpMan preparebountyclaim()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "funding outpoint is required (outpoint or prevout.txid/vout)");
             }
             plan.mode = "STAGED_RELEASE";
+            // Resolve the wallet first: a caller without wallet access must not
+            // learn from the secret_ref errors whether a local file exists.
+            auto pwallet = WalletForModelFunding(request);
             if (!wallet::LoadBountySecretRef(request.params[0]["secret_ref"].get_str(), plan.claim_preimage, err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
-            auto pwallet = WalletForModelFunding(request);
             if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err, /*sign=*/false)) {
                 if (!plan.claim_preimage.empty()) {
                     memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
@@ -2044,10 +2386,12 @@ static RPCHelpMan signbountyclaim()
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "funding outpoint is required (outpoint or prevout.txid/vout)");
             }
             plan.mode = "STAGED_RELEASE";
+            // Resolve the wallet first: a caller without wallet access must not
+            // learn from the secret_ref errors whether a local file exists.
+            auto pwallet = WalletForModelFunding(request);
             if (!wallet::LoadBountySecretRef(o["secret_ref"].get_str(), plan.claim_preimage, err)) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, err);
             }
-            auto pwallet = WalletForModelFunding(request);
             if (!wallet::PrepareBountyLeafSpend(*pwallet, plan, wallet::BountySpendPath::CLAIM, err, /*sign=*/true)) {
                 if (!plan.claim_preimage.empty()) {
                     memory_cleanse(plan.claim_preimage.data(), plan.claim_preimage.size());
@@ -2105,8 +2449,8 @@ static RPCHelpMan submitbountyrefund() { return NamedBountySubmit("submitbountyr
     static RPCHelpMan fn()                                                                \
     {                                                                                     \
         return ProxyOrLocal(#fn, help "\n",                                               \
-                            {{"request", RPCArg::Type::STR, RPCArg::Optional::OMITTED,    \
-                              "Pay With Compute request object",                          \
+                            {{"request", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED,    \
+                              "Pay With Compute request object", std::vector<RPCArg>{},   \
                               RPCArgOptions{.skip_type_check = true}}});                 \
     }
 
@@ -2141,6 +2485,44 @@ PWC_RPC(verifycomputeaccessgrant, "Check a ComputeAccessGrant signature, trusted
 PWC_RPC(getcomputesigningidentity, "Return the local application signing identity. Not a wallet key.")
 #undef PWC_RPC
 
+
+static RPCHelpMan modelsecurity()
+{
+    return RPCHelpMan{
+        "modelsecurity",
+        "Dispatch a bounded local model-security request through the node-owned guard. "
+        "This is an owner RPC, not a public peer endpoint. Long jobs return a job id. "
+        "No request grants wallet or automatic spending authority.\n",
+        {{"request", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Typed security request", {},
+          RPCArgOptions{.skip_type_check = true}}},
+        RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "Scoped result or refusal"}}},
+        RPCExamples{HelpExampleCli("modelsecurity", "'{\"op\":\"status\"}'")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            (void)self;
+            // An owner RPC: a pause needs no signed record and stops the guard
+            // for the whole node, like stop.
+            EnsureNotWalletRestricted(request);
+#ifdef ENABLE_MODELNET
+            UniValue input = request.params[0];
+            if (input.isStr()) {
+                const auto raw = input.get_str();
+                if (raw.size() > 1024 * 1024 || !input.read(raw))
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, "SEC_SCHEMA");
+            }
+            if (!input.isObject() || input.write().size() > 1024 * 1024)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "SEC_SCHEMA");
+            UniValue result;
+            std::string error;
+            if (!modelnet::SwarmSecurityRequest(input, result, error))
+                throw JSONRPCError(RPC_MISC_ERROR, error);
+            return result;
+#else
+            throw JSONRPCError(RPC_MISC_ERROR, "SEC_MODELNET_NOT_BUILT");
+#endif
+        },
+    };
+}
+
 static RPCHelpMan lab035()
 {
     return RPCHelpMan{
@@ -2148,7 +2530,7 @@ static RPCHelpMan lab035()
         "Dispatch one local lab035 method. Research authority does not spend a wallet.\n",
         {
             {"method", RPCArg::Type::STR, RPCArg::Optional::NO, "lab035 method name"},
-            {"request", RPCArg::Type::STR, RPCArg::Optional::NO, "request object or JSON string", RPCArgOptions{.skip_type_check = true}},
+            {"request", RPCArg::Type::OBJ, RPCArg::Optional::NO, "request object or JSON string", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true, .oneline_description = "request", .type_str = {"", "string or json object"}}},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", "method result"}}},
         RPCExamples{HelpExampleCli("lab035", "lab035.git.digest '{\"kind\":\"blob\",\"content\":\"a\"}'")},
@@ -2294,6 +2676,7 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &preparemodelfunding},
         {"modelnet", &signmodelfunding},
         {"modelnet", &submitmodelfunding},
+        {"modelnet", &getmodelfundingsettlement},
         {"modelnet", &exportmodelrecovery},
         {"modelnet", &buildmodelhtlcclaim},
         {"modelnet", &buildmodelhtlcrefund},
@@ -2514,6 +2897,7 @@ void RegisterModelNetRPCCommands(CRPCTable& t)
         {"modelnet", &verifycomputeaccessgrant},
         {"modelnet", &getcomputesigningidentity},
         {"modelnet", &lab035},
+        {"modelnet", &modelsecurity},
     };
     for (const auto& c : commands) t.appendCommand(c.name, &c);
 #else

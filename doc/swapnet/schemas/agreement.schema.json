@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "initiator": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "type": "string"
+    },
+    "long_leg": {
+      "additionalProperties": false,
+      "properties": {
+        "amount_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "asset": {
+          "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+          "type": "string"
+        },
+        "claim_key": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "hashlock": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "lock_commitment": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "lock_domain": {
+          "enum": [
+            "height",
+            "timestamp"
+          ]
+        },
+        "lock_value": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_claim_fee_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "max_refund_fee_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "payout": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "refund_key": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "refund_payout": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset",
+        "amount_atoms",
+        "hashlock",
+        "claim_key",
+        "refund_key",
+        "payout",
+        "refund_payout",
+        "lock_domain",
+        "lock_value",
+        "lock_commitment",
+        "max_claim_fee_atoms",
+        "max_refund_fee_atoms"
+      ],
+      "type": "object"
+    },
+    "network": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "nonce": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "quote_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "responder": {
+      "maxLength": 16384,
+      "minLength": 1,
+      "type": "string"
+    },
+    "short_leg": {
+      "additionalProperties": false,
+      "properties": {
+        "amount_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "asset": {
+          "pattern": "^(btx|btc|evm):[0-9a-f]{64}:(0|[1-9][0-9]*):(native|0x[0-9a-f]{40})$",
+          "type": "string"
+        },
+        "claim_key": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "hashlock": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "lock_commitment": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "lock_domain": {
+          "enum": [
+            "height",
+            "timestamp"
+          ]
+        },
+        "lock_value": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_claim_fee_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "max_refund_fee_atoms": {
+          "description": "Atomic units; runtime additionally enforces <= 2^256-1.",
+          "pattern": "^(0|[1-9][0-9]{0,77})$",
+          "type": "string"
+        },
+        "payout": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "refund_key": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        },
+        "refund_payout": {
+          "maxLength": 16384,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset",
+        "amount_atoms",
+        "hashlock",
+        "claim_key",
+        "refund_key",
+        "payout",
+        "refund_payout",
+        "lock_domain",
+        "lock_value",
+        "lock_commitment",
+        "max_claim_fee_atoms",
+        "max_refund_fee_atoms"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "network",
+    "quote_id",
+    "initiator",
+    "responder",
+    "nonce",
+    "long_leg",
+    "short_leg"
+  ],
+  "title": "SwapNet agreement",
+  "type": "object"
+}

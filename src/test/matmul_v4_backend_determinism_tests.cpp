@@ -50,6 +50,7 @@
 #endif
 
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -460,17 +461,17 @@ public:
             m_original = cur;
         }
         if (value != nullptr) {
-            setenv("BTX_MATMUL_V4_BACKEND", value, 1);
+            test::SetEnv("BTX_MATMUL_V4_BACKEND", value);
         } else {
-            unsetenv("BTX_MATMUL_V4_BACKEND");
+            test::UnsetEnv("BTX_MATMUL_V4_BACKEND");
         }
     }
     ~ScopedBackendEnv()
     {
         if (m_had_original) {
-            setenv("BTX_MATMUL_V4_BACKEND", m_original.c_str(), 1);
+            test::SetEnv("BTX_MATMUL_V4_BACKEND", m_original.c_str());
         } else {
-            unsetenv("BTX_MATMUL_V4_BACKEND");
+            test::UnsetEnv("BTX_MATMUL_V4_BACKEND");
         }
     }
 

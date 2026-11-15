@@ -315,6 +315,11 @@ struct StoreConfig {
      * Runtime RPC adds are stored separately and persist across restart.
      */
     std::vector<CPubKey> blocklist{};
+    /**
+     * Config-forced ML-DSA-44 pin member blocklist. Same emergency semantics
+     * as blocklist: a still-listed PQ pin member becomes inert for PinVotes.
+     */
+    std::vector<std::vector<unsigned char>> pq_blocklist{};
 };
 
 enum class AddResult : uint8_t {
@@ -636,9 +641,15 @@ public:
     [[nodiscard]] bool IsAuthorityPqSigner(
         const std::vector<unsigned char>& pubkey) const;
     [[nodiscard]] bool IsBlocked(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsBlockedPq(
+        const std::vector<unsigned char>& pubkey) const;
     [[nodiscard]] std::set<CPubKey> BlockedSigners() const;
     [[nodiscard]] std::set<CPubKey> ConfigBlockedSigners() const;
     [[nodiscard]] std::set<CPubKey> RuntimeBlockedSigners() const;
+    [[nodiscard]] std::set<std::vector<unsigned char>> BlockedPqSigners()
+        const;
+    [[nodiscard]] std::set<std::vector<unsigned char>> RuntimeBlockedPqSigners()
+        const;
     [[nodiscard]] size_t UnblockedPinMembers() const;
     [[nodiscard]] bool PinQuorumReachable() const;
     /**
@@ -648,9 +659,14 @@ public:
      * unblocking a runtime add requires editing the persisted record.
      */
     [[nodiscard]] BlocklistResult AddBlocklistedSigner(const CPubKey& pubkey);
+    /** Same emergency excision for an ML-DSA-44 pin member. */
+    [[nodiscard]] BlocklistResult AddBlocklistedPqSigner(
+        const std::vector<unsigned char>& pubkey);
     /** Merge persisted runtime blocks. Returns false if a key would
      *  disable pin quorum, block the local signer, or overflow the cap. */
     [[nodiscard]] bool RestoreRuntimeBlocked(std::set<CPubKey> blocked);
+    [[nodiscard]] bool RestoreRuntimeBlockedPq(
+        std::set<std::vector<unsigned char>> blocked);
     [[nodiscard]] std::set<CPubKey> AdmittedOpenSigners() const;
     [[nodiscard]] std::set<CPubKey> FrozenOpenSigners() const;
     [[nodiscard]] std::vector<ExactReplayAttestation> GetHeard(
@@ -721,6 +737,8 @@ private:
     [[nodiscard]] bool WouldReachQuorumLocked(
         const BlockKey& key, const std::vector<unsigned char>& pq_signer) const;
     [[nodiscard]] bool IsBlockedLocked(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsBlockedPqLocked(
+        const std::vector<unsigned char>& pubkey) const;
     [[nodiscard]] size_t UnblockedPinMembersLocked() const;
     void DropHeardLocked(const CPubKey& pubkey);
     void AdmitOpenLocked(const CPubKey& pubkey);
@@ -776,9 +794,11 @@ private:
     std::set<CPubKey> m_trusted_signers;
     std::set<std::vector<unsigned char>> m_trusted_pq_signers;
     std::set<CPubKey> m_blocked_config;
+    std::set<std::vector<unsigned char>> m_blocked_pq_config;
 
     mutable std::mutex m_mutex;
     std::set<CPubKey> m_blocked;
+    std::set<std::vector<unsigned char>> m_blocked_pq;
     std::condition_variable m_changed;
     std::map<BlockKey, Bucket> m_buckets;
     std::map<HeardKey, ExactReplayAttestation> m_heard;

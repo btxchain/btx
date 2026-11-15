@@ -433,6 +433,62 @@ BOOST_AUTO_TEST_CASE(package_roundtrip)
     BOOST_CHECK_EQUAL(from_vector.inputs[0].amount, spend.amount);
 }
 
+BOOST_AUTO_TEST_CASE(decode_rejects_automatic_spend_fields_recursively)
+{
+    const auto seed = MasterSeedFromDerivation();
+    const Bcp1Spend spend = MakeSpend(seed);
+    const UniValue encoded = bcp1::Encode(PackageFromSpend(spend));
+
+    // A valid package and unrelated extension metadata must remain accepted.
+    const auto check_accepted = [&](const UniValue& json) {
+        bcp1::Package decoded;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(bcp1::Decode(json, decoded, err), err);
+        BOOST_REQUIRE_MESSAGE(bcp1::ValidateStructure(decoded, err), err);
+        BOOST_CHECK_EQUAL(bcp1::Encode(decoded).write(), encoded.write());
+    };
+    check_accepted(encoded);
+    UniValue metadata(UniValue::VOBJ);
+    metadata.pushKV("note", "unit-test extension");
+    UniValue benign = encoded;
+    benign.pushKV("metadata", metadata);
+    check_accepted(benign);
+
+    const auto check_rejected = [&](const UniValue& json, const char* location) {
+        BOOST_TEST_CONTEXT(location) {
+            bcp1::Package decoded;
+            std::string err;
+            BOOST_CHECK(!bcp1::Decode(json, decoded, err));
+            BOOST_CHECK_EQUAL(err, bcp1::ERR_AUTOMATIC_SPEND_FORBIDDEN);
+        }
+    };
+
+    // Rejection is based on field presence, including a zero or null value.
+    UniValue top = encoded;
+    top.pushKV("automatic_spend_atoms", 0);
+    check_rejected(top, "top-level zero");
+    UniValue null_value = encoded;
+    null_value.pushKV("automatic_spend_atoms", UniValue());
+    check_rejected(null_value, "top-level null");
+
+    UniValue forbidden(UniValue::VOBJ);
+    forbidden.pushKV("automatic_spend_atoms", 0);
+    UniValue nested = encoded;
+    nested.pushKV("metadata", forbidden);
+    check_rejected(nested, "nested object");
+
+    UniValue array(UniValue::VARR);
+    array.push_back(metadata);
+    benign = encoded;
+    benign.pushKV("metadata", array);
+    check_accepted(benign);
+
+    array.push_back(forbidden);
+    nested = encoded;
+    nested.pushKV("metadata", array);
+    check_rejected(nested, "object inside array");
+}
+
 BOOST_AUTO_TEST_CASE(corrupt_mldsa_signature_rejected)
 {
     const UniValue corrupt_v = ReadBcp1Json("negative-corrupt-signature.json");
@@ -488,6 +544,34 @@ BOOST_AUTO_TEST_CASE(leaf_pubkey_mismatch_rejected)
     BOOST_CHECK_MESSAGE(!bcp1::InsertSignature(pkg, 0, other->GetPubKey(), sig, err),
                         "InsertSignature must not accept a key that is not in the P2MR leaf");
     BOOST_CHECK(err.find("CORRUPT") != std::string::npos || err == bcp1::ERR_CORRUPT_SIGNATURE);
+}
+
+// A signature with one byte appended passed the package check, which dropped
+// that byte, and went into the witness whole. Consensus reads the byte as the
+// hash type: 0x00 signs the package digest (SIGHASH_DEFAULT), any other value
+// signs another digest. The package check must accept exactly what consensus
+// accepts, so a transaction it reports as complete can be mined.
+BOOST_AUTO_TEST_CASE(trailing_hashtype_byte_follows_consensus)
+{
+    const auto seed = MasterSeedFromDerivation();
+    const Bcp1Spend spend = MakeSpend(seed);
+    std::vector<unsigned char> sig;
+    BOOST_REQUIRE(spend.deposit_key.Sign(spend.digest, sig));
+    for (const unsigned char hashtype : {0x00, 0x01, 0x02, 0x03, 0x81}) {
+        bcp1::Package pkg = PackageFromSpend(spend);
+        std::vector<unsigned char> with_byte = sig;
+        with_byte.push_back(hashtype);
+        CScriptWitness wit;
+        wit.stack = {with_byte, spend.leaf, spend.control};
+        const bool consensus_ok{VerifyP2MRWitness(spend.unsigned_tx, spend.prev_txout, wit)};
+        BOOST_CHECK_EQUAL(consensus_ok, hashtype == 0x00);
+        std::string err;
+        BOOST_CHECK_MESSAGE(bcp1::InsertSignature(pkg, 0, with_byte, err) == consensus_ok,
+                            "InsertSignature disagrees with consensus for trailing byte " << int{hashtype});
+        CMutableTransaction tx;
+        BOOST_CHECK_MESSAGE(bcp1::TryExtractSignedTx(pkg, tx, err) == consensus_ok,
+                            "TryExtractSignedTx disagrees with consensus for trailing byte " << int{hashtype});
+    }
 }
 
 BOOST_AUTO_TEST_CASE(wrong_prevout_rejected)
@@ -968,6 +1052,61 @@ BOOST_AUTO_TEST_CASE(structure_rejects_duplicate_noncanonical_p2mr_wrong_change)
 
 }
 
+BOOST_AUTO_TEST_CASE(decode_change_vout_not_wrapped)
+{
+    const auto seed = MasterSeedFromDerivation();
+    const Bcp1Spend spend = MakeSpend(seed);
+    bcp1::Package pkg = PackageFromSpend(spend);
+    pkg.change.clear();
+    bcp1::ChangeOutput change;
+    change.vout = 1;
+    change.amount = spend.change_amount;
+    change.script_pub_key = spend.change_spk;
+    pkg.change.push_back(change);
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(bcp1::ValidateStructure(pkg, err), err);
+    const UniValue encoded = bcp1::Encode(pkg);
+    BOOST_REQUIRE(encoded["change"].isArray());
+    BOOST_REQUIRE_EQUAL(encoded["change"].size(), 1U);
+
+    // Control: the in-range index decodes and validates.
+    bcp1::Package decoded;
+    BOOST_REQUIRE_MESSAGE(bcp1::Decode(encoded, decoded, err), err);
+    BOOST_REQUIRE_EQUAL(decoded.change.size(), 1U);
+    BOOST_CHECK_EQUAL(decoded.change[0].vout, 1U);
+    BOOST_CHECK_MESSAGE(bcp1::ValidateStructure(decoded, err), err);
+
+    // 2^32 + 1 decoded as change output 1, which then validated.
+    const int64_t wrapped{(int64_t{1} << 32) + 1};
+    {
+        UniValue c = encoded["change"][0];
+        c.pushKV("vout", wrapped);
+        UniValue arr(UniValue::VARR);
+        arr.push_back(c);
+        UniValue json = encoded;
+        json.pushKV("change", arr);
+        bcp1::Package out;
+        BOOST_CHECK(!bcp1::Decode(json, out, err));
+        BOOST_CHECK_EQUAL(err, bcp1::ERR_WRONG_CHANGE);
+    }
+    // The same index in "outputs" with role "change", read when "change" is empty.
+    {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("role", "change");
+        o.pushKV("vout", wrapped);
+        o.pushKV("amount_atoms", spend.change_amount);
+        o.pushKV("scriptPubKey", HexStr(spend.change_spk));
+        UniValue outputs(UniValue::VARR);
+        outputs.push_back(o);
+        UniValue json = encoded;
+        json.pushKV("change", UniValue(UniValue::VARR));
+        json.pushKV("outputs", outputs);
+        bcp1::Package out;
+        BOOST_CHECK(!bcp1::Decode(json, out, err));
+        BOOST_CHECK_EQUAL(err, bcp1::ERR_WRONG_CHANGE);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(negative_spent_input_vector)
 {
     const UniValue spent = ReadBcp1Json("negative-spent-input.json");
@@ -1176,6 +1315,17 @@ BOOST_AUTO_TEST_CASE(finalizeexternalsign_accepts_valid_software_signature)
     CMutableTransaction mtx;
     BOOST_REQUIRE(DecodeHexTx(mtx, result["hex"].get_str()));
     BOOST_CHECK(VerifyP2MRWitness(mtx, spend.prev_txout, mtx.vin[0].scriptWitness));
+
+    // The documented {"package", "signatures"} object form must give the same
+    // result. Its parser used to assign the "package" member back over the
+    // wrapper object, which copies out of storage the assignment frees.
+    UniValue wrapped(UniValue::VOBJ);
+    wrapped.pushKV("package", bcp1::Encode(pkg));
+    wrapped.pushKV("signatures", sigs);
+    UniValue wrapped_params(UniValue::VARR);
+    wrapped_params.push_back(wrapped);
+    JSONRPCRequest wrapped_req = WalletRpc(context, wrapped_params);
+    BOOST_CHECK_EQUAL(finalizeexternalsign().HandleRequest(wrapped_req).write(), result.write());
 
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }

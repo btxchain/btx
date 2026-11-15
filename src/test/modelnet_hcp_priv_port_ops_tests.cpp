@@ -5,17 +5,16 @@
 
 #include <test/modelnet_hcp_test.h>
 #include <test/util/setup_common.h>
+#include <test/util/sdk_process.h>
 #include <modelnet/http_bridge.h>
 #include <modelnet/package_core.h>
 #include <clientversion.h>
+#include <tinyformat.h>
 #include <util/fs.h>
 
 #include <boost/test/unit_test.hpp>
 
-#include <cstdio>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_hcp_priv_port_ops_tests, BasicTestingSetup)
 
@@ -153,56 +152,23 @@ BOOST_AUTO_TEST_CASE(hcp_port_07_independent_sdk_parity)
     const fs::path python = sdk_root / "python" / "test_body_id.py";
     const fs::path ts = sdk_root / "typescript" / "src" / "body_id.test.ts";
 
-    const auto shell_quote = [](const std::string& s) {
-        std::string q = "'";
-        for (char c : s) {
-            if (c == '\'') q += "'\\''";
-            else q += c;
-        }
-        q += "'";
-        return q;
-    };
-    const auto spawn = [](const std::string& cmd, std::string& combined) {
-        FILE* fp = ::popen(cmd.c_str(), "r");
-        if (!fp) return -1;
-        char buf[4096];
-        while (fgets(buf, sizeof(buf), fp) != nullptr) combined.append(buf);
-        const int st = ::pclose(fp);
-        if (st == -1) return -1;
-        if (WIFEXITED(st)) return WEXITSTATUS(st);
-        return 127;
-    };
-    const auto which = [&](const char* name) {
-        std::string out;
-        const int rc = spawn(std::string("command -v ") + name + " 2>/dev/null", out);
-        while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
-        if (rc != 0) return std::string{};
-        return out;
-    };
-
     BOOST_REQUIRE_MESSAGE(fs::exists(python), fs::PathToString(python) + " missing");
-    std::string python_exe = "/usr/bin/python3";
-    if (::access(python_exe.c_str(), X_OK) != 0) {
-        python_exe = which("python3");
-    }
-    BOOST_REQUIRE_MESSAGE(!python_exe.empty() && ::access(python_exe.c_str(), X_OK) == 0,
-                          "python3 is required for independent SDK parity");
+    const std::string python_exe = sdk_test::Python3();
+    BOOST_REQUIRE_MESSAGE(!python_exe.empty(), "python3 is required for independent SDK parity");
     std::string py_out;
-    const std::string py_cmd =
-        shell_quote(python_exe) + " " + shell_quote(fs::PathToString(python)) + " 2>&1";
-    const int py_rc = spawn(py_cmd, py_out);
+    const std::vector<std::string> py_cmd{python_exe, fs::PathToString(python)};
+    const int py_rc = sdk_test::Spawn(py_cmd, py_out);
     BOOST_REQUIRE_MESSAGE(py_rc == 0, "python SDK test_body_id.py rc=" + std::to_string(py_rc) + "\n" + py_out);
 
-    const std::string node_exe = which("node");
+    const std::string node_exe = sdk_test::Which("node");
     if (node_exe.empty()) {
         BOOST_TEST_MESSAGE("HONEST_NOT_RUN typescript SDK");
     } else {
         BOOST_REQUIRE_MESSAGE(fs::exists(ts), fs::PathToString(ts) + " missing");
         std::string ts_out;
         // node:test + .ts imports: native strip-types (package.json: node --test).
-        const std::string ts_cmd = shell_quote(node_exe) + " --experimental-strip-types --test " +
-                                   shell_quote(fs::PathToString(ts)) + " 2>&1";
-        const int ts_rc = spawn(ts_cmd, ts_out);
+        const std::vector<std::string> ts_cmd{node_exe, "--no-warnings", "--experimental-strip-types", "--test", fs::PathToString(ts)};
+        const int ts_rc = sdk_test::Spawn(ts_cmd, ts_out);
         BOOST_REQUIRE_MESSAGE(ts_rc == 0,
                               "typescript SDK body_id.test.ts rc=" + std::to_string(ts_rc) + "\n" + ts_out);
     }
@@ -236,9 +202,10 @@ BOOST_AUTO_TEST_CASE(hcp_ops_01_public_bridge_isolation)
 BOOST_AUTO_TEST_CASE(hcp_ops_02_money_only_regression)
 {
     const std::string ver = FormatFullVersion();
-    BOOST_CHECK(ver.find("0.34.8") != std::string::npos);
+    const std::string triple = strprintf("%d.%d.%d", CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR, CLIENT_VERSION_BUILD);
+    BOOST_CHECK(ver.find(triple) != std::string::npos);
     if (!CLIENT_VERSION_IS_RELEASE) {
-        BOOST_CHECK(ver.find("-dev") != std::string::npos || ver.find("0.34.8") != std::string::npos);
+        BOOST_CHECK(ver.find("-dev") != std::string::npos || ver.find(triple) != std::string::npos);
     }
     auto e = hcp_test::Lab();
     BOOST_CHECK_EQUAL(e->Cfg().automatic_spend_atoms, 0);

@@ -120,9 +120,20 @@ bcp1::Package PackageFromArg(const UniValue& raw)
 CAmount ParseAtomsOrAmount(const UniValue& o, const char* atoms_key, const char* amount_key)
 {
     if (o.exists(atoms_key) && !o[atoms_key].isNull()) {
-        if (o[atoms_key].isNum()) return o[atoms_key].getInt<int64_t>();
         int64_t v = 0;
-        if (o[atoms_key].isStr() && ParseInt64(o[atoms_key].get_str(), &v)) return v;
+        bool parsed{false};
+        if (o[atoms_key].isNum()) {
+            v = o[atoms_key].getInt<int64_t>();
+            parsed = true;
+        } else if (o[atoms_key].isStr() && ParseInt64(o[atoms_key].get_str(), &v)) {
+            parsed = true;
+        }
+        if (parsed) {
+            // As AmountFromValue does for "amount": the wallet sums the outputs
+            // and the coin selection assumes amounts within MoneyRange.
+            if (!MoneyRange(v)) throw JSONRPCError(RPC_TYPE_ERROR, "Amount out of range");
+            return v;
+        }
     }
     if (o.exists(amount_key) && !o[amount_key].isNull()) return AmountFromValue(o[amount_key]);
     throw JSONRPCError(RPC_INVALID_PARAMETER, "amount or amount_atoms required");
@@ -130,9 +141,11 @@ CAmount ParseAtomsOrAmount(const UniValue& o, const char* atoms_key, const char*
 
 std::vector<CRecipient> RecipientsFromValue(const UniValue& raw)
 {
-    UniValue arr = raw;
-    if (arr.isObject() && arr.exists("outputs")) arr = arr["outputs"];
-    else if (arr.isObject() && arr.exists("recipients")) arr = arr["recipients"];
+    // Bind to the member instead of assigning it back over its own parent:
+    // "arr = arr[key]" copies from inside the vector it overwrites.
+    const UniValue& arr = raw.isObject() && raw.exists("outputs")    ? raw["outputs"] :
+                          raw.isObject() && raw.exists("recipients") ? raw["recipients"] :
+                                                                       raw;
     if (!arr.isArray()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "outputs must be an array of {address, amount}");
     }
@@ -253,20 +266,6 @@ bool LabelMatchesPool(const std::string& label, uint32_t account, uint32_t branc
     }
     if (account == 0 && branch == bcp1::BRANCH_DEPOSIT && index == 0 && label == "bcp1-deposit") return true;
     return false;
-}
-
-bool ParseUint32Index(int64_t v, uint32_t& out, const char* name, std::string& err)
-{
-    if (v < 0) {
-        err = strprintf("%s cannot be negative", name);
-        return false;
-    }
-    if (v > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
-        err = strprintf("%s exceeds uint32 range", name);
-        return false;
-    }
-    out = static_cast<uint32_t>(v);
-    return true;
 }
 
 std::string P2MRAddressFromWalletTree(Span<const unsigned char> ml, Span<const unsigned char> slh)
@@ -402,8 +401,12 @@ UniValue FundedPackage(CWallet& wallet, const std::vector<CRecipient>& recipient
             }
         }
     }
-    auto res = CreateTransaction(wallet, recipients, change_pos, coin_control, /*sign=*/false);
+    bool inputs_failed{false};
+    auto res = CreateTransaction(wallet, recipients, change_pos, coin_control, /*sign=*/false, &inputs_failed);
     if (!res) {
+        // As in the RPC FundTransaction(): ask for the unlock only when the inputs
+        // could not be fetched, selected or sized and the lock hid own coins.
+        if (inputs_failed && LockedWalletLeftOutOwnCoins(wallet, coin_control)) EnsureWalletIsUnlocked(wallet);
         throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(res).original);
     }
     PartiallySignedTransaction psbtx{CMutableTransaction(*res->tx)};
@@ -445,19 +448,18 @@ UniValue FundedPackage(CWallet& wallet, const std::vector<CRecipient>& recipient
 CTxDestination WatchOmnibus(const CWallet& wallet)
 {
     AssertLockHeld(wallet.cs_wallet);
+    // The omnibus is change 0 of account 0, else deposit 0, in the label format
+    // importdepositpool writes (0/change/0) or the legacy one (change/0). Any
+    // other address-book entry may be a customer deposit or an outside address,
+    // so without either label the caller has to name the destination.
     std::optional<CTxDestination> deposit0;
-    std::optional<CTxDestination> any;
     for (const auto& [dest, entry] : wallet.m_address_book) {
         if (!IsValidDestination(dest)) continue;
         const std::string label = entry.GetLabel();
-        if (label == "change/0") return dest;
-        if (label == "deposit/0" || label == "bcp1-deposit") {
-            if (!deposit0) deposit0 = dest;
-        }
-        if (!any) any = dest;
+        if (LabelMatchesPool(label, 0, bcp1::BRANCH_CHANGE, 0)) return dest;
+        if (!deposit0 && LabelMatchesPool(label, 0, bcp1::BRANCH_DEPOSIT, 0)) deposit0 = dest;
     }
     if (deposit0) return *deposit0;
-    if (any) return *any;
     throw JSONRPCError(RPC_INVALID_PARAMETER, "change_address required for watch-only consolidation");
 }
 
@@ -488,12 +490,57 @@ bool SelectPlanInputs(CCoinControl& cc, const UniValue& options)
     for (const UniValue& i : ins->getValues()) {
         if (!i.isObject() || !i.exists("txid")) continue;
         const uint256 txid = ParseHashV(i["txid"], "txid");
-        const int64_t vout = i.exists("vout") ? i["vout"].getInt<int64_t>() : 0;
-        if (vout < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "vout cannot be negative");
-        cc.Select(COutPoint(Txid::FromUint256(txid), static_cast<uint32_t>(vout)));
+        uint32_t vout{0};
+        std::string vout_err;
+        if (i.exists("vout") && !ParseUint32Index(i["vout"].getInt<int64_t>(), vout, "vout", vout_err)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, vout_err);
+        }
+        cc.Select(COutPoint(Txid::FromUint256(txid), vout));
     }
     cc.m_allow_other_inputs = false;
     return cc.HasSelected();
+}
+
+bool LockUnspentsRequested(const UniValue& options)
+{
+    if (options.exists("lockUnspents")) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Use lock_unspents instead of lockUnspents");
+    }
+    if (!options.exists("lock_unspents")) return false;
+    return options["lock_unspents"].get_bool();
+}
+
+// Lock selected_utxos after FundedPackage and the fee ceiling have accepted the
+// package. A coin the wallet already held is not recorded. If a lock fails,
+// unlock only the outpoints this call locked.
+void LockSelectedPackageInputs(CWallet& wallet, const UniValue& funded)
+{
+    LOCK(wallet.cs_wallet);
+    if (!funded.exists("selected_utxos") || !funded["selected_utxos"].isArray()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Locking coin failed");
+    }
+    const UniValue& selected = funded["selected_utxos"];
+    std::vector<COutPoint> locked_here;
+    locked_here.reserve(selected.size());
+    for (const UniValue& utxo : selected.getValues()) {
+        const Txid txid = Txid::FromUint256(ParseHashV(utxo["txid"], "txid"));
+        uint32_t vout{0};
+        std::string vout_err;
+        if (!ParseUint32Index(utxo["vout"].getInt<int64_t>(), vout, "vout", vout_err)) {
+            for (const COutPoint& outpoint : locked_here) wallet.UnlockCoin(outpoint);
+            throw JSONRPCError(RPC_WALLET_ERROR, "Locking coin failed");
+        }
+        const COutPoint outpoint{txid, vout};
+        if (wallet.IsLockedCoin(outpoint)) continue;
+        if (!wallet.LockCoin(outpoint)) {
+            // LockCoin inserts before a database write can fail. Drop that
+            // insert, then the outpoints this call locked. Leave the rest.
+            wallet.UnlockCoin(outpoint);
+            for (const COutPoint& locked : locked_here) wallet.UnlockCoin(locked);
+            throw JSONRPCError(RPC_WALLET_ERROR, "Locking coin failed");
+        }
+        locked_here.push_back(outpoint);
+    }
 }
 
 UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
@@ -508,12 +555,22 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     if (options.exists("minimumAmount")) fp.min_amount = AmountFromValue(options["minimumAmount"]);
     if (options.exists("min_amount")) fp.min_amount = AmountFromValue(options["min_amount"]);
     const bool have_plan_inputs = SelectPlanInputs(cc, options);
-    auto coins = AvailableCoinsListUnspent(wallet, &cc, fp);
+    // AvailableCoins skips coins that are already selected, so list with a
+    // copy that selects nothing and pick the named inputs from that list.
+    CCoinControl list_cc{cc};
+    list_cc.UnSelectAll();
+    auto coins = AvailableCoinsListUnspent(wallet, &list_cc, fp);
     std::vector<COutput> all = coins.All();
-    const size_t max_inputs = options.exists("max_inputs") ? static_cast<size_t>(options["max_inputs"].getInt<int64_t>()) :
-                              options.exists("batch_size") ? static_cast<size_t>(options["batch_size"].getInt<int64_t>()) :
-                              all.size();
-    const size_t target = options.exists("target_utxo_count") ? static_cast<size_t>(options["target_utxo_count"].getInt<int64_t>()) : 1;
+    // max_inputs (or batch_size) caps the plan. A cast of a negative value to
+    // size_t would lift the cap, and 0 would plan nothing.
+    const char* const max_key{options.exists("max_inputs") ? "max_inputs" : options.exists("batch_size") ? "batch_size" : nullptr};
+    size_t max_inputs = all.size();
+    if (max_key) {
+        const int64_t requested = options[max_key].getInt<int64_t>();
+        if (requested < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("%s must be at least 1", max_key));
+        max_inputs = static_cast<size_t>(requested);
+    }
+    const int64_t target_utxos = options.exists("target_utxo_count") ? options["target_utxo_count"].getInt<int64_t>() : 1;
     CAmount fee_ceiling = MAX_MONEY;
     if (options.exists("fee_ceiling")) fee_ceiling = AmountFromValue(options["fee_ceiling"]);
     else if (options.exists("fee_ceiling_atoms") && options["fee_ceiling_atoms"].isNum()) {
@@ -521,16 +578,32 @@ UniValue PlanCoins(CWallet& wallet, UniValue options, bool create_tx)
     }
     std::vector<COutput> selected;
     if (!have_plan_inputs) {
+        if (target_utxos < 1) throw JSONRPCError(RPC_INVALID_PARAMETER, "target_utxo_count must be at least 1");
+        const size_t target = static_cast<size_t>(target_utxos);
+        // The wallet ends with the coins left out plus the one consolidation output.
+        // At least one coin is selected, as before, so a wallet that already holds
+        // no more than target UTXOs can still sweep one, for example to a cold
+        // change_address.
         for (const COutput& c : all) {
+            if (!selected.empty() && all.size() - selected.size() + 1 <= target) break;
             if (selected.size() >= max_inputs) break;
             selected.push_back(c);
-            if (all.size() - selected.size() <= target && !selected.empty()) break;
         }
         for (const COutput& c : selected) cc.Select(c.outpoint);
         cc.m_allow_other_inputs = false;
     } else {
         for (const COutput& c : all) {
             if (cc.IsSelected(c.outpoint)) selected.push_back(c);
+        }
+        // A named input that the listing leaves out (locked, below minconf or
+        // min_amount, or spent) stays selected and would be spent by the
+        // transaction outside the plan total, as a second output. Refuse it.
+        for (const COutPoint& named : cc.ListSelected()) {
+            if (std::none_of(selected.begin(), selected.end(), [&](const COutput& c) { return c.outpoint == named; })) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                    strprintf("plan input %s:%u is not spendable here (locked, below minconf or min_amount, or spent)",
+                              named.hash.GetHex(), named.n));
+            }
         }
     }
     UniValue plan(UniValue::VOBJ);
@@ -801,9 +874,27 @@ RPCHelpMan deriveexchangeaddress()
                                                Params().IsTestChain() ? 1 : 0, account, branch, index);
             {
                 LOCK(pwallet->cs_wallet);
+                // A label that names this slot wins over the bcp1-deposit default
+                // label, and two addresses on the slot are an error: the answer
+                // must not depend on address-book order.
+                std::optional<CTxDestination> named;
+                std::optional<CTxDestination> fallback;
                 for (const auto& [dest, entry] : pwallet->m_address_book) {
                     const std::string label = entry.GetLabel();
-                    if (LabelMatchesPool(label, account, branch, index) || label == want) {
+                    if (!LabelMatchesPool(label, account, branch, index) && label != want) continue;
+                    if (label == "bcp1-deposit") {
+                        if (!fallback) fallback = dest;
+                        continue;
+                    }
+                    if (named && !(*named == dest)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR,
+                                           strprintf("More than one pool entry is labelled for %s; remove the extra label", want));
+                    }
+                    named = dest;
+                }
+                if (const std::optional<CTxDestination> found = named ? named : fallback) {
+                    const CTxDestination& dest = *found;
+                    {
                         UniValue o(UniValue::VOBJ);
                         o.pushKV("address", EncodeDestination(dest));
                         o.pushKV("index", static_cast<int64_t>(index));
@@ -850,6 +941,20 @@ RPCHelpMan deriveexchangeaddress()
     };
 }
 
+//! A rescan from height 0 needs every block. Same check as EnsureBlockDataFromTime
+//! in rpc/backup.cpp, for the timestamp-0 rescan of importdepositpool.
+static void EnsureBlockDataFromGenesis(const CWallet& wallet)
+{
+    auto& chain{wallet.chain()};
+    if (!chain.havePruned()) return;
+    int height{0};
+    const bool found{chain.findFirstBlockWithTimeAndHeight(/*min_time=*/0, /*min_height=*/0, interfaces::FoundBlock().height(height))};
+    const uint256 tip_hash{WITH_LOCK(wallet.cs_wallet, return wallet.GetLastBlockHash())};
+    if (found && !chain.hasBlocks(tip_hash, height)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, strprintf("Pruned blocks from height %d required to rescan for the deposit pool. Import without rescan, or use getblockchaininfo to see the pruned height.", height));
+    }
+}
+
 RPCHelpMan importdepositpool()
 {
     return RPCHelpMan{
@@ -886,21 +991,35 @@ RPCHelpMan importdepositpool()
             std::shared_ptr<CWallet> pwallet = GetWalletForJSONRPCRequest(request);
             if (!pwallet) return UniValue::VNULL;
             (void)self;
+            bool rescan = false;
+            if (!request.params[1].isNull() && request.params[1].isObject() && request.params[1].exists("rescan")) {
+                rescan = request.params[1]["rescan"].get_bool();
+            }
+            // As importwalletbundle does: before importing, refuse a rescan the
+            // node has no block data for; after it, report a scan that stopped
+            // short, instead of answering rescan=true with deposits missing.
+            WalletRescanReserver reserver(*pwallet);
+            if (rescan) {
+                if (!reserver.reserve()) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning");
+                }
+                EnsureBlockDataFromGenesis(*pwallet);
+            }
             bilingual_str err;
             UniValue details(UniValue::VOBJ);
             if (!ImportDepositPool(*pwallet, ImportArg(request.params[0]), err, details)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, err.original);
             }
-            bool rescan = false;
-            if (!request.params[1].isNull() && request.params[1].isObject() && request.params[1].exists("rescan")) {
-                rescan = request.params[1]["rescan"].get_bool();
-            }
             if (rescan) {
-                WalletRescanReserver reserver(*pwallet);
-                if (!reserver.reserve()) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning");
+                bool interrupted = false;
+                const int64_t scanned_time = pwallet->RescanFromTime(0, reserver, true, &interrupted);
+                if (pwallet->IsAbortingRescan()) {
+                    throw JSONRPCError(RPC_MISC_ERROR, "Rescan aborted by user.");
+                } else if (interrupted) {
+                    throw JSONRPCError(RPC_MISC_ERROR, "Rescan interrupted by node shutdown.");
+                } else if (scanned_time > 0) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Rescan was unable to fully rescan the blockchain. Some transactions may be missing.");
                 }
-                pwallet->RescanFromTime(0, reserver, true);
             }
             UniValue o(UniValue::VOBJ);
             o.pushKV("success", true);
@@ -951,7 +1070,12 @@ RPCHelpMan prepareexternalsign()
                 throw JSONRPCError(RPC_WALLET_ERROR, "prepareexternalsign does not sign with wallet keys");
             }
             const UniValue& arg = request.params[0];
-            if (arg.isObject() && (arg.exists("recipients") || arg.exists("outputs"))) {
+            // A BTXPSBT package (what createexchangebatch and createconsolidationtx
+            // return) also carries "outputs" and "recipients". It names a transaction
+            // to prepare, not a payment to fund again with fresh coin selection.
+            const bool is_package = arg.isObject() && (arg.exists("format") || arg.exists("psbt") ||
+                                                       arg.exists("unsigned_tx") || arg.exists("unsigned_tx_hex"));
+            if (arg.isObject() && !is_package && (arg.exists("recipients") || arg.exists("outputs"))) {
                 pwallet->BlockUntilSyncedToCurrentChain();
                 UniValue options = request.params[1].isNull() ? UniValue(UniValue::VOBJ) : request.params[1];
                 if (arg.exists("change_address") && !options.exists("change_address")) {
@@ -1052,7 +1176,8 @@ RPCHelpMan finalizeexternalsign()
             UniValue sigs = request.params[1];
             if (pkg_arg.isObject() && pkg_arg.exists("package")) {
                 if ((sigs.isNull() || !sigs.isArray()) && pkg_arg.exists("signatures")) sigs = pkg_arg["signatures"];
-                pkg_arg = pkg_arg["package"];
+                UniValue inner = pkg_arg["package"]; // copy out before pkg_arg is overwritten
+                pkg_arg = std::move(inner);
             }
             if ((sigs.isNull() || !sigs.isArray()) && pkg_arg.isObject() && pkg_arg.exists("signatures")) {
                 sigs = pkg_arg["signatures"];
@@ -1123,9 +1248,11 @@ RPCHelpMan getdepositstatus()
                 txid = ParseHashV(first, "txid");
                 if (!request.params[1].isNull()) vout64 = request.params[1].getInt<int64_t>();
             }
-            if (vout64 < 0) throw JSONRPCError(RPC_INVALID_PARAMETER, "vout cannot be negative");
+            uint32_t vout{0};
+            std::string vout_err;
+            if (!ParseUint32Index(vout64, vout, "vout", vout_err)) throw JSONRPCError(RPC_INVALID_PARAMETER, vout_err);
             LOCK(pwallet->cs_wallet);
-            UniValue result = GetDepositStatusUniValue(*pwallet, txid, static_cast<uint32_t>(vout64));
+            UniValue result = GetDepositStatusUniValue(*pwallet, txid, vout);
             if (!result.exists("irreversible")) result.pushKV("irreversible", false);
             return result;
         },
@@ -1186,7 +1313,7 @@ RPCHelpMan planconsolidation()
             {"min_confirmations", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
             {"max_inputs", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
             {"batch_size", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
-            {"target_utxo_count", RPCArg::Type::NUM, RPCArg::Default{1}, ""},
+            {"target_utxo_count", RPCArg::Type::NUM, RPCArg::Default{1}, "UTXOs to end with: the coins left out plus the consolidation output"},
             {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
             {"minimum_input_value", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
         }}},
@@ -1224,6 +1351,7 @@ RPCHelpMan createconsolidationtx()
                 {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, ""},
                 {"max_inputs", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, ""},
                 {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
+                {"lock_unspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock selected unspent outputs"},
                 {"plan", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "planconsolidation result", std::vector<RPCArg>{}},
             }},
         },
@@ -1242,13 +1370,21 @@ RPCHelpMan createconsolidationtx()
             UniValue options{UniValue::VOBJ};
             if (request.params[0].isObject()) {
                 options = request.params[0];
-            } else if (request.params[1].isObject()) {
-                options = request.params[1];
+            }
+            // The options argument also applies next to a plan object in the first
+            // argument (the help names this pair); its keys win, as in createexchangebatch.
+            if (request.params[1].isObject()) {
+                for (const std::string& key : request.params[1].getKeys()) {
+                    options.pushKV(key, request.params[1][key]);
+                }
             }
             if (request.params[0].isStr()) {
                 options.pushKV("change_address", request.params[0].get_str());
             }
-            return PlanCoins(*pwallet, options, /*create_tx=*/true);
+            const bool lock_unspents{LockUnspentsRequested(options)};
+            UniValue funded = PlanCoins(*pwallet, options, /*create_tx=*/true);
+            if (lock_unspents) LockSelectedPackageInputs(*pwallet, funded);
+            return funded;
         },
     };
 }
@@ -1291,7 +1427,12 @@ RPCHelpMan estimateconsolidationfee()
                     o.pushKV("would_broadcast", false);
                     return o;
                 } catch (const UniValue&) {
-                    // Fall through to an unsigned plan when change/omnibus cannot be priced.
+                    // Without change_address or destination the omnibus may not be
+                    // priceable: fall through to an unsigned plan (this still hides any
+                    // other error on that path). With either option the error
+                    // (fee_ceiling, funds, a locked wallet) is the answer, as in
+                    // createconsolidationtx.
+                    if (options.exists("change_address") || options.exists("destination")) throw;
                 }
             }
             return PlanCoins(*pwallet, options, /*create_tx=*/false);
@@ -1318,6 +1459,7 @@ RPCHelpMan createexchangebatch()
                 {"minconf", RPCArg::Type::NUM, RPCArg::Default{1}, ""},
                 {"fee_rate", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, "Fee rate in " + CURRENCY_ATOM + "/vB"},
                 {"fee_ceiling", RPCArg::Type::AMOUNT, RPCArg::Optional::OMITTED, ""},
+                {"lock_unspents", RPCArg::Type::BOOL, RPCArg::Default{false}, "Lock selected unspent outputs"},
             }},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {
@@ -1351,12 +1493,14 @@ RPCHelpMan createexchangebatch()
                     options.pushKV("change_address", request.params[0]["change_address"]);
                 }
             }
+            const bool lock_unspents{LockUnspentsRequested(options)};
             CCoinControl cc = CoinControlFromOptions(*pwallet, options, /*default_minconf=*/1);
             UniValue funded = FundedPackage(*pwallet, recs, cc, std::nullopt);
             if (options.exists("fee_ceiling") && funded.exists("fee_atoms") &&
                 funded["fee_atoms"].getInt<int64_t>() > AmountFromValue(options["fee_ceiling"])) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "estimated fee exceeds fee_ceiling");
             }
+            if (lock_unspents) LockSelectedPackageInputs(*pwallet, funded);
             return funded;
         },
     };

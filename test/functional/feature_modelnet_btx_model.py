@@ -61,6 +61,7 @@ _ERASURE_MANIFEST = {
     "stripe_count": 2,
     "final_real_piece_count": 16,
     "shard_index_root": "b" * 96,
+    "idempotency_key": "btx-model-cli-erasure",
     "stripes": [
         {"index": 0, "positions": list(range(16))},
         {"index": 1, "positions": list(range(15))},
@@ -116,7 +117,10 @@ class ModelNetBtxModelTest(BitcoinTestFramework):
         datadir.mkdir(parents=True, exist_ok=True)
         self.modeldir = datadir / "modeldir"
         self.modeldir.mkdir(parents=True, exist_ok=True)
-        self.modeld_socket = self.modeldir / "modeld.sock"
+        # _assert_scratch_socket refuses a socket outside the test directory, and
+        # <datadir>/modeldir/modeld.sock does not fit in sun_path under
+        # test_runner.py, so the socket sits at the top of the test directory.
+        self.modeld_socket = Path(self.options.tmpdir) / "modeld.sock"
         if self.modeld_socket.exists():
             self.modeld_socket.unlink()
         argv = [
@@ -363,7 +367,11 @@ class ModelNetBtxModelTest(BitcoinTestFramework):
             raise AssertionError(f"transport torrentd process: {transport}")
 
         pkg = self._cli(
-            ["package", "create", json.dumps({"kind": "btxbundle", "schema_version": 1})],
+            ["package", "create", json.dumps({
+                "kind": "btxbundle",
+                "schema_version": 1,
+                "idempotency_key": "btx-model-cli-package",
+            })],
             "package create",
         )
         hex_blob = self._nested(pkg, "hex")
@@ -405,6 +413,7 @@ class ModelNetBtxModelTest(BitcoinTestFramework):
                 "size_bytes": local_st.stat().st_size,
             }],
             "automatic_spend_atoms": 0,
+            "idempotency_key": "btx-model-cli-import",
         }
         plan_path = Path(self.options.tmpdir) / "import-plan-local.json"
         plan_path.write_text(json.dumps(plan) + "\n", encoding="utf-8")

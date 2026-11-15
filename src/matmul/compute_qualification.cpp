@@ -28,6 +28,7 @@
 #include <fstream>
 #include <limits>
 #include <set>
+#include <stdexcept>
 
 #ifndef WIN32
 #include <sys/file.h>
@@ -416,35 +417,49 @@ bool QualificationRegistry::Load(std::string& err)
         return false;
     }
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    UniValue parsed;
-    if (!parsed.read(raw) || !parsed.isObject() || !parsed.exists("entries") || !parsed["entries"].isArray() ||
-        !parsed.exists("schema") || !parsed["schema"].isNum() || parsed["schema"].getInt<int>() != 1) {
-        m_quarantine = fs::PathFromString(fs::PathToString(m_path) + ".quarantine");
-        std::error_code ec;
-        fs::rename(m_path, m_quarantine, ec);
-        err = "registry quarantined";
-        return false;
-    }
-    m_entries.clear();
-    for (const auto& row : parsed["entries"].getValues()) {
-        if (!row.isObject()) {
-            err = "registry quarantined";
+    in.close();
+    const auto parse_entries = [&] {
+        UniValue parsed;
+        if (!parsed.read(raw) || !parsed.isObject() || !parsed.exists("entries") || !parsed["entries"].isArray() ||
+            !parsed.exists("schema") || !parsed["schema"].isNum() || parsed["schema"].getInt<int>() != 1) {
             return false;
         }
-        Entry e;
-        e.id = row["id"].get_str();
-        e.profile_id = row["profile_id"].get_str();
-        e.subject = row["subject"].get_str();
-        e.issued_at_ms = row["issued_at_ms"].getInt<int64_t>();
-        e.expires_at_ms = row["expires_at_ms"].getInt<int64_t>();
-        e.episode_count = static_cast<uint32_t>(row["episode_count"].getInt<int64_t>());
-        e.max_elapsed_ms = row.exists("max_elapsed_ms") ? row["max_elapsed_ms"].getInt<uint64_t>() : 0;
-        e.redeemed = row["redeemed"].get_bool();
-        e.redeemed_at_ms = row.exists("redeemed_at_ms") ? row["redeemed_at_ms"].getInt<int64_t>() : 0;
-        e.canonical = row.exists("canonical") ? row["canonical"].get_str() : "";
-        m_entries.push_back(std::move(e));
+        m_entries.clear();
+        for (const auto& row : parsed["entries"].getValues()) {
+            if (!row.isObject()) {
+                return false;
+            }
+            Entry e;
+            e.id = row["id"].get_str();
+            e.profile_id = row["profile_id"].get_str();
+            e.subject = row["subject"].get_str();
+            e.issued_at_ms = row["issued_at_ms"].getInt<int64_t>();
+            e.expires_at_ms = row["expires_at_ms"].getInt<int64_t>();
+            e.episode_count = static_cast<uint32_t>(row["episode_count"].getInt<int64_t>());
+            e.max_elapsed_ms = row.exists("max_elapsed_ms") ? row["max_elapsed_ms"].getInt<uint64_t>() : 0;
+            e.redeemed = row["redeemed"].get_bool();
+            e.redeemed_at_ms = row.exists("redeemed_at_ms") ? row["redeemed_at_ms"].getInt<int64_t>() : 0;
+            e.canonical = row.exists("canonical") ? row["canonical"].get_str() : "";
+            m_entries.push_back(std::move(e));
+        }
+        return true;
+    };
+    try {
+        if (parse_entries()) return true;
+    } catch (const std::runtime_error&) {
+        // Wrong JSON field types and out-of-range integers are corrupt registry data.
     }
-    return true;
+    const fs::path destination = fs::PathFromString(fs::PathToString(m_path) + ".quarantine");
+    std::error_code ec;
+    fs::rename(m_path, destination, ec);
+    if (ec) {
+        m_quarantine.clear();
+        err = "registry quarantine failed: " + ec.message();
+        return false;
+    }
+    m_quarantine = destination;
+    err = "registry quarantined";
+    return false;
 }
 
 bool QualificationRegistry::Save(std::string& err)

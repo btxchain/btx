@@ -247,7 +247,9 @@ constexpr uint64_t SHIELDED_VERIFY_UNITS_PER_SETTLEMENT_PROOF{100};
         return std::nullopt;
     }
 
-    auto ss = mlkem::Decaps(grant.kem_ct, operator_sk);
+    auto secret = mlkem::Decaps(grant.kem_ct, operator_sk);
+    if (!secret) return std::nullopt;
+    auto& ss = *secret;
 
     std::vector<uint8_t, secure_allocator<uint8_t>> aead_key(32, 0);
     CHKDF_HMAC_SHA256_L32 hkdf(ss.data(), ss.size(), VIEW_GRANT_SALT);

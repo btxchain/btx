@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "btx-swapnet"
+version = "2.0.0"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=42"]
+description = "BTX SwapNet embedded discovery and durable cross-chain HTLC execution"
+[project.optional-dependencies]
+test = ["pytest>=8", "jsonschema>=4"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["swapnet*"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]

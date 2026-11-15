@@ -1,0 +1,120 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/license/mit/.
+
+#include <modelnet/swarm_rescap/codes.h>
+#include <modelnet/swarm_rescap/limits.h>
+#include <modelnet/swarm_rescap/swarm_rescap.h>
+#include <test/util/setup_common.h>
+
+#include <boost/test/unit_test.hpp>
+
+#include <cstdint>
+#include <limits>
+#include <string>
+
+BOOST_FIXTURE_TEST_SUITE(swarm_rescap_over_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(threads_above_64_are_capped_and_store_nothing)
+{
+    modelnet::SwarmResCap plane;
+    std::string err = "prior";
+
+    BOOST_REQUIRE(!plane.Raise(65, err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(!plane.stored(65));
+    BOOST_REQUIRE_EQUAL(plane.stored_threads(65), 0);
+    BOOST_REQUIRE(plane.raise_count() == 0);
+    BOOST_REQUIRE(!plane.raised());
+    BOOST_REQUIRE(plane.raised() == modelnet::kSwarmResCapRaised);
+    BOOST_REQUIRE_EQUAL(plane.cap_threads(), 64);
+    BOOST_REQUIRE(plane.cap_threads() == modelnet::kSwarmResCapThreadCap);
+    BOOST_REQUIRE_EQUAL(plane.bytes_moved(), 0);
+    BOOST_REQUIRE(!plane.gpu());
+    BOOST_REQUIRE(!plane.launched());
+
+    err = "prior";
+    BOOST_REQUIRE(!plane.Raise(66, err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(!plane.stored(66));
+    BOOST_REQUIRE(plane.raise_count() == 0);
+    BOOST_REQUIRE(!plane.raised());
+    BOOST_REQUIRE_EQUAL(plane.cap_threads(), 64);
+
+    err = "prior";
+    BOOST_REQUIRE(!plane.Raise(std::numeric_limits<int64_t>::max(), err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(!plane.stored(std::numeric_limits<int64_t>::max()));
+    BOOST_REQUIRE(plane.raise_count() == 0);
+    BOOST_REQUIRE(!plane.raised());
+    BOOST_REQUIRE_EQUAL(plane.cap_threads(), 64);
+    BOOST_REQUIRE_EQUAL(plane.bytes_moved(), 0);
+    BOOST_REQUIRE(!plane.gpu());
+    BOOST_REQUIRE(!plane.launched());
+
+    err = "prior";
+    BOOST_REQUIRE(!plane.Raise(65, err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(err != modelnet::kSwarmResCapReplay);
+    BOOST_REQUIRE(plane.raise_count() == 0);
+    BOOST_REQUIRE(!plane.raised());
+    BOOST_REQUIRE_EQUAL(plane.cap_threads(), 64);
+}
+
+BOOST_AUTO_TEST_CASE(above_64_after_a_raise_keeps_the_stored_count)
+{
+    modelnet::SwarmResCap plane;
+    std::string err = "prior";
+
+    BOOST_REQUIRE(!plane.Raise(64, err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(plane.stored(64));
+    BOOST_REQUIRE_EQUAL(plane.stored_threads(64), 64);
+    BOOST_REQUIRE(!plane.raised());
+
+    err = "prior";
+    BOOST_REQUIRE(!plane.Raise(65, err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(plane.stored(64));
+    BOOST_REQUIRE_EQUAL(plane.stored_threads(64), 64);
+    BOOST_REQUIRE(!plane.stored(65));
+    BOOST_REQUIRE(plane.raise_count() == 1);
+    BOOST_REQUIRE(!plane.raised());
+    BOOST_REQUIRE_EQUAL(plane.cap_threads(), 64);
+    BOOST_REQUIRE_EQUAL(plane.bytes_moved(), 0);
+    BOOST_REQUIRE(!plane.gpu());
+    BOOST_REQUIRE(!plane.launched());
+}
+
+BOOST_AUTO_TEST_CASE(above_64_does_not_block_a_later_raise)
+{
+    modelnet::SwarmResCap plane;
+    std::string err = "prior";
+
+    BOOST_REQUIRE(!plane.Raise(128, err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(plane.raise_count() == 0);
+
+    err = "prior";
+    BOOST_REQUIRE(!plane.Raise(64, err));
+    BOOST_REQUIRE(err == modelnet::kSwarmResCapCapped);
+    BOOST_REQUIRE_EQUAL(err, "CAPPED");
+    BOOST_REQUIRE(plane.stored(64));
+    BOOST_REQUIRE_EQUAL(plane.stored_threads(64), 64);
+    BOOST_REQUIRE(!plane.stored(128));
+    BOOST_REQUIRE(plane.raise_count() == 1);
+    BOOST_REQUIRE(!plane.raised());
+    BOOST_REQUIRE_EQUAL(plane.cap_threads(), 64);
+    BOOST_REQUIRE_EQUAL(plane.bytes_moved(), 0);
+    BOOST_REQUIRE(!plane.gpu());
+    BOOST_REQUIRE(!plane.launched());
+}
+
+BOOST_AUTO_TEST_SUITE_END()

@@ -7,6 +7,7 @@
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
+#include <modelnet/model_nat.h>
 #include <modelnet/piece_ranges.h>
 #include <modelnet/profile.h>
 #include <modelnet/reachability.h>
@@ -19,6 +20,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -442,6 +444,123 @@ BOOST_AUTO_TEST_CASE(infra_12_profile_restart_persist)
     BOOST_CHECK(!p2.relay);
     BOOST_CHECK_EQUAL(p2.auto_cap_bytes, PERSONAL_AUTO_CAP_BYTES);
     BOOST_CHECK(!p2.preserve_rare);
+}
+
+#ifdef _WIN32
+BOOST_AUTO_TEST_CASE(profile_refuses_invalid_windows_path)
+{
+    using namespace modelnet;
+    const auto path = m_path_root / "invalid<profile>.json";
+    const auto policy = ResolveProfile(OperatorProfile::PERSONAL, {});
+    std::string err;
+    BOOST_CHECK(!SaveOperatorProfile(path, OperatorProfile::PERSONAL, policy, err));
+    BOOST_CHECK_MESSAGE(err.find("cannot inspect operator profile path: ") == 0, err);
+}
+#endif
+
+#ifndef __MINGW64__
+BOOST_AUTO_TEST_CASE(profile_refuses_destination_and_temporary_symlinks)
+{
+    using namespace modelnet;
+    const auto target = m_path_root / "profile-link-target";
+    fs::create_directory(target);
+    const auto path = OperatorProfilePath(m_path_root);
+    const auto temporary = m_path_root / "operator_profile.json.tmp";
+    const auto policy = ResolveProfile(OperatorProfile::PERSONAL, {});
+    for (const auto& link : {path, temporary}) {
+        fs::create_directory_symlink(target, link);
+        std::string err;
+        BOOST_CHECK(!SaveOperatorProfile(path, OperatorProfile::PERSONAL, policy, err));
+        BOOST_CHECK_EQUAL(err, "operator profile paths must not be symbolic links");
+        BOOST_CHECK(fs::is_empty(target));
+        BOOST_REQUIRE(fs::remove(link));
+    }
+    BOOST_CHECK(!fs::exists(path));
+}
+#endif
+
+BOOST_AUTO_TEST_CASE(operator_rpc_overrides_reach_resolved_policy)
+{
+    using namespace modelnet;
+    UniValue request;
+    BOOST_REQUIRE(request.read(R"({"profile":"custom","storage_bytes":"8MiB","relay":true,"follow_peers":false,"host_mode":"auto","upload_bps":"2MiB","seed":"manual","automatic_spend_atoms":0})"));
+    ProfileOverrides overrides;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ParseProfileOverridesJson(request, overrides, error), error);
+    const auto policy = ResolveProfile(OperatorProfile::CUSTOM, overrides);
+    BOOST_CHECK_EQUAL(policy.storage_arg, "8388608");
+    BOOST_CHECK(policy.relay);
+    BOOST_CHECK(!policy.follow_peers);
+    BOOST_CHECK(policy.host_mode == HostMode::AUTO);
+    BOOST_CHECK_EQUAL(policy.upload_bps, 2 * MIB);
+    BOOST_CHECK_EQUAL(policy.seed, "manual");
+    BOOST_REQUIRE(request.read(R"({"storage_bytes":null})"));
+    BOOST_REQUIRE(ParseProfileOverridesJson(request, overrides, error));
+    BOOST_CHECK_EQUAL(*overrides.storage_arg, "auto");
+    BOOST_REQUIRE(request.read(R"({"storage_bytes":0})"));
+    BOOST_REQUIRE(ParseProfileOverridesJson(request, overrides, error));
+    BOOST_CHECK_EQUAL(*overrides.storage_arg, "0");
+}
+
+BOOST_AUTO_TEST_CASE(operator_rpc_override_rejects_authority_and_ambiguity)
+{
+    using namespace modelnet;
+    for (const char* body : {R"({"storage_bytes":-1})", R"({"storage_bytes":1.5})",
+        R"({"storage_bytes":"8MiB","storage_arg":"0"})", R"({"relay":1})",
+        R"({"seed":"invalid"})", R"({"host_mode":true})", R"({"automatic_spend_atoms":1})",
+        R"({"automatic_spend_atoms":"00"})", R"({"wallet":true})", R"({"relay":true,"relay":false})"}) {
+        UniValue request;
+        BOOST_REQUIRE(request.read(body));
+        ProfileOverrides overrides;
+        std::string error;
+        BOOST_CHECK_MESSAGE(!ParseProfileOverridesJson(request, overrides, error), body);
+        BOOST_CHECK(!error.empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(infra_13_natpmp_off_reaches_helper)
+{
+    using namespace modelnet;
+    HelperLaunchConfig cfg;
+    cfg.bind = "0.0.0.0:29447";
+    BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    cfg.natpmp = false;
+    BOOST_CHECK(ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    // No PQ1 listener, nothing to map.
+    cfg.bind.clear();
+    BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
+    // Disabled mapping never looks for a gateway.
+    BOOST_CHECK(AttemptModelPortMap("0.0.0.0:29447", /*enable=*/false).status == ModelNatStatus::DISABLED);
+}
+
+BOOST_AUTO_TEST_CASE(infra_14_packaged_helper_uses_platform_file_name)
+{
+    using namespace modelnet;
+#ifdef WIN32
+    BOOST_CHECK_EQUAL(std::string{MODELD_FILE_NAME}, "btx-modeld.exe");
+    const fs::path other_name{"btx-modeld"};
+#else
+    BOOST_CHECK_EQUAL(std::string{MODELD_FILE_NAME}, "btx-modeld");
+    const fs::path other_name{"btx-modeld.exe"};
+#endif
+#if defined(WIN32) || defined(__linux__) || defined(__APPLE__)
+    // btxd looks for the helper next to itself, so it must know where it runs from.
+    BOOST_CHECK(fs::is_directory(SelfExeDir()));
+#endif
+    const fs::path root = m_path_root / "packaged";
+    const fs::path btxd_dir = root / "sbin";
+    const std::vector<fs::path> searched{btxd_dir, btxd_dir / "libexec", root / "libexec", root / "bin"};
+    for (const fs::path& dir : searched) {
+        fs::create_directories(dir);
+        std::ofstream{dir / other_name};
+    }
+    // The other platform's file name is not the helper.
+    BOOST_CHECK(FindPackagedModeldIn(btxd_dir).empty());
+    // From the last place searched to the first, each one is found ahead of the places after it.
+    for (auto dir = searched.rbegin(); dir != searched.rend(); ++dir) {
+        std::ofstream{*dir / MODELD_FILE_NAME};
+        BOOST_CHECK_EQUAL(fs::PathToString(FindPackagedModeldIn(btxd_dir)), fs::PathToString(*dir / MODELD_FILE_NAME));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

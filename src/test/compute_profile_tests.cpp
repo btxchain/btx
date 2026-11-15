@@ -13,6 +13,8 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fstream>
+#include <iterator>
+#include <utility>
 
 BOOST_FIXTURE_TEST_SUITE(compute_profile_tests, BasicTestingSetup)
 
@@ -178,7 +180,177 @@ BOOST_AUTO_TEST_CASE(qualification_rejects_bounds_expiry_and_corrupt_registry)
     pwc::QualificationRegistry broken;
     BOOST_CHECK(!broken.Open(path, err));
     BOOST_CHECK(!broken.Healthy());
-    BOOST_CHECK(fs::exists(fs::PathFromString(fs::PathToString(path) + ".quarantine")));
+    const fs::path quarantine = fs::PathFromString(fs::PathToString(path) + ".quarantine");
+    BOOST_CHECK(fs::exists(quarantine));
+    BOOST_CHECK(!fs::exists(path));
+    std::ifstream isolated(quarantine);
+    const std::string isolated_bytes((std::istreambuf_iterator<char>(isolated)), std::istreambuf_iterator<char>());
+    BOOST_CHECK_EQUAL(isolated_bytes, "{not-json");
+    BOOST_CHECK_EQUAL(broken.Health()["quarantine_path"].get_str(), fs::PathToString(quarantine));
+    BOOST_CHECK_EQUAL(err, "registry quarantined");
+    pwc::QualificationRegistry recovered;
+    BOOST_REQUIRE(recovered.Open(path, err));
+    BOOST_CHECK(recovered.Healthy());
+    BOOST_CHECK_EQUAL(recovered.Health()["entries"].getInt<uint64_t>(), 0u);
+    BOOST_REQUIRE(recovered.Status(challenge["challenge_id"].get_str(), 2'000, summary, code, err));
+    BOOST_CHECK_EQUAL(summary["status"].get_str(), "unknown");
+    BOOST_CHECK(!recovered.Verify(challenge, response, true, 2'000, summary, code, err));
+    BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_UNKNOWN");
+}
+
+
+BOOST_AUTO_TEST_CASE(qualification_quarantines_non_object_rows_and_recovers_empty)
+{
+    pwc::QualificationFreshness in;
+    in.network = "regtest";
+    in.profile_name = "btx-rc-p1e-toy-v1";
+    in.subject.fill(9);
+    in.issuer_nonce.fill(4);
+    in.issued_at_ms = 1'000;
+    in.expires_at_ms = 1'000'000;
+    in.episode_count = 1;
+    std::string code, err;
+    UniValue redeemed_challenge, redeemed_response, pending_challenge, pending_response, summary;
+    BOOST_REQUIRE(pwc::IssueQualification(in, true, redeemed_challenge, code, err));
+    BOOST_REQUIRE(pwc::SolveQualification(redeemed_challenge, 60000, false, redeemed_response, code, err));
+    in.issuer_nonce.fill(5);
+    BOOST_REQUIRE(pwc::IssueQualification(in, true, pending_challenge, code, err));
+    BOOST_REQUIRE(pwc::SolveQualification(pending_challenge, 60000, false, pending_response, code, err));
+    const fs::path path = m_path_root / "qual-non-object.dat";
+    const fs::path quarantine = fs::PathFromString(fs::PathToString(path) + ".quarantine");
+    pwc::QualificationRegistry issuer;
+    BOOST_REQUIRE(issuer.Open(path, err));
+    BOOST_REQUIRE(issuer.RememberIssued(redeemed_challenge, code, err));
+    BOOST_REQUIRE(issuer.Verify(redeemed_challenge, redeemed_response, true, 2'000, summary, code, err));
+    BOOST_REQUIRE(issuer.RememberIssued(pending_challenge, code, err));
+    const std::string corrupt = "{\"schema\":1,\"entries\":[null]}\n";
+    {
+        std::ofstream bad(path, std::ios::trunc);
+        bad << corrupt;
+        BOOST_REQUIRE(bad.good());
+    }
+    pwc::QualificationRegistry broken;
+    BOOST_CHECK(!broken.Open(path, err));
+    BOOST_CHECK(!broken.Healthy());
+    BOOST_CHECK_EQUAL(err, "registry quarantined");
+    BOOST_CHECK(!broken.RememberIssued(pending_challenge, code, err));
+    BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_INVALID");
+    BOOST_CHECK(!broken.Verify(redeemed_challenge, redeemed_response, true, 2'100, summary, code, err));
+    BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_INVALID");
+    BOOST_CHECK(!broken.Status(pending_challenge["challenge_id"].get_str(), 2'100, summary, code, err));
+    BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_INVALID");
+    BOOST_CHECK_MESSAGE(!fs::exists(path), "corrupt registry source was not moved aside");
+    BOOST_CHECK_MESSAGE(fs::exists(quarantine), "corrupt registry quarantine was not created");
+    std::ifstream isolated(quarantine);
+    const std::string isolated_bytes((std::istreambuf_iterator<char>(isolated)), std::istreambuf_iterator<char>());
+    BOOST_CHECK_EQUAL(isolated_bytes, corrupt);
+    pwc::QualificationRegistry recovered;
+    BOOST_REQUIRE_MESSAGE(recovered.Open(path, err), "new registry instance did not recover after quarantine");
+    BOOST_CHECK(recovered.Healthy());
+    BOOST_CHECK_EQUAL(recovered.Health()["entries"].getInt<uint64_t>(), 0u);
+    for (const auto& pair : {std::make_pair(redeemed_challenge, redeemed_response), std::make_pair(pending_challenge, pending_response)}) {
+        BOOST_REQUIRE(recovered.Status(pair.first["challenge_id"].get_str(), 2'200, summary, code, err));
+        BOOST_CHECK_EQUAL(summary["status"].get_str(), "unknown");
+        BOOST_CHECK(!recovered.Verify(pair.first, pair.second, true, 2'200, summary, code, err));
+        BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_UNKNOWN");
+    }
+    // Recovering storage must not discard the preserved corrupt evidence.
+    std::ifstream retained(quarantine);
+    const std::string retained_bytes((std::istreambuf_iterator<char>(retained)), std::istreambuf_iterator<char>());
+    BOOST_CHECK_EQUAL(retained_bytes, corrupt);
+}
+
+BOOST_AUTO_TEST_CASE(qualification_quarantine_failure_preserves_source_and_reports_error)
+{
+    for (const auto& corrupt : {std::string("{not-json\n"), std::string("{\"schema\":1,\"entries\":[null]}\n")}) {
+        const fs::path path = m_path_root / "qual-rename-failure.dat";
+        const fs::path quarantine = fs::PathFromString(fs::PathToString(path) + ".quarantine");
+        fs::create_directory(quarantine);
+        const fs::path marker = quarantine / "preserve-marker";
+        {
+            std::ofstream bad(path, std::ios::trunc);
+            bad << corrupt;
+            BOOST_REQUIRE(bad.good());
+            std::ofstream keep(marker);
+            keep << "existing destination data";
+            BOOST_REQUIRE(keep.good());
+        }
+        std::string code, err;
+        pwc::QualificationRegistry broken;
+        BOOST_CHECK(!broken.Open(path, err));
+        BOOST_CHECK(!broken.Healthy());
+        BOOST_CHECK_MESSAGE(err.find("registry quarantine failed: ") == 0, "rename failure falsely reported as successful quarantine: " << err);
+        const UniValue health = broken.Health();
+        BOOST_CHECK_EQUAL(health["error"].get_str(), err);
+        BOOST_CHECK(!health.exists("quarantine_path"));
+        std::ifstream original(path);
+        const std::string original_bytes((std::istreambuf_iterator<char>(original)), std::istreambuf_iterator<char>());
+        BOOST_CHECK_EQUAL(original_bytes, corrupt);
+        original.close();
+        std::ifstream kept(marker);
+        const std::string marker_bytes((std::istreambuf_iterator<char>(kept)), std::istreambuf_iterator<char>());
+        BOOST_CHECK_EQUAL(marker_bytes, "existing destination data");
+        kept.close();
+        UniValue summary;
+        BOOST_CHECK(!broken.Status(std::string(96, '0'), 2'000, summary, code, err));
+        BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_INVALID");
+        // Clear only the test-owned obstruction, then require normal quarantine and a later empty reopen.
+        fs::remove_all(quarantine);
+        pwc::QualificationRegistry retry;
+        BOOST_CHECK(!retry.Open(path, err));
+        BOOST_CHECK(!retry.Healthy());
+        BOOST_CHECK_EQUAL(err, "registry quarantined");
+        BOOST_CHECK(!fs::exists(path));
+        BOOST_CHECK(fs::exists(quarantine));
+        std::ifstream retry_isolated(quarantine);
+        const std::string retry_bytes((std::istreambuf_iterator<char>(retry_isolated)), std::istreambuf_iterator<char>());
+        BOOST_CHECK_EQUAL(retry_bytes, corrupt);
+        retry_isolated.close();
+        pwc::QualificationRegistry recovered;
+        BOOST_REQUIRE(recovered.Open(path, err));
+        BOOST_CHECK(recovered.Healthy());
+        BOOST_CHECK_EQUAL(recovered.Health()["entries"].getInt<uint64_t>(), 0u);
+        fs::remove(quarantine);
+    }
+}
+
+
+BOOST_AUTO_TEST_CASE(qualification_quarantines_invalid_field_types_and_schema_overflow)
+{
+    const std::vector<std::string> payloads{
+        "{\"schema\":1,\"entries\":[{}]}\n",
+        "{\"schema\":18446744073709551616,\"entries\":[]}\n",
+    };
+    for (size_t i = 0; i < payloads.size(); ++i) {
+        const fs::path path = m_path_root / fs::PathFromString("qual-field-error-" + std::to_string(i) + ".dat");
+        const fs::path quarantine = fs::PathFromString(fs::PathToString(path) + ".quarantine");
+        {
+            std::ofstream bad(path);
+            bad << payloads[i];
+            BOOST_REQUIRE(bad.good());
+        }
+        std::string code, err;
+        pwc::QualificationRegistry broken;
+        bool opened = true;
+        BOOST_CHECK_NO_THROW(opened = broken.Open(path, err));
+        BOOST_CHECK(!opened);
+        BOOST_CHECK(!broken.Healthy());
+        BOOST_CHECK_EQUAL(err, "registry quarantined");
+        BOOST_CHECK(!fs::exists(path));
+        BOOST_CHECK(fs::exists(quarantine));
+        std::ifstream isolated(quarantine);
+        const std::string isolated_bytes((std::istreambuf_iterator<char>(isolated)), std::istreambuf_iterator<char>());
+        BOOST_CHECK_EQUAL(isolated_bytes, payloads[i]);
+        UniValue summary;
+        BOOST_CHECK(!broken.Status(std::string(96, '0'), 2'000, summary, code, err));
+        BOOST_CHECK_EQUAL(code, "COMPUTE_CHALLENGE_INVALID");
+        pwc::QualificationRegistry recovered;
+        bool recovered_opened = false;
+        BOOST_CHECK_NO_THROW(recovered_opened = recovered.Open(path, err));
+        BOOST_CHECK(recovered_opened);
+        BOOST_CHECK(recovered.Healthy());
+        BOOST_CHECK_EQUAL(recovered.Health()["entries"].getInt<uint64_t>(), 0u);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -4,18 +4,22 @@
 
 // Unit tests for denial-of-service detection/prevention code
 
+#include <addresstype.h>
 #include <banman.h>
 #include <chainparams.h>
 #include <common/args.h>
 #include <net.h>
 #include <net_processing.h>
+#include <netmessagemaker.h>
 #include <pubkey.h>
 #include <script/sign.h>
 #include <script/signingprovider.h>
+#include <script/solver.h>
 #include <serialize.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
+#include <txmempool.h>
 #include <util/string.h>
 #include <util/time.h>
 #include <validation.h>
@@ -426,6 +430,101 @@ BOOST_AUTO_TEST_CASE(DoS_bantime)
     BOOST_CHECK(banman->IsDiscouraged(addr));
 
     peerLogic->FinalizeNode(dummyNode);
+}
+
+BOOST_FIXTURE_TEST_CASE(orphan_reconsideration_interruptible, TestChain100Setup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    const CTxMemPool& mempool = *m_node.mempool;
+    // BTX relays only P2MR outputs as standard. This test is about orphan scheduling, and its
+    // transactions pay to P2PKH like the fixture's coinbases, so standardness is off as in
+    // txpackage_tests.
+    Assert(m_node.mempool)->m_opts.require_standard = false;
+
+    CNode peer{/*id=*/0,
+               /*sock=*/nullptr,
+               CAddress(ip(0xa0b0c001), NODE_NONE),
+               /*nKeyedNetGroupIn=*/0,
+               /*nLocalHostNonceIn=*/0,
+               CAddress(),
+               /*addrNameIn=*/"",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(
+        /*node=*/peer,
+        /*successfully_connected=*/true,
+        /*remote_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        /*local_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        /*version=*/PROTOCOL_VERSION,
+        /*relay_txs=*/true);
+
+    // BTX regtest coinbases pay 20 COIN, so the parent splits one into 3 COIN outputs.
+    const CScript script{GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    const int num_children{6};
+    const auto parent{MakeTransactionRef(CreateValidMempoolTransaction(
+        {m_coinbase_txns[0]}, {COutPoint{m_coinbase_txns[0]->GetHash(), 0}}, /*input_height=*/1, {coinbaseKey},
+        std::vector<CTxOut>(num_children, CTxOut{3 * COIN, script}), /*submit=*/false))};
+
+    const auto send_tx{[&](const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        connman.FlushSendBuffer(peer); // Drop messages we sent, the transport is shared with the fake peer.
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx))));
+        peer.fPauseSend = false;
+        return connman.ProcessMessagesOnce(peer);
+    }};
+
+    // Children arrive first and become orphans. Half of them pay no fee and will be rejected.
+    for (int i{0}; i < num_children; ++i) {
+        const CAmount output_value{i % 2 ? 3 * COIN : 2 * COIN};
+        send_tx(MakeTransactionRef(CreateValidMempoolTransaction(parent, i, /*input_height=*/101, coinbaseKey, script, output_value, /*submit=*/false)));
+    }
+    BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children);
+    BOOST_CHECK_EQUAL(mempool.size(), 0U);
+
+    // Accepting the parent schedules all children for reconsideration.
+    BOOST_CHECK(send_tx(parent));
+    BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children);
+    BOOST_CHECK_EQUAL(mempool.size(), 1U);
+
+    // Each call accepts or rejects exactly one orphan, whether it is valid or not.
+    for (int i{1}; i <= num_children; ++i) {
+        BOOST_CHECK(connman.ProcessMessagesOnce(peer));
+        BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), num_children - i);
+    }
+    BOOST_CHECK_EQUAL(mempool.size(), 1U + num_children / 2);
+    BOOST_CHECK(!connman.ProcessMessagesOnce(peer));
+
+    // Create a new parent for the purpose of testing a single orphan is reconsidered per call.
+    mineBlocks(1);
+    const int child_count{2};
+    const auto new_parent{MakeTransactionRef(CreateValidMempoolTransaction(
+        {m_coinbase_txns[1]}, {COutPoint{m_coinbase_txns[1]->GetHash(), 0}}, /*input_height=*/2, {coinbaseKey},
+        std::vector<CTxOut>(child_count, CTxOut{5 * COIN, script}), /*submit=*/false))};
+
+    // Now create 2 children. Each spends the parent and a non-existing input.
+    for (int i{0}; i < child_count; ++i) {
+        CMutableTransaction mtx;
+        mtx.vin.emplace_back(COutPoint{new_parent->GetHash(), uint32_t(i)});
+        mtx.vin.emplace_back(COutPoint{Txid::FromUint256(m_rng.rand256()), 0});
+        mtx.vout.emplace_back(COIN, script);
+        send_tx(MakeTransactionRef(mtx));
+    }
+    BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), child_count);
+
+    // Processing the parent will lead to processing a single orphan per run, even though each fails
+    // on a missing-input error (orphanage size does not decrease).
+    BOOST_CHECK(send_tx(new_parent));
+    BOOST_CHECK(mempool.exists(GenTxid::Txid(new_parent->GetHash())));
+    for (int i{0}; i < child_count; ++i) {
+        BOOST_CHECK(connman.ProcessMessagesOnce(peer));
+        BOOST_CHECK_EQUAL(peerman.GetOrphanTransactions().size(), child_count);
+    }
+    BOOST_CHECK(!connman.ProcessMessagesOnce(peer));
+
+    peerman.FinalizeNode(peer);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -3,6 +3,10 @@
 # started by the caller (not here) so functional tests stay single-runner.
 export LC_ALL=C
 set -u
+if [[ -n "${CUDA_FIT_RESERVE_MIB:-}" ]]; then
+  echo "E2E_PARALLEL_PROD FAIL: unset CUDA_FIT_RESERVE_MIB (operator override, not production evidence)" >&2
+  exit 1
+fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOG="$ROOT/e2e-scratch/parallel-prod"
 rm -rf "$LOG"; mkdir -p "$LOG"

@@ -80,13 +80,17 @@ void ResetForTest();
 [[nodiscard]] bool IsAuthoritySigner(const CPubKey& pubkey);
 [[nodiscard]] bool IsAuthorityPqSigner(const std::vector<unsigned char>& pubkey);
 [[nodiscard]] bool IsBlocked(const CPubKey& pubkey);
+[[nodiscard]] bool IsBlockedPq(const std::vector<unsigned char>& pubkey);
 [[nodiscard]] std::vector<CPubKey> BlockedSigners();
 [[nodiscard]] std::vector<CPubKey> ConfigBlockedSigners();
 [[nodiscard]] std::vector<CPubKey> RuntimeBlockedSigners();
+[[nodiscard]] std::vector<std::vector<unsigned char>> BlockedPqSigners();
 [[nodiscard]] size_t UnblockedPinMembers();
 [[nodiscard]] bool PinQuorumReachable();
 [[nodiscard]] matmul::trusted::BlocklistResult AddBlocklistedSigner(
     const CPubKey& pubkey, std::string& persist_error);
+[[nodiscard]] matmul::trusted::BlocklistResult AddBlocklistedPqSigner(
+    const std::vector<unsigned char>& pubkey, std::string& persist_error);
 [[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> HeardAttestations();
 /** Heard statements for one block, for a GETMMATTEST answer. See
  *  AttestationStore::GetHeardForServe. Empty without a store. */
@@ -540,6 +544,17 @@ static constexpr int GETMMATTEST_CATCHUP_TTL_HEADERS_AHEAD{2};
     int threshold = GETMMATTEST_HAMMER_BAN_AFTER)
 {
     return consecutive_ignored >= threshold;
+}
+
+/** A trusted mirror does not 24h-ban the attestor it is pinned to for an
+ *  attestation rate limit. That peer is often its only body source. A
+ *  forged proof still bans, and every other peer still bans. */
+[[nodiscard]] inline bool TrustedMirrorSkipsPinnedAttestorHammerBan(
+    bool trusted_mirror,
+    bool pinned_attestor,
+    bool forged_proof)
+{
+    return trusted_mirror && pinned_attestor && !forged_proof;
 }
 
 /** LCA(tip, candidate) depth in (0, TRUSTED_MIRROR_SHORT_REORG_DEPTH].

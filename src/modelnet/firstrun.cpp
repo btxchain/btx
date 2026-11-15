@@ -41,11 +41,22 @@ std::string ResolveHeadlessStorageArg(const std::string& requested, bool explici
 {
     if (requested == "0") return requested;
     if (explicit_operator_choice) return requested;
-    if (AllowPayloadStorageFile(consent_path)) return requested;
+    FirstRunConsent saved;
+    std::string saved_err;
+    if (fs::exists(consent_path)) {
+        // An existing refusal or malformed policy must never fall back to a positive default.
+        if (!LoadFirstRunConsent(consent_path, saved, saved_err) || !AllowPayloadStorage(saved)) return "0";
+        return saved.storage_mode == StorageMode::AUTO ? requested : std::to_string(saved.storage_bytes);
+    }
     uint64_t env_bytes{0};
     std::string env_err;
-    if (EnvHasPositiveStorageBudget(env_bytes, env_err)) return requested;
-    return "0";
+    if (std::getenv("BTX_MODEL_STORAGE") != nullptr) {
+        return EnvHasPositiveStorageBudget(env_bytes, env_err) ? std::to_string(env_bytes) : "0";
+    }
+    // A bounded starter cache allows free verified model acquisition on a fresh node.
+    // The much larger adaptive budget still requires an explicit choice. This grants
+    // neither execution nor private data access, and -modelstorage=0 remains final.
+    return requested == "auto" ? "1GiB" : "0";
 }
 
 bool LoadFirstRunConsent(const fs::path& path, FirstRunConsent& out, std::string& err)
