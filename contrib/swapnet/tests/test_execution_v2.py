@@ -171,6 +171,20 @@ def test_timeout_refunds_without_counterparty_funding(pair):
     assert pair.state('alice')['stage']=='refunded'
     assert not pair.state('alice')['secret_exposed']
 
+def test_maker_accepts_when_chain_clock_is_read_after_receipt(pair):
+    pair.start()
+    sender, peer, kind, sid, body = pair.queue.pop(0)
+    maker = pair.nodes['bob'][3]
+    for driver in maker.drivers.values():
+        real = driver.clock
+        def late(real=real):
+            pair.time.n += 2
+            return real()
+        driver.clock = late
+    maker.receive_proposal(sender, sid, body, pair.market)
+    assert pair.nodes['bob'][1].load(sid)[1]['stage'] == 'offered'
+
+
 def test_mutated_payout_rejected_before_signature(pair):
     pair.start()
     sender,peer,kind,sid,body=pair.queue.pop(0)

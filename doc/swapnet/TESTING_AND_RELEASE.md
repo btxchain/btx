@@ -32,3 +32,5 @@ Use `qualification/live_regtest.py` with independent funded BTX and Bitcoin node
 ## Receipt discipline
 
 Keep exact commands, timestamps, exits and reproducible fixtures. Report SKIP/NOT_RUN distinctly from PASS. A local test report must identify whether chain calls were mocked or real. Successful compilation does not prove economic correctness; a completed happy-path swap does not prove hostile-case recovery. Do not call the source archive a mainnet-qualified release until the necessary external receipts exist.
+
+Independent evidence for the two-party BTX/BTC, BTX/ETH, restart, refund, maturity-boundary, and EVM lock/claim/refund/withdrawal rows names the commit, the commands, and whether each call was a real `btxd`, `bitcoind`, or EVM RPC. Those receipts are not stored in this tree. A public-testnet receipt is the same kind of evidence and does not by itself qualify mainnet.

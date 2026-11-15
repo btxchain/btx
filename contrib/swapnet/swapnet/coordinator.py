@@ -144,7 +144,9 @@ class Coordinator:
         self.authority.reserve(ctx,reverse,market['mandate_id'],maxfee,check_only=True)
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset);a.ready();b.ready()
         long,short=Deadline(**p['long_deadline']),Deadline(**p['short_deadline'])
-        self.policy.validate_deadlines(long,short,a.clock(),b.clock(),now)
+        # ready() and clock() are RPCs. Their observed_at is after the now
+        # captured for the quote, so the deadline check has to read the clock again.
+        self.policy.validate_deadlines(long,short,a.clock(),b.clock(),self.now())
         ak=a.new_key('claim');bk=b.new_key('refund')
         long_fee=market['claim_fee_atoms'];short_fee=market['refund_fee_atoms']
         h=hex32(p['hashlock'])
