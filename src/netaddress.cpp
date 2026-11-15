@@ -230,7 +230,7 @@ bool CNetAddr::SetTor(const std::string& addr)
     static const char* suffix{".onion"};
     static constexpr size_t suffix_len{6};
 
-    if (addr.size() <= suffix_len || addr.substr(addr.size() - suffix_len) != suffix) {
+    if (addr.size() <= suffix_len || ToLower(addr.substr(addr.size() - suffix_len)) != suffix) {
         return false;
     }
 
