@@ -9527,6 +9527,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         *c = next;
         result = CampaignToJson(*c);
+        // btxd sends this write to the helper unscoped for every RPC user, also
+        // one restricted to another wallet or to none (getrestrictedmodelview only
+        // wraps reads). Leave out what the local wallet funding flow recorded, as
+        // the restricted views do; the owner reads it with getmodelrelease.
+        DropLocalFundingFields(result);
         g_feed.NoteFundingChanged(*c, ConnNowMs());
         LiveObserveCampaign(*c, FeedEventType::RELEASE_FUNDING_CHANGED);
         result.pushKV("note", "pledge is local accounting; send BTX with 0.34.6 HTLC separately. pledged is not funded.");
