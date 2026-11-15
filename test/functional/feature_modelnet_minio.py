@@ -484,6 +484,12 @@ class ModelNetMinioLayoutsTest(BitcoinTestFramework):
         restored = b"".join(p.read_bytes() for p in pieces)
         if hashlib.sha384(restored).hexdigest() != want_sha:
             raise AssertionError("normal recovery restored different bytes")
+        # The quarantine copy is released once the live store holds the bytes.
+        # Kept copies count against the quarantine's own -modelstorage quota.
+        leftover = sorted((Path(self.modeldir) / "cloud-hydrate-q").rglob("*.piece"))
+        if leftover:
+            raise AssertionError(
+                f"{mode} hydrate left {len(leftover)} quarantine piece(s) after the live copy was complete")
         self._restart_helper()
         healthy = self._zero_spend(node.getmodel(uri), "normal recovery after another restart")
         if healthy.get("status") != "local" or healthy.get("cloud_hydrated") is True:

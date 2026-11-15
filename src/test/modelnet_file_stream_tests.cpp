@@ -581,4 +581,29 @@ BOOST_AUTO_TEST_CASE(only_complete_file_integrity_mismatches_mark_rejection)
     }
 }
 
+BOOST_AUTO_TEST_CASE(finished_hydration_releases_its_quarantine_copy)
+{
+    using namespace modelnet;
+    // Each hydration opens the quarantine with the -modelstorage quota and
+    // recounts the pieces already in it. Room for one file there must be
+    // enough for files hydrated one after another.
+    const fs::path qdir = Scratch(m_path_root, "release-q");
+    ModelStore live(Scratch(m_path_root, "release-live"), 64 << 20);
+    for (const unsigned char tag : {0x81, 0x82}) {
+        const std::vector<unsigned char> file(PIECE_SIZE + 1, tag);
+        Digest48 artifact{};
+        artifact.data[0] = tag;
+        ModelStore q(qdir, PIECE_SIZE + PIECE_SIZE / 2);
+        FileStreamHydration hyd(artifact, 0, file.size(), live, q);
+        hyd.SetExpectedSha384(DigestOf(file));
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(hyd.Feed(Span<const unsigned char>{file.data(), file.size()}, err), err);
+        BOOST_REQUIRE_MESSAGE(hyd.Finish(err), err);
+        BOOST_CHECK(live.HasPiece(artifact, 0, 0));
+        BOOST_CHECK(live.HasPiece(artifact, 0, 1));
+        BOOST_CHECK(!q.HasPiece(artifact, 0, 0));
+        BOOST_CHECK(!q.HasPiece(artifact, 0, 1));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
