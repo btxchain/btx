@@ -509,6 +509,51 @@ class PackageReleaseArchiveTest(unittest.TestCase):
                 "btx-0.34.7/libexec/metal/matmul_v4_rc_rowleaf_gpu_kernels.metallib", names
             )
 
+    def test_macos_checks_finished_images_after_runtime_bundling(self):
+        # A build input can legitimately link Homebrew Python. Only the final
+        # staged images may pass the shipping gate; a bad bundle must fail closed.
+        for broken in (None, "btxd.real", "btx-cli.real", "btx-util.real", "btx-modeld.real"):
+            with self.subTest(broken=broken), tempfile.TemporaryDirectory() as tmpdir:
+                root = pathlib.Path(tmpdir)
+                source_root = self._build_source_root(root)
+                btxd, cli = self._write_binaries(root)
+                (root / "btx-modeld").write_text("producer dependency\n")
+                checked = []
+                def gate(path):
+                    if path.parent.name != "libexec" or path.read_text() != "bundled\n":
+                        raise RuntimeError("unrelocated producer dependency")
+                    checked.append(path.name)
+                    if path.name == broken:
+                        raise RuntimeError("invalid final image")
+                self.module.verify_shipped_btxd = gate
+                self.module.verify_shipped_cli = gate
+                self.module.verify_shipped_helper = gate
+                def bundle(release_root, **kwargs):
+                    for image in (release_root / "libexec").glob("*.real"):
+                        image.write_text("bundled\n")
+                    return []
+                fake = types.ModuleType("bundle_macos_python_runtime")
+                fake.bundle_macos_python = bundle
+                spec = importlib.machinery.ModuleSpec("bundle_macos_python_runtime",
+                    types.SimpleNamespace(create_module=lambda spec: fake, exec_module=lambda module: None))
+                original_spec = importlib.util.spec_from_file_location
+                def select_spec(name, path, *args, **kwargs):
+                    if pathlib.Path(path).name == "bundle_macos_python_runtime.py":
+                        return spec
+                    return original_spec(name, path, *args, **kwargs)
+                args = ["--output-dir", str(root / "out"), "--version", "test",
+                        "--platform-id", "macos-arm64", "--btxd", str(btxd),
+                        "--btx-cli", str(cli), "--source-root", str(source_root)]
+                with mock.patch.object(self.module.importlib.util, "spec_from_file_location", side_effect=select_spec):
+                    if broken:
+                        with self.assertRaisesRegex(RuntimeError, "invalid final image"):
+                            self.module.main(args)
+                        self.assertFalse(list((root / "out").glob("*.tar.gz")))
+                    else:
+                        self.assertEqual(self.module.main(args), 0)
+                        self.assertEqual(set(checked), {"btxd.real", "btx-cli.real", "btx-util.real", "btx-modeld.real"})
+                        self.assertTrue(list((root / "out").glob("*.tar.gz")))
+
     def test_verify_shipped_btxd_refuses_unrecognized_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             btxd = pathlib.Path(tmpdir) / "btxd"

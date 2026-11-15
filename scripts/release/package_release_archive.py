@@ -672,8 +672,13 @@ def stage_release_tree(
         *resolve_optional_sibling_binaries(btxd_path, config["exe_suffix"]),
         *model_helpers,
     ]
-    verify_shipped_btxd(btxd_path)
-    verify_shipped_cli(btx_cli_path)
+    # Mac build inputs still name the linked CPython framework. Verify the
+    # finished native images after relocation, as the Qt deployment does.
+    # Other platforms retain their existing input admission order.
+    macos = platform_id.startswith("macos-")
+    if not macos:
+        verify_shipped_btxd(btxd_path)
+        verify_shipped_cli(btx_cli_path)
     qt_source = next((source for source, dest_name in binary_pairs if dest_name.startswith("btx-qt")), None)
     if require_gui and qt_source is None:
         raise FileNotFoundError(
@@ -681,9 +686,9 @@ def stage_release_tree(
             "-DWITH_QT_VERSION=6 (Qt 6 on Linux, the host Qt on macOS) and pass --require-gui."
         )
     for helper_path, helper_name in binary_pairs[3:]:
-        # The macOS GUI is rewritten by macdeployqt into btx-qt.app. The build-tree
-        # binary still names Homebrew Qt; the deployed app is checked after that copy.
-        if helper_name.startswith("btx-qt") and platform_id.startswith("macos-"):
+        # macOS input dependencies are relocated during Python/Qt deployment.
+        # Verify the final real images below, not the unbundled producers.
+        if macos:
             continue
         verify_shipped_helper(helper_path)
 
@@ -754,6 +759,14 @@ def stage_release_tree(
         included += mac_python.bundle_macos_python(
             release_root, source_root=source_root, python=python,
             architecture=config["triple"].split("-", 1)[0])
+        # Run the unchanged shipping gates on real bundled images, never the
+        # shell wrappers. No archive is emitted unless these checks succeed.
+        verify_shipped_btxd(libexec_dir / "btxd.real")
+        verify_shipped_cli(libexec_dir / "btx-cli.real")
+        for _, helper_name in binary_pairs[2:]:
+            if helper_name.startswith("btx-qt"):
+                continue  # deploy_macos_qt_app already checks the deployed app.
+            verify_shipped_helper(libexec_dir / f"{helper_name}.real")
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
