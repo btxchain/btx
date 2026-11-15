@@ -120,10 +120,15 @@ std::optional<uint256> ComputeInputDigest(const CMutableTransaction& tx, std::ve
     return out;
 }
 
+//! The package digest always uses SIGHASH_DEFAULT (ValidateStructure), and the
+//! signature goes into the witness as it is. Consensus reads one byte after the
+//! signature as the hash type: 0x00 signs the same digest, any other value signs
+//! another digest or is refused. So only a 0x00 byte is dropped for the check; a
+//! signature with any other byte keeps the wrong size and is refused.
 Span<const unsigned char> RawSignature(Span<const unsigned char> sig, PQAlgorithm algo)
 {
     const size_t expected = GetPQSignatureSize(algo);
-    if (sig.size() == expected + 1) return sig.first(expected);
+    if (sig.size() == expected + 1 && sig.back() == SIGHASH_DEFAULT) return sig.first(expected);
     return sig;
 }
 
@@ -547,6 +552,10 @@ bool Decode(const UniValue& in, Package& pkg, std::string& error)
                 const UniValue* vout_v = FindField(cv, {"vout", "index"});
                 if (vout_v) {
                     const int64_t vout = vout_v->getInt<int64_t>();
+                    if (vout > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                        error = ERR_WRONG_CHANGE;
+                        return false;
+                    }
                     if (vout >= 0) c.vout = static_cast<uint32_t>(vout);
                 }
                 const UniValue* amt = FindField(cv, {"amount_atoms", "amount"});
@@ -568,6 +577,10 @@ bool Decode(const UniValue& in, Package& pkg, std::string& error)
                 const UniValue* vout_v = FindField(ov, {"vout", "index"});
                 if (vout_v) {
                     const int64_t vout = vout_v->getInt<int64_t>();
+                    if (vout > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+                        error = ERR_WRONG_CHANGE;
+                        return false;
+                    }
                     if (vout >= 0) c.vout = static_cast<uint32_t>(vout);
                 }
                 const UniValue* amt = FindField(ov, {"amount_atoms", "amount"});

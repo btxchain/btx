@@ -34,6 +34,7 @@
 #include <fstream>
 #include <netinet/in.h>
 #include <string>
+#include <utility>
 #include <sys/socket.h>
 #include <vector>
 
@@ -556,6 +557,66 @@ BOOST_AUTO_TEST_CASE(leafless_multi_origin_does_not_splice_pieces)
     BOOST_REQUIRE(multi);
     BOOST_CHECK(multi->IndependentOriginCount() != 2);
     BOOST_CHECK(!multi->OriginsMixedWithoutIdentity() || multi->IndependentOriginCount() == 0);
+    modelnet::ClearRegistryInjections();
+}
+
+// doc/modelnet/registry-independence.md: without leaves or a whole-file sha384,
+// the first successful origin is locked for the file and a later origin cannot
+// splice in. Two mirrors of the same origin type are still two origins.
+BOOST_AUTO_TEST_CASE(leafless_same_type_mirrors_do_not_splice_pieces)
+{
+    modelnet::ClearRegistryInjections();
+    const uint64_t psz = modelnet::PIECE_SIZE;
+    const uint64_t sz = psz + 8;
+    modelnet::SetRegistryGetForTests([psz](const std::string& url, uint64_t offset, uint64_t length,
+                                           std::vector<unsigned char>& out, std::string& err) {
+        const bool first = url.find("/first-org/") != std::string::npos;
+        if (first && offset >= psz) {
+            err = "origin unavailable";
+            return false;
+        }
+        out.assign(length, static_cast<unsigned char>(first ? 'A' : 'Y'));
+        err.clear();
+        return true;
+    });
+    UniValue j(UniValue::VOBJ);
+    j.pushKV("plan_id", PlanId('7'));
+    UniValue origins(UniValue::VARR);
+    for (const auto& [loc, pri] : std::vector<std::pair<std::string, int>>{
+             {"https://huggingface.co/first-org/model", 0}, {"https://huggingface.co/second-org/model", 1}}) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("type", "huggingface");
+        o.pushKV("locator", loc);
+        o.pushKV("snapshot_token", "rev-a");
+        o.pushKV("priority", pri);
+        origins.push_back(o);
+    }
+    j.pushKV("origins", origins);
+    UniValue files(UniValue::VARR);
+    UniValue f(UniValue::VOBJ);
+    f.pushKV("source_path", "model.safetensors");
+    f.pushKV("destination_path", "model.safetensors");
+    f.pushKV("size_bytes", static_cast<int64_t>(sz));
+    files.push_back(f);
+    j.pushKV("files", files);
+    modelnet::ImportPlan plan;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(modelnet::ParseImportPlan(j, plan, err), err);
+    BOOST_REQUIRE_EQUAL(plan.origins.size(), 2U);
+    BOOST_REQUIRE(plan.files[0].piece_sha384_hex.empty());
+    BOOST_REQUIRE(plan.files[0].sha384_hex.empty());
+    const fs::path root = m_path_root / "reg-leafless-same-type";
+    modelnet::ImportCoordinator coord{plan, root};
+    BOOST_REQUIRE(coord.PrepareStaging(err));
+    auto src = modelnet::MakePlanByteSource(plan, err);
+    BOOST_REQUIRE(src);
+    // Piece 0 comes from the first mirror, which then fails; the second mirror
+    // must not supply piece 1 of the same file.
+    BOOST_CHECK_MESSAGE(!coord.StageFromSource(*src, coord.AcceptedFiles()[0], sz, err),
+                        "a second mirror of the same type spliced into a leafless file");
+    auto* multi = dynamic_cast<modelnet::MultiOriginByteSource*>(src.get());
+    BOOST_REQUIRE(multi);
+    BOOST_CHECK(multi->OriginsMixedWithoutIdentity() || err == "origin unavailable");
     modelnet::ClearRegistryInjections();
 }
 

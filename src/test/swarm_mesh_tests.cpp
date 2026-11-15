@@ -422,6 +422,15 @@ BOOST_AUTO_TEST_CASE(coordinator_exit_keeps_the_checkpoint_and_the_mesh_state)
     std::ifstream kept(dst / "checkpoint.bin");
     std::string body((std::istreambuf_iterator<char>(kept)), std::istreambuf_iterator<char>());
     BOOST_CHECK_EQUAL(body, "checkpoint-bytes");
+    kept.close();
+    WriteFile(src / "checkpoint.bin", "");
+    BOOST_CHECK(!modelnet::SwarmRetain(src, dst, err));
+    BOOST_CHECK_EQUAL(err, "RETAIN_COPY");
+    std::ifstream preserved(dst / "checkpoint.bin");
+    const std::string old((std::istreambuf_iterator<char>(preserved)), std::istreambuf_iterator<char>());
+    BOOST_CHECK_EQUAL(old, "checkpoint-bytes");
+    preserved.close();
+
     BOOST_CHECK(fs::exists(dst / "channel-state.json"));
     BOOST_CHECK(fs::exists(dst / "obligations.json"));
     fs::remove_all(src, ec);

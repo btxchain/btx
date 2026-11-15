@@ -300,14 +300,20 @@ class WalletBackupTest(BitcoinTestFramework):
                 assert_raises_rpc_error(-8, "importwallet is disabled", self.nodes[node_num].importwallet, self.nodes[node_num].datadir_path / 'wallet.dump')
                 assert_equal(self.nodes[node_num].getbalance(), 0)
 
-        # Backup to source wallet file must fail
-        sourcePaths = [
+        # An existing destination file is refused before the copy. Directories
+        # that are the loaded wallet (or its parent) still fail inside BackupWallet.
+        existing_wallet_files = [
             os.path.join(self.nodes[0].wallets_path, self.default_wallet_name, self.wallet_data_filename),
             os.path.join(self.nodes[0].wallets_path, '.', self.default_wallet_name, self.wallet_data_filename),
+        ]
+        wallet_directories = [
             os.path.join(self.nodes[0].wallets_path, self.default_wallet_name),
-            os.path.join(self.nodes[0].wallets_path)]
+            os.path.join(self.nodes[0].wallets_path),
+        ]
 
-        for sourcePath in sourcePaths:
+        for sourcePath in existing_wallet_files:
+            assert_raises_rpc_error(-8, "already exists", self.nodes[0].backupwallet, sourcePath)
+        for sourcePath in wallet_directories:
             assert_raises_rpc_error(-4, "backup failed", self.nodes[0].backupwallet, sourcePath)
 
         self.test_pruned_wallet_backup()

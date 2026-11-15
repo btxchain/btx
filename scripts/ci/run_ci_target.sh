@@ -233,6 +233,7 @@ run_lint() {
   python3 test/lint/lint-python-dead-code.py
   python3 test/lint/lint-python-utf8-encoding.py
   python3 test/lint/lint-tests.py
+  python3 test/lint/lint-rpc-fuzz-lists.py
   python3 test/lint/lint-op-success-p2tr.py
   python3 test/lint/lint-shell.py
   python3 test/lint/lint-ci-base-install.py
@@ -240,6 +241,7 @@ run_lint() {
   python3 test/util/local_mac_matrix_test.py
   python3 test/util/matmul_v4_asert_calibration_test.py
   python3 test/util/verify_release_btxd_test.py
+  python3 test/util/verify_archive_clean_start_test.py
   python3 test/util/package_release_archive_test.py
   python3 test/util/issue_122_zmq_release_gate_test.py
   python3 test/util/issue_116_attestation_publish_sites_test.py
@@ -299,37 +301,36 @@ run_ctest() {
 }
 
 run_fuzz() {
+  # Run every fuzz target through test/fuzz/test_runner.py, as Bitcoin Core's
+  # native_fuzz job does. A target with inputs in its corpus folder replays
+  # each input once. A target without inputs fuzzes from an empty input for
+  # FUZZ_EMPTY_MIN_TIME seconds in a libFuzzer build; a build without libFuzzer
+  # (no fuzzer in FUZZ_SANITIZERS) only starts it. The runner exits 1 and
+  # reports the first target that aborts, crashes or reports a sanitizer error.
+  #   FUZZ_CORPUS_DIR      one folder per target with inputs to replay
+  #                        (default: empty folders)
+  #   FUZZ_EMPTY_MIN_TIME  seconds for each target without inputs (default: 60)
+  #   FUZZ_SANITIZERS      for example fuzzer,address,undefined with clang
+  # Warnings are checked by the rows that build through ensure_core_build
+  # (-DWERROR=ON); here a compiler warning must not stop the fuzz targets.
   local build_dir="build-fuzz-ci"
-  local corpus_dir=".ci-fuzz-corpus"
-  local seed_url="https://raw.githubusercontent.com/bitcoin-core/qa-assets/master/fuzz_corpora/p2p_headers_presync/00023f09dc69205f114e1015b894621f04c813d4"
-  local max_total_time="${FUZZ_MAX_TOTAL_TIME:-60}"
-  local per_input_timeout="${FUZZ_TIMEOUT:-10}"
-  mkdir -p "${corpus_dir}/p2p_headers_presync"
-  curl -fsSL "${seed_url}" -o "${corpus_dir}/p2p_headers_presync/00023f09dc69205f114e1015b894621f04c813d4"
+  local corpus_dir="${FUZZ_CORPUS_DIR:-.ci-fuzz-corpus}"
+  local empty_min_time="${FUZZ_EMPTY_MIN_TIME:-60}"
   cmake -S . -B "${build_dir}" -G Ninja \
     -DBUILD_FOR_FUZZING=ON \
     -DBUILD_FUZZ_BINARY=ON \
     -DBUILD_GUI=OFF \
     -DBUILD_TESTS=OFF \
     -DWITH_ZMQ=ON \
-    -DWERROR=ON
+    -DWERROR=OFF \
+    -DSANITIZERS="${FUZZ_SANITIZERS:-}"
   cmake --build "${build_dir}" -j"$(nproc_detect)" --target fuzz
-  local links_without_main
-  links_without_main="$(
-    grep -E '^FUZZ_BINARY_LINKS_WITHOUT_MAIN_FUNCTION:INTERNAL=' "${build_dir}/CMakeCache.txt" 2>/dev/null | head -n 1 | cut -d= -f2-
-  )"
-
-  if [[ -n "${links_without_main}" ]]; then
-    # LibFuzzer mode: default execution is unbounded; add a time limit so CI can finish.
-    FUZZ=p2p_headers_presync "${build_dir}/bin/fuzz" \
-      -max_total_time="${max_total_time}" \
-      -timeout="${per_input_timeout}" \
-      "${corpus_dir}/p2p_headers_presync"
-  else
-    # File-mode fallback (no libFuzzer driver linked): run the target against the
-    # corpus once. This path does not understand libFuzzer flags.
-    FUZZ=p2p_headers_presync "${build_dir}/bin/fuzz" "${corpus_dir}/p2p_headers_presync"
-  fi
+  mkdir -p "${corpus_dir}"
+  "${build_dir}/test/fuzz/test_runner.py" \
+    -j"$(nproc_detect)" \
+    -l DEBUG \
+    --empty_min_time="${empty_min_time}" \
+    "${corpus_dir}"
 }
 
 run_functional_matmul() {
@@ -361,6 +362,7 @@ run_production_readiness() {
   python3 test/util/matmul_v4_asert_calibration_test.py
   python3 test/util/matmul_v4_asert_assembly_test.py
   python3 test/util/verify_release_btxd_test.py
+  python3 test/util/verify_archive_clean_start_test.py
   python3 test/util/package_release_archive_test.py
   python3 test/util/issue_122_zmq_release_gate_test.py
   python3 test/util/issue_116_attestation_publish_sites_test.py

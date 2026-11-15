@@ -9,6 +9,7 @@
 #include <modelnet/package_export.h>
 #include <modelnet/types.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 
 #include <fstream>
 #include <iterator>
@@ -318,14 +319,11 @@ bool SaveChannelWatch(const std::string& path, const UniValue& statement, std::s
     UniValue parsed;
     if (!ParseChannelStatement(statement, parsed, err_code, err)) return false;
     const fs::path p = fs::PathFromString(path);
-    std::ofstream out(p, std::ios::binary | std::ios::trunc);
-    if (!out) {
+    if (!WriteBinaryFileAtomically(p, parsed.write() + "\n")) {
         err_code = "IO_ERROR";
         err = "channel watch write";
         return false;
     }
-    const std::string body = parsed.write() + "\n";
-    out.write(body.data(), static_cast<std::streamsize>(body.size()));
     return true;
 }
 

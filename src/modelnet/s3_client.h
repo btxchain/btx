@@ -44,6 +44,8 @@ struct S3ClientConfig {
     bool use_fake{true};
     bool allow_http_loopback{false};
     bool allow_link_local{false};
+    /** Empty: FakeS3 stays in memory. Set: objects are loaded from and written to this directory. */
+    fs::path fake_store_dir;
 };
 
 struct ParsedS3Endpoint {
@@ -116,10 +118,17 @@ class FakeS3
     std::string m_region{"us-east-1"};
     std::string m_bucket;
     uint64_t m_upload_seq{0};
+    fs::path m_dir;
+    std::string m_load_error;
+
+    bool PersistLocked(std::string& err);
+    void LoadStore();
 
 public:
-    FakeS3();
+    /** No directory: private in-memory store. A directory reloads `<dir>/fakes3-objects.bin`. */
+    explicit FakeS3(fs::path dir = {});
     ~FakeS3();
+    const std::string& LoadError() const { return m_load_error; }
 
     void SetSigningContext(std::string access_key_id, std::string secret_access_key, std::string region,
                            std::string bucket);

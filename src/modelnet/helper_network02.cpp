@@ -47,6 +47,7 @@
 #include <crypto/hex_base.h>
 #include <span.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
@@ -676,13 +677,12 @@ bool PackageFromObject(const UniValue& o, UniValue& result, std::string& err_cod
             err_code = "SYMLINK_REFUSED";
             return false;
         }
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        if (!out) {
+        const std::string_view contents{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+        if (!WriteBinaryFileAtomically(path, contents)) {
             err = "package write";
             err_code = "IO_ERROR";
             return false;
         }
-        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         result.pushKV("path", o["path"].get_str());
     }
     return true;
@@ -1033,7 +1033,10 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
                                   result["signature_cryptographic"].isStr() &&
                                   result["signature_cryptographic"].get_str() == "PASS";
             UniValue man = result.exists("bundle") ? result["bundle"] : UniValue(UniValue::VOBJ);
-            if (man.exists("manifest") && man["manifest"].isObject()) man = man["manifest"];
+            if (man.exists("manifest") && man["manifest"].isObject()) {
+                UniValue inner = man["manifest"]; // copy out before man is overwritten
+                man = std::move(inner);
+            }
             if (man.exists("model_id") && man.exists("files") && man["files"].isArray()) {
                 if (st == "UNSIGNED" || st == "NOT_EVALUATED" || !sig_pass) {
                     err_code = "UNSIGNED_PACKAGE";

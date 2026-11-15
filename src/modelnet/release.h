@@ -71,7 +71,11 @@ bool SignReleaseCampaign(ReleaseCampaign& c, Span<const unsigned char> sk, std::
 bool VerifyReleaseCampaign(const ReleaseCampaign& c, std::string& err);
 UniValue CampaignToJson(const ReleaseCampaign& c);
 bool CampaignFromJson(const UniValue& o, ReleaseCampaign& c, std::string& err);
-bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err);
+/** Load campaigns.json. Returns false when the file exists but is not a campaign list.
+ *  An entry that cannot be read is skipped; its release_id, when it has one, is added
+ *  to skipped_release_ids. */
+bool LoadCampaigns(const fs::path& dir, std::vector<ReleaseCampaign>& out, std::string& err,
+                   std::vector<std::string>* skipped_release_ids = nullptr);
 bool SaveCampaigns(const fs::path& dir, const std::vector<ReleaseCampaign>& campaigns, std::string& err);
 
 /** Most campaigns a CampaignIndex holds; the search index and the feed hold as many records. */
@@ -90,16 +94,23 @@ public:
 
 private:
     std::map<std::string, ReleaseCampaign> m_by_release;
-    std::map<std::string, std::string> m_model_to_release;
+    // Keep every surviving release for a model in Put order. Eviction may
+    // remove the current choice while leaving an older locally kept release.
+    std::map<std::string, std::map<uint64_t, std::string>> m_model_releases;
     /** When a record last named each campaign (or the cap passed over it because it must stay), oldest first:
      *  the order campaigns are dropped at the cap. */
     std::map<uint64_t, std::string> m_by_age;
-    std::map<std::string, uint64_t> m_age;
+    struct ReleaseOrder {
+        uint64_t last_seen;
+        uint64_t model_put;
+    };
+    std::map<std::string, ReleaseOrder> m_age;
     uint64_t m_next_age{0};
     size_t m_cap{CAMPAIGN_INDEX_CAP_DEFAULT};
 
     bool Droppable(const ReleaseCampaign& c, const KeepFn& keep) const;
     void Touch(const std::string& release_hex);
+    void RemoveModelLookup(const std::string& release_hex, const Digest48& model_id);
     void Erase(const std::string& release_hex);
 
 public:
@@ -115,7 +126,7 @@ public:
     void Clear()
     {
         m_by_release.clear();
-        m_model_to_release.clear();
+        m_model_releases.clear();
         m_by_age.clear();
         m_age.clear();
     }

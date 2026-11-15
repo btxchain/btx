@@ -232,12 +232,20 @@ BOOST_AUTO_TEST_CASE(ahp_comp_05_modelnet_disabled_build)
     BOOST_REQUIRE_MESSAGE(!script.empty() && fs::exists(script),
                           "missing contrib/modelnet/check-with-modelnet-off.sh");
     const std::string cmd = "bash " + fs::PathToString(script) + " 2>&1";
+#ifdef _WIN32
+    FILE* pipe = _popen(cmd.c_str(), "r");
+#else
     FILE* pipe = popen(cmd.c_str(), "r");
+#endif
     BOOST_REQUIRE(pipe);
     std::string out;
     char buf[512];
     while (fgets(buf, sizeof(buf), pipe) != nullptr) out.append(buf);
+#ifdef _WIN32
+    const int status = _pclose(pipe);
+#else
     const int status = pclose(pipe);
+#endif
     BOOST_TEST_MESSAGE(out);
     BOOST_REQUIRE_EQUAL(status, 0);
     BOOST_CHECK(out.find("WITH_MODELNET=OFF is the monetary-only build") != std::string::npos);

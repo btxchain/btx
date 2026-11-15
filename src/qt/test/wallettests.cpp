@@ -28,6 +28,7 @@
 #include <script/solver.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
+#include <wallet/spend.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
@@ -48,6 +49,8 @@
 #include <QDialogButtonBox>
 
 using wallet::AddWallet;
+using wallet::CCoinControl;
+using wallet::CRecipient;
 using wallet::CWallet;
 using wallet::CreateMockableWalletDatabase;
 using wallet::RemoveWallet;
@@ -433,6 +436,115 @@ void TestGUI(interfaces::Node& node, const std::shared_ptr<CWallet>& wallet)
     QCOMPARE(walletModel.wallet().getAddressReceiveRequests().size(), size_t{0});
 }
 
+//! Bump the fee of a send from a locked, encrypted P2MR wallet. A locked wallet
+//! holds no PQ seeds, so it cannot build the replacement until it is unlocked:
+//! the fee bump must ask for the passphrase first, as Send does.
+void TestGUIBumpFeeLocked(interfaces::Node& node, const std::shared_ptr<CWallet>& funder)
+{
+    const SecureString passphrase{"bumpfee while locked"};
+    const CFeeRate fee_rate{10'000};
+
+    // EncryptWallet() sets up fresh P2MR descriptors and leaves the wallet locked.
+    std::shared_ptr<CWallet> pq_wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", CreateMockableWalletDatabase());
+    pq_wallet->LoadWallet();
+    {
+        LOCK(pq_wallet->cs_wallet);
+        pq_wallet->m_keypool_size = 2; // PQ key derivation is slow, and two keys per chain are enough here
+        pq_wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        const CBlockIndex* tip{WITH_LOCK(node.context()->chainman->GetMutex(), return node.context()->chainman->ActiveChain().Tip())};
+        pq_wallet->SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    }
+    pq_wallet->SetBroadcastTransactions(true);
+    QVERIFY(pq_wallet->EncryptWallet(passphrase));
+    QVERIFY(pq_wallet->IsLocked());
+    const auto dest{pq_wallet->GetNewDestination(OutputType::P2MR, "")};
+    QVERIFY(dest);
+
+    // Fund it with an unconfirmed payment (no block, so the later tests see the same chain).
+    CTransactionRef funding;
+    {
+        LOCK(funder->cs_wallet);
+        CCoinControl coin_control;
+        coin_control.m_feerate = fee_rate;
+        coin_control.m_min_depth = 1;
+        auto res{wallet::CreateTransaction(*funder, {CRecipient{*dest, 10 * COIN, /*fSubtractFeeFromAmount=*/false}}, /*change_pos=*/std::nullopt, coin_control)};
+        QVERIFY(res);
+        funding = res->tx;
+    }
+    funder->CommitTransaction(funding, /*mapValue=*/{}, /*orderForm=*/{});
+    QVERIFY(node.context()->chain->isInMempool(funding->GetHash()));
+    pq_wallet->transactionAddedToMempool(funding);
+
+    // Send with RBF while unlocked, then lock again.
+    const auto pay_to{funder->GetNewDestination(OutputType::P2MR, "")};
+    QVERIFY(pay_to);
+    QVERIFY(pq_wallet->Unlock(passphrase));
+    uint256 txid;
+    {
+        LOCK(pq_wallet->cs_wallet);
+        CCoinControl coin_control;
+        coin_control.m_feerate = fee_rate;
+        coin_control.m_signal_bip125_rbf = true;
+        coin_control.m_include_unsafe_inputs = true; // the funding payment is unconfirmed
+        auto res{wallet::CreateTransaction(*pq_wallet, {CRecipient{*pay_to, 1 * COIN, /*fSubtractFeeFromAmount=*/false}}, /*change_pos=*/std::nullopt, coin_control)};
+        QVERIFY(res);
+        txid = res->tx->GetHash();
+        pq_wallet->CommitTransaction(res->tx, /*mapValue=*/{}, /*orderForm=*/{});
+    }
+    QVERIFY(node.context()->chain->isInMempool(txid));
+    QVERIFY(pq_wallet->Lock());
+
+    std::unique_ptr<const PlatformStyle> platformStyle(PlatformStyle::instantiate("other"));
+    MiniGUI mini_gui(node, platformStyle.get());
+    mini_gui.initModelForWallet(node, pq_wallet, platformStyle.get());
+    WalletModel& walletModel = *mini_gui.walletModel;
+    QCOMPARE(walletModel.getEncryptionStatus(), WalletModel::Locked);
+
+    // Stand in for the passphrase dialog that the GUI opens on requireUnlock().
+    int unlock_requests{0};
+    QObject::connect(&walletModel, &WalletModel::requireUnlock, [&] {
+        ++unlock_requests;
+        walletModel.setWalletLocked(/*locked=*/false, passphrase);
+    });
+
+    // Press Send on the fee bump confirmation; record any other message box,
+    // which is the "Fee bump error" box.
+    QString confirm_text;
+    QString error_text;
+    QTimer timer;
+    timer.setInterval(100);
+    QObject::connect(&timer, &QTimer::timeout, [&] {
+        for (QWidget* widget : QApplication::topLevelWidgets()) {
+            if (!widget->isVisible()) continue;
+            if (auto* dialog = qobject_cast<SendConfirmationDialog*>(widget)) {
+                confirm_text = dialog->text();
+                QAbstractButton* send_button = dialog->button(QMessageBox::Yes);
+                send_button->setEnabled(true);
+                send_button->click();
+                return;
+            }
+            if (auto* message_box = qobject_cast<QMessageBox*>(widget)) {
+                error_text = message_box->text();
+                message_box->defaultButton()->click();
+                return;
+            }
+        }
+    });
+    timer.start();
+    uint256 new_txid;
+    const bool bumped{walletModel.bumpFee(txid, new_txid)};
+    timer.stop();
+
+    QVERIFY2(error_text.isEmpty(), qPrintable(error_text));
+    QCOMPARE(unlock_requests, 1);
+    QVERIFY(confirm_text.contains("Do you want to increase the fee?"));
+    QVERIFY(bumped);
+    QVERIFY(node.context()->chain->isInMempool(new_txid));
+    QVERIFY(!node.context()->chain->isInMempool(txid));
+    // The wallet was unlocked for the bump only.
+    QVERIFY(pq_wallet->IsLocked());
+}
+
 void TestGUIWatchOnly(interfaces::Node& node, TestChain100Setup& test)
 {
     const std::shared_ptr<CWallet>& wallet = SetupLegacyWatchOnlyWallet(node, test);
@@ -511,6 +623,9 @@ void TestGUI(interfaces::Node& node)
     // "Full" GUI tests, use descriptor wallet
     const std::shared_ptr<CWallet>& desc_wallet = SetupDescriptorsWallet(node, test);
     TestGUI(node, desc_wallet);
+
+    // Fee bump on a locked P2MR wallet, funded from the descriptor wallet
+    TestGUIBumpFeeLocked(node, desc_wallet);
 
     // Legacy watch-only wallet test
     // Verify PSBT creation.

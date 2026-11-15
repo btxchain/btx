@@ -279,6 +279,49 @@ BOOST_AUTO_TEST_CASE(full_record_cache_does_not_stop_pinned_takedown)
     }
 }
 
+BOOST_AUTO_TEST_CASE(full_advisory_list_keeps_operator_reports)
+{
+    // Operator reports and the advisories of pinned publishers share one
+    // bounded list. A pinned publisher that keeps issuing advisories must not
+    // push the operator's own block out, and expired advisories must not hold
+    // places that a new report needs.
+    SafetyReset reset;
+    std::string err;
+    const int64_t now = 1700000000;
+    const std::string operator_block(96, 'e');
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(operator_block, modelnet::SAFETY_TARGET_MODEL,
+                                                       modelnet::SAFETY_MALWARE, "operator", now, err));
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const auto pub = modelnet::ResearchIdentityId(pk);
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub.Hex(), "vendor", err));
+    const auto advisory = [&](uint32_t i, int64_t ingest_at, int64_t expires_at) {
+        unsigned char id[48]{};
+        WriteLE32(id, i);
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("target_id", HexStr(id));
+        body.pushKV("target_kind", modelnet::SAFETY_TARGET_MODEL);
+        body.pushKV("severity", modelnet::SAFETY_MALWARE);
+        body.pushKV("expires_at", expires_at);
+        id[47] = 0xff;
+        bool applied = false;
+        BOOST_REQUIRE_MESSAGE(modelnet::GlobalSafety().IngestSigned(body, pub.Hex(), HexStr(id), ingest_at, applied, err), err);
+    };
+    for (uint32_t i = 0; i < modelnet::MAX_SAFETY_ADVISORIES; ++i) advisory(i, now, now + modelnet::DAY_SECONDS);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(operator_block));
+
+    // A list of advisories that were valid when they came in and have expired
+    // since still takes a new operator report.
+    SafetyReset again;
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub.Hex(), "vendor", err));
+    const int64_t earlier = now - modelnet::DAY_SECONDS;
+    for (uint32_t i = 0; i < modelnet::MAX_SAFETY_ADVISORIES; ++i) advisory(i, earlier, now - 1);
+    BOOST_REQUIRE_EQUAL(modelnet::GlobalSafety().AdvisoriesJson(earlier)["advisories"].size(), modelnet::MAX_SAFETY_ADVISORIES);
+    BOOST_CHECK_MESSAGE(modelnet::GlobalSafety().LocalReport(operator_block, modelnet::SAFETY_TARGET_MODEL,
+                                                             modelnet::SAFETY_MALWARE, "operator", now, err), err);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(operator_block));
+}
+
 BOOST_AUTO_TEST_CASE(safety_advisory_rejects_provider_signer_class)
 {
     std::vector<unsigned char> pk, sk;
@@ -428,6 +471,67 @@ BOOST_AUTO_TEST_CASE(import_requires_weights_and_cleans_failed_staging)
     BOOST_CHECK_EQUAL(cat.UsedBytes(), 0);
 }
 
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(unpin_reports_a_failed_save)
+{
+    // removemodelsafetypublisher answered "removed" when the publisher list
+    // could not be written. The file still pinned the publisher, so after the
+    // next start its new advisories blocked models again instead of staying
+    // warnings.
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-unpin-save";
+    modelnet::ModelCatalog cat{tmp, 1 << 20};
+    modelnet::EnsureSafetyBound(tmp);
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string pub = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub, "vendor", err));
+    UniValue result;
+    auto unpin = [&](std::string& code) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "removemodelsafetypublisher");
+        UniValue params(UniValue::VARR);
+        params.push_back(pub);
+        req.pushKV("params", params);
+        result.setNull();
+        std::string rpc_err;
+        code.clear();
+        return modelnet::DispatchHelperRpc(cat, req, result, code, rpc_err, nullptr);
+    };
+    auto reload = [&] {
+        modelnet::GlobalSafety().ResetForTests();
+        modelnet::GlobalSafety().Bind(tmp);
+    };
+    // The temporary file cannot be created where a directory stands.
+    const fs::path blocker = tmp / "safety_publishers.json.tmp";
+    fs::create_directories(blocker);
+    std::string code;
+    BOOST_CHECK(!unpin(code));
+    BOOST_CHECK_EQUAL(code, "SAFETY");
+    // Memory and file agree: the publisher stays pinned in both.
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(pub));
+    reload();
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(pub));
+    fs::remove(blocker);
+
+    // Unpinning does not change the advisories, so a full disk for that file
+    // does not stop it.
+    const fs::path ads_blocker = tmp / "safety_advisories.json.tmp";
+    fs::create_directories(ads_blocker);
+    BOOST_REQUIRE(unpin(code));
+    BOOST_CHECK(result["removed"].isTrue());
+    BOOST_CHECK(!modelnet::GlobalSafety().PublisherPinned(pub));
+    reload();
+    BOOST_CHECK(!modelnet::GlobalSafety().PublisherPinned(pub));
+    fs::remove(ads_blocker);
+
+    // A publisher that is not pinned is not an error.
+    BOOST_REQUIRE(unpin(code));
+    BOOST_CHECK(result["removed"].isFalse());
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(addpeer_cap_is_visible)
 {
     SafetyReset reset;
@@ -449,6 +553,53 @@ BOOST_AUTO_TEST_CASE(addpeer_cap_is_visible)
     BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, req, result, code, rpc_err, nullptr));
     BOOST_CHECK(result["ok"].isFalse());
     BOOST_CHECK(result["added"].isFalse());
+}
+
+BOOST_AUTO_TEST_CASE(addpeer_refuses_endpoint_that_cannot_be_dialed)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-peers-dial";
+    {
+        modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+        for (const std::string& bad : std::vector<std::string>{"zz", "192.0.2.1", "192.0.2.1:0", "192.0.2.1:70000",
+                                                               ":29447", std::string(4096, 'a')}) {
+            BOOST_CHECK_MESSAGE(!cat.AddPeer(bad), "accepted " + bad.substr(0, 32));
+        }
+        BOOST_CHECK(cat.Peers().empty());
+        BOOST_CHECK(cat.AddPeer("192.0.2.1:29447"));
+        BOOST_CHECK(cat.AddPeer("[2001:db8::1]:29447"));
+
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "addmodelnode");
+        UniValue params(UniValue::VARR);
+        params.push_back("zz");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string code, rpc_err;
+        BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, req, result, code, rpc_err, nullptr));
+        BOOST_CHECK(result["ok"].isFalse());
+        BOOST_CHECK_EQUAL(result["reason"].get_str(), "endpoint must be host:port");
+    }
+    {
+        // A catalog saved before the check still loads, without the contact
+        // that cannot be dialed.
+        std::ifstream in{tmp / "cat" / "catalog.json"};
+        std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue saved;
+        BOOST_REQUIRE(saved.read(raw) && saved.isObject());
+        UniValue root(UniValue::VOBJ);
+        for (const std::string& key : saved.getKeys()) {
+            if (key != "peers") root.pushKV(key, saved[key]);
+        }
+        UniValue peers(UniValue::VARR);
+        peers.push_back("zz");
+        peers.push_back("192.0.2.1:29447");
+        root.pushKV("peers", peers);
+        std::ofstream out{tmp / "cat" / "catalog.json", std::ios::trunc};
+        out << root.write();
+    }
+    modelnet::ModelCatalog reloaded{tmp / "cat", 1 << 20};
+    BOOST_CHECK(reloaded.Peers() == std::vector<std::string>{"192.0.2.1:29447"});
 }
 
 BOOST_AUTO_TEST_SUITE_END()

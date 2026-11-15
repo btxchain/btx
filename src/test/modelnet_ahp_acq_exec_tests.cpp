@@ -147,6 +147,43 @@ BOOST_AUTO_TEST_CASE(ahp_acq_06_concurrent_reservation_exhaustion)
     BOOST_CHECK_EQUAL(code, "BUDGET_EXCEEDED");
 }
 
+BOOST_AUTO_TEST_CASE(ahp_acq_06_destination_under_symlinked_ancestor)
+{
+    // A symlink above the destination (macOS /tmp or /var, a datadir moved to
+    // another disk) is the operator's layout. Only the destination itself and
+    // the components below it must refuse a symlink.
+    CreditRestore restore;
+    auto& credits = restore.c;
+    credits.SetCeiling(1 << 20);
+
+    const fs::path real = m_path_root / "acq-06l-real";
+    const fs::path link = m_path_root / "acq-06l-link";
+    fs::create_directories(real);
+    fs::create_directory_symlink(real, link);
+    const fs::path src = m_path_root / "src-06l.bin";
+    const std::string payload(64, 'y');
+    {
+        std::ofstream{fs::PathToString(src)} << payload;
+    }
+    modelnet::ExecuteAcquisitionRequest req;
+    req.plan = PlanTo(link / "exec");
+    req.credit = &credits;
+    req.reserve_bytes = payload.size();
+    modelnet::VerifiedLocalFile f;
+    f.relative_path = "sub/weights.gguf";
+    f.sha384_hex = Sha384Of(payload);
+    f.source_path = fs::PathToString(src);
+    req.files.push_back(f);
+    RememberDigest(req, f.relative_path, f.sha384_hex);
+
+    modelnet::AcquisitionReceipt rec;
+    uint64_t reserved = 0;
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(modelnet::ExecuteBtxAcquisition(req, rec, reserved, code, err), code + ": " + err);
+    BOOST_CHECK_EQUAL(rec.ready_state, "MODEL_READY");
+    BOOST_CHECK(fs::exists(real / "exec" / "sub" / "weights.gguf"));
+}
+
 BOOST_AUTO_TEST_CASE(ahp_acq_07_stale_cache_reverify)
 {
     const fs::path dest = m_path_root / "acq-07-exec";

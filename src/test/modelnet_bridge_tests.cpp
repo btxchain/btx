@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <modelnet/bridge.h>
+#include <modelnet/helper.h>
 #include <modelnet/http_bridge.h>
 #include <modelnet/resource_uri.h>
 #include <modelnet/types.h>
@@ -13,7 +14,9 @@
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
 
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -21,8 +24,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_bridge_tests, BasicTestingSetup)
 
@@ -756,6 +762,58 @@ BOOST_AUTO_TEST_CASE(dequeued_hint_same_policy_for_any_from_addr)
         BOOST_CHECK(modelnet::PublicHintWellFormed(consumed->hint, consumed->from_addr, err));
     }
     DrainBridgeHints();
+}
+
+// The /api/v1/feed routes read getmodelfeed from btx-modeld when
+// BTX_BRIDGE_RPC_SOCKET is set. Each route must ask for a feed mode that
+// getmodelfeed accepts; a refused mode leaves the route with the empty shell.
+BOOST_AUTO_TEST_CASE(api_v1_feed_routes_reach_the_helper_feed)
+{
+    const fs::path tmp = m_args.GetDataDirBase() / "bridge-feed-routes";
+    fs::create_directories(tmp);
+    modelnet::HelperConfig cfg;
+    cfg.modeldir = tmp;
+    cfg.quota_bytes = 1 << 20;
+    cfg.lan_discovery = false;
+    cfg.natpmp = false;
+    char sock_dir[] = "/tmp/btx-sock-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(sock_dir) != nullptr);
+    cfg.rpc_socket = fs::PathFromString(sock_dir) / "modeld.sock";
+    std::atomic<bool> stop{false};
+    std::thread daemon([&] { modelnet::RunModelDaemon(cfg, &stop); });
+    auto finish = [&] {
+        stop.store(true);
+        if (daemon.joinable()) daemon.join();
+        ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
+        ::rmdir(sock_dir);
+    };
+    try {
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!fs::exists(cfg.rpc_socket) && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        BOOST_REQUIRE(fs::exists(cfg.rpc_socket));
+        test::ScopedEnvVar sock{"BTX_BRIDGE_RPC_SOCKET"};
+        sock.Set(fs::PathToString(cfg.rpc_socket).c_str());
+        const std::vector<std::pair<std::string, std::string>> routes{
+            {"/api/v1/feed", "NEWEST"},
+            {"/api/v1/feed/releases", "NEW_RELEASE_CAMPAIGNS"},
+            {"/api/v1/feed/unlocked", "JUST_UNLOCKED"},
+        };
+        for (const auto& [route, mode] : routes) {
+            modelnet::BrowserBridgeResponse br;
+            BOOST_REQUIRE(modelnet::HandleBridgeGet(route, br));
+            BOOST_CHECK_EQUAL(br.http_status, 200);
+            const UniValue obj = ParseBody(br);
+            CheckDisclosure(obj);
+            BOOST_CHECK_MESSAGE(HasBoolCI(obj, "from_helper", true), route << " did not get the helper feed");
+            BOOST_CHECK_MESSAGE(obj["mode"].isStr() && obj["mode"].get_str() == mode, route << " mode " << obj["mode"].write());
+        }
+    } catch (...) {
+        finish();
+        throw;
+    }
+    finish();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

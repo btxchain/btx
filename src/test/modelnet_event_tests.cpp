@@ -11,8 +11,14 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <csignal>
 #include <fstream>
+#include <iterator>
 #include <string>
+
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_event_tests, BasicTestingSetup)
 
@@ -70,6 +76,109 @@ BOOST_AUTO_TEST_CASE(event_restart_persists_sequence)
         BOOST_CHECK_EQUAL(o.local_sequence, seq + 1);
     }
 }
+
+BOOST_AUTO_TEST_CASE(event_failed_append_is_not_kept)
+{
+    // An event whose journal line could not be written must not be served, must
+    // not take a sequence number, and must not make the retried observation a
+    // duplicate. Otherwise the retry is never written, the event is gone after a
+    // restart, and the next start hands its sequence to another event, which a
+    // reader that already holds that cursor then skips.
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "event-append-fail";
+    fs::create_directories(dir);
+    ModelEventJournal j(dir, 32);
+    const fs::path journal = dir / "events" / "journal.jsonl";
+    // A directory where the journal file belongs makes the append fail.
+    fs::create_directories(journal);
+    ObserveResult o;
+    std::string err;
+    BOOST_CHECK(!j.Observe(MakeEv(ModelEventType::MODEL_PUBLISHED, "01"), o, err));
+    BOOST_CHECK_EQUAL(err, "journal append");
+    BOOST_CHECK_EQUAL(j.Size(), 0U);
+    BOOST_CHECK_EQUAL(j.Cursor(), 0U);
+    BOOST_CHECK(j.ReplayAfter(0).empty());
+
+    fs::remove(journal);
+    BOOST_REQUIRE(j.Observe(MakeEv(ModelEventType::MODEL_PUBLISHED, "01"), o, err));
+    BOOST_CHECK(!o.duplicate);
+    BOOST_CHECK_EQUAL(o.local_sequence, 1U);
+    BOOST_REQUIRE(j.Observe(MakeEv(ModelEventType::MODEL_PUBLISHED, "02"), o, err));
+    BOOST_CHECK_EQUAL(o.local_sequence, 2U);
+
+    ModelEventJournal reloaded(dir, 32);
+    BOOST_CHECK_EQUAL(reloaded.Size(), 2U);
+    BOOST_CHECK_EQUAL(reloaded.Cursor(), 2U);
+    const auto replay = reloaded.ReplayAfter(0);
+    BOOST_REQUIRE_EQUAL(replay.size(), 2U);
+    BOOST_CHECK_EQUAL(replay[0].object_id, "01");
+    BOOST_CHECK_EQUAL(replay[1].object_id, "02");
+}
+
+BOOST_AUTO_TEST_CASE(event_append_after_torn_line_is_kept)
+{
+    // A crash during a write can leave the journal ending in half a line. The
+    // next event must start on its own line, or both are lost on the next load.
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "event-torn-line";
+    fs::create_directories(dir / "events");
+    {
+        std::ofstream out(dir / "events" / "journal.jsonl", std::ios::binary);
+        out << "{\"event_id\":\"cut-short";
+    }
+    {
+        ModelEventJournal j(dir, 32);
+        ObserveResult o;
+        std::string err;
+        BOOST_REQUIRE(j.Observe(MakeEv(ModelEventType::MODEL_PUBLISHED, "01"), o, err));
+    }
+    ModelEventJournal reloaded(dir, 32);
+    BOOST_CHECK_EQUAL(reloaded.Size(), 1U);
+    BOOST_CHECK_EQUAL(reloaded.Cursor(), 1U);
+}
+
+#if !defined(_WIN32)
+BOOST_AUTO_TEST_CASE(event_write_failure_leaves_no_torn_line)
+{
+    // A full disk can fail the write of a line part way. The journal must be
+    // cut back, so that the retried observation is one whole line on disk.
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "event-write-fail";
+    fs::create_directories(dir);
+    ModelEventJournal j(dir, 32);
+    ObserveResult o;
+    std::string err;
+    BOOST_REQUIRE(j.Observe(MakeEv(ModelEventType::MODEL_PUBLISHED, "01"), o, err));
+    const fs::path journal = dir / "events" / "journal.jsonl";
+    const auto read = [&] {
+        std::ifstream in(journal, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string committed = read();
+    struct rlimit saved{};
+    BOOST_REQUIRE_EQUAL(getrlimit(RLIMIT_FSIZE, &saved), 0);
+    const auto handler = std::signal(SIGXFSZ, SIG_IGN);
+    BOOST_REQUIRE(handler != SIG_ERR);
+    struct rlimit limited = saved;
+    limited.rlim_cur = committed.size() + 10;
+    if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+        std::signal(SIGXFSZ, handler);
+        BOOST_FAIL("setrlimit failed");
+    }
+    const bool ok = j.Observe(MakeEv(ModelEventType::MODEL_PUBLISHED, "02"), o, err);
+    if (setrlimit(RLIMIT_FSIZE, &saved) != 0) std::terminate();
+    std::signal(SIGXFSZ, handler);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK_EQUAL(read(), committed);
+    BOOST_CHECK_EQUAL(j.Size(), 1U);
+
+    BOOST_REQUIRE(j.Observe(MakeEv(ModelEventType::MODEL_PUBLISHED, "02"), o, err));
+    BOOST_CHECK(!o.duplicate);
+    ModelEventJournal reloaded(dir, 32);
+    BOOST_CHECK_EQUAL(reloaded.Size(), 2U);
+    BOOST_CHECK_EQUAL(reloaded.Cursor(), 2U);
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(event_dedupe_same_object_sequence_transition)
 {

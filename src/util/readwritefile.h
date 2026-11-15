@@ -7,8 +7,11 @@
 
 #include <util/fs.h>
 
+#include <cstdio>
+#include <functional>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 
 /** Read full contents of a file and return them in a std::string.
@@ -24,5 +27,13 @@ std::pair<bool,std::string> ReadBinaryFile(const fs::path &filename, size_t maxs
  * @return true on success.
  */
 bool WriteBinaryFile(const fs::path &filename, const std::string &data);
+
+//! Sync and close the staged file before replacement, then attempt to sync the destination directory.
+//! A nonempty staging directory must be on the same filesystem as the destination.
+bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data);
+bool WriteBinaryFileAtomically(const fs::path& filename, std::string_view data, const fs::path& staging_dir);
+
+//! Write to a staged binary file. The callback returns false on write failure and must not close it.
+bool WriteBinaryFileAtomically(const fs::path& filename, const std::function<bool(std::FILE*)>& write, const fs::path& staging_dir = {});
 
 #endif // BITCOIN_UTIL_READWRITEFILE_H

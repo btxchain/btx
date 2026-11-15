@@ -166,7 +166,10 @@ RPCHelpMan issuecomputequalification()
             in.profile_name = request.params[1].get_str();
             std::memcpy(in.subject.data(), subject.data(), 32);
             GetStrongRandBytes(in.issuer_nonce);
-            in.episode_count = static_cast<uint32_t>(request.params[2].getInt<int64_t>());
+            std::string episodes_err;
+            if (!ParseUint32Index(request.params[2].getInt<int64_t>(), in.episode_count, "episode_count", episodes_err)) {
+                ThrowCode("COMPUTE_CHALLENGE_INVALID", episodes_err);
+            }
             const int64_t expires = request.params[3].getInt<int64_t>();
             if (expires < 1 || expires > 86400) ThrowCode("COMPUTE_CHALLENGE_INVALID", "expires_in_s");
             in.issued_at_ms = NowMs();
@@ -195,7 +198,7 @@ RPCHelpMan solvecomputequalification()
         "solvecomputequalification",
         "Solve a compute qualification locally with exact Profile-1 replay. Client timing is advisory.\n",
         {
-            {"challenge", RPCArg::Type::STR, RPCArg::Optional::NO, "Challenge object", RPCArgOptions{.skip_type_check = true}},
+            {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge object", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}},
             {"backend", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "cpu, or auto/cuda/hip/metal/ascend. A device that is not self-qualified is rejected. The issuer recomputes on the CPU reference."},
             {"time_budget_ms", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "Stop before the next episode once this budget is exceeded"},
         },
@@ -221,8 +224,8 @@ RPCHelpMan verifycomputequalification()
         "verifycomputequalification",
         "Recompute a qualification without consuming it.\n",
         {
-            {"challenge", RPCArg::Type::STR, RPCArg::Optional::NO, "Issued challenge", RPCArgOptions{.skip_type_check = true}},
-            {"response", RPCArg::Type::STR, RPCArg::Optional::NO, "Solver response", RPCArgOptions{.skip_type_check = true}},
+            {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Issued challenge", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}},
+            {"response", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Solver response", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
         RPCExamples{HelpExampleCli("verifycomputequalification", "'{}' '{}'")},
@@ -248,8 +251,8 @@ RPCHelpMan redeemcomputequalification()
         "redeemcomputequalification",
         "Verify a qualification and mark it redeemed. A second redemption fails.\n",
         {
-            {"challenge", RPCArg::Type::STR, RPCArg::Optional::NO, "Issued challenge", RPCArgOptions{.skip_type_check = true}},
-            {"response", RPCArg::Type::STR, RPCArg::Optional::NO, "Solver response", RPCArgOptions{.skip_type_check = true}},
+            {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Issued challenge", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}},
+            {"response", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Solver response", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}},
         },
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
         RPCExamples{HelpExampleCli("redeemcomputequalification", "'{}' '{}'")},
@@ -313,7 +316,7 @@ RPCHelpMan buildcomputepassport()
     return RPCHelpMan{
         "buildcomputepassport",
         "Build a self-attested Compute Passport from integer microsecond samples. Not a qualification.\n",
-        {{"samples", RPCArg::Type::STR, RPCArg::Optional::NO, "profile_name and wall_us[]", RPCArgOptions{.skip_type_check = true}}},
+        {{"samples", RPCArg::Type::OBJ, RPCArg::Optional::NO, "profile_name and wall_us[]", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
         RPCResult{RPCResult::Type::OBJ, "", "", {{RPCResult::Type::ELISION, "", ""}}},
         RPCExamples{HelpExampleCli("buildcomputepassport", "'{\"profile_name\":\"btx-rc-p1e-toy-v1\",\"wall_us\":[1000]}'")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {

@@ -501,6 +501,13 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
 {
     const CTransactionRef old_tx = m_wallet->getTx(hash);
 
+    // A locked wallet has dropped its PQ keys, so it can neither size nor sign
+    // the replacement. Ask for the passphrase before building it, as Send does.
+    WalletModel::UnlockContext ctx(requestUnlock());
+    if (!ctx.isValid()) {
+        return false;
+    }
+
     CCoinControl coin_control;
     coin_control.m_signal_bip125_rbf = true;
     std::vector<bilingual_str> errors;
@@ -578,11 +585,6 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
         Q_EMIT message(tr("PSBT copied"), tr("Fee-bump PSBT copied to clipboard"), CClientUIInterface::MSG_INFORMATION | CClientUIInterface::MODAL);
 #endif
         return true;
-    }
-
-    WalletModel::UnlockContext ctx(requestUnlock());
-    if (!ctx.isValid()) {
-        return false;
     }
 
     assert(!m_wallet->privateKeysDisabled() || wallet().hasExternalSigner());

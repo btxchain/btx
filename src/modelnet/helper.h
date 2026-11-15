@@ -14,10 +14,63 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace modelnet {
+
+// Read methods whose composed views may include a local wallet observation.
+inline bool IsWalletObservationRead(std::string_view method)
+{
+    return method == "getmodelreleaseeconomics" ||
+           method == "getfundablemodels" ||
+           method == "getmodeleconomyentry" ||
+           method == "getmodelfeed" ||
+           method == "getreleasefeed" ||
+           method == "getrecentreleases" ||
+           method == "getrecentlyunlockedmodels" ||
+           method == "searchmodels" ||
+           method == "getmodeldirectory" ||
+           method == "getmodeldirectoryentry" ||
+           method == "browsemodels" ||
+           method == "gettrendingmodels" ||
+           method == "getsimilarmodels" ||
+           method == "getnewmodels" ||
+           method == "getmodelrelease";
+}
+
+// Methods whose request names a path on the server (read, write, list or run),
+// as a positional argument or as a field of the request object. btxd refuses
+// them for a wallet-restricted RPC user before the helper is called. Keep this
+// list disjoint from IsWalletObservationRead.
+inline bool IsServerPathMethod(std::string_view method)
+{
+    return method == "importmodel" ||
+           method == "hostmodel" ||
+           method == "previewmodelimport" ||
+           method == "exportmodellink" ||
+           method == "qualifymodel" ||
+           method == "scanmodelwatch" ||
+           method == "executemodelimport" ||
+           method == "resumemodelimport" ||
+           method == "createbtxpackage" ||
+           method == "exportbtxbundle" ||
+           method == "exportbtxpackage" ||
+           method == "inspectbtxpackage" ||
+           method == "verifybtxpackage" ||
+           method == "importbtxpackage" ||
+           method == "getbtxpackagedocument" ||
+           method == "planbtxacquisition" ||
+           method == "planbtxclientinstall" ||
+           method == "planbtxruntime" ||
+           method == "executebtxacquisition" ||
+           method == "setcloudstorage" ||
+           method == "addmodelstorage" ||
+           method == "preparebountyevaluation" ||
+           method == "runbountyevaluation" ||
+           method == "ensurebtxcapability";
+}
 
 struct NativeRequest {
     std::string method;
@@ -103,7 +156,7 @@ bool NativeHttpRequiresVerifiedPq1();
 /** Advertised /btx-model/2/ paths from capabilities.http. */
 std::vector<std::string> AdvertisedNativeHttpPaths();
 
-bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop = nullptr);
+bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop = nullptr, bool include_wallet_observation = true);
 
 bool IsNetwork02HelperMethod(const std::string& method);
 bool DispatchNetwork02Rpc(ModelCatalog& cat, const std::string& method, const UniValue& params, UniValue& result,
@@ -147,7 +200,7 @@ bool UnixSocketSafeToAdopt(const fs::path& sock, std::string& err);
 /** SO_PEERCRED uid matches this process. Platforms without SO_PEERCRED return true. */
 bool UnixConnectedPeerIsSelf(int fd, std::string& err);
 
-bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err);
+bool CallUnixRpc(const fs::path& socket_path, const std::string& method, const UniValue& params, UniValue& result, std::string& err, std::atomic<bool>* stop = nullptr, int reply_timeout_ms = 0, bool check_peer = false, int64_t expected_peer_pid = 0);
 
 /** True when `err` is a helper application refusal (`{"code","message"}`).
  *  Transport failures (connect, write, non-JSON reply) return false. */

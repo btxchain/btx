@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -218,6 +219,31 @@ void FillIdentity(DepositStatusResult& result)
     result.network = Bcp1NetworkName();
 }
 
+//! importdepositpool labels a change-branch entry <account>/change/<index>; older
+//! imports used change/<index>.
+bool IsPoolChangeLabel(std::string_view label)
+{
+    const auto number = [](std::string_view s) {
+        return !s.empty() && s.size() <= 10 && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    const size_t slash = label.find('/');
+    if (slash != std::string_view::npos && number(label.substr(0, slash))) label.remove_prefix(slash + 1);
+    constexpr std::string_view prefix{"change/"};
+    return label.substr(0, prefix.size()) == prefix && number(label.substr(prefix.size()));
+}
+
+//! Change as the wallet sees it (no address-book entry), or an output to the
+//! change branch of an imported deposit pool. Every pool entry has a label, so the
+//! wallet's own rule never counts the pool's change branch as change.
+bool IsDepositChange(const CWallet& wallet, const CTxOut& txout) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    if (OutputIsChange(wallet, txout)) return true;
+    CTxDestination dest;
+    if (!ExtractDestination(txout.scriptPubKey, dest)) return false;
+    const CAddressBookData* entry = wallet.FindAddressBookEntry(dest);
+    return entry && IsPoolChangeLabel(entry->GetLabel());
+}
+
 void FillOutputFields(const CWallet& wallet, const CWalletTx& wtx, uint32_t vout, DepositStatusResult& result)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
@@ -225,7 +251,7 @@ void FillOutputFields(const CWallet& wallet, const CWalletTx& wtx, uint32_t vout
     const CTxOut& txout = wtx.tx->vout[vout];
     result.amount_atoms = txout.nValue;
     result.is_mine = static_cast<bool>(wallet.IsMine(txout) & ISMINE_ALL);
-    result.is_change = OutputIsChange(wallet, txout);
+    result.is_change = IsDepositChange(wallet, txout);
     result.is_coinbase = wtx.IsCoinBase();
     result.locked = wallet.IsLockedCoin(COutPoint{Txid::FromUint256(result.txid), vout});
     CTxDestination dest;
@@ -284,6 +310,7 @@ std::string DepositEventTypeToString(DepositEventType type)
     case DepositEventType::TransactionMempool: return "transaction.mempool";
     case DepositEventType::TransactionConfirmed: return "transaction.confirmed";
     case DepositEventType::TransactionReorged: return "transaction.reorged";
+    case DepositEventType::TransactionConflicted: return "transaction.conflicted";
     case DepositEventType::DepositDetected: return "deposit.detected";
     case DepositEventType::DepositConfirmationsChanged: return "deposit.confirmations_changed";
     case DepositEventType::UtxoCreated: return "utxo.created";
@@ -299,6 +326,7 @@ std::optional<DepositEventType> DepositEventTypeFromString(std::string_view name
     if (name == "transaction.mempool") return DepositEventType::TransactionMempool;
     if (name == "transaction.confirmed") return DepositEventType::TransactionConfirmed;
     if (name == "transaction.reorged") return DepositEventType::TransactionReorged;
+    if (name == "transaction.conflicted") return DepositEventType::TransactionConflicted;
     if (name == "deposit.detected") return DepositEventType::DepositDetected;
     if (name == "deposit.confirmations_changed") return DepositEventType::DepositConfirmationsChanged;
     if (name == "utxo.created") return DepositEventType::UtxoCreated;
@@ -338,7 +366,7 @@ bool IsWalletDepositOutput(const CWallet& wallet, const CTxOut& txout, bool incl
 {
     AssertLockHeld(wallet.cs_wallet);
     if (!(wallet.IsMine(txout) & ISMINE_ALL)) return false;
-    if (!include_change && OutputIsChange(wallet, txout)) return false;
+    if (!include_change && IsDepositChange(wallet, txout)) return false;
     return true;
 }
 
@@ -606,6 +634,8 @@ std::vector<DepositEventType> EventsForDepositTransition(const std::optional<Dep
             events.push_back(DepositEventType::TransactionReorged);
         } else if (now.status == DepositStatus::MEMPOOL) {
             events.push_back(DepositEventType::TransactionMempool);
+        } else if (now.status == DepositStatus::CONFLICTED) {
+            events.push_back(DepositEventType::TransactionConflicted);
         } else if (now.status == DepositStatus::SPENT && was_unspent) {
             events.push_back(DepositEventType::UtxoSpent);
         }
@@ -619,6 +649,57 @@ std::vector<DepositEventType> EventsForDepositTransition(const std::optional<Dep
         events.push_back(DepositEventType::UtxoSpent);
     }
     return events;
+}
+
+std::vector<std::pair<uint256, UniValue>> DepositSpentEventsForTx(const CWallet& wallet, const uint256& spending_txid)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<std::pair<uint256, UniValue>> out;
+    const CWalletTx* spender = wallet.GetWalletTx(spending_txid);
+    if (!spender || !spender->tx || spender->IsCoinBase()) return out;
+    for (const CTxIn& txin : spender->tx->vin) {
+        const CWalletTx* prev = wallet.GetWalletTx(txin.prevout.hash.ToUint256());
+        if (!prev || !prev->tx || txin.prevout.n >= prev->tx->vout.size()) continue;
+        if (!(wallet.IsMine(prev->tx->vout[txin.prevout.n]) & ISMINE_ALL)) continue;
+        // A deposit that is not confirmed yet is reported spent when it confirms,
+        // through DepositNotifyEventsForTx; reporting it here as well would repeat it.
+        if (!prev->isConfirmed()) continue;
+        DepositStatusResult now = GetDepositStatus(wallet, prev->GetHash(), txin.prevout.n);
+        if (now.status != DepositStatus::SPENT) continue;
+        // Name this spender: a replaced spender may still be in the wallet.
+        now.spent_by = spending_txid;
+        out.emplace_back(prev->GetHash(), EmitDepositEvent(DepositEventType::UtxoSpent, now));
+    }
+    return out;
+}
+
+std::vector<DepositStatusResult> DepositStatusesForTx(const CWallet& wallet, const uint256& txid)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<DepositStatusResult> out;
+    const CWalletTx* wtx = wallet.GetWalletTx(txid);
+    if (!wtx || !wtx->tx) return out;
+    for (uint32_t n = 0; n < wtx->tx->vout.size(); ++n) {
+        if (!(wallet.IsMine(wtx->tx->vout[n]) & ISMINE_ALL)) continue;
+        out.push_back(GetDepositStatus(wallet, txid, n));
+    }
+    return out;
+}
+
+std::vector<UniValue> DepositNotifyEventsForStateChange(const CWallet& wallet, const uint256& txid,
+                                                        const std::vector<DepositStatusResult>& before)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    std::vector<UniValue> out;
+    for (const DepositStatusResult& now : DepositStatusesForTx(wallet, txid)) {
+        const auto prev = std::find_if(before.begin(), before.end(),
+                                       [&](const DepositStatusResult& b) { return b.vout == now.vout; });
+        if (prev == before.end() || prev->status == now.status) continue;
+        for (const DepositEventType type : EventsForDepositTransition(*prev, now)) {
+            out.push_back(EmitDepositEvent(type, now));
+        }
+    }
+    return out;
 }
 
 void NoteBlockDisconnected(const CWallet& wallet, const uint256& block_hash, int height)
@@ -741,21 +822,42 @@ std::vector<UniValue> DepositNotifyEventsForTx(const CWallet& wallet, const uint
     std::vector<UniValue> out;
     const CWalletTx* wtx = wallet.GetWalletTx(txid);
     if (!wtx || !wtx->tx) return out;
+    // Read what was known before any output is looked at: GetDepositStatus records a
+    // confirmation (and clears the reorg mark) in the same per-transaction cache
+    // entry, so reading it later found the new state, also for the next output.
+    DepositObservation obs;
+    bool had_obs{false};
+    if (!inserted_new) {
+        LOCK(g_bcp1_deposit_cache_mutex);
+        had_obs = LookupObservation(wallet, txid, obs);
+    }
     for (uint32_t n = 0; n < wtx->tx->vout.size(); ++n) {
         if (!(wallet.IsMine(wtx->tx->vout[n]) & ISMINE_ALL)) continue;
         const DepositStatusResult now = GetDepositStatus(wallet, txid, n);
         if (now.status == DepositStatus::UNKNOWN) continue;
         std::optional<DepositStatusResult> previous;
-        if (!inserted_new) {
-            DepositObservation obs;
-            LOCK(g_bcp1_deposit_cache_mutex);
-            if (LookupObservation(wallet, txid, obs) && obs.last_confirmations > 0) {
-                previous = now;
-                previous->confirmations = obs.last_confirmations;
-                previous->status = obs.saw_disconnect ? DepositStatus::REORGED : DepositStatus::CONFIRMED;
-            }
+        if (!inserted_new && had_obs && obs.last_confirmations > 0) {
+            previous = now;
+            previous->confirmations = obs.last_confirmations;
+            previous->status = obs.saw_disconnect ? DepositStatus::REORGED : DepositStatus::CONFIRMED;
+        } else if (!inserted_new && now.status == DepositStatus::CONFIRMED) {
+            // Known to the wallet but never seen confirmed: it was in the mempool. A
+            // transaction the wallet holds but has not reported yet (its own payment
+            // before broadcast is UNKNOWN) keeps no previous state, so it is reported
+            // as detected once it reaches the mempool.
+            previous = now;
+            previous->confirmations = 0;
+            previous->status = DepositStatus::MEMPOOL;
         }
-        for (const DepositEventType type : EventsForDepositTransition(previous, now)) {
+        std::vector<DepositEventType> events = EventsForDepositTransition(previous, now);
+        // A deposit spent before it confirmed reports SPENT, which GetDepositStatus
+        // decides before it looks at confirmations, so the step above never sees it
+        // confirm. Its own transaction confirming is still a confirmation.
+        if (!inserted_new && now.status == DepositStatus::SPENT && wtx->isConfirmed() &&
+            !(had_obs && obs.last_confirmations > 0)) {
+            events.insert(events.begin(), DepositEventType::TransactionConfirmed);
+        }
+        for (const DepositEventType type : events) {
             out.push_back(EmitDepositEvent(type, now));
         }
     }

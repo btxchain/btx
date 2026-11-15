@@ -1,6 +1,10 @@
 // Isolated CUDA qualification worker. NOT linked into btxd or test_btx.
 // GPU-01..06: tiny kernel, explicit device, finite timeout, no wallet/network.
 // Tiny alloc. Does not starve ExactReplay. Set BTX_LIVE_ATTESTOR=1 to refuse.
+// ISO-05 FIT (--granite-bytes): model MiB + reserve MiB must fit in total MiB
+// minus the observed ExactReplay footprint. The reserve defaults to 4096 MiB.
+// A lower --reserve-mib is an operator override and never prints
+// CUDA_GRANITE_FIT PASS.
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
@@ -11,9 +15,29 @@
 
 __global__ void ping(int* x) { *x = 42; }
 
+static constexpr long long DEFAULT_RESERVE_MIB = 4096;
+static constexpr long long EXACTREPLAY_OBSERVED_MIB = 3382;
+static constexpr long long MAX_GRANITE_BYTES = 1LL << 50;
+static constexpr long long MAX_RESERVE_MIB = 1LL << 20;
+
 static void die(const char* m) {
     std::fprintf(stderr, "cuda_qual_worker FAIL: %s\n", m);
     std::exit(1);
+}
+
+// Decimal digits only: no sign, no suffix, no overflow past max.
+static bool ParseCount(const char* s, long long max, long long& out)
+{
+    if (*s == '\0') return false;
+    long long v = 0;
+    for (; *s != '\0'; ++s) {
+        if (*s < '0' || *s > '9') return false;
+        const int d = *s - '0';
+        if (v > (max - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    out = v;
+    return true;
 }
 
 int main(int argc, char** argv)
@@ -22,12 +46,28 @@ int main(int argc, char** argv)
     int gpu = -1;
     bool allow_shared = false;
     bool allow_validator = false;
+    long long granite = 0;
+    long long reserve_mib = DEFAULT_RESERVE_MIB;
     for (int i = 1; i < argc; ++i) {
         if (std::strncmp(argv[i], "--gpu=", 6) == 0) gpu = std::atoi(argv[i] + 6);
         else if (std::strcmp(argv[i], "--allow-shared-gpu") == 0) allow_shared = true;
         else if (std::strcmp(argv[i], "--allow-validator-gpu") == 0) allow_validator = true;
-        else if (std::strcmp(argv[i], "--help") == 0) {
-            std::puts("cuda_qual_worker --gpu=N [--allow-shared-gpu]");
+        else if (std::strncmp(argv[i], "--granite-bytes=", 16) == 0) {
+            if (!ParseCount(argv[i] + 16, MAX_GRANITE_BYTES, granite)) {
+                std::fprintf(stderr, "ISO-05: --granite-bytes must be a decimal byte count up to 2^50\n");
+                return 2;
+            }
+        } else if (std::strncmp(argv[i], "--reserve-mib=", 14) == 0) {
+            if (!ParseCount(argv[i] + 14, MAX_RESERVE_MIB, reserve_mib)) {
+                std::fprintf(stderr, "ISO-05: --reserve-mib must be a decimal MiB count up to 1048576\n");
+                return 2;
+            }
+        } else if (std::strcmp(argv[i], "--help") == 0) {
+            std::puts("cuda_qual_worker --gpu=N [--allow-shared-gpu] [--allow-validator-gpu]\n"
+                      "                 [--granite-bytes=BYTES [--reserve-mib=MIB]]\n"
+                      "ISO-05 FIT: BYTES/MiB + MIB <= total MiB - 3382 (observed ExactReplay).\n"
+                      "--reserve-mib defaults to 4096. A lower value is an operator override:\n"
+                      "ISO-05 OVERRIDE_FIT and CUDA_GRANITE_FIT OVERRIDE_PASS, never PASS.");
             return 0;
         }
     }
@@ -72,18 +112,19 @@ int main(int argc, char** argv)
                 gpu, prop.name, prop.major, prop.minor, prop.totalGlobalMem / (1024 * 1024));
     std::printf("GPU-03 isolation: no wallet, no RPC cookie, no listen socket\n");
     std::printf("GPU-06 backend_hash_observation cuda/%s/%d.%d\n", prop.name, prop.major, prop.minor);
-    long long granite = 0;
-    long long reserve_mib = 4096;
-    for (int i = 1; i < argc; ++i) {
-        if (std::strncmp(argv[i], "--granite-bytes=", 16) == 0) granite = std::atoll(argv[i] + 16);
-        else if (std::strncmp(argv[i], "--reserve-mib=", 14) == 0) reserve_mib = std::atoll(argv[i] + 14);
-    }
     if (granite > 0) {
-        const long long free_mib = (long long)(prop.totalGlobalMem / (1024 * 1024)) - 3382; // ExactReplay observed
+        const long long free_mib = (long long)(prop.totalGlobalMem / (1024 * 1024)) - EXACTREPLAY_OBSERVED_MIB;
         const long long need_mib = granite / (1024 * 1024) + reserve_mib;
         if (need_mib > free_mib) {
-            std::printf("ISO-05 REFUSE starve ExactReplay need_mib=%lld free_mib=%lld\n", need_mib, free_mib);
+            std::printf("ISO-05 REFUSE starve ExactReplay need_mib=%lld free_mib=%lld reserve_mib=%lld "
+                        "default_reserve_mib=%lld\n",
+                        need_mib, free_mib, reserve_mib, DEFAULT_RESERVE_MIB);
             std::printf("CUDA_GRANITE_FIT REFUSED\n");
+        } else if (reserve_mib < DEFAULT_RESERVE_MIB) {
+            std::printf("ISO-05 OVERRIDE_FIT granite_bytes=%lld need_mib=%lld free_mib=%lld reserve_mib=%lld "
+                        "default_reserve_mib=%lld\n",
+                        granite, need_mib, free_mib, reserve_mib, DEFAULT_RESERVE_MIB);
+            std::printf("CUDA_GRANITE_FIT OVERRIDE_PASS (reserve below default; not release qualification)\n");
         } else {
             std::printf("ISO-05 FIT granite_bytes=%lld need_mib=%lld free_mib=%lld reserve_mib=%lld\n",
                         granite, need_mib, free_mib, reserve_mib);

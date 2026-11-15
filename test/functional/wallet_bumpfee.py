@@ -57,7 +57,20 @@ class BumpFeeTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
-        # whitelist peers to speed up tx relay / mempool sync
+        # Noban skips the inventory trickle in SendMessages (fSendTrickle).
+        # It does not bypass Dandelion++. On regtest the stem phase is active
+        # from genesis. BroadcastTransaction calls
+        # DandelionManager::AcceptStemTransaction with from_peer=-1, and that
+        # function keeps a self-originated transaction in the stempool even
+        # during a fluff epoch. PeerManagerImpl::TransactionAddedToMempool
+        # then hits DandelionManager::SuppressInventoryRelay and returns
+        # without RelayTransaction, so the whitelist never sees an inv. The
+        # peer's DLTX handler also leaves the transaction out of its mempool
+        # until CheckEmbargoes. ComputeEmbargoDeadline is 5–180s (mean 39s);
+        # sync_mempools stops at 60s. spend_one_input's P2MR spend is already
+        # a transaction this node accepts (about 4000 sat on a ~3.9 kvB
+        # ML-DSA input, above the 1 sat/vB relay floor). This test is not a
+        # stem-relay test.
         self.noban_tx_relay = True
         self.extra_args = [[
             "-walletrbf={}".format(i),
@@ -65,6 +78,7 @@ class BumpFeeTest(BitcoinTestFramework):
             "-mintxfee=0.00002",
             "-fallbackfee=0.00002",
             "-addresstype=p2mr",
+            "-dandelion=0",
         ] for i in range(self.num_nodes)]
         self.wallet_names = [self.default_wallet_name, "RBF wallet"]
 
@@ -186,8 +200,8 @@ class BumpFeeTest(BitcoinTestFramework):
                 rbf_node.bumpfee, rbfid, {"outputs": []})
         assert_raises_rpc_error(-8, "Invalid parameter, duplicated address: " + dest_address,
                 rbf_node.bumpfee, rbfid, {"outputs": [{dest_address: 0.1}, {dest_address: 0.2}]})
-        assert_raises_rpc_error(-8, "Invalid parameter, duplicate key: data",
-                rbf_node.bumpfee, rbfid, {"outputs": [{"data": "deadbeef"}, {"data": "deadbeef"}]})
+        assert_raises_rpc_error(-8, 'OP_RETURN "data" outputs are disabled on BTX',
+                rbf_node.bumpfee, rbfid, {"outputs": [{dest_address: 0.1}, {"data": "deadbeef"}]})
 
         self.log.info("Test original_change_index option")
         assert_raises_rpc_error(-1, "JSON integer out of range", rbf_node.bumpfee, rbfid, {"original_change_index": -1})

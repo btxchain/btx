@@ -8,6 +8,7 @@
 #include <modelnet/types.h>
 #include <util/strencodings.h>
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -41,7 +42,14 @@ bool ReadJson(const fs::path& path, UniValue& out)
 
 bool WriteJsonAtomic(const fs::path& path, const UniValue& obj, std::string& err)
 {
-    fs::create_directories(path.parent_path());
+    // Report a directory that cannot be created like any other failed write;
+    // a throw would leave UnpinPublisher without its pin in memory only.
+    try {
+        fs::create_directories(path.parent_path());
+    } catch (const fs::filesystem_error& e) {
+        err = e.what();
+        return false;
+    }
     const fs::path tmp = fs::PathFromString(fs::PathToString(path) + ".tmp");
     {
         std::ofstream out(tmp);
@@ -122,6 +130,29 @@ bool RelPathLooksUnsafe(const std::string& rel)
     return false;
 }
 
+namespace {
+//! Make room for one more advisory in a bounded list: drop the expired ones,
+//! then, if the list is still full, the oldest one a publisher signed. The
+//! operator's own unexpired reports are never dropped to make room. False
+//! when only those fill the list.
+bool MakeRoomForAdvisory(std::vector<SafetyRegistry::Advisory>& list, size_t cap, int64_t now)
+{
+    if (now > 0) {
+        list.erase(std::remove_if(list.begin(), list.end(), [&](const SafetyRegistry::Advisory& a) {
+                       return a.expires_at && a.expires_at < now;
+                   }),
+                   list.end());
+    }
+    if (list.size() < cap) return true;
+    const auto oldest_signed = std::find_if(list.begin(), list.end(), [](const SafetyRegistry::Advisory& a) {
+        return !a.local;
+    });
+    if (oldest_signed == list.end()) return false;
+    list.erase(oldest_signed);
+    return true;
+}
+} // namespace
+
 void SafetyRegistry::RebuildLocked(int64_t now)
 {
     m_deny.clear();
@@ -191,7 +222,7 @@ void SafetyRegistry::LoadLocked()
     RebuildLocked(0);
 }
 
-bool SafetyRegistry::PersistLocked(std::string& err) const
+bool SafetyRegistry::PersistPublishersLocked(std::string& err) const
 {
     if (m_dir.empty()) return true;
     UniValue pubs(UniValue::VOBJ);
@@ -206,7 +237,13 @@ bool SafetyRegistry::PersistLocked(std::string& err) const
     pubs.pushKV("automatic_spend_atoms", 0);
     pubs.pushKV("consensus", false);
     pubs.pushKV("publishers", parr);
-    if (!WriteJsonAtomic(m_dir / "safety_publishers.json", pubs, err)) return false;
+    return WriteJsonAtomic(m_dir / "safety_publishers.json", pubs, err);
+}
+
+bool SafetyRegistry::PersistLocked(std::string& err) const
+{
+    if (m_dir.empty()) return true;
+    if (!PersistPublishersLocked(err)) return false;
     UniValue ads(UniValue::VOBJ);
     UniValue aarr(UniValue::VARR);
     UniValue warr(UniValue::VARR);
@@ -259,15 +296,21 @@ bool SafetyRegistry::PinPublisher(const std::string& publisher_id_hex, const std
     return PersistLocked(err);
 }
 
-bool SafetyRegistry::UnpinPublisher(const std::string& publisher_id_hex)
+bool SafetyRegistry::UnpinPublisher(const std::string& publisher_id_hex, std::string& err)
 {
     const std::string id = ToLower(publisher_id_hex);
     std::lock_guard<std::mutex> lock(m_mu);
-    const bool erased = m_publishers.erase(id) > 0;
+    err.clear();
+    auto pin = m_publishers.extract(id);
+    if (pin.empty()) return false;
     RebuildLocked(0);
-    std::string err;
-    (void)PersistLocked(err);
-    return erased;
+    // Only the publisher list changes, so only its file is written. If that
+    // fails, the old file still pins the publisher, and so does memory.
+    if (!PersistPublishersLocked(err)) {
+        m_publishers.insert(std::move(pin));
+        return false;
+    }
+    return true;
 }
 
 bool SafetyRegistry::PublisherPinned(const std::string& publisher_id_hex) const
@@ -312,7 +355,7 @@ bool SafetyRegistry::LocalReport(const std::string& target_hex, uint8_t target_k
             return PersistLocked(err);
         }
     }
-    if (m_advisories.size() >= MAX_SAFETY_ADVISORIES) {
+    if (!MakeRoomForAdvisory(m_advisories, MAX_SAFETY_ADVISORIES, now)) {
         err = "advisory cap";
         return false;
     }
@@ -361,7 +404,10 @@ bool SafetyRegistry::IngestSigned(const UniValue& body, const std::string& signe
             return true;
         }
     }
-    if (dest.size() >= cap) dest.erase(dest.begin());
+    if (!MakeRoomForAdvisory(dest, cap, now)) {
+        err = "advisory cap";
+        return false;
+    }
     dest.push_back(std::move(a));
     if (pinned) {
         RebuildLocked(now);

@@ -679,7 +679,14 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_MESSAGE(shard.valid, shard.note);
     BOOST_CHECK_EQUAL(shard.hash_layout.n_columns, 500U);
     BOOST_CHECK_EQUAL(shard.fold_layout.n_columns, 16U);
-    BOOST_CHECK_EQUAL(shard.hash_real_rows, 217U);
+    // 217 rows for the query's paths, plus the terminal FRI layer that the
+    // shard proves in the same table: kRCFriBlowup leaves and
+    // kRCFriBlowup - 1 nodes, recorded as group 7.
+    const auto terminal_rows = static_cast<uint32_t>(std::count_if(
+        shard.hash_tasks.begin(), shard.hash_tasks.end(),
+        [](const HashTaskV1& task) { return task.group == 7; }));
+    BOOST_CHECK_EQUAL(terminal_rows, 2 * kRCFriBlowup - 1);
+    BOOST_CHECK_EQUAL(shard.hash_real_rows, 217U + 2 * kRCFriBlowup - 1);
     BOOST_CHECK_EQUAL(shard.hash_trace_rows, 256U);
     BOOST_CHECK_EQUAL(shard.fold_real_rows, 8U);
     BOOST_CHECK_EQUAL(shard.fold_trace_rows, 8U);

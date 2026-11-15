@@ -20,6 +20,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -445,6 +446,39 @@ BOOST_AUTO_TEST_CASE(infra_12_profile_restart_persist)
     BOOST_CHECK(!p2.preserve_rare);
 }
 
+#ifdef _WIN32
+BOOST_AUTO_TEST_CASE(profile_refuses_invalid_windows_path)
+{
+    using namespace modelnet;
+    const auto path = m_path_root / "invalid<profile>.json";
+    const auto policy = ResolveProfile(OperatorProfile::PERSONAL, {});
+    std::string err;
+    BOOST_CHECK(!SaveOperatorProfile(path, OperatorProfile::PERSONAL, policy, err));
+    BOOST_CHECK_MESSAGE(err.find("cannot inspect operator profile path: ") == 0, err);
+}
+#endif
+
+#ifndef __MINGW64__
+BOOST_AUTO_TEST_CASE(profile_refuses_destination_and_temporary_symlinks)
+{
+    using namespace modelnet;
+    const auto target = m_path_root / "profile-link-target";
+    fs::create_directory(target);
+    const auto path = OperatorProfilePath(m_path_root);
+    const auto temporary = m_path_root / "operator_profile.json.tmp";
+    const auto policy = ResolveProfile(OperatorProfile::PERSONAL, {});
+    for (const auto& link : {path, temporary}) {
+        fs::create_directory_symlink(target, link);
+        std::string err;
+        BOOST_CHECK(!SaveOperatorProfile(path, OperatorProfile::PERSONAL, policy, err));
+        BOOST_CHECK_EQUAL(err, "operator profile paths must not be symbolic links");
+        BOOST_CHECK(fs::is_empty(target));
+        BOOST_REQUIRE(fs::remove(link));
+    }
+    BOOST_CHECK(!fs::exists(path));
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(operator_rpc_overrides_reach_resolved_policy)
 {
     using namespace modelnet;
@@ -497,6 +531,36 @@ BOOST_AUTO_TEST_CASE(infra_13_natpmp_off_reaches_helper)
     BOOST_CHECK(!ArgvHas(BuildHelperArgv(cfg), "-modelnatpmp=0"));
     // Disabled mapping never looks for a gateway.
     BOOST_CHECK(AttemptModelPortMap("0.0.0.0:29447", /*enable=*/false).status == ModelNatStatus::DISABLED);
+}
+
+BOOST_AUTO_TEST_CASE(infra_14_packaged_helper_uses_platform_file_name)
+{
+    using namespace modelnet;
+#ifdef WIN32
+    BOOST_CHECK_EQUAL(std::string{MODELD_FILE_NAME}, "btx-modeld.exe");
+    const fs::path other_name{"btx-modeld"};
+#else
+    BOOST_CHECK_EQUAL(std::string{MODELD_FILE_NAME}, "btx-modeld");
+    const fs::path other_name{"btx-modeld.exe"};
+#endif
+#if defined(WIN32) || defined(__linux__) || defined(__APPLE__)
+    // btxd looks for the helper next to itself, so it must know where it runs from.
+    BOOST_CHECK(fs::is_directory(SelfExeDir()));
+#endif
+    const fs::path root = m_path_root / "packaged";
+    const fs::path btxd_dir = root / "sbin";
+    const std::vector<fs::path> searched{btxd_dir, btxd_dir / "libexec", root / "libexec", root / "bin"};
+    for (const fs::path& dir : searched) {
+        fs::create_directories(dir);
+        std::ofstream{dir / other_name};
+    }
+    // The other platform's file name is not the helper.
+    BOOST_CHECK(FindPackagedModeldIn(btxd_dir).empty());
+    // From the last place searched to the first, each one is found ahead of the places after it.
+    for (auto dir = searched.rbegin(); dir != searched.rend(); ++dir) {
+        std::ofstream{*dir / MODELD_FILE_NAME};
+        BOOST_CHECK_EQUAL(fs::PathToString(FindPackagedModeldIn(btxd_dir)), fs::PathToString(*dir / MODELD_FILE_NAME));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

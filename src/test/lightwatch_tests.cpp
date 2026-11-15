@@ -436,9 +436,12 @@ BOOST_AUTO_TEST_CASE(lightwatch_file_cut_at_a_line_end_is_refused)
     BOOST_CHECK(!missing.Load(path, error));
 
     // A version 1 file has no trailer. It is still read, and saving it writes version 2.
+    // Save writes through a text stream, so the line ends are CRLF on Windows.
+    const std::string v2_header{"btx-lightwatch 2"};
     std::string v1 = text.substr(0, text.rfind("end "));
-    BOOST_REQUIRE_EQUAL(v1.rfind("btx-lightwatch 2\n", 0), 0U);
-    v1.replace(0, std::string("btx-lightwatch 2").size(), "btx-lightwatch 1");
+    BOOST_REQUIRE_EQUAL(v1.rfind(v2_header, 0), 0U);
+    BOOST_REQUIRE_EQUAL(v1.find_first_of("\r\n"), v2_header.size());
+    v1.replace(0, v2_header.size(), "btx-lightwatch 1");
     write(v1);
     LightWatch old;
     BOOST_REQUIRE(old.Load(path, error));

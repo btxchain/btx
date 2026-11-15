@@ -94,6 +94,7 @@
 #include <vector>
 #include <typeinfo>
 #include <utility>
+#include <swapnet/node.h>
 
 using namespace util::hex_literals;
 
@@ -600,7 +601,11 @@ static constexpr size_t MATMUL_BUDGET_DEFERRED_MAX{256};
  *  plus the near-tip bodies dropped alongside them. At exactly one window, a
  *  single extra drop overflowed the set; the overflow erases begin(), the
  *  smallest hash, so the two smallest dropped holes then evicted each other
- *  and were fetched again on every delivery until the tip moved (#292). */
+ *  and were fetched again on every delivery until the tip moved (#292).
+ *  m_header_only_competing now keeps up to one window of deep dropped holes
+ *  across a tip move (ReleaseHeaderOnlySkipOnTipMove, #292): the holes the
+ *  walk would otherwise fetch and drop again, at most one window of the four,
+ *  so the bound is unchanged. */
 static constexpr size_t MAX_HEADER_ONLY_SKIP_HASHES{4 * BLOCK_DOWNLOAD_WINDOW};
 
 //! Claimed unique unattested tip-child for ExactReplay GPU. File-static so
@@ -1909,13 +1914,12 @@ private:
     /**
      * Reconsider orphan transactions after a parent has been accepted to the mempool.
      *
-     * @peer[in]  peer     The peer whose orphan transactions we will reconsider. Generally only
+     * @peer[in]  peer     The peer whose orphan transactions we will reconsider. At most
      *                     one orphan will be reconsidered on each call of this function. If an
      *                     accepted orphan has orphaned children, those will need to be
      *                     reconsidered, creating more work, possibly for other peers.
-     * @return             True if meaningful work was done (an orphan was accepted/rejected).
-     *                     If no meaningful work was done, then the work set for this peer
-     *                     will be empty.
+     * @return             True if an orphan was reconsidered. If not, the work set for this
+     *                     peer is empty.
      */
     bool ProcessOrphanTx(Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex);
@@ -2464,7 +2468,9 @@ private:
     /** Competing near-tip P2P bodies dropped HEADER_ONLY so miner GPU /
      *  trusted-mirror / local-signer sole-child persist is not flooded.
      *  FindNextBlocks must not re-getdata these until the active tip
-     *  moves OR quorum is recorded for that hash (qualifier: snapshot
+     *  moves OR quorum is recorded for that hash. A tip move keeps the
+     *  dropped holes deep on the new active chain
+     *  (ReleaseHeaderOnlySkipOnTipMove, #292) (qualifier: snapshot
      *  backfill re-requested the same pre-snapshot hash 150–301 times
      *  after HEADER_ONLY discarded a delivered body; a later quorum
      *  used to leave the hash suppressed forever because both clear
@@ -3604,8 +3610,14 @@ PeerManagerImpl::MarkMatMulAsyncVerification(const uint256& hash)
 void PeerManagerImpl::UnmarkMatMulAsyncVerification(
     const node::MatMulBlockLifecycle::Token& token)
 {
-    (void)m_matmul_block_lifecycle.Retry(
-        token, MATMUL_BUDGET_DEFER_COOLDOWN);
+    // pin_progress is the followed tip-child. Refresh already schedules it
+    // on the short cadence; Retry() must not put that body back on the 60s
+    // budget backstop or catch-up stays at one block per minute while
+    // mapBlocksInFlight is empty (wallet_basic economic CPU-diagnostic IBD).
+    const auto delay{m_matmul_block_lifecycle.IsRetainedPinProgress(token.hash)
+                         ? MATMUL_PIN_PROGRESS_RETRY_DELAY
+                         : MATMUL_BUDGET_DEFER_COOLDOWN};
+    (void)m_matmul_block_lifecycle.Retry(token, delay);
 }
 
 void PeerManagerImpl::UnmarkMatMulAsyncVerification(const uint256& hash)
@@ -4277,7 +4289,11 @@ void PeerManagerImpl::DispatchDisconnectedRetainedMatMulBody(
                     hash, "disconnected source retryable accelerator failure");
                 if (auto pin{source_pin_weak.lock()}) pin->Release();
                 if (token) {
-                    (void)m_matmul_block_lifecycle.Retry(*token, MATMUL_BUDGET_DEFER_COOLDOWN);
+                    const auto delay{
+                        m_matmul_block_lifecycle.IsRetainedPinProgress(hash)
+                            ? MATMUL_PIN_PROGRESS_RETRY_DELAY
+                            : MATMUL_BUDGET_DEFER_COOLDOWN};
+                    (void)m_matmul_block_lifecycle.Retry(*token, delay);
                 } else {
                     UnmarkMatMulAsyncVerification(hash);
                 }
@@ -4595,10 +4611,16 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     uint256 wanted{};
     uint256 fork_child_hash{};
     bool frontier_off_chain{false};
+    int tip_height{-1};
+    bool in_flight_empty{false};
     {
         LOCK(cs_main);
         const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
-        if (tip != nullptr) wanted = tip->GetBlockHash();
+        in_flight_empty = mapBlocksInFlight.empty();
+        if (tip != nullptr) {
+            wanted = tip->GetBlockHash();
+            tip_height = tip->nHeight;
+        }
         const auto frontier{m_chainman.GetSignedFrontierStatus()};
         frontier_off_chain = frontier.available && !frontier.on_active_chain;
         if (const CBlockIndex* const fork{
@@ -4641,6 +4663,49 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     const bool idle_catchup{
         m_matmul_pending_verifications.load(std::memory_order_relaxed) == 0 &&
         m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) == 0};
+    // Skipped Reserve (followed tip-child already held) logs "cap reached"
+    // and stores RC_PENDING_CAPACITY without ever incrementing the pending
+    // counter, so the capacity epoch does not move and WakeCapacityRetry
+    // never fires. Descendants then sit retained, mapBlocksInFlight is
+    // cleared, and the tip-extending body waits out the refill backstop.
+    // When nothing is in flight and CanStart would actually accept the job,
+    // submit that body now. A honestly full cap stays on the epoch wake.
+    if (in_flight_empty && tip_height >= 0) {
+        const Consensus::Params& params{m_chainparams.GetConsensus()};
+        const auto waiting{m_matmul_block_lifecycle.CapacityDeferredBodiesBelow(
+            tip_height + 2)};
+        for (const auto& item : waiting) {
+            if (item.second != tip_height + 1) continue;
+            bool extends_tip{false};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* const idx{
+                    m_chainman.m_blockman.LookupBlockIndex(item.first)};
+                const CBlockIndex* const tip{m_chainman.ActiveTip()};
+                extends_tip = idx != nullptr && tip != nullptr && idx->pprev == tip;
+            }
+            if (!extends_tip) continue;
+            const bool rc{params.IsMatMulRCFamilyActive(item.second)};
+            const uint32_t work{rc ? MatMulRCWorkUnits(params, item.second)
+                                   : MatMulEncDrWorkUnits(params, item.second)};
+            const bool slot_free{
+                rc ? CanStartMatMulRCVerification(
+                         m_matmul_rc_pending_verifications.load(
+                             std::memory_order_relaxed),
+                         work, params, item.second)
+                   : CanStartMatMulVerification(
+                         m_matmul_pending_verifications.load(
+                             std::memory_order_relaxed),
+                         work, params, item.second)};
+            if (!slot_free) continue;
+            if (m_matmul_block_lifecycle.WakeNow(item.first)) {
+                LogDebug(BCLog::NET,
+                         "Idle catch-up: retrying capacity-deferred tip-child %s "
+                         "height=%d (in_flight_global=0, verification slot free)\n",
+                         item.first.ToString(), item.second);
+            }
+        }
+    }
     const auto woken{m_matmul_block_lifecycle.WakeCapacityRetry(
         wanted,
         m_matmul_encdr_capacity_epoch.load(std::memory_order_acquire),
@@ -6153,6 +6218,44 @@ bool PeerManagerImpl::HeaderFetchSuppressedForTest(const uint256& hash) const
         hashes.erase(victim);
     }
     return true;
+}
+
+//! Release the HEADER_ONLY skip entries a tip move can make admissible. Both
+//! tip notifications used to clear the whole set. A dropped body that is on
+//! the new active chain, has no data and lies deeper than
+//! MATMUL_RC_NEAR_TIP_DEPTH below the new tip meets the same depth gate after
+//! the move (IndependentConsensusMaySpendExactReplayGpu), and
+//! IsHeaderOnlyFetchSuppressed lifts its suppression by itself once a quorum
+//! or the signed frontier covers it. Clearing such holes made the assumeutxo
+//! background walk fetch its whole window again after every block and drop
+//! every body again (#292). Keep them; release every other entry as before.
+//! The walk asks for at most BLOCK_DOWNLOAD_WINDOW heights past its tip, so
+//! only that many are kept, lowest first: a followed hole's body is admitted
+//! even unrequested, and bodies pushed from further up must not hold the set
+//! full across tip moves.
+static void ReleaseHeaderOnlySkipOnTipMove(std::set<uint256>& hashes,
+                                           const ChainstateManager& chainman,
+                                           const CBlockIndex& new_tip)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    std::vector<std::pair<int, std::set<uint256>::iterator>> kept;
+    for (auto it{hashes.begin()}; it != hashes.end();) {
+        const CBlockIndex* const index{chainman.m_blockman.LookupBlockIndex(*it)};
+        if (index != nullptr &&
+            (index->nStatus & BLOCK_HAVE_DATA) == 0 &&
+            index->nHeight < new_tip.nHeight - MATMUL_RC_NEAR_TIP_DEPTH &&
+            new_tip.GetAncestor(index->nHeight) == index) {
+            kept.emplace_back(index->nHeight, it++);
+        } else {
+            it = hashes.erase(it);
+        }
+    }
+    if (kept.size() > BLOCK_DOWNLOAD_WINDOW) {
+        const auto keep_end{kept.begin() + BLOCK_DOWNLOAD_WINDOW};
+        std::nth_element(kept.begin(), keep_end, kept.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (auto k{keep_end}; k != kept.end(); ++k) hashes.erase(k->second);
+    }
 }
 
 //! True if another unattested tip-child already has a body or ExactReplay
@@ -7848,9 +7951,10 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 }
                 // A body evicted moments ago under capacity pressure is not
                 // missing. Asking for it again makes the store evict another
-                // one to take it. The progress body is never evicted, so it
-                // is never held back here.
-                if (m_matmul_block_lifecycle.WasEvictedRecently(
+                // one to take it. A body evicted before it was the tip-child
+                // is still requested once it is the direct child of the active tip.
+                if ((activeChain == nullptr || pindex->pprev != activeChain->Tip()) &&
+                    m_matmul_block_lifecycle.WasEvictedRecently(
                         deferred_hash, MATMUL_BUDGET_DEFER_COOLDOWN)) {
                     continue;
                 }
@@ -8116,6 +8220,9 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
+    // SWAPNET-DISCONNECT
+    swapnet::PeerClosed(node.GetId());
+
     if (const auto chunk_hash{DropInboundBlockChunks(node.GetId())}) {
         LogDebug(BCLog::NET,
                  "Dropped incomplete chunked block %s on peer=%d disconnect\n",
@@ -9696,7 +9803,7 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     // Both paths update the same chain-dependent caches below. Take the
     // recursive lock here instead of requiring an undocumented caller lock.
     LOCK(::cs_main);
-    m_header_only_competing.clear();
+    ReleaseHeaderOnlySkipOnTipMove(m_header_only_competing, m_chainman, new_tip);
     m_header_only_followed_skip.clear();
     g_configured_claimed_tip_child.SetNull();
 
@@ -10127,8 +10234,9 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
 
     {
         LOCK(cs_main);
-        if (pindexNew == m_chainman.ActiveTip()) {
-            m_header_only_competing.clear();
+        if (pindexNew != nullptr && pindexNew == m_chainman.ActiveTip()) {
+            ReleaseHeaderOnlySkipOnTipMove(m_header_only_competing, m_chainman,
+                                           *pindexNew);
             m_header_only_followed_skip.clear();
             m_structural_download_skip.clear();
         }
@@ -10506,6 +10614,14 @@ std::optional<uint256> PeerManagerImpl::ExpireInboundBlockChunks(
 PeerManagerImpl::GetBlockDataOutcome PeerManagerImpl::ProcessGetBlockData(
     CNode& pfrom, Peer& peer, const CInv& inv, bool try_cs_main, bool hold_g_msgproc)
 {
+    // First perform the stateless checks:
+    // A filtered block can only ever be requested if we offer NODE_BLOOM.
+    // Check before looking up the block, to avoid an unnecessary disk read.
+    if ((inv.IsMsgFilteredBlk() || inv.IsMsgFilteredWitnessBlk()) && !(peer.m_our_services & NODE_BLOOM)) {
+        LogDebug(BCLog::NET, "filtered block request received when NODE_BLOOM service disabled, %s\n", pfrom.DisconnectMsg(fLogIPs));
+        pfrom.fDisconnect = true;
+        return GetBlockDataOutcome::Done;
+    }
     if (m_chainman.IsDiscoveryRelay()) {
         return GetBlockDataOutcome::Done;
     }
@@ -15130,9 +15246,7 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
     AssertLockHeld(g_msgproc_mutex);
     LOCK2(::cs_main, m_tx_download_mutex);
 
-    CTransactionRef porphanTx = nullptr;
-
-    while (CTransactionRef porphanTx = m_txdownloadman.GetTxToReconsider(peer.m_id)) {
+    if (CTransactionRef porphanTx = m_txdownloadman.GetTxToReconsider(peer.m_id)) {
         const MempoolAcceptResult result = m_chainman.ProcessTransaction(porphanTx);
         const TxValidationState& state = result.m_state;
         const Txid& orphanHash = porphanTx->GetHash();
@@ -15141,7 +15255,6 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             LogDebug(BCLog::TXPACKAGES, "   accepted orphan tx %s (wtxid=%s)\n", orphanHash.ToString(), orphan_wtxid.ToString());
             ProcessValidTx(peer.m_id, porphanTx, result.m_replaced_transactions);
-            return true;
         } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
             LogDebug(BCLog::TXPACKAGES, "   invalid orphan tx %s (wtxid=%s) from peer=%d. %s\n",
                 orphanHash.ToString(),
@@ -15155,8 +15268,8 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
                        state.GetResult() != TxValidationResult::TX_RESULT_UNSET)) {
                 ProcessInvalidTx(peer.m_id, porphanTx, state, /*first_time_failure=*/false);
             }
-            return true;
         }
+        return true;
     }
 
     return false;
@@ -15930,14 +16043,40 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         archive_it->second == node.GetId();
                 }
                 const auto lifecycle_now{std::chrono::steady_clock::now()};
+                bool pin_progress{false};
+                {
+                    LOCK(cs_main);
+                    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+                    const CBlockIndex* const idx{
+                        m_chainman.m_blockman.LookupBlockIndex(hash)};
+                    if (tip != nullptr && idx != nullptr) {
+                        pin_progress =
+                            m_chainman.IndexIsFollowedTipChild(tip, idx) ||
+                            block->hashPrevBlock == tip->GetBlockHash();
+                        if (!pin_progress && m_chainman.m_best_header != nullptr) {
+                            const LastCommonRootFirstResult root_first{
+                                ClampLastCommonToRootFirst(
+                                    tip, m_chainman.m_best_header, tip,
+                                    &m_chainman.ActiveChain())};
+                            pin_progress =
+                                root_first.lowest_missing != nullptr &&
+                                root_first.lowest_missing->GetBlockHash() == hash;
+                        }
+                    }
+                }
+                // The queued body is the one that extends the tip. Pin it so a
+                // retryable accelerator failure (CPU-diagnostic, lease already
+                // held) uses the short cadence instead of the 60s backstop.
+                const auto queued_retry_delay{pin_progress
+                                                  ? MATMUL_PIN_PROGRESS_RETRY_DELAY
+                                                  : MATMUL_BUDGET_DEFER_COOLDOWN};
                 if (matmul_admission.lifecycle_token &&
                     !m_matmul_block_lifecycle.Retain(
                         hash,
                         node::MatMulBlockLifecycle::RetainedBody{
                             .block = block,
                             .stored_at = lifecycle_now,
-                            .retry_not_before =
-                                lifecycle_now + MATMUL_BUDGET_DEFER_COOLDOWN,
+                            .retry_not_before = lifecycle_now + queued_retry_delay,
                             .bytes = ::GetSerializeSize(
                                 TX_WITH_WITNESS(*block)),
                             .source_peer = node.GetId(),
@@ -15951,6 +16090,8 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             .reference_height =
                                 matmul_admission.reference_height,
                             .work_units = matmul_admission.work_units,
+                            .pin_progress = pin_progress,
+                            .idle_retry_bypass_available = pin_progress,
                         },
                         lifecycle_now)) {
                     if (handing_off_header) {
@@ -16136,9 +16277,12 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             source_pin->Release();
                         }
                         if (lifecycle_token) {
+                            const auto delay{
+                                m_matmul_block_lifecycle.IsRetainedPinProgress(hash)
+                                    ? MATMUL_PIN_PROGRESS_RETRY_DELAY
+                                    : MATMUL_BUDGET_DEFER_COOLDOWN};
                             (void)m_matmul_block_lifecycle.Retry(
-                                *lifecycle_token,
-                                MATMUL_BUDGET_DEFER_COOLDOWN);
+                                *lifecycle_token, delay);
                         } else {
                             UnmarkMatMulAsyncVerification(hash);
                         }
@@ -17295,6 +17439,24 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                      "ancestor: deferring %s hash=%s height=%d peer=%d\n",
                      source, block_hash.ToString(), exact_reference_height,
                      node.GetId());
+        } else if (m_chainman.GetMatMulValidationMode() ==
+                   kernel::MatMulValidationMode::ECONOMIC) {
+            // The pending slot only bounds concurrent ExactReplay jobs. It is
+            // not an acceptance input. Economic ConnectTip does not require
+            // BLOCK_EXACT_REPLAY_VERIFIED, and ContextualCheckBlock still runs
+            // the v4 EncDr/RC predicate on the ordinary path (it does not
+            // consult this slot or the economic phase-2 switch). Retaining
+            // here leaves mapBlocksInFlight empty and the tip stuck for as
+            // long as the counter stays high or the cap cannot hold one job.
+            // CONSENSUS and TRUSTED keep RETAIN_FOR_RETRY below.
+            LogDebug(BCLog::NET,
+                     "Economic mode continuing acceptance of %s hash=%s "
+                     "height=%d from peer=%d without a MatMul "
+                     "pending-verification slot\n",
+                     source, block_hash.ToString(), exact_reference_height,
+                     node.GetId());
+            admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+            return true;
         } else {
             LogInfo(
             "Deferring peer=%d: MatMul pending verification cap reached (%s) "
@@ -17320,7 +17482,16 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         admission.rc_profile = rc_profile;
         admission.reference_height = exact_reference_height;
         admission.work_units = work;
-        admission.retry_delay = MatMulBudgetRefillRetryDelay();
+        // The direct tip-child is the only body that moves the tip. The 60s
+        // refill backstop is for band bodies that lost a full cap. A
+        // CONSENSUS or TRUSTED tip-child kept on that backstop advances at
+        // one block a minute while descendants log "cap reached" and
+        // in_flight_global stays 0. Store pins this hash; use the short cadence.
+        // Economic mode does not reach here for a slot miss: it continues
+        // ordinary acceptance above.
+        admission.retry_delay = direct_authenticated_tip_child
+                                    ? MATMUL_PIN_PROGRESS_RETRY_DELAY
+                                    : MatMulBudgetRefillRetryDelay();
         admission.retry_cause = rc_profile
             ? node::MatMulBlockLifecycle::RetryCause::RC_PENDING_CAPACITY
             : node::MatMulBlockLifecycle::RetryCause::ENCDR_PENDING_CAPACITY;
@@ -17775,6 +17946,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                      const std::chrono::microseconds time_received,
                                      const std::atomic<bool>& interruptMsgProc)
 {
+    // SWAPNET-RECEIVE
+    if (swapnet::Transport::KnownCommand(msg_type)) {
+        if (pfrom.fSuccessfullyConnected && vRecv.size() <= swapnet::Transport::MAX_FRAME) {
+            swapnet::PeerReady(pfrom.GetId());
+            swapnet::Receive(pfrom.GetId(), msg_type,
+                std::string(reinterpret_cast<const char*>(vRecv.data()), vRecv.size()));
+        }
+        return;
+    }
+
     AssertLockHeld(g_msgproc_mutex);
 
     LogDebug(BCLog::NET, "received: %s (%u bytes) peer=%d\n", SanitizeString(msg_type), vRecv.size(), pfrom.GetId());
@@ -19401,6 +19582,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         vRecv >> req;
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after getblocktxn = %u bytes", vRecv.size()));
+            return;
+        }
+
+        // No legitimate reason to send indexes empty: a getblocktxn is only
+        // needed when at least one transaction of a compact block is missing.
+        if (req.indexes.empty()) {
+            LogDebug(BCLog::NET, "getblocktxn received with no transaction indexes, %s\n", pfrom.DisconnectMsg(fLogIPs));
+            pfrom.fDisconnect = true;
             return;
         }
 
@@ -23209,7 +23398,16 @@ void PeerManagerImpl::BanHammeringPeer(CNode& pnode, Peer& peer, std::string_vie
         pnode.fDisconnect = true;
         return;
     }
-    if (m_banman) m_banman->Ban(pnode.addr);
+    // A forged MatMul proof keeps the ordinary ban. The attestation P2P reasons
+    // can be reached by any inbound peer, so they use the bounded automatic
+    // ban, which does not write the whole ban list on each ban.
+    if (m_banman) {
+        if (forged_proof) {
+            m_banman->Ban(pnode.addr);
+        } else {
+            m_banman->BanAutomatic(pnode.addr);
+        }
+    }
     m_connman.DisconnectNode(pnode.addr);
 }
 
@@ -23772,6 +23970,17 @@ bool PeerManagerImpl::SetupAddressRelay(const CNode& node, Peer& peer)
 
 bool PeerManagerImpl::SendMessages(CNode* pto)
 {
+    // SWAPNET-SEND
+    if (pto->fSuccessfullyConnected) {
+        swapnet::PeerReady(pto->GetId());
+        for (auto& frame : swapnet::Drain(pto->GetId())) {
+            CSerializedNetMsg msg;
+            msg.m_type = frame.command;
+            msg.data.assign(frame.payload.begin(), frame.payload.end());
+            m_connman.PushMessage(pto, std::move(msg));
+        }
+    }
+
     // Note: MaybeRotateEpoch() is called from the scheduler every MONITOR_INTERVAL;
     // no need to call it here on every SendMessages() invocation.
     AssertLockNotHeld(m_tx_download_mutex);

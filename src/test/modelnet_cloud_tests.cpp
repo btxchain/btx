@@ -42,14 +42,24 @@
 #include <test/modelnet_n02_idem.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/sock.h>
 
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
+
+#if !defined(_WIN32)
+#include <csignal>
+#include <exception>
+#include <stdexcept>
+#include <sys/resource.h>
+#endif
+#include <iterator>
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <string>
 #include <vector>
 
@@ -93,6 +103,36 @@ modelnet::CloudStoreConfig BaseCfg(const fs::path& creds, const std::string& end
     return c;
 }
 
+// Positive Windows fixtures use the supported ENV source. Keep BaseCfg's PATH
+// source available for permission-refusal checks; never relax product policy.
+class ScopedCloudCredentials
+{
+#ifdef WIN32
+    test::ScopedEnvVar m_credentials{"BTX_TEST_CLOUD_FIXTURE_CREDS",
+        (std::string{"aws_access_key_id="} + kAccess +
+         "\naws_secret_access_key=" + kSecret + "\n").c_str()};
+#endif
+
+public:
+    modelnet::CloudStoreConfig Config(const fs::path& creds, const std::string& endpoint = "https://acct.r2.cloudflarestorage.com") const
+    {
+        auto cfg = BaseCfg(creds, endpoint);
+#ifdef WIN32
+        cfg.s3.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_CLOUD_FIXTURE_CREDS"};
+#endif
+        return cfg;
+    }
+
+    std::string RpcRef(const fs::path& creds) const
+    {
+#ifdef WIN32
+        return "env:BTX_TEST_CLOUD_FIXTURE_CREDS";
+#else
+        return fs::PathToString(creds);
+#endif
+    }
+};
+
 void NoSecrets(const UniValue& v, const std::string& access, const std::string& secret)
 {
     const std::string dump = v.write();
@@ -109,10 +149,98 @@ modelnet::Digest48 ArtifactFill(unsigned char b)
     return d;
 }
 
+
+// Exercise the real transport and wait for peer EOF, not just a successful
+// response. The loopback server and all waits are bounded on both platforms.
+void CheckS3SocketCleanup(bool reject_tls)
+{
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    BOOST_REQUIRE(handle != INVALID_SOCKET);
+    Sock listener{handle};
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    BOOST_REQUIRE_EQUAL(listener.Bind(reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+    BOOST_REQUIRE_EQUAL(listener.Listen(1), 0);
+    socklen_t addr_len = sizeof(addr);
+    BOOST_REQUIRE_EQUAL(listener.GetSockName(reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+    BOOST_REQUIRE(listener.SetNonBlocking());
+    const std::vector<unsigned char> payload{'b', 't', 'x', 0, 255};
+    auto server = std::async(std::launch::async, [&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+        auto ready = [&](const Sock& sock) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+            Sock::Event occurred{0};
+            return remaining.count() > 0 && sock.Wait(remaining, Sock::RECV, &occurred) && (occurred & Sock::RECV);
+        };
+        if (!ready(listener)) return false;
+        auto peer = listener.Accept(nullptr, nullptr);
+        if (!peer || !peer->SetNonBlocking()) return false;
+        std::string request;
+        char buf[4096];
+        if (!reject_tls) {
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                if (!ready(*peer)) return false;
+                const auto n = peer->Recv(buf, sizeof(buf), 0);
+                if (n <= 0) return false;
+                request.append(buf, n);
+                if (request.size() > 65536) return false;
+            }
+            if (request.find("GET /btx-models/loopback-object HTTP/1.1\r\n") != 0) return false;
+        }
+        CThreadInterrupt interrupt;
+        std::string response = reject_tls ? "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n" :
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n";
+        if (!reject_tls) response.append(reinterpret_cast<const char*>(payload.data()), payload.size());
+        peer->SendComplete(Span<const unsigned char>{reinterpret_cast<const unsigned char*>(response.data()), response.size()}, std::chrono::seconds{5}, interrupt);
+        // Keep the server socket open: only the client's cleanup can yield EOF.
+        size_t drained = 0;
+        while (ready(*peer)) {
+            const auto n = peer->Recv(buf, sizeof(buf), 0);
+            if (n == 0) return true;
+            if (n < 0) {
+#ifdef WIN32
+                const bool reset = WSAGetLastError() == WSAECONNRESET;
+#else
+                const bool reset = errno == ECONNRESET;
+#endif
+                // Failed TLS can close with unread plaintext. A reset still
+                // proves peer teardown; successful HTTP must yield clean EOF.
+                return reject_tls && reset;
+            }
+            if ((drained += n) > 65536) return false;
+        }
+        return false;
+    });
+    test::ScopedEnvVar credentials{"BTX_TEST_S3_SOCKET_CREDS", "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\n"};
+    modelnet::S3ClientConfig cfg;
+    cfg.endpoint = std::string{reject_tls ? "https://127.0.0.1:" : "http://127.0.0.1:"} + std::to_string(ntohs(addr.sin_port));
+    cfg.bucket = "btx-models";
+    cfg.region = "auto";
+    cfg.use_fake = false;
+    cfg.allow_http_loopback = !reject_tls;
+    cfg.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_S3_SOCKET_CREDS"};
+    modelnet::S3Client client;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(client.Init(cfg, err), err);
+    BOOST_CHECK(!client.UsesFake());
+    std::vector<unsigned char> got;
+    const bool ok = client.Get("loopback-object", got, err);
+    if (reject_tls) {
+        BOOST_CHECK(!ok);
+        BOOST_CHECK_EQUAL(err, "https handshake failed");
+    } else {
+        BOOST_CHECK_MESSAGE(ok, err);
+        BOOST_CHECK(got == payload);
+    }
+    BOOST_CHECK(server.get());
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(cloud_01_sigv4_put_get_fakes3)
 {
+    const ScopedCloudCredentials credentials;
     modelnet::SigV4Request req;
     req.method = "GET";
     req.canonical_uri = "/test.txt";
@@ -133,7 +261,7 @@ BOOST_AUTO_TEST_CASE(cloud_01_sigv4_put_get_fakes3)
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3Client client;
     std::string err;
-    BOOST_REQUIRE(client.Init(BaseCfg(creds).s3, err));
+    BOOST_REQUIRE_MESSAGE(client.Init(credentials.Config(creds).s3, err), err);
     const std::vector<unsigned char> body{'b', 't', 'x'};
     BOOST_REQUIRE(client.Put("v1/artifacts/aa/files/0", body, err));
     std::vector<unsigned char> got;
@@ -147,11 +275,12 @@ BOOST_AUTO_TEST_CASE(cloud_01_sigv4_put_get_fakes3)
 
 BOOST_AUTO_TEST_CASE(cloud_02_head_range_path_style)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-02-creds";
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3Client client;
     std::string err;
-    BOOST_REQUIRE(client.Init(BaseCfg(creds).s3, err));
+    BOOST_REQUIRE_MESSAGE(client.Init(credentials.Config(creds).s3, err), err);
     std::vector<unsigned char> body(32, 0x11);
     BOOST_REQUIRE(client.Put("obj", body, err));
     uint64_t size = 0;
@@ -178,20 +307,26 @@ BOOST_AUTO_TEST_CASE(cloud_03_creds_0600_env_never_in_json)
     const fs::path good = m_path_root / "cloud-03-good";
     WriteCreds(good, kAccess, kSecret, true);
     cfg.creds.value = fs::PathToString(good);
-    BOOST_REQUIRE(client.Init(cfg, err));
+#ifdef WIN32
+    // Windows attributes cannot express owner-only POSIX file permissions.
+    BOOST_CHECK(!client.Init(cfg, err));
+    BOOST_CHECK_EQUAL(err, "credential file must be mode 0600");
+#else
+    BOOST_REQUIRE_MESSAGE(client.Init(cfg, err), err);
     NoSecrets(client.HealthJson(), kAccess, kSecret);
     NoSecrets(client.ConfigJson(), kAccess, kSecret);
+#endif
 
     const char* env_name = "BTX_TEST_CLOUD_CREDS_C";
     const std::string body = std::string("aws_access_key_id=") + kAccess + "\naws_secret_access_key=" + kSecret + "\n";
-    BOOST_REQUIRE_EQUAL(test::SetEnv(env_name, body.c_str()), 0);
+    test::ScopedEnvVar credentials{env_name, body.c_str()};
     modelnet::S3Client env_client;
     auto env_cfg = cfg;
     env_cfg.creds.kind = modelnet::CredentialRefKind::ENV;
     env_cfg.creds.value = env_name;
-    BOOST_REQUIRE(env_client.Init(env_cfg, err));
+    BOOST_REQUIRE_MESSAGE(env_client.Init(env_cfg, err), err);
     NoSecrets(env_client.HealthJson(), kAccess, kSecret);
-    test::UnsetEnv(env_name);
+    NoSecrets(env_client.ConfigJson(), kAccess, kSecret);
 }
 
 BOOST_AUTO_TEST_CASE(cloud_04_reject_file_unix_gopher)
@@ -233,11 +368,12 @@ BOOST_AUTO_TEST_CASE(cloud_06_redact_cloud_secrets)
 
 BOOST_AUTO_TEST_CASE(cloud_07_cloud_object_store_source_files)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-07-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     BOOST_CHECK_EQUAL(modelnet::CloudObjectLayoutName(store.Layout()), "SOURCE_FILES");
     const auto art = ArtifactFill(0xab);
     const fs::path src = m_path_root / "cloud-07.bin";
@@ -256,9 +392,10 @@ BOOST_AUTO_TEST_CASE(cloud_07_cloud_object_store_source_files)
 
 BOOST_AUTO_TEST_CASE(cloud_07b_cloud_object_store_piece_objects)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-07b-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds, "https://minio.example.test");
+    auto cfg = credentials.Config(creds, "https://minio.example.test");
     cfg.provider = modelnet::CloudProvider::MINIO;
     cfg.layout = modelnet::CloudObjectLayout::PIECE_OBJECTS;
     modelnet::S3PieceStore store{cfg};
@@ -285,6 +422,7 @@ BOOST_AUTO_TEST_CASE(cloud_07b_cloud_object_store_piece_objects)
 
 BOOST_AUTO_TEST_CASE(cloud_07c_piece_objects_hydrate_incomplete)
 {
+    const ScopedCloudCredentials credentials;
     using namespace modelnet;
     const fs::path dir = m_path_root / "cloud-07c";
     fs::create_directories(dir);
@@ -298,7 +436,7 @@ BOOST_AUTO_TEST_CASE(cloud_07c_piece_objects_hydrate_incomplete)
     cfg.pushKV("prefix", "v1");
     cfg.pushKV("provider", "MINIO");
     cfg.pushKV("layout", "PIECE_OBJECTS");
-    cfg.pushKV("credential_ref", fs::PathToString(creds));
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
     cfg.pushKV("use_fake", true);
     cfg.pushKV("idempotency_key", "cloud-07c-set");
     UniValue params(UniValue::VARR);
@@ -374,11 +512,12 @@ BOOST_AUTO_TEST_CASE(cloud_08_layout_not_in_identity)
 
 BOOST_AUTO_TEST_CASE(cloud_09_presign_get_exact_object)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-09-creds";
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3Client client;
     std::string err;
-    BOOST_REQUIRE(client.Init(BaseCfg(creds).s3, err));
+    BOOST_REQUIRE_MESSAGE(client.Init(credentials.Config(creds).s3, err), err);
     const std::vector<unsigned char> body{'z'};
     BOOST_REQUIRE(client.Put("exact/object", body, err));
     std::string url;
@@ -444,11 +583,12 @@ BOOST_AUTO_TEST_CASE(cloud_10_stream_put_over_8mib)
 
 BOOST_AUTO_TEST_CASE(cloud_11_health_json_counters)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-11-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x33);
     const fs::path src = m_path_root / "cloud-11.bin";
     {
@@ -475,13 +615,14 @@ BOOST_AUTO_TEST_CASE(cloud_11_health_json_counters)
 
 BOOST_AUTO_TEST_CASE(cloud_12_budget_refuse_when_exhausted)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-12-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds);
+    auto cfg = credentials.Config(creds);
     cfg.budget_gets = 1;
     modelnet::S3PieceStore store{cfg};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x44);
     const fs::path src = m_path_root / "cloud-12.bin";
     {
@@ -497,9 +638,10 @@ BOOST_AUTO_TEST_CASE(cloud_12_budget_refuse_when_exhausted)
 
 BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-12b-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds);
+    auto cfg = credentials.Config(creds);
     cfg.budget_gets_per_day = 1;
     cfg.budget_state_path = m_path_root / "cloud-12b-budget.json";
     const int64_t day0 = 86400 * 20000 + 3600;
@@ -507,7 +649,7 @@ BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
         modelnet::S3PieceStore store{cfg};
         store.SetClockForTests(day0);
         std::string err;
-        BOOST_REQUIRE(store.Init(err));
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
         const auto art = ArtifactFill(0x45);
         const fs::path src = m_path_root / "cloud-12b.bin";
         {
@@ -530,7 +672,7 @@ BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
         modelnet::S3PieceStore store{cfg};
         store.SetClockForTests(day0 + 86400);
         std::string err;
-        BOOST_REQUIRE(store.Init(err));
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
         const auto art = ArtifactFill(0x45);
         std::vector<unsigned char> got;
         BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
@@ -538,13 +680,264 @@ BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
     }
 }
 
+// Insert before fullcloud_01 in modelnet_cloud_tests.cpp. POSIX-only fault fixture.
+// Requires <csignal>, <stdexcept>, <sys/resource.h> on POSIX.
+#if !defined(_WIN32)
+BOOST_AUTO_TEST_CASE(cloud_12c_startup_write_failure_preserves_budget)
+{
+    const ScopedCloudCredentials credentials;
+    const auto creds = m_path_root / "cloud-12c-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    auto cfg = credentials.Config(creds);
+    cfg.budget_gets_per_day = 1;
+    cfg.budget_state_path = m_path_root / "cloud-12c-budget.json";
+    const int64_t day0 = 86400 * 20000 + 3600;
+    const auto art = ArtifactFill(0x46);
+    const auto src = m_path_root / "cloud-12c.bin";
+    { std::ofstream out(src, std::ios::binary); out << "daycap"; }
+    const auto read_budget = [&] {
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const auto read_json = [&] {
+        UniValue v;
+        BOOST_REQUIRE(v.read(read_budget()) && v.isObject());
+        return v;
+    };
+    const auto put = [&](modelnet::S3PieceStore& store) {
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.PutSourceFile(art, 0, src, 6, 1, err), err);
+    };
+    const auto refuse = [&](modelnet::S3PieceStore& store) {
+        std::string err;
+        std::vector<unsigned char> got;
+        const bool ok = store.GetSourceFile(art, 0, got, err);
+        BOOST_CHECK_MESSAGE(!ok && err.find("budget") != std::string::npos,
+                            "expected budget refusal; actual ok=" << ok << " err=" << err);
+    };
+    const auto fetch = [&](modelnet::S3PieceStore& store) {
+        std::string err;
+        std::vector<unsigned char> got;
+        BOOST_REQUIRE_MESSAGE(store.GetSourceFile(art, 0, got, err), err);
+        BOOST_CHECK_EQUAL(std::string(got.begin(), got.end()), "daycap");
+    };
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); fetch(store); refuse(store);
+    }
+    const std::string committed = read_budget();
+    BOOST_REQUIRE(committed.size() > 32);
+    const auto seeded = read_json();
+    for (const auto* k : {"day_gets", "month_gets", "used_gets"})
+        BOOST_REQUIRE_EQUAL(seeded[k].getInt<int64_t>(), 1);
+    for (const auto* k : {"day_bytes", "month_bytes", "used_bytes"})
+        BOOST_REQUIRE_EQUAL(seeded[k].getInt<int64_t>(), 6);
+    {
+        // Each Init creates a fresh FakeS3. Re-PUT prevents missing data from
+        // masquerading as a preserved budget on the next GET.
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); refuse(store);
+    }
+    bool init_ok = true, ready = true;
+    std::string startup_error;
+    {
+        // Run only this case in its own test process. The soft limit is restored
+        // before any Boost reporting or observation output. Half the file, not
+        // size-1: dropping only the trailing newline still leaves valid JSON.
+        class ScopedFileLimit {
+            struct rlimit saved{};
+            using Handler = void (*)(int);
+            Handler previous{SIG_ERR};
+        public:
+            explicit ScopedFileLimit(rlim_t bytes) {
+                if (getrlimit(RLIMIT_FSIZE, &saved) != 0)
+                    throw std::runtime_error("getrlimit failed");
+                previous = std::signal(SIGXFSZ, SIG_IGN);
+                if (previous == SIG_ERR) throw std::runtime_error("signal failed");
+                struct rlimit limited = saved;
+                limited.rlim_cur = bytes;
+                if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+                    std::signal(SIGXFSZ, previous);
+                    throw std::runtime_error("setrlimit failed");
+                }
+            }
+            ~ScopedFileLimit() {
+                // An unrecoverable restore must not let the remaining test run
+                // under a hidden process-wide limit.
+                if (setrlimit(RLIMIT_FSIZE, &saved) != 0) std::terminate();
+                std::signal(SIGXFSZ, previous);
+            }
+        } limit(committed.size() / 2);
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        init_ok = store.Init(startup_error);
+        ready = store.IsReady();
+    }
+    const auto after_fault = read_budget();
+    BOOST_TEST_MESSAGE("startup result=" << init_ok << " ready=" << ready
+                       << " err=" << startup_error << " old_bytes=" << committed.size()
+                       << " after_bytes=" << after_fault.size());
+    BOOST_CHECK(!init_ok);
+    BOOST_CHECK(!ready);
+    BOOST_CHECK(!startup_error.empty());
+    BOOST_CHECK_EQUAL(after_fault, committed);
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); refuse(store);
+    }
+    const auto reopened = read_json();
+    for (const auto* k : {"day_gets", "month_gets", "used_gets", "day_bytes", "month_bytes", "used_bytes"})
+        BOOST_CHECK_EQUAL(reopened[k].getInt<int64_t>(), seeded[k].getInt<int64_t>());
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0 + 86400);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); fetch(store); refuse(store);
+    }
+    const auto rolled = read_json();
+    BOOST_CHECK_EQUAL(rolled["day_utc"].getInt<int64_t>(), seeded["day_utc"].getInt<int64_t>() + 1);
+    BOOST_CHECK_EQUAL(rolled["month_utc"].getInt<int64_t>(), seeded["month_utc"].getInt<int64_t>());
+    BOOST_CHECK_EQUAL(rolled["day_gets"].getInt<int64_t>(), 1);
+    BOOST_CHECK_EQUAL(rolled["day_bytes"].getInt<int64_t>(), 6);
+    BOOST_CHECK_EQUAL(rolled["month_gets"].getInt<int64_t>(), 2);
+    BOOST_CHECK_EQUAL(rolled["used_gets"].getInt<int64_t>(), 2);
+    BOOST_CHECK_EQUAL(rolled["month_bytes"].getInt<int64_t>(), 12);
+    BOOST_CHECK_EQUAL(rolled["used_bytes"].getInt<int64_t>(), 12);
+    cfg.budget_state_path.clear();
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(day0);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        put(store); fetch(store); refuse(store);
+        store.SetClockForTests(day0 + 86400);
+        fetch(store); refuse(store);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_12d_post_read_save_failure_retains_charge)
+{
+    const ScopedCloudCredentials credentials;
+    const auto creds = m_path_root / "cloud-12d-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    auto cfg = credentials.Config(creds);
+    cfg.budget_gets_per_day = 1;
+    cfg.budget_state_path = m_path_root / "cloud-12d-budget.json";
+    modelnet::S3PieceStore store{cfg};
+    store.SetClockForTests(86400LL * 20000 + 3600);
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+    const auto src = m_path_root / "cloud-12d.bin";
+    { std::ofstream out(src, std::ios::binary); out << "daycap"; }
+    const auto art = ArtifactFill(0x47);
+    BOOST_REQUIRE(store.PutSourceFile(art, 0, src, 6, 1, err));
+    const auto read = [&] {
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const auto committed = read();
+    struct rlimit saved{};
+    BOOST_REQUIRE_EQUAL(getrlimit(RLIMIT_FSIZE, &saved), 0);
+    const auto handler = std::signal(SIGXFSZ, SIG_IGN);
+    BOOST_REQUIRE(handler != SIG_ERR);
+    auto limited = saved;
+    limited.rlim_cur = committed.size() / 2;
+    if (setrlimit(RLIMIT_FSIZE, &limited) != 0) {
+        std::signal(SIGXFSZ, handler);
+        BOOST_FAIL("setrlimit failed");
+    }
+    std::vector<unsigned char> got;
+    bool ok;
+    try { ok = store.GetSourceFile(art, 0, got, err); }
+    catch (...) {
+        if (setrlimit(RLIMIT_FSIZE, &saved) != 0) std::terminate();
+        std::signal(SIGXFSZ, handler);
+        throw;
+    }
+    if (setrlimit(RLIMIT_FSIZE, &saved) != 0) std::terminate();
+    std::signal(SIGXFSZ, handler);
+    BOOST_CHECK(!ok);
+    BOOST_CHECK(got.empty());
+    BOOST_CHECK(err.find("budget") != std::string::npos);
+    BOOST_CHECK_EQUAL(read(), committed);
+    const auto health = store.HealthJson();
+    BOOST_CHECK_EQUAL(health["budget_used_gets"].getInt<int64_t>(), 1);
+    BOOST_CHECK_EQUAL(health["origin_bytes"].getInt<int64_t>(), 6);
+    BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
+    BOOST_CHECK(err.find("budget") != std::string::npos);
+}
+#endif
+
+// A budget file that exists but does not parse is not a fresh budget. Starting
+// from zero would admit reads past a cap that was already used up, and the
+// zeros written at Init would replace the damaged file for good.
+BOOST_AUTO_TEST_CASE(cloud_12e_damaged_budget_state_refuses_init)
+{
+    const ScopedCloudCredentials credentials;
+    const auto creds = m_path_root / "cloud-12e-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    auto cfg = credentials.Config(creds);
+    cfg.budget_gets_per_day = 1;
+    cfg.budget_state_path = m_path_root / "cloud-12e-budget.json";
+    const int64_t now = 86400LL * 20000 + 3600;
+    const auto art = ArtifactFill(0x49);
+    {
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(now);
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+        const auto src = m_path_root / "cloud-12e.bin";
+        { std::ofstream out(src, std::ios::binary); out << "daycap"; }
+        BOOST_REQUIRE(store.PutSourceFile(art, 0, src, 6, 1, err));
+        std::vector<unsigned char> got;
+        BOOST_REQUIRE_MESSAGE(store.GetSourceFile(art, 0, got, err), err);
+        BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
+    }
+    std::string committed;
+    {
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        committed.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    BOOST_REQUIRE_GT(committed.size(), 2U);
+    const std::string damaged = committed.substr(0, committed.size() / 2);
+    for (const std::string& text : {damaged, std::string{"[]\n"}, std::string{"{\"day_gets\":\"1\"}\n"},
+                                    std::string{"{\"used_gets\":-1}\n"}, std::string{"{\"day_bytes\":1.5}\n"}}) {
+        { std::ofstream out(cfg.budget_state_path, std::ios::binary | std::ios::trunc); out << text; }
+        modelnet::S3PieceStore store{cfg};
+        store.SetClockForTests(now);
+        std::string err;
+        BOOST_CHECK(!store.Init(err));
+        BOOST_CHECK_MESSAGE(err.find("budget") != std::string::npos, err);
+        BOOST_CHECK(!store.IsReady());
+        std::ifstream in(cfg.budget_state_path, std::ios::binary);
+        BOOST_CHECK_EQUAL(std::string(std::istreambuf_iterator<char>(in), {}), text);
+    }
+    // A missing file is a fresh budget.
+    fs::remove(cfg.budget_state_path);
+    modelnet::S3PieceStore store{cfg};
+    store.SetClockForTests(now);
+    std::string err;
+    BOOST_CHECK_MESSAGE(store.Init(err), err);
+}
+
 BOOST_AUTO_TEST_CASE(fullcloud_01_102400_pieces_one_source_object)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "fc-01-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x55);
     const fs::path src = m_path_root / "fc-01.bin";
     const std::string payload = "tiny-logical-400gib";
@@ -565,11 +958,12 @@ BOOST_AUTO_TEST_CASE(fullcloud_01_102400_pieces_one_source_object)
 
 BOOST_AUTO_TEST_CASE(fullcloud_02_object_bytes_equal_fileentry)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "fc-02-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3PieceStore store{BaseCfg(creds)};
+    modelnet::S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x66);
     const fs::path src = m_path_root / "fc-02.bin";
     const std::string payload = "FileEntry-bytes-exact";
@@ -687,14 +1081,15 @@ BOOST_AUTO_TEST_CASE(fullcloud_13_estimated_gets)
 
 BOOST_AUTO_TEST_CASE(fullcloud_20_budget_remaining_in_health)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "fc-20-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    auto cfg = BaseCfg(creds);
+    auto cfg = credentials.Config(creds);
     cfg.budget_gets = 10;
     cfg.budget_origin_bytes = 1000;
     modelnet::S3PieceStore store{cfg};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const auto art = ArtifactFill(0x88);
     const fs::path src = m_path_root / "fc-20.bin";
     {
@@ -726,12 +1121,13 @@ BOOST_AUTO_TEST_CASE(fullcloud_23_source_files_object_key)
 
 BOOST_AUTO_TEST_CASE(fullcloud_05_fakes3_stream_hydrates_one_get)
 {
+    const ScopedCloudCredentials credentials;
     using namespace modelnet;
     const fs::path creds = m_path_root / "cloud-stream-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    S3PieceStore store{BaseCfg(creds)};
+    S3PieceStore store{credentials.Config(creds)};
     std::string err;
-    BOOST_REQUIRE(store.Init(err));
+    BOOST_REQUIRE_MESSAGE(store.Init(err), err);
     const fs::path src = m_path_root / "stream.bin";
     std::vector<unsigned char> file(256, 0x5a);
     file[0] = 0x11;
@@ -769,6 +1165,7 @@ BOOST_AUTO_TEST_CASE(fullcloud_05_fakes3_stream_hydrates_one_get)
 
 BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
 {
+    const ScopedCloudCredentials credentials;
     using namespace modelnet;
     const fs::path dir = m_path_root / "cloud-rpc";
     fs::create_directories(dir);
@@ -782,7 +1179,7 @@ BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
     cfg.pushKV("prefix", "v1");
     cfg.pushKV("provider", "AUTO");
     cfg.pushKV("layout", "AUTO");
-    cfg.pushKV("credential_ref", fs::PathToString(creds));
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
     cfg.pushKV("use_fake", true);
     cfg.pushKV("idempotency_key", "cloud-rpc-set");
     UniValue params(UniValue::VARR);
@@ -872,6 +1269,70 @@ BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
     NoSecrets(probe, kAccess, kSecret);
 }
 
+BOOST_AUTO_TEST_CASE(cloud_rpc_damaged_budget_reports_init_error)
+{
+    // The helper loads the stored origin at the start of every call. When the
+    // budget file is damaged, the origin must stay off and say why, in
+    // setcloudstorage and in getcloudstorageinfo, and the other calls must
+    // keep working.
+    const ScopedCloudCredentials credentials;
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "cloud-rpc-damaged";
+    fs::create_directories(dir);
+    const fs::path creds = dir / "creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    ModelCatalog cat{dir, 8 << 20};
+    const auto call = [&](const std::string& method, const UniValue& params, UniValue& result) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        std::string code, err;
+        const bool ok = DispatchHelperRpc(cat, req, result, code, err);
+        BOOST_CHECK_MESSAGE(ok, method + " " + code + " " + err);
+        return ok;
+    };
+    UniValue cfg(UniValue::VOBJ);
+    cfg.pushKV("endpoint", "https://acct.r2.cloudflarestorage.com");
+    cfg.pushKV("bucket", "btx-models");
+    cfg.pushKV("prefix", "v1");
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
+    cfg.pushKV("use_fake", true);
+    cfg.pushKV("idempotency_key", "cloud-rpc-damaged-1");
+    UniValue params(UniValue::VARR);
+    params.push_back(cfg);
+    UniValue result;
+    BOOST_REQUIRE(call("setcloudstorage", params, result));
+    BOOST_REQUIRE(result["applied"].get_bool());
+
+    fs::path budget;
+    for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+        if (entry.path().filename() == "cloud-budget.json") budget = entry.path();
+    }
+    BOOST_REQUIRE(!budget.empty());
+    {
+        std::ofstream out(budget, std::ios::binary | std::ios::trunc);
+        out << "{\"used_gets\":-1}\n";
+    }
+    cfg.pushKV("idempotency_key", "cloud-rpc-damaged-2");
+    UniValue again(UniValue::VARR);
+    again.push_back(cfg);
+    if (call("setcloudstorage", again, result)) {
+        BOOST_CHECK(!result["applied"].get_bool());
+        BOOST_CHECK(result["init_error"].get_str().find("cloud budget state") != std::string::npos);
+    }
+
+    UniValue info;
+    if (call("getcloudstorageinfo", UniValue(UniValue::VARR), info)) {
+        BOOST_CHECK(!info["configured"].get_bool());
+        BOOST_CHECK(info.exists("init_error") &&
+                    info["init_error"].get_str().find("cloud budget state") != std::string::npos);
+        NoSecrets(info, kAccess, kSecret);
+    }
+    // Every helper call loads the stored origin first: the others keep working.
+    UniValue listed;
+    BOOST_CHECK(call("listmodels", UniValue(UniValue::VARR), listed));
+}
+
 BOOST_AUTO_TEST_CASE(cloud_https_transport_available)
 {
     BOOST_CHECK(modelnet::S3HttpsTransportAvailable());
@@ -879,6 +1340,7 @@ BOOST_AUTO_TEST_CASE(cloud_https_transport_available)
 
 BOOST_AUTO_TEST_CASE(cloud_https_use_fake_false_error_is_not_stubbed)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-https-creds";
     WriteCreds(creds, kAccess, kSecret, true);
     modelnet::S3ClientConfig cfg;
@@ -886,8 +1348,7 @@ BOOST_AUTO_TEST_CASE(cloud_https_use_fake_false_error_is_not_stubbed)
     cfg.bucket = "btx-models";
     cfg.region = "auto";
     cfg.use_fake = false;
-    cfg.creds.kind = modelnet::CredentialRefKind::PATH;
-    cfg.creds.value = fs::PathToString(creds);
+    cfg.creds = credentials.Config(creds).s3.creds;
     modelnet::S3Client client;
     std::string err;
     BOOST_REQUIRE_MESSAGE(client.Init(cfg, err), err);
@@ -935,9 +1396,10 @@ BOOST_AUTO_TEST_CASE(cloud_https_refuses_redirect)
 
 BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
 {
+    const ScopedCloudCredentials credentials;
     const fs::path creds = m_path_root / "cloud-https-not-stub-creds";
     WriteCreds(creds, kAccess, kSecret, true);
-    modelnet::S3ClientConfig cfg = BaseCfg(creds, "http://127.0.0.1:1").s3;
+    modelnet::S3ClientConfig cfg = credentials.Config(creds, "http://127.0.0.1:1").s3;
     cfg.use_fake = false;
     cfg.allow_http_loopback = true;
     modelnet::S3Client client;
@@ -948,6 +1410,45 @@ BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
     BOOST_CHECK(!client.Put("k", body, err));
     BOOST_CHECK(err.find("stubbed") == std::string::npos);
     BOOST_CHECK(err.find("OpenSSL HTTPS transport is stubbed") == std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_fixture_credentials_restore_environment)
+{
+#ifdef WIN32
+    const char* name = "BTX_TEST_CLOUD_FIXTURE_CREDS";
+    test::ScopedEnvVar previous{name, "preexisting-fixture-value"};
+    {
+        const ScopedCloudCredentials credentials;
+        const auto cfg = credentials.Config(fs::PathFromString("unused-credential-file"));
+        BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::ENV);
+        BOOST_REQUIRE(std::getenv(name));
+        BOOST_CHECK(std::string{std::getenv(name)}.find(kSecret) != std::string::npos);
+    }
+    BOOST_REQUIRE(std::getenv(name));
+    BOOST_CHECK_EQUAL(std::getenv(name), "preexisting-fixture-value");
+    previous.Set(nullptr);
+    {
+        const ScopedCloudCredentials credentials;
+        BOOST_REQUIRE(std::getenv(name));
+    }
+    BOOST_CHECK(std::getenv(name) == nullptr);
+#else
+    const ScopedCloudCredentials credentials;
+    const auto path = fs::PathFromString("unchanged-posix-credential-file");
+    const auto cfg = credentials.Config(path);
+    BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::PATH);
+    BOOST_CHECK_EQUAL(cfg.s3.creds.value, fs::PathToString(path));
+#endif
+}
+
+BOOST_AUTO_TEST_CASE(cloud_real_http_socket_cleanup)
+{
+    CheckS3SocketCleanup(false);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_tls_handshake_socket_cleanup)
+{
+    CheckS3SocketCleanup(true);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

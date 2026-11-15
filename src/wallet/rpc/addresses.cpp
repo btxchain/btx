@@ -240,10 +240,9 @@ RPCHelpMan setlabel()
 
     const std::string label{LabelFromValue(request.params[1])};
 
-    if (pwallet->IsMine(dest)) {
-        pwallet->SetAddressBook(dest, label, AddressPurpose::RECEIVE);
-    } else {
-        pwallet->SetAddressBook(dest, label, AddressPurpose::SEND);
+    const auto purpose = pwallet->IsMine(dest) ? AddressPurpose::RECEIVE : AddressPurpose::SEND;
+    if (!pwallet->SetAddressBook(dest, label, purpose)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Failed to save address label");
     }
 
     return UniValue::VNULL;

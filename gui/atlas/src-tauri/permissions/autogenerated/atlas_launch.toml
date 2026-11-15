@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-atlas-launch"
+description = "Enables the atlas_launch command without any pre-configured scope."
+commands.allow = ["atlas_launch"]
+
+[[permission]]
+identifier = "deny-atlas-launch"
+description = "Denies the atlas_launch command without any pre-configured scope."
+commands.deny = ["atlas_launch"]

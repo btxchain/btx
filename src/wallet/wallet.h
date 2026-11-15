@@ -703,6 +703,11 @@ public:
 
     /** Automatically shield mature coinbase outputs into the shielded pool. */
     void MaybeAutoShieldCoinbase() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /** After an unlock, load the shielded keys and notes that a locked load or
+     *  scan left out, and go over the mempool again when that happened. Used by
+     *  walletpassphrase and by the wallet interface (Qt). Returns true when the
+     *  shielded state was rehydrated. */
+    bool RehydrateShieldedStateAfterUnlock() EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     bool LoadPendingBridgeOperation(const BridgePendingOperation& operation) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void MaybeRecoverPendingBridgeOperations();
 
@@ -793,7 +798,7 @@ public:
     void blockConnected(ChainstateRole role, const interfaces::BlockInfo& block) override;
     void blockDisconnected(const interfaces::BlockInfo& block) override;
     void updatedBlockTip() override;
-    int64_t RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool update);
+    int64_t RescanFromTime(int64_t startTime, const WalletRescanReserver& reserver, bool update, bool* interrupted = nullptr);
 
     struct ScanResult {
         enum { SUCCESS, FAILURE, USER_ABORT } status = SUCCESS;

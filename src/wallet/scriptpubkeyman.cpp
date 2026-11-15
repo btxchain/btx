@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <future>
+#include <limits>
 #include <optional>
 #include <thread>
 
@@ -2478,8 +2479,14 @@ bool DescriptorScriptPubKeyMan::TopUpWithDB(WalletBatch& batch, unsigned int siz
         target_size = m_keypool_size;
     }
 
-    // Calculate the new range_end
-    int32_t new_range_end = std::max(m_wallet_descriptor.next_index + (int32_t)target_size, m_wallet_descriptor.range_end);
+    // Calculate the new range_end. next_index can be as high as 2^31-1 on an imported
+    // descriptor and target_size is user controlled, so compute the end in a wider type.
+    // The range is left unchanged if that end does not fit in the int32_t it is stored in.
+    const int64_t target_end{int64_t{m_wallet_descriptor.next_index} + target_size};
+    int32_t new_range_end = m_wallet_descriptor.range_end;
+    if (target_end <= std::numeric_limits<int32_t>::max()) {
+        new_range_end = std::max(static_cast<int32_t>(target_end), m_wallet_descriptor.range_end);
+    }
 
     // If the descriptor is not ranged, we actually just want to fill the first cache item
     if (!m_wallet_descriptor.descriptor->IsRange()) {
@@ -2909,6 +2916,18 @@ bool DescriptorScriptPubKeyMan::UnlockPQSeeds(const CKeyingMaterial& master_key)
     if (!plaintext_seed && !plaintext_map) return true;
     LogPrintf("Encrypting PQ descriptor seeds. An older wallet build that only reads plaintext seed records can open this wallet but cannot spend from it.\n");
     return WritePQSeeds(batch, &master_key);
+}
+
+void DescriptorScriptPubKeyMan::LockPQSeeds()
+{
+    LOCK(cs_desc_man);
+    m_map_signing_providers_private.clear();
+    m_map_signing_providers_private_locked.clear();
+    // Wipe the seeds only when UnlockPQSeeds() can decrypt them again. An older wallet
+    // has only a plaintext record until its first unlock, so its seeds stay loaded.
+    if (m_wallet_descriptor.descriptor && (m_crypted_pq_seed || m_crypted_pq_seed_map)) {
+        m_wallet_descriptor.descriptor->WipePQSeeds();
+    }
 }
 
 bool DescriptorScriptPubKeyMan::IsHDEnabled() const

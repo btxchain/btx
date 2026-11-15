@@ -34,6 +34,8 @@ createpsbt
 | `testmempoolaccept` | Coordinator | Second validation: policy + consensus before broadcast. |
 | `sendrawtransaction` | Coordinator | Only after accept. |
 
+A package that is still being signed does not reserve its inputs: the next `createexchangebatch`, `createconsolidationtx` or `walletcreatefundedpsbt` call can select them again, and the two transactions then conflict. Pass `lock_unspents: true` (`lockUnspents` for `walletcreatefundedpsbt`) to lock the package's `selected_utxos`, or lock them yourself with `lockunspent false`. Broadcasting the package spends and unlocks them; for a package you drop, call `lockunspent true` on its `selected_utxos`. These locks live in memory and a restart clears them, so after a restart lock the inputs of packages still in flight again (`lockunspent false <inputs> true` writes the lock to the wallet).
+
 Do not skip `testmempoolaccept`. A corrupt ML-DSA signature, wrong prevout, wrong network, or non-canonical witness must fail before send.
 
 Existing `walletprocesspsbt` + `<cmd> signtransaction` remains valid for command adapters. BCP/1 prefers `SignDigest` so raw-signing venues can attach without parsing a full PSBT on day one.

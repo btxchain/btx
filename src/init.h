@@ -7,11 +7,14 @@
 #define BITCOIN_INIT_H
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 
 class CChainParams;
+struct bilingual_str;
 
 //! Default value for -daemon option
 static constexpr bool DEFAULT_DAEMON = false;
@@ -131,5 +134,15 @@ MatMulRCRuntimeReprobeResult RunUnavailableMatMulRCRuntimeReprobe(
     bool strict_device_ready,
     const std::string& provider,
     const std::function<std::pair<bool, std::string>(const std::string&)>& probe);
+
+/** Text of the persistent MATMUL_RC_NEXT_BLOCK_UNVERIFIABLE warning. Once the
+ * active tip is at or past nMatMulRCHeight - 1 it names the tip height, the
+ * block that cannot be connected, and the two configurations that let the
+ * node advance. tip_height is nullopt when the tip is not known. */
+bilingual_str MatMulRCNextBlockUnverifiableWarning(
+    int32_t rc_activation_height,
+    std::optional<int> tip_height,
+    const std::string& provider,
+    const std::string& reason);
 
 #endif // BITCOIN_INIT_H

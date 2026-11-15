@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -279,6 +280,38 @@ BOOST_AUTO_TEST_CASE(watch_free_download_queues_not_spend)
     BOOST_CHECK_EQUAL(acts[0].object_id, "mid-9");
 }
 
+BOOST_AUTO_TEST_CASE(watch_actions_queue_is_bounded)
+{
+    using namespace modelnet;
+    // A journal that keeps 4 events: the action queue keeps at most 4 actions too,
+    // dropping the oldest, and says how many it dropped.
+    const fs::path dir = m_path_root / "watch-actions-bounded";
+    BindModelEventLayer(dir, 4);
+    ModelCatalog cat{dir, 8 << 20};
+    ModelWatch w;
+    w.kind = WatchKind::PUBLISHER;
+    w.publisher_id = "busy-publisher";
+    w.action = ActionPolicy::KEEP;
+    std::string err, code;
+    BOOST_REQUIRE(BoundModelWatchStore()->PutWatch(w, err));
+    for (int i = 0; i < 7; ++i) {
+        ObserveResult observed;
+        BOOST_REQUIRE(JournalObserve(MakeSigned("busy-publisher", "busy-model-" + std::to_string(i)), observed, err));
+    }
+    const std::vector<QueuedWatchAction> queued = BoundModelWatchStore()->PeekActions();
+    BOOST_REQUIRE_EQUAL(queued.size(), 4U);
+    for (size_t i = 0; i < queued.size(); ++i) {
+        BOOST_CHECK_EQUAL(queued[i].object_id, "busy-model-" + std::to_string(i + 3));
+    }
+    UniValue peek(UniValue::VOBJ);
+    peek.pushKV("drain", false);
+    UniValue result;
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("getmodelwatchactions", peek), result, code, err), err);
+    BOOST_CHECK_EQUAL(result["actions"].size(), 4U);
+    BOOST_REQUIRE(result.exists("dropped_actions"));
+    BOOST_CHECK_EQUAL(result["dropped_actions"].getInt<int64_t>(), 3);
+}
+
 BOOST_AUTO_TEST_CASE(watch_helper_peek_does_not_execute_or_drain)
 {
     using namespace modelnet;
@@ -315,6 +348,59 @@ BOOST_AUTO_TEST_CASE(watch_helper_peek_does_not_execute_or_drain)
     BOOST_CHECK(result["actions"][0].exists("getmodel_error"));
     BOOST_CHECK(BoundModelWatchStore()->PeekActions().empty());
     AssertZeroSpendNoWallet(result);
+}
+
+BOOST_AUTO_TEST_CASE(unwatch_drops_the_actions_the_watch_queued)
+{
+    // unwatchmodel removed the watch but not the actions it had already queued,
+    // so a later drain still ran FREE_DOWNLOAD for a watch the user had dropped.
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "watch-unwatch-queued";
+    BindModelEventLayer(dir, 32);
+    ModelCatalog cat{dir, 8 << 20};
+    ModelWatch dropped;
+    dropped.kind = WatchKind::PUBLISHER;
+    dropped.publisher_id = "unwatch-publisher";
+    dropped.action = ActionPolicy::FREE_DOWNLOAD;
+    ModelWatch kept;
+    kept.kind = WatchKind::PUBLISHER;
+    kept.publisher_id = "kept-publisher";
+    kept.action = ActionPolicy::FREE_DOWNLOAD;
+    std::string err, code;
+    BOOST_REQUIRE(BoundModelWatchStore()->PutWatch(dropped, err));
+    BOOST_REQUIRE(BoundModelWatchStore()->PutWatch(kept, err));
+    ObserveResult observed;
+    BOOST_REQUIRE(JournalObserve(MakeSigned("unwatch-publisher", "dropped-model"), observed, err));
+    BOOST_REQUIRE(JournalObserve(MakeSigned("kept-publisher", "kept-model"), observed, err));
+    BOOST_REQUIRE_EQUAL(BoundModelWatchStore()->PeekActions().size(), 2U);
+
+    UniValue un(UniValue::VOBJ);
+    un.pushKV("watch_id", dropped.watch_id);
+    UniValue result;
+    const fs::path blocked_save = dir / "watches.json.tmp";
+    BOOST_REQUIRE(fs::create_directory(blocked_save));
+    BOOST_CHECK(!DispatchHelperRpc(cat, HelperReq("unwatchmodel", un), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO_ERROR");
+    ModelWatch stored;
+    BOOST_CHECK(BoundModelWatchStore()->GetWatch(dropped.watch_id, stored));
+    BOOST_CHECK_EQUAL(BoundModelWatchStore()->PeekActions().size(), 2U);
+    BOOST_CHECK(ModelWatchStore{dir}.GetWatch(dropped.watch_id, stored));
+    BOOST_REQUIRE(fs::remove(blocked_save));
+
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("unwatchmodel", un), result, code, err), err);
+    BOOST_REQUIRE(result["removed"].get_bool());
+    ModelWatchStore reopened(dir);
+    BOOST_CHECK(!reopened.GetWatch(dropped.watch_id, stored));
+    BOOST_CHECK(reopened.GetWatch(kept.watch_id, stored));
+
+    const auto queued = BoundModelWatchStore()->PeekActions();
+    BOOST_REQUIRE_EQUAL(queued.size(), 1U);
+    BOOST_CHECK_EQUAL(queued[0].object_id, "kept-model");
+    UniValue drain(UniValue::VOBJ);
+    drain.pushKV("drain", true);
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("getmodelwatchactions", drain), result, code, err), err);
+    BOOST_REQUIRE_EQUAL(result["actions"].size(), 1U);
+    BOOST_CHECK_EQUAL(result["actions"][0]["object_id"].get_str(), "kept-model");
 }
 
 BOOST_AUTO_TEST_CASE(watch_persist_restart)
@@ -364,6 +450,54 @@ BOOST_AUTO_TEST_CASE(watch_longpoll_timeout)
     UniValue r2;
     BOOST_REQUIRE(DispatchModelWatchRpc("waitformodelevent", RpcParamsObj(p), r2, code, err, &stop));
     BOOST_CHECK(r2["interrupted"].get_bool());
+}
+
+BOOST_AUTO_TEST_CASE(events_cursor_continues_after_the_last_event_returned)
+{
+    using namespace modelnet;
+    // getmodelevents and waitformodelevent return at most a page of events and a
+    // cursor to continue from (doc/modelnet/events.md). Paging through must reach
+    // every event, also when there are more than a page.
+    const fs::path dir = m_path_root / "events-cursor";
+    BindModelEventLayer(dir, 1000);
+    std::string code, err;
+    for (int i = 0; i < 250; ++i) {
+        ObserveResult observed;
+        BOOST_REQUIRE(JournalObserve(MakeSigned("cursor-publisher", "cursor-model-" + std::to_string(i)), observed, err));
+    }
+    const auto page = [&](const char* method, const std::string& cursor, int limit) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("cursor", cursor);
+        if (limit > 0) p.pushKV("limit", limit);
+        p.pushKV("timeout_ms", 0);
+        UniValue result;
+        BOOST_REQUIRE_MESSAGE(DispatchModelWatchRpc(method, RpcParamsObj(p), result, code, err, nullptr), err);
+        return result;
+    };
+
+    std::set<std::string> seen;
+    std::string cursor = "0";
+    for (int pages = 0; pages < 10; ++pages) {
+        const UniValue r = page("getmodelevents", cursor, 0);
+        if (r["events"].empty()) break;
+        for (const UniValue& ev : r["events"].getValues()) seen.insert(ev["object_id"].get_str());
+        cursor = r["cursor"].get_str();
+    }
+    BOOST_CHECK_EQUAL(seen.size(), 250U);
+    BOOST_CHECK_EQUAL(cursor, "250");
+
+    UniValue first = page("getmodelevents", "0", 0);
+    BOOST_CHECK_EQUAL(first["events"].size(), 100U);
+    BOOST_CHECK_EQUAL(first["cursor"].get_str(), "100");
+    BOOST_CHECK_EQUAL(page("getmodelevents", "0", 10)["cursor"].get_str(), "10");
+    const UniValue waited = page("waitformodelevent", "200", 0);
+    BOOST_CHECK_EQUAL(waited["events"].size(), 50U);
+    BOOST_CHECK_EQUAL(waited["cursor"].get_str(), "250");
+    BOOST_CHECK_EQUAL(page("waitformodelevent", "0", 0)["cursor"].get_str(), "100");
+
+    // An empty page keeps the cursor; one past the journal comes back to it.
+    BOOST_CHECK_EQUAL(page("getmodelevents", "250", 0)["cursor"].get_str(), "250");
+    BOOST_CHECK_EQUAL(page("getmodelevents", "9999", 0)["cursor"].get_str(), "250");
 }
 
 BOOST_AUTO_TEST_CASE(watch_rpc_roundtrip)
@@ -825,6 +959,61 @@ BOOST_AUTO_TEST_CASE(remaining_watch_collection_query_get_unwatch_helper)
     un2.pushKV("watch_id", model_wid);
     BOOST_REQUIRE_MESSAGE(DispatchModelWatchRpc("unwatchmodel", RpcParamsObj(un2), result, code, err, nullptr), err);
     BOOST_CHECK(result["removed"].get_bool());
+}
+
+BOOST_AUTO_TEST_CASE(mirror_keep_latest_keeps_one_watch_per_selector)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "mirror-keep-latest";
+    BindModelEventLayer(dir, 32);
+    ModelCatalog cat{dir, 8 << 20};
+    std::string code, err;
+    const auto set_mirror = [&](int keep_latest, const std::string& key) {
+        UniValue arg(UniValue::VOBJ);
+        arg.pushKV("publisher_id", "mirror-publisher");
+        arg.pushKV("keep_latest", keep_latest);
+        arg.pushKV("idempotency_key", key);
+        UniValue result;
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, HelperReq("setmodelmirror", arg), result, code, err), err);
+        return result;
+    };
+    const auto keep_watches = [&]() {
+        std::vector<ModelWatch> out;
+        for (const ModelWatch& w : BoundModelWatchStore()->List()) {
+            if (w.action == ActionPolicy::KEEP && w.publisher_id == "mirror-publisher") out.push_back(w);
+        }
+        return out;
+    };
+
+    // The KEEP watch setmodelmirror adds is named in its result.
+    const UniValue first = set_mirror(3, "mirror-keep-a");
+    std::vector<ModelWatch> watches = keep_watches();
+    BOOST_REQUIRE_EQUAL(watches.size(), 1U);
+    BOOST_CHECK_EQUAL(watches[0].keep_n, 3);
+    BOOST_REQUIRE(first.exists("watch_id"));
+    BOOST_CHECK_EQUAL(first["watch_id"].get_str(), watches[0].watch_id);
+
+    // Setting the same selector again replaces that watch instead of adding one.
+    const UniValue second = set_mirror(5, "mirror-keep-b");
+    watches = keep_watches();
+    BOOST_REQUIRE_EQUAL(watches.size(), 1U);
+    BOOST_CHECK_EQUAL(watches[0].keep_n, 5);
+    BOOST_REQUIRE(second.exists("watch_id"));
+    BOOST_CHECK_EQUAL(second["watch_id"].get_str(), watches[0].watch_id);
+
+    // So one event queues one KEEP action.
+    ObserveResult observed;
+    BOOST_REQUIRE(JournalObserve(MakeSigned("mirror-publisher", "not-a-model-digest"), observed, err));
+    size_t keep_actions{0};
+    for (const QueuedWatchAction& action : BoundModelWatchStore()->PeekActions()) {
+        if (action.action == ActionPolicy::KEEP) ++keep_actions;
+    }
+    BOOST_CHECK_EQUAL(keep_actions, 1U);
+
+    // keep_latest 0 ends the mirror's KEEP watch.
+    const UniValue cleared = set_mirror(0, "mirror-keep-c");
+    BOOST_CHECK(keep_watches().empty());
+    BOOST_CHECK(!cleared.exists("watch_id"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

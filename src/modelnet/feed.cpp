@@ -12,6 +12,9 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <tuple>
+#include <utility>
 
 namespace modelnet {
 
@@ -101,8 +104,21 @@ std::string MakeFeedEventId(FeedEventType t, const Digest48& model_id, const std
     return h.Hex();
 }
 
+void FeedStore::Reset()
+{
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_by_id.clear();
+    m_seq = 0;
+    m_cap = FEED_CAP_DEFAULT;
+    m_ttl_ms = FEED_TTL_DEFAULT_MS;
+    m_last_refresh = 0;
+    m_publisher_models.clear();
+    m_path.clear();
+}
+
 bool FeedStore::Note(FeedEvent ev, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     Expire(now_ms);
     if (ev.event_id.empty()) {
         ev.event_id = MakeFeedEventId(ev.event_type, ev.model_id, ev.release_id, ev.rec.metadata_sequence, "");
@@ -114,15 +130,14 @@ bool FeedStore::Note(FeedEvent ev, int64_t now_ms)
         return true;
     }
     if (m_by_id.size() >= m_cap) {
-        Expire(now_ms + m_ttl_ms); // force ttl path
-        if (m_by_id.size() >= m_cap) {
-            // drop oldest first_seen
-            auto oldest = m_by_id.begin();
-            for (auto i = m_by_id.begin(); i != m_by_id.end(); ++i) {
-                if (i->second.first_seen_at < oldest->second.first_seen_at) oldest = i;
-            }
-            if (oldest != m_by_id.end()) m_by_id.erase(oldest);
+        // Expire(now_ms) above already dropped the expired events. Make room
+        // by dropping the event first seen longest ago. (Expiring at
+        // now_ms + m_ttl_ms here dropped every event observed before now.)
+        auto oldest = m_by_id.begin();
+        for (auto i = m_by_id.begin(); i != m_by_id.end(); ++i) {
+            if (i->second.first_seen_at < oldest->second.first_seen_at) oldest = i;
         }
+        if (oldest != m_by_id.end()) m_by_id.erase(oldest);
     }
     if (ev.first_seen_at == 0) ev.first_seen_at = now_ms;
     if (ev.observed_at == 0) ev.observed_at = now_ms;
@@ -131,12 +146,38 @@ bool FeedStore::Note(FeedEvent ev, int64_t now_ms)
     return true;
 }
 
+namespace {
+FeedEventType SearchRecordEventType(const ModelSearchRecord& r)
+{
+    if (!r.release_id.empty() && r.metadata_sequence <= 1) return FeedEventType::RELEASE_CAMPAIGN_CREATED;
+    return r.metadata_sequence > 1 ? FeedEventType::MODEL_METADATA_UPDATED : FeedEventType::MODEL_PUBLISHED;
+}
+} // namespace
+
+bool FeedStore::RefreshSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Expire first, as Note does: the re-read is often the only feed write on a
+    // quiet node, and records that left the index must still age out.
+    Expire(now_ms);
+    if (r.tombstone || r.model_id.IsNull()) return false;
+    const std::string id = MakeFeedEventId(SearchRecordEventType(r), r.model_id, r.release_id, r.metadata_sequence, "");
+    const auto it = m_by_id.find(id);
+    if (it != m_by_id.end()) {
+        // Still in the index: keep it current (it expires by observed_at), but
+        // do not count the re-read as another source.
+        it->second.observed_at = now_ms;
+        return true;
+    }
+    return NoteSearchRecord(r, now_ms);
+}
+
 bool FeedStore::NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (r.tombstone || r.model_id.IsNull()) return false;
     FeedEvent ev;
-    ev.event_type = r.metadata_sequence > 1 ? FeedEventType::MODEL_METADATA_UPDATED : FeedEventType::MODEL_PUBLISHED;
-    if (!r.release_id.empty() && r.metadata_sequence <= 1) ev.event_type = FeedEventType::RELEASE_CAMPAIGN_CREATED;
+    ev.event_type = SearchRecordEventType(r);
     ev.model_id = r.model_id;
     ev.release_id = r.release_id;
     ev.published_at = r.published_at;
@@ -169,6 +210,7 @@ bool FeedStore::NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 
 bool FeedStore::NoteCampaign(const ReleaseCampaign& c, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     FeedEvent ev;
     ev.event_type = FeedEventType::RELEASE_CAMPAIGN_CREATED;
     ev.model_id = c.model_id;
@@ -182,6 +224,7 @@ bool FeedStore::NoteCampaign(const ReleaseCampaign& c, int64_t now_ms)
 
 bool FeedStore::NoteUnlock(const Digest48& model_id, const std::string& release_id, const ModelSearchRecord& r, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     FeedEvent ev;
     ev.event_type = FeedEventType::MODEL_UNLOCKED;
     ev.model_id = model_id;
@@ -196,28 +239,47 @@ bool FeedStore::NoteUnlock(const Digest48& model_id, const std::string& release_
     return Note(std::move(secret), now_ms);
 }
 
+namespace {
+//! The type and id of the feed event for c's current funding step. Dedupe per
+//! campaign + frozen/secret transition only, not every pledge tick.
+std::pair<FeedEventType, std::string> FundingStep(const ReleaseCampaign& c)
+{
+    if (c.target_atoms > 0 && c.funded_atoms >= c.target_atoms) {
+        return {FeedEventType::RELEASE_FUNDED,
+                MakeFeedEventId(FeedEventType::RELEASE_FUNDED, c.model_id, c.release_id.Hex(), 0, "funded")};
+    }
+    const std::string extra = std::string(c.frozen ? "1" : "0") + (c.secret_disclosed ? "1" : "0") +
+                               std::to_string(c.pledged_atoms / std::max<int64_t>(1, c.target_atoms / 20));
+    return {FeedEventType::RELEASE_FUNDING_CHANGED,
+            MakeFeedEventId(FeedEventType::RELEASE_FUNDING_CHANGED, c.model_id, c.release_id.Hex(), 0, extra)};
+}
+} // namespace
+
+bool FeedStore::NotedFundingEvent(const ReleaseCampaign& c, FeedEvent& out) const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    const auto it = m_by_id.find(FundingStep(c).second);
+    if (it == m_by_id.end()) return false;
+    out = it->second;
+    return true;
+}
+
 bool FeedStore::NoteFundingChanged(const ReleaseCampaign& c, int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     FeedEvent ev;
-    ev.event_type = FeedEventType::RELEASE_FUNDING_CHANGED;
+    std::tie(ev.event_type, ev.event_id) = FundingStep(c);
     ev.model_id = c.model_id;
     ev.release_id = c.release_id.Hex();
     ev.campaign = c;
     ev.has_campaign = true;
     ev.published_at = now_ms;
-    // Dedupe per campaign + frozen/secret transition only, not every pledge tick:
-    const std::string extra = std::string(c.frozen ? "1" : "0") + (c.secret_disclosed ? "1" : "0") +
-                               std::to_string(c.pledged_atoms / std::max<int64_t>(1, c.target_atoms / 20));
-    ev.event_id = MakeFeedEventId(ev.event_type, c.model_id, c.release_id.Hex(), 0, extra);
-    if (c.target_atoms > 0 && c.funded_atoms >= c.target_atoms) {
-        ev.event_type = FeedEventType::RELEASE_FUNDED;
-        ev.event_id = MakeFeedEventId(FeedEventType::RELEASE_FUNDED, c.model_id, c.release_id.Hex(), 0, "funded");
-    }
     return Note(std::move(ev), now_ms);
 }
 
 void FeedStore::Expire(int64_t now_ms)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_ttl_ms <= 0) return;
     for (auto it = m_by_id.begin(); it != m_by_id.end();) {
         if (it->second.observed_at > 0 && now_ms - it->second.observed_at > m_ttl_ms) {
@@ -230,6 +292,7 @@ void FeedStore::Expire(int64_t now_ms)
 
 std::vector<FeedEvent> FeedStore::Query(const FeedQuery& q, int64_t now_ms, std::string& next_cursor) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     std::vector<FeedEvent> all;
     all.reserve(m_by_id.size());
     for (const auto& kv : m_by_id) {
@@ -325,6 +388,7 @@ std::vector<FeedEvent> FeedStore::Query(const FeedQuery& q, int64_t now_ms, std:
 
 UniValue FeedStore::StatusJson(int public_models, int campaigns, int unreleased, int unlocked, const FeedCoverage& cov) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", FEED_SCHEMA_VERSION);
     o.pushKV("feed_sequence", static_cast<int64_t>(m_seq));
@@ -345,6 +409,7 @@ UniValue FeedStore::StatusJson(int public_models, int campaigns, int unreleased,
 
 UniValue FeedStore::EventToJson(const FeedEvent& ev, const ModelEconomyEntry* entry) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     UniValue o(UniValue::VOBJ);
     o.pushKV("event_id", ev.event_id);
     o.pushKV("event_type", FeedEventTypeName(ev.event_type));
@@ -365,6 +430,7 @@ UniValue FeedStore::EventToJson(const FeedEvent& ev, const ModelEconomyEntry* en
 
 bool FeedStore::Save(std::string& err) const
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_path.empty()) return true;
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", FEED_SCHEMA_VERSION);
@@ -388,12 +454,28 @@ bool FeedStore::Save(std::string& err) const
     }
     o.pushKV("events", arr);
     fs::create_directories(m_path.parent_path());
-    std::ofstream out(m_path, std::ios::trunc);
-    if (!out) {
+    // Write a temp file, check it after close and rename it over feed.json, so
+    // a write that a full disk cuts short keeps the previous file.
+    const fs::path tmp = fs::PathFromString(fs::PathToString(m_path) + ".tmp");
+    std::error_code ec;
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (out) {
+            out << o.write() << "\n";
+            out.close();
+        }
+        if (!out) {
+            fs::remove(tmp, ec);
+            err = "feed.json write";
+            return false;
+        }
+    }
+    fs::rename(tmp, m_path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
         err = "feed.json write";
         return false;
     }
-    out << o.write() << "\n";
     return true;
 }
 
@@ -499,6 +581,7 @@ bool FeedEventFromJson(const UniValue& ej, FeedEvent& ev, std::string& err)
 
 bool FeedStore::Load(int64_t now_ms, std::string& err)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_path.empty() || !fs::exists(m_path)) return true;
     m_by_id.clear();
     m_seq = 0;

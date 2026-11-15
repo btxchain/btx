@@ -1,2 +1,4 @@
 src/clientversion.cpp export-subst
 src/matmul/matmul_v4_rc_production_golden_manifest.data text eol=lf
+contrib/atlas/neuronlab/**/*.py text eol=lf
+contrib/atlas/neuronlab/**/*.json text eol=lf

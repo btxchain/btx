@@ -98,6 +98,10 @@ RPCHelpMan sweeptoself()
             if (pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
                 throw JSONRPCError(RPC_WALLET_ERROR, "Error: Private keys are disabled for this wallet");
             }
+            // A locked wallet holds no PQ seeds, so AvailableCoins() would
+            // leave out its own P2MR coins and the sweep would report "No
+            // spendable UTXOs". It always signs, so ask for the unlock first.
+            EnsureWalletIsUnlocked(*pwallet);
 
             pwallet->BlockUntilSyncedToCurrentChain();
 

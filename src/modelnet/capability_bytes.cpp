@@ -10,6 +10,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -510,17 +511,36 @@ bool MaterializeCompleteFile(const std::vector<std::vector<unsigned char>>& piec
         err = "fsync";
         return false;
     }
-    ::close(fd);
-    const fs::path gen_path = fs::PathFromString(dest + ".gen");
-    std::ofstream gf(gen_path);
-    if (!gf.good()) {
+    if (::close(fd) != 0) {
+        ::unlink(dest.c_str());
+        err_code = "IO_ERROR";
+        err = "close payload";
+        return false;
+    }
+    const std::string sidecar = dest + ".gen";
+    const std::string metadata = GenerationHex(gen) + "\n" + std::to_string(pieces.size()) + "\n";
+    const int sidecar_fd = ::open(sidecar.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
+    if (sidecar_fd < 0) {
         ::unlink(dest.c_str());
         err_code = "IO_ERROR";
         err = "generation sidecar";
         return false;
     }
-    gf << GenerationHex(gen) << "\n" << pieces.size() << "\n";
-    gf.close();
+    size_t written = 0;
+    while (written < metadata.size()) {
+        const ssize_t count = ::write(sidecar_fd, metadata.data() + written, metadata.size() - written);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        written += static_cast<size_t>(count);
+    }
+    const bool closed = ::close(sidecar_fd) == 0;
+    if (written != metadata.size() || !closed) {
+        ::unlink(sidecar.c_str());
+        ::unlink(dest.c_str());
+        err_code = "IO_ERROR";
+        err = "generation sidecar";
+        return false;
+    }
     return true;
 }
 

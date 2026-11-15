@@ -28,6 +28,11 @@
 #include <string>
 #include <vector>
 
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#endif
+
 BOOST_FIXTURE_TEST_SUITE(modelnet_ahp_chan_tests, BasicTestingSetup)
 
 namespace {
@@ -230,6 +235,53 @@ BOOST_AUTO_TEST_CASE(ahp_chan_07_restart_high_water)
     BOOST_REQUIRE_MESSAGE(modelnet::LoadChannelWatch(path.utf8string(), loaded, code, err), err);
     BOOST_CHECK_EQUAL(loaded["sequence"].get_str(), "10");
     BOOST_CHECK(modelnet::ChannelRollback(loaded["sequence"].get_str(), "9"));
+
+#ifndef WIN32
+    const UniValue next = Statement("11", Hex96('a'), "1000", "5000", ids);
+    struct rlimit previous_limit {};
+    BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &previous_limit) == 0);
+    struct rlimit short_limit{previous_limit};
+    short_limit.rlim_cur = 8;
+    const auto previous_handler = std::signal(SIGXFSZ, SIG_IGN);
+    BOOST_REQUIRE(previous_handler != SIG_ERR);
+    const int limit_status = ::setrlimit(RLIMIT_FSIZE, &short_limit);
+    bool wrote = false;
+    if (limit_status == 0) {
+        try {
+            wrote = modelnet::SaveChannelWatch(path.utf8string(), next, code, err);
+        } catch (...) {
+            ::setrlimit(RLIMIT_FSIZE, &previous_limit);
+            std::signal(SIGXFSZ, previous_handler);
+            throw;
+        }
+    }
+    const int restore_status = ::setrlimit(RLIMIT_FSIZE, &previous_limit);
+    std::signal(SIGXFSZ, previous_handler);
+    BOOST_REQUIRE(limit_status == 0);
+    BOOST_REQUIRE(restore_status == 0);
+    BOOST_CHECK(!wrote);
+    BOOST_CHECK_EQUAL(code, "IO_ERROR");
+    BOOST_REQUIRE(modelnet::LoadChannelWatch(path.utf8string(), loaded, code, err));
+    BOOST_CHECK_EQUAL(loaded["sequence"].get_str(), "10");
+    BOOST_REQUIRE(modelnet::SaveChannelWatch(path.utf8string(), next, code, err));
+    BOOST_REQUIRE(modelnet::LoadChannelWatch(path.utf8string(), loaded, code, err));
+    BOOST_CHECK_EQUAL(loaded["sequence"].get_str(), "11");
+#endif
+
+    const fs::path truncated = m_path_root / "channel-watch-truncated.json";
+    {
+        std::ofstream partial(truncated, std::ios::binary);
+        const std::string body = accepted.write();
+        partial << body.substr(0, body.size() / 2);
+        partial.close();
+        BOOST_REQUIRE(partial);
+    }
+    BOOST_CHECK(!modelnet::LoadChannelWatch(truncated.utf8string(), loaded, code, err));
+    BOOST_CHECK_EQUAL(code, "NONCANONICAL_PAYLOAD");
+    BOOST_CHECK(!loaded.exists("sequence"));
+    BOOST_REQUIRE(modelnet::SaveChannelWatch(truncated.utf8string(), accepted, code, err));
+    BOOST_REQUIRE(modelnet::LoadChannelWatch(truncated.utf8string(), loaded, code, err));
+    BOOST_CHECK_EQUAL(loaded["sequence"].get_str(), "10");
 }
 
 BOOST_AUTO_TEST_CASE(ahp_chan_08_lease_hold)

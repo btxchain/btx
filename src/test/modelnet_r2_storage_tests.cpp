@@ -8,7 +8,7 @@
 // R2S-01  r2s_01_layout_identity_invariant_across_key_families
 // R2S-03  r2s_02_multipart_part_size_planner_vs_client            (tripwire)
 // R2S-01  r2s_03_source_files_cold_get_estimate_is_per_object     (tripwire)
-// R2S-04  r2s_04_over_budget_get_transfers_bytes_and_records_none (tripwire)
+// R2S-04  r2s_04_over_budget_get_is_recorded_and_stops_retries    (fixed)
 // R2S-05  r2s_05_put_path_is_not_metered                          (tripwire)
 // R2S-11  r2s_06_non_aws_access_key_ids_are_masked_by_field_name  (fixed)
 // §1.1    r2s_07_minio_is_config_only_not_run
@@ -35,6 +35,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -88,6 +89,27 @@ modelnet::CloudStoreConfig BaseCfg(const fs::path& creds)
     c.layout = modelnet::CloudObjectLayout::AUTO;
     return c;
 }
+
+// Positive Windows fixtures use the supported ENV source. Keep BaseCfg's PATH
+// source available for permission-refusal checks; never relax product policy.
+class ScopedR2Credentials
+{
+#ifdef WIN32
+    test::ScopedEnvVar m_credentials{"BTX_TEST_R2_FIXTURE_CREDS",
+        (std::string{"aws_access_key_id="} + kFixtureAccess +
+         "\naws_secret_access_key=" + kFixtureSecret + "\n").c_str()};
+#endif
+
+public:
+    modelnet::CloudStoreConfig Config(const fs::path& creds) const
+    {
+        auto cfg = BaseCfg(creds);
+#ifdef WIN32
+        cfg.s3.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_R2_FIXTURE_CREDS"};
+#endif
+        return cfg;
+    }
+};
 
 modelnet::Digest48 ArtifactFill(unsigned char b)
 {
@@ -278,15 +300,18 @@ BOOST_AUTO_TEST_CASE(r2s_03_source_files_cold_get_estimate_is_per_object)
     BOOST_CHECK_EQUAL(streamed / MultipartPartCount(OBJECT_LAYOUT_EXAMPLE_BYTES, kCloudStreamChunkBytes), 128U);
 }
 
-// R2S-04 tripwire. S3PieceStore::GetObject prechecks only the GET count, then
-// transfers, then charges. A response larger than the remaining byte budget is
-// fetched (and billed by the provider), discarded, and never recorded — so a
-// retrying caller burns real egress while the ledger stays frozen.
-BOOST_AUTO_TEST_CASE(r2s_04_over_budget_get_transfers_bytes_and_records_none)
+// R2S-04 (fixed). A whole-object GET learns the object size only from the
+// response, so a response larger than the remaining byte budget is still
+// fetched (and billed by the provider) once. The store used to discard it
+// without recording it, so a retrying caller burned real egress while the
+// ledger stayed frozen. The read is now charged and refused, and every later
+// GET, including a presigned one, is refused before it reaches the backend.
+BOOST_AUTO_TEST_CASE(r2s_04_over_budget_get_is_recorded_and_stops_retries)
 {
+    const ScopedR2Credentials credentials;
     const fs::path creds = m_path_root / "r2s-04-creds";
     WriteCreds(creds, kFixtureAccess, kFixtureSecret);
-    modelnet::CloudStoreConfig cfg = BaseCfg(creds);
+    modelnet::CloudStoreConfig cfg = credentials.Config(creds);
     cfg.budget_origin_bytes = 8;
     modelnet::S3PieceStore store{cfg};
     std::string err;
@@ -302,29 +327,48 @@ BOOST_AUTO_TEST_CASE(r2s_04_over_budget_get_transfers_bytes_and_records_none)
     BOOST_REQUIRE_MESSAGE(store.PutSourceFile(art, 0, src, payload.size(), 1, err), err);
     BOOST_REQUIRE(store.FakeForTests());
     const uint64_t gets_before = store.FakeForTests()->GetCount();
+    const uint64_t ranges_before = store.FakeForTests()->RangeCount();
 
+    // A range GET states its length, so a range larger than the remaining
+    // budget is refused before it reaches the backend.
     std::vector<unsigned char> got;
+    BOOST_CHECK(!store.GetObject(store.SourceFileKey(art, 0), 0, 16, got, err));
+    BOOST_CHECK(err.find("budget") != std::string::npos);
+    BOOST_CHECK_EQUAL(store.FakeForTests()->RangeCount(), ranges_before);
+
     BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
     BOOST_CHECK(err.find("budget") != std::string::npos);
     BOOST_CHECK(got.empty());
 
-    // The object really was fetched from the backend before being discarded.
+    // The object really was fetched from the backend before being discarded,
+    // and that transfer is now recorded as exposure.
     BOOST_CHECK_EQUAL(store.FakeForTests()->GetCount(), gets_before + 1);
-
-    // ...yet nothing about that transfer is recorded as exposure.
     const UniValue h = store.HealthJson();
-    BOOST_CHECK_EQUAL(h["origin_bytes"].getInt<int64_t>(), 0);
-    BOOST_CHECK_EQUAL(h["budget_used_gets"].getInt<int64_t>(), 0);
-    BOOST_CHECK_EQUAL(h["budget_bytes_remaining"].getInt<int64_t>(), 8);
+    BOOST_CHECK_EQUAL(h["origin_bytes"].getInt<int64_t>(), 64);
+    BOOST_CHECK_EQUAL(h["budget_used_gets"].getInt<int64_t>(), 1);
+    BOOST_CHECK_EQUAL(h["budget_bytes_remaining"].getInt<int64_t>(), 0);
+
+    // Retries no longer reach the backend.
+    for (int i = 0; i < 3; ++i) {
+        BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
+        BOOST_CHECK(err.find("budget") != std::string::npos);
+    }
+    std::string url;
+    BOOST_REQUIRE_MESSAGE(store.PresignSourceFileGet(art, 0, 60, url, err), err);
+    BOOST_CHECK(!store.FetchPresignedGet(url, got, err));
+    BOOST_CHECK(err.find("budget") != std::string::npos);
+    BOOST_CHECK_EQUAL(store.FakeForTests()->GetCount(), gets_before + 1);
+    BOOST_CHECK_EQUAL(store.HealthJson()["budget_used_gets"].getInt<int64_t>(), 1);
 }
 
 // R2S-05 tripwire. Uploads never touch the ledger, so an exhausted GET budget
 // does not bound Class A operations or written bytes.
 BOOST_AUTO_TEST_CASE(r2s_05_put_path_is_not_metered)
 {
+    const ScopedR2Credentials credentials;
     const fs::path creds = m_path_root / "r2s-05-creds";
     WriteCreds(creds, kFixtureAccess, kFixtureSecret);
-    modelnet::CloudStoreConfig cfg = BaseCfg(creds);
+    modelnet::CloudStoreConfig cfg = credentials.Config(creds);
     cfg.budget_gets = 0;
     cfg.budget_origin_bytes = 0;
     modelnet::S3PieceStore store{cfg};
@@ -421,13 +465,20 @@ BOOST_AUTO_TEST_CASE(r2s_07_minio_is_config_only_not_run)
 // setcloudstorage, so this shape is only constructible in-process.
 BOOST_AUTO_TEST_CASE(r2s_08_write_creds_break_fake_signing)
 {
+    const ScopedR2Credentials credentials;
     const fs::path read_creds = m_path_root / "r2s-08-read-creds";
     const fs::path write_creds = m_path_root / "r2s-08-write-creds";
     WriteCreds(read_creds, kFixtureAccess, kFixtureSecret);
     WriteCreds(write_creds, "AKIAR2LANEWRITEKEY00", "r2-lane-write-secret-not-real");
 
-    modelnet::S3ClientConfig cfg = BaseCfg(read_creds).s3;
+    modelnet::S3ClientConfig cfg = credentials.Config(read_creds).s3;
     cfg.write_creds = modelnet::CredentialRef{modelnet::CredentialRefKind::PATH, fs::PathToString(write_creds)};
+#ifdef WIN32
+    // Keep the deliberately different upload key distinct from the read key.
+    test::ScopedEnvVar write_credentials{"BTX_TEST_R2_WRITE_FIXTURE_CREDS",
+        "aws_access_key_id=AKIAR2LANEWRITEKEY00\naws_secret_access_key=r2-lane-write-secret-not-real\n"};
+    cfg.write_creds = modelnet::CredentialRef{modelnet::CredentialRefKind::ENV, "BTX_TEST_R2_WRITE_FIXTURE_CREDS"};
+#endif
 
     modelnet::S3Client client;
     std::string err;
@@ -445,9 +496,10 @@ BOOST_AUTO_TEST_CASE(r2s_08_write_creds_break_fake_signing)
 
 BOOST_AUTO_TEST_CASE(r2s_09_physical_whole_file_and_large_extents_fakes3)
 {
+    const ScopedR2Credentials credentials;
     const fs::path creds = m_path_root / "r2s-09-creds";
     WriteCreds(creds, kFixtureAccess, kFixtureSecret);
-    modelnet::CloudStoreConfig cfg = BaseCfg(creds);
+    modelnet::CloudStoreConfig cfg = credentials.Config(creds);
     modelnet::S3PieceStore store{cfg};
     std::string err;
     BOOST_REQUIRE_MESSAGE(store.Init(err), err);
@@ -474,6 +526,35 @@ BOOST_AUTO_TEST_CASE(r2s_09_physical_whole_file_and_large_extents_fakes3)
     const auto plan = modelnet::PlanObjectLayout(whole.size() + ext0.size() + ext1.size(),
                                                  modelnet::PhysicalObjectLayout::WHOLE_FILE);
     BOOST_CHECK(!plan.replaces_source_files);
+}
+
+BOOST_AUTO_TEST_CASE(r2s_fixture_credentials_restore_environment)
+{
+#ifdef WIN32
+    const char* name = "BTX_TEST_R2_FIXTURE_CREDS";
+    test::ScopedEnvVar previous{name, "preexisting-fixture-value"};
+    {
+        const ScopedR2Credentials credentials;
+        const auto cfg = credentials.Config(fs::PathFromString("unused-credential-file"));
+        BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::ENV);
+        BOOST_REQUIRE(std::getenv(name));
+        BOOST_CHECK(std::string{std::getenv(name)}.find(kFixtureSecret) != std::string::npos);
+    }
+    BOOST_REQUIRE(std::getenv(name));
+    BOOST_CHECK_EQUAL(std::getenv(name), "preexisting-fixture-value");
+    previous.Set(nullptr);
+    {
+        const ScopedR2Credentials credentials;
+        BOOST_REQUIRE(std::getenv(name));
+    }
+    BOOST_CHECK(std::getenv(name) == nullptr);
+#else
+    const ScopedR2Credentials credentials;
+    const auto path = fs::PathFromString("unchanged-posix-credential-file");
+    const auto cfg = credentials.Config(path);
+    BOOST_CHECK(cfg.s3.creds.kind == modelnet::CredentialRefKind::PATH);
+    BOOST_CHECK_EQUAL(cfg.s3.creds.value, fs::PathToString(path));
+#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()

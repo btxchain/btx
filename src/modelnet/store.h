@@ -85,6 +85,8 @@ public:
     uint64_t UsedBytes() const { return m_quota.used_bytes; }
     void SetQuotaBytes(uint64_t bytes);
     void RecountUsed();
+    /** Bytes of the committed pieces of one artifact, as UsedBytes() counts them. */
+    uint64_t ArtifactBytes(const Digest48& artifact) const;
     bool RemoveArtifact(const Digest48& artifact, std::string& err);
     void EvictUnpinned();
     bool ListCommittedPieces(const Digest48& artifact, uint32_t file_index, std::vector<uint32_t>& out) const;

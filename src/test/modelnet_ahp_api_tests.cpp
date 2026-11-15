@@ -10,6 +10,7 @@
 #include <modelnet/http_bridge.h>
 #include <modelnet/package_acquisition.h>
 #include <modelnet/package_core.h>
+#include <test/util/sdk_process.h>
 #include <test/util/setup_common.h>
 #include <test/modelnet_n02_idem.h>
 #include <univalue.h>
@@ -68,7 +69,7 @@ std::string HelperErr(bool ok, const UniValue& result, const std::string& code)
     return {};
 }
 
-#ifdef MODELNET_BTX_OPEN_PATH
+#if defined(MODELNET_BTX_OPEN_PATH) && !defined(WIN32)
 std::string ShellQuote(const std::string& s)
 {
     std::string q = "'";
@@ -235,16 +236,20 @@ BOOST_AUTO_TEST_CASE(ahp_api_04_plan_execute_cancel_acquisition)
     BOOST_REQUIRE(fixture.find("btx://") == std::string::npos);
     BOOST_REQUIRE(fixture.ends_with(".btx") || fixture.ends_with(".BTX"));
     // One argv: the unsigned .btx path. Not a shell of mixed URI+file.
+    std::string out;
+#ifdef WIN32
+    const int rc = sdk_test::Spawn({MODELNET_BTX_OPEN_PATH, fixture}, out, false);
+#else
     const std::string cmd = ShellQuote(MODELNET_BTX_OPEN_PATH) + " " + ShellQuote(fixture);
     BOOST_REQUIRE(cmd.find("btx://") == std::string::npos);
     FILE* fp = popen(cmd.c_str(), "r");
     BOOST_REQUIRE(fp);
-    std::string out;
     char buf[4096];
     while (fgets(buf, sizeof(buf), fp) != nullptr) {
         out.append(buf);
     }
     const int rc = pclose(fp);
+#endif
     BOOST_REQUIRE_EQUAL(rc, 0);
     const bool inspect_fields = out.find("core_version") != std::string::npos ||
                                 out.find("documents") != std::string::npos ||

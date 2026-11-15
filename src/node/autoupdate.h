@@ -207,6 +207,13 @@ AutoUpdateCheckResult CheckForAutoUpdate(const AutoUpdateConfig& config,
                                          AutoUpdateSignatureVerifier& verifier,
                                          AutoUpdateCommandRunner& runner);
 
+// Write a verified installer script to <datadir>/autoupdate as an executable
+// file and return its path. Returns std::nullopt if the file on disk may not
+// hold exactly `script`; the caller runs the returned file as it is.
+std::optional<fs::path> StageAutoUpdateInstallerScript(const fs::path& datadir,
+                                                       std::string_view version,
+                                                       const std::vector<unsigned char>& script);
+
 // Build a verifier for the named release-signature scheme ("ml-dsa-44" or
 // "slh-dsa-128s"). Returns nullptr for an unknown or classical scheme.
 std::unique_ptr<AutoUpdateSignatureVerifier> MakeAutoUpdateSignatureVerifier(

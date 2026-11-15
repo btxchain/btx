@@ -1546,7 +1546,18 @@ static int CommandLineRPC(int argc, char *argv[])
                 fputc('\n', stdout);
             }
         }
-        if (bundle_passphrase.has_value()) {
+        // Named conversion collects bare tokens as a positional prefix. Only
+        // all-named bundle and archive calls need a named passphrase; keep
+        // mixed calls on the existing positional insertion path.
+        const bool named_bundle_passphrases = gArgs.GetBoolArg("-named", DEFAULT_NAMED) &&
+            args.size() > 1 && (wallet_passphrase || bundle_passphrase) &&
+            (args[0] == "backupwalletbundle" || args[0] == "backupwalletbundlearchive" ||
+             args[0] == "restorewalletbundlearchive") &&
+            std::all_of(args.begin() + 1, args.end(), [](const std::string& arg) {
+                const auto separator = arg.find('=');
+                return separator != std::string::npos && separator != 0 && !arg.starts_with("args=");
+            });
+        if (bundle_passphrase.has_value() && !named_bundle_passphrases) {
             const bool is_backupwalletbundlearchive = args.size() >= 1 && args[0] == "backupwalletbundlearchive";
             const bool is_restorewalletbundlearchive = args.size() >= 1 && args[0] == "restorewalletbundlearchive";
             if (is_backupwalletbundlearchive) {
@@ -1561,7 +1572,7 @@ static int CommandLineRPC(int argc, char *argv[])
                 args.insert(args.begin() + 3, *bundle_passphrase);
             }
         }
-        if (wallet_passphrase.has_value()) {
+        if (wallet_passphrase.has_value() && !named_bundle_passphrases) {
             const bool is_walletpassphrase = args.size() >= 1 && args[0].substr(0, 16) == "walletpassphrase";
             const bool is_backupwalletbundle = args.size() >= 1 && args[0] == "backupwalletbundle";
             const bool is_backupwalletbundlearchive = args.size() >= 1 && args[0] == "backupwalletbundlearchive";
@@ -1588,6 +1599,21 @@ static int CommandLineRPC(int argc, char *argv[])
             if (StdinTerminal()) {
                 fputc('\n', stdout);
             }
+        }
+        if (named_bundle_passphrases) {
+            const auto add_passphrase = [&](const std::string& name, const std::string& value) {
+                const std::string prefix = name + "=";
+                // Named conversion normally lets later values override earlier
+                // ones. Refuse a second source for a passphrase explicitly.
+                if (std::any_of(args.begin() + 1, args.end(), [&](const std::string& arg) {
+                        return arg.starts_with(prefix);
+                    })) {
+                    throw std::runtime_error(name + " was supplied both explicitly and through a stdin passphrase option");
+                }
+                args.push_back(prefix + value);
+            };
+            if (bundle_passphrase) add_passphrase("archive_passphrase", *bundle_passphrase);
+            if (wallet_passphrase) add_passphrase("wallet_passphrase", *wallet_passphrase);
         }
         gArgs.CheckMultipleCLIArgs();
         std::unique_ptr<BaseRequestHandler> rh;

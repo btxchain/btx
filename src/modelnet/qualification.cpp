@@ -98,6 +98,18 @@ bool HeaderKeysAreExl3(const UniValue& header)
     return su && sv && trellis;
 }
 
+namespace {
+//! A JSON number that is a non-negative integer, without throwing on any other value.
+bool JsonUint64(const UniValue& v, uint64_t& out)
+{
+    if (!v.isNum()) return false;
+    const auto parsed{ToIntegral<uint64_t>(v.getValStr())};
+    if (!parsed) return false;
+    out = *parsed;
+    return true;
+}
+} // namespace
+
 QualResult QualifySafeTensors(Span<const unsigned char> header_and_maybe_body, uint64_t file_size, QualReport& report)
 {
     if (header_and_maybe_body.size() < 8) {
@@ -146,14 +158,22 @@ QualResult QualifySafeTensors(Span<const unsigned char> header_and_maybe_body, u
             report.result = QualResult::INVALID_MODEL;
             return report.result;
         }
-        if (!t["shape"].isArray() || t["data_offsets"].size() != 2) {
+        if (!t["shape"].isArray() || !t["data_offsets"].isArray() || t["data_offsets"].size() != 2) {
             report.detail = "tensor geometry";
             report.result = QualResult::INVALID_MODEL;
             return report.result;
         }
         uint64_t numel = 1;
         for (const auto& d : t["shape"].getValues()) {
-            const uint64_t dim = d.getInt<uint64_t>();
+            // The header comes from a file (a download, the watch folder): a
+            // dimension that is not a non-negative integer is an invalid model,
+            // not an exception that ends the helper.
+            uint64_t dim{0};
+            if (!JsonUint64(d, dim)) {
+                report.detail = "tensor geometry";
+                report.result = QualResult::INVALID_MODEL;
+                return report.result;
+            }
             if (dim > 0 && numel > (UINT64_MAX / dim)) {
                 report.detail = "shape overflow";
                 report.result = QualResult::INVALID_MODEL;
@@ -161,9 +181,16 @@ QualResult QualifySafeTensors(Span<const unsigned char> header_and_maybe_body, u
             }
             numel *= dim;
         }
-        const uint64_t begin = t["data_offsets"][0].getInt<uint64_t>();
-        const uint64_t end = t["data_offsets"][1].getInt<uint64_t>();
-        if (end < begin || 8 + hlen + end > file_size) {
+        uint64_t begin{0};
+        uint64_t end{0};
+        if (!JsonUint64(t["data_offsets"][0], begin) || !JsonUint64(t["data_offsets"][1], end)) {
+            report.detail = "tensor offset";
+            report.result = QualResult::INVALID_MODEL;
+            return report.result;
+        }
+        // 8 + hlen <= file_size was checked above; compare without the sum,
+        // which wraps for an end close to 2^64.
+        if (end < begin || end > file_size - 8 - hlen) {
             report.detail = "tensor offset";
             report.result = QualResult::INVALID_MODEL;
             return report.result;

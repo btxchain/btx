@@ -527,4 +527,58 @@ BOOST_AUTO_TEST_CASE(whole_file_fallback_keeps_a_piece_and_does_not_wait_out_the
     BOOST_CHECK(kept == piece);
 }
 
+
+BOOST_AUTO_TEST_CASE(short_final_checkpoint_survives_publication_quota_failure)
+{
+    using namespace modelnet;
+    std::vector<unsigned char> file(PIECE_SIZE + 123, 0x35);
+    Digest48 artifact{};
+    artifact.data[0] = 0x71;
+    const fs::path jobs = Scratch(m_path_root, "short-eof-jobs");
+    ModelStore live(Scratch(m_path_root, "short-eof-live"), PIECE_SIZE);
+    ModelStore q(Scratch(m_path_root, "short-eof-q"), 64 << 20);
+    std::string err;
+    FileStreamHydration first(artifact, 0, file.size(), live, q);
+    first.SetJobDir(jobs);
+    first.SetExpectedSha384(DigestOf(file));
+    BOOST_REQUIRE(first.Feed(Span<const unsigned char>{file.data(), file.size()}, err));
+    BOOST_CHECK(!first.Finish(err));
+    BOOST_CHECK_EQUAL(err, "disk quota");
+    BOOST_CHECK(!first.IntegrityFailed());
+    FileStreamJobRecord rec;
+    BOOST_REQUIRE(LoadFileStreamJob(jobs, artifact, 0, rec, err));
+    BOOST_CHECK_EQUAL(rec.next_piece, 2U);
+    live.SetQuotaBytes(64 << 20);
+    FileStreamHydration resumed(artifact, 0, file.size(), live, q);
+    resumed.SetJobDir(jobs);
+    BOOST_REQUIRE(resumed.ApplyRecord(rec, err));
+    BOOST_CHECK_EQUAL(resumed.Progress().bytes_ingested, file.size());
+    BOOST_REQUIRE_MESSAGE(resumed.Finish(err), err);
+    BOOST_CHECK(resumed.IsAdvertisable());
+    BOOST_CHECK(!fs::exists(FileStreamJobPath(jobs, artifact, 0)));
+}
+
+BOOST_AUTO_TEST_CASE(only_complete_file_integrity_mismatches_mark_rejection)
+{
+    using namespace modelnet;
+    const std::vector<unsigned char> file(123, 0x12);
+    for (const bool bad_root : {false, true}) {
+        Digest48 artifact{};
+        artifact.data[0] = bad_root ? 0x72 : 0x73;
+        ModelStore live(Scratch(m_path_root, bad_root ? "root-live" : "hash-live"), 64 << 20);
+        ModelStore q(Scratch(m_path_root, bad_root ? "root-q" : "hash-q"), 64 << 20);
+        FileStreamHydration hyd(artifact, 0, file.size(), live, q);
+        Digest48 expected = DigestOf(file);
+        if (!bad_root) expected.data[0] ^= 1;
+        hyd.SetExpectedSha384(expected);
+        if (bad_root) hyd.SetExpectedPiecesRoot(Digest48{});
+        std::string err;
+        BOOST_REQUIRE(hyd.Feed(Span<const unsigned char>{file.data(), file.size()}, err));
+        BOOST_CHECK(!hyd.Finish(err));
+        BOOST_CHECK(hyd.IntegrityFailed());
+        BOOST_CHECK_EQUAL(err, bad_root ? "pieces_root mismatch" : "file SHA-384 mismatch");
+        BOOST_CHECK(!live.HasPiece(artifact, 0, 0));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

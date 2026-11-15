@@ -46,17 +46,22 @@ TestingSetup* g_setup;
 template <bool INVALID>
 void initialize_chain()
 {
-    const auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
-    static const auto chain{CreateBlockChain(2 * COINBASE_MATURITY, *params)};
-    g_chain = &chain;
+    // CreateBlockChain() passes no parent median time past, which the v4 seed
+    // rule requires, so under the default regtest schedule (v4 from height 100)
+    // it fails at height 100 and the init aborts before any input runs. Use the
+    // schedule of the other targets that mine 2 * COINBASE_MATURITY setup
+    // blocks, and mine the chain with the node's own params.
     static const auto setup{
         MakeNoLogFileContext<TestingSetup>(ChainType::REGTEST,
                                            TestOpts{
+                                               .extra_args = SetupChainMatMulArgs(),
                                                .setup_net = false,
                                                .setup_validation_interface = false,
                                                .min_validation_cache = true,
                                            }),
     };
+    static const auto chain{CreateBlockChain(2 * COINBASE_MATURITY, setup->m_node.chainman->GetParams())};
+    g_chain = &chain;
     if constexpr (INVALID) {
         auto& chainman{*setup->m_node.chainman};
         for (const auto& block : chain) {

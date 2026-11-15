@@ -69,6 +69,8 @@ Wallet RPCs fail closed if they would use in-process private keys under `-exchan
 | `estimateconsolidationfee` | Fee / weight for a consolidation plan |
 | `createexchangebatch` | One tx, N withdrawal outputs, change, digests |
 
+`createexchangebatch` and `createconsolidationtx` take `lock_unspents` (default false), and a true value locks the selected inputs until the caller unlocks them or spends them.
+
 ### Reused (already in tree)
 
 | RPC | Purpose |
@@ -101,6 +103,7 @@ BCP/1 event names (JSON). `-walletdepositnotify=<cmd>` runs a command on deposit
 | `transaction.mempool` | Tx accepted to mempool | `sequence` `A`; `hashtx` / `rawtx`; `hashwallettx-mempool` |
 | `transaction.confirmed` | Tx included in a **connected** block (depth ≥ 1) | `hashtx` / `rawtx` on block; `hashwallettx-block`; confirm with RPC |
 | `transaction.reorged` | Confirming block disconnected; tx may return to mempool | `sequence` `D` then wallet status `REORGED` |
+| `transaction.conflicted` | Another tx spending the same prevout is in the active chain or mempool (fee bump, double-spend, reorg) | `-walletdepositnotify` + `getdepositstatus` → `CONFLICTED` |
 | `deposit.detected` | Watch-only wallet first sees a matching output | `-walletdepositnotify` (`%e`, `%j`) + `getdepositstatus` |
 | `deposit.confirmations_changed` | Depth or block identity changed | `-walletdepositnotify` + poll `getdepositstatus` |
 | `deposit.finalized` | **Policy alias only**: confirmations ≥ the venue's configured depth. **Not** chain finality |
@@ -162,7 +165,7 @@ Facts the node *does* expose:
 - Confirmation **depth** and **block hash/height** via `getdepositstatus` and wallet transaction metadata.
 - Disconnects (`sequence` `D`, `block.disconnected`) and status transitions to `REORGED` / `CONFLICTED`.
 - Wallet **reorg hold** flags (service policy, not consensus): after a block disconnect the wallet can report `settlement_safe=false` and zero settlement-safe balances until hold clears — `-walletreorgsafetydepth` (minimum confirmations for settlement-safe reporting), `-walletreorgholdblocks`, and `-walletreorgholdseconds` (`src/wallet/init.cpp`). Use these together with `getdepositstatus` so crediting pauses after a reorg without requiring a node restart.
-- Local reorg **protection** (not a BCP/1 finality gadget): optional PARK/warn profiles via `-parkdeepreorg` / `-maxreorgdepthpark`; `getreorgprotectionstatus` reports the active profile. This affects how the **local** node treats deep competing chains; it does not make any confirmation depth irreversible for deposits.
+- Local reorg **protection** (not a BCP/1 finality gadget): optional PARK/warn profiles via `-parkdeepreorg` / `-maxreorgdepthpark`; `getdifficultyhealth` reports the active profile under `reorg_protection`. This affects how the **local** node treats deep competing chains; it does not make any confirmation depth irreversible for deposits.
 
 ### How deep a reorg has BTX historically experienced?
 

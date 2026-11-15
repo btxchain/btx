@@ -5,7 +5,9 @@
 #include <consensus/amount.h>
 #include <key.h>
 #include <policy/fees.h>
+#include <policy/policy.h>
 #include <script/solver.h>
+#include <txmempool.h>
 #include <validation.h>
 #include <wallet/coincontrol.h>
 #include <wallet/spend.h>
@@ -78,6 +80,45 @@ BOOST_FIXTURE_TEST_CASE(SubtractFee, TestChain100Setup)
     // -123). This overpays the recipient instead of overpaying the miner more
     // than double the necessary fee.
     BOOST_CHECK_EQUAL(fee, check_tx(fee + 123));
+}
+
+BOOST_FIXTURE_TEST_CASE(deferred_sign_checks_chain_limits_on_signed_tx, TestChain100Setup)
+{
+    // With the default -maxapsfee, CreateTransaction builds unsigned and signs
+    // only the kept transaction. -walletrejectlongchains must see the signed
+    // vsize, not the smaller unsigned one.
+    CreateAndProcessBlock({}, GetScriptForDestination(PKHash(coinbaseKey.GetPubKey())));
+    auto wallet = CreateSyncedWallet(*m_node.chain, WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain()), coinbaseKey);
+    BOOST_REQUIRE(wallet->m_max_aps_fee > -1);
+
+    CRecipient recipient{PubKeyDestination({}), COIN, /*subtract_fee=*/false};
+    CCoinControl coin_control;
+    coin_control.m_feerate.emplace(10000);
+    coin_control.fOverrideFeeRate = true;
+    coin_control.m_change_type = OutputType::P2MR;
+
+    LOCK(wallet->cs_wallet);
+    auto res = CreateTransaction(*wallet, {recipient}, /*change_pos=*/std::nullopt, coin_control);
+    BOOST_REQUIRE(res);
+    const CTransactionRef signed_tx = res->tx;
+    CMutableTransaction unsigned_mtx{*signed_tx};
+    for (auto& txin : unsigned_mtx.vin) {
+        txin.scriptSig.clear();
+        txin.scriptWitness.SetNull();
+    }
+    const int64_t signed_vsize{GetVirtualTransactionSize(*signed_tx)};
+    const int64_t unsigned_vsize{GetVirtualTransactionSize(CTransaction{unsigned_mtx})};
+    BOOST_REQUIRE_GT(signed_vsize, unsigned_vsize + 1);
+
+    // A size limit between the unsigned and the signed vsize must refuse the send.
+    auto& limits = m_node.mempool->m_opts.limits;
+    const auto saved_limits{limits};
+    limits.ancestor_size_vbytes = signed_vsize - 1;
+    limits.descendant_size_vbytes = signed_vsize - 1;
+    auto refused = CreateTransaction(*wallet, {recipient}, /*change_pos=*/std::nullopt, coin_control);
+    limits = saved_limits;
+    BOOST_REQUIRE(!refused);
+    BOOST_CHECK(util::ErrorString(refused).original.find("exceeds ancestor size limit") != std::string::npos);
 }
 
 BOOST_FIXTURE_TEST_CASE(wallet_duplicated_preset_inputs_test, TestChain100Setup)

@@ -9,6 +9,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -180,6 +181,75 @@ BOOST_AUTO_TEST_CASE(evidence_and_research_path)
     BOOST_CHECK(eng.research_outside());
     BOOST_CHECK(!eng.release_qualified());
     BOOST_CHECK(!eng.passed());
+    BOOST_CHECK(!eng.gpu_passed());
+    BOOST_CHECK(!eng.windows_passed());
+    BOOST_CHECK(!eng.hardware_qualified());
+    BOOST_CHECK_EQUAL(eng.automatic_spend(), modelnet::NIFDT_AUTOMATIC_SPEND);
+}
+
+
+BOOST_AUTO_TEST_CASE(research_path_separators)
+{
+    TempDirs dirs(m_path_root);
+    BOOST_REQUIRE(dirs.evidence_created);
+    BOOST_REQUIRE(dirs.outside_created);
+    WriteBytes(dirs.file_a, "alpha");
+    const std::string root = fs::PathToString(dirs.evidence);
+    modelnet::Proc08 eng;
+    std::string err;
+    auto inside = [&](const std::string& path, const std::string& worktree) {
+        BOOST_CHECK(!eng.AcceptResearchPath(path, worktree, err));
+        BOOST_CHECK_EQUAL(err, "INSIDE");
+        BOOST_CHECK(!eng.research_outside());
+    };
+    auto outside = [&](const std::string& path) {
+        BOOST_CHECK(eng.AcceptResearchPath(path, root, err));
+        BOOST_CHECK(err.empty());
+        BOOST_CHECK(eng.research_outside());
+    };
+
+    outside(fs::PathToString(dirs.outside));
+    inside(fs::PathToString(dirs.file_a), root);
+    inside(fs::PathToString(dirs.evidence / "missing"), root);
+    inside(root, root + "/");
+    BOOST_REQUIRE(fs::equivalent(dirs.file_a, fs::PathFromString(root + "/a.txt")));
+    inside(root + "/a.txt", root);
+#ifdef WIN32
+    std::string forward_root = root;
+    std::replace(forward_root.begin(), forward_root.end(), '\\', '/');
+    BOOST_REQUIRE(fs::equivalent(dirs.file_a, fs::PathFromString(forward_root + "/a.txt")));
+    inside(forward_root + "/a.txt", forward_root);
+    inside(root + "\\a.txt", forward_root);
+    inside(forward_root + "/a.txt", root + "\\");
+    inside(root, root + "\\");
+#endif
+
+    const fs::path sibling = m_path_root / "proc08-evidence-other";
+    BOOST_REQUIRE(fs::create_directories(sibling));
+    outside(fs::PathToString(sibling));
+    BOOST_CHECK(fs::remove(sibling));
+
+    // Backslash is a separator on Windows and a literal filename byte on POSIX.
+    const fs::path backslash = m_path_root / "proc08-evidence\\a.txt";
+#ifdef WIN32
+    BOOST_REQUIRE(fs::equivalent(dirs.file_a, backslash));
+    inside(fs::PathToString(backslash), root);
+#else
+    WriteBytes(backslash, "literal");
+    BOOST_CHECK(!fs::equivalent(dirs.file_a, backslash));
+    outside(fs::PathToString(backslash));
+    BOOST_CHECK(fs::remove(backslash));
+    const fs::path literal_inside = dirs.evidence / "part\\leaf.txt";
+    WriteBytes(literal_inside, "literal-inside");
+    inside(fs::PathToString(literal_inside), root);
+    BOOST_CHECK(fs::remove(literal_inside));
+#endif
+    BOOST_CHECK(!eng.AcceptResearchPath(fs::PathToString(m_path_root / "absent"), root, err));
+    BOOST_CHECK_EQUAL(err, "ABSENT");
+    BOOST_CHECK(!eng.AcceptResearchPath("", root, err));
+    BOOST_CHECK_EQUAL(err, "FIELD");
+    BOOST_CHECK(!eng.passed());
+    BOOST_CHECK(!eng.release_qualified());
     BOOST_CHECK(!eng.gpu_passed());
     BOOST_CHECK(!eng.windows_passed());
     BOOST_CHECK(!eng.hardware_qualified());

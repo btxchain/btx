@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <limits>
 #include <string_view>
 #include <tuple>
 #include <utility>
@@ -121,6 +122,20 @@ CFeeRate ParseFeeRate(const UniValue& json)
     CAmount val{AmountFromValue(json)};
     if (val >= COIN) throw JSONRPCError(RPC_INVALID_PARAMETER, "Fee rates larger than or equal to 1BTX/kvB are not accepted");
     return CFeeRate{val};
+}
+
+bool ParseUint32Index(int64_t v, uint32_t& out, const char* name, std::string& err)
+{
+    if (v < 0) {
+        err = strprintf("%s cannot be negative", name);
+        return false;
+    }
+    if (v > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+        err = strprintf("%s exceeds uint32 range", name);
+        return false;
+    }
+    out = static_cast<uint32_t>(v);
+    return true;
 }
 
 uint256 ParseHashV(const UniValue& v, std::string_view name)

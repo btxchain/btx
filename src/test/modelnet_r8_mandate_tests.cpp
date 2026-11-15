@@ -8,6 +8,8 @@
 // behaviour. The remaining *_documents_gap cases pin production wiring that
 // still lives outside the mandate module.
 
+#include <modelnet/catalog.h>
+#include <modelnet/helper.h>
 #include <modelnet/subscription_mandate.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
@@ -414,14 +416,38 @@ BOOST_AUTO_TEST_CASE(r8_05_budget_and_revocation_survive_restart)
     BOOST_CHECK_EQUAL(result["used_fee_atoms"].get_str(), "2");
 }
 
-// F-R8-06 residue. Persistence is opt-in and nothing switches it on: the store the
-// node dispatches through is constructed by GlobalSubscriptionStore() and no caller
-// gives it a path, so the shipped helper still forgets every mandate on restart.
-// The wiring belongs to modelnet/helper.cpp (or init), not to this module.
-BOOST_AUTO_TEST_CASE(r8_05b_global_store_not_file_backed_documents_gap)
+// F-R8-06 residue, fixed. The helper backs the store it dispatches through with a
+// file in its dir, so a restart of the helper keeps spent budget and revocation.
+BOOST_AUTO_TEST_CASE(r8_05b_helper_store_survives_restart)
 {
-    BOOST_CHECK_MESSAGE(!GlobalSubscriptionStore().Persisted(),
-                        "expected the documented gap: no caller gives the global store a state file");
+    const fs::path dir = m_path_root / "r8-helper-mandates";
+    ModelCatalog cat{dir, 8 << 20};
+    const auto call = [&](const std::string& method, const UniValue& arg, UniValue& result, std::string& code) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", Arr(arg));
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        std::string err;
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    UniValue mandate = MandateJson("r8-helper");
+    mandate.pushKV("expires_at_ms", "4000000000000");
+    UniValue result;
+    std::string code;
+    BOOST_REQUIRE_MESSAGE(call("createsubscriptionmandate", mandate, result, code), code);
+    BOOST_REQUIRE_MESSAGE(call("reservesubscriptionmandate", StoreReserveJson("r8-helper", "e-helper", 50, 5), result, code), code);
+    BOOST_REQUIRE_MESSAGE(call("revokesubscriptionmandate", mandate, result, code), code);
+    BOOST_CHECK(GlobalSubscriptionStore().Persisted());
+
+    // Restart: the store forgets everything, including its file.
+    GlobalSubscriptionStore().Reset();
+    BOOST_REQUIRE_MESSAGE(call("getsubscriptionmandate", MandateIdJson("r8-helper"), result, code), code);
+    BOOST_CHECK_MESSAGE(result["revoked"].get_bool(), "revocation must be durable");
+    BOOST_CHECK_EQUAL(result["used_principal_atoms"].get_str(), "50");
+    BOOST_CHECK_EQUAL(result["used_fee_atoms"].get_str(), "5");
+    BOOST_CHECK_EQUAL(result["action_count"].getInt<int64_t>(), 1);
+    BOOST_CHECK(!call("reservesubscriptionmandate", StoreReserveJson("r8-helper", "e-after", 10, 1), result, code));
 }
 
 // F-R8-07, fixed. Exposure is what is reserved and not yet settled: broadcasting
@@ -620,6 +646,39 @@ BOOST_AUTO_TEST_CASE(r8_10_reservation_carries_no_wallet_or_object_binding)
     BOOST_CHECK(!o["private_keys"].get_bool());
     BOOST_CHECK_EQUAL(o["automatic_spend_atoms"].getInt<int64_t>(), SUBSCRIPTION_AUTOMATIC_SPEND_ATOMS);
     BOOST_CHECK_EQUAL(SUBSCRIPTION_AUTOMATIC_SPEND_ATOMS, 0);
+}
+
+// createsubscriptionmandate takes its mandate back when the state file cannot be
+// written. A reservation must do the same: it is refused, so it must not stay in
+// memory as spent budget that a retry or the next save would then keep.
+BOOST_AUTO_TEST_CASE(r8_11_reservation_that_cannot_be_saved_is_undone)
+{
+    const fs::path state = m_path_root / "r8-unsaved" / "subscriptions.json";
+    const fs::path blocker = fs::PathFromString(fs::PathToString(state) + ".tmp");
+    UniValue result;
+    std::string code, err;
+    SubscriptionStore store;
+    BOOST_REQUIRE_MESSAGE(store.SetPersistPath(state, err), err);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createsubscriptionmandate", Arr(MandateJson("r8-unsaved")), result, code, err, kNow), err);
+
+    // A directory where the temp file goes makes the next save fail.
+    fs::create_directories(blocker);
+    BOOST_CHECK(!store.Dispatch("reservesubscriptionmandate", Arr(StoreReserveJson("r8-unsaved", "e-unsaved", 50, 5)), result, code, err, kNow));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("getsubscriptionmandate", Arr(MandateIdJson("r8-unsaved")), result, code, err, kNow), err);
+    BOOST_CHECK_EQUAL(result["used_principal_atoms"].get_str(), "0");
+    BOOST_CHECK_EQUAL(result["used_fee_atoms"].get_str(), "0");
+    BOOST_CHECK_EQUAL(result["action_count"].getInt<int64_t>(), 0);
+
+    // Once the file can be written, the same event reserves and is kept.
+    fs::remove(blocker);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("reservesubscriptionmandate", Arr(StoreReserveJson("r8-unsaved", "e-unsaved", 50, 5)), result, code, err, kNow), err);
+    BOOST_CHECK_EQUAL(result["used_principal_atoms"].get_str(), "50");
+    SubscriptionStore restarted;
+    BOOST_REQUIRE_MESSAGE(restarted.SetPersistPath(state, err), err);
+    BOOST_REQUIRE_MESSAGE(restarted.Dispatch("getsubscriptionmandate", Arr(MandateIdJson("r8-unsaved")), result, code, err, kNow), err);
+    BOOST_CHECK_EQUAL(result["used_principal_atoms"].get_str(), "50");
+    BOOST_CHECK_EQUAL(result["action_count"].getInt<int64_t>(), 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

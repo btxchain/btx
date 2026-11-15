@@ -27,6 +27,8 @@
 #include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/sock.h>
+#include <util/threadinterrupt.h>
 #include <util/strencodings.h>
 #include <util/syserror.h>
 
@@ -34,10 +36,13 @@
 #include <test/util/environment.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <future>
+#include <memory>
 #include <iterator>
 #include <set>
 #include <string>
@@ -46,14 +51,17 @@
 
 #ifndef WIN32
 #include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
 #if defined(__linux__)
 #include <fcntl.h>
 #include <sched.h>
-#include <sys/wait.h>
 #endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_hosting_tests, BasicTestingSetup)
@@ -583,6 +591,148 @@ BOOST_AUTO_TEST_CASE(start_socket_path_that_cannot_fit_does_not_spawn)
 #endif
 
 #ifndef WIN32
+BOOST_AUTO_TEST_CASE(external_helper_shutdown_cancels_inflight_health_read)
+{
+    // Use a short private socket path. Test datadirs can exceed sun_path.
+    char dir[] = "/tmp/btx-supervisor-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(dir) != nullptr);
+    const fs::path root{dir};
+    const auto cleanup = std::unique_ptr<const fs::path, void (*)(const fs::path*)>{
+        &root, [](const fs::path* path) {
+            std::error_code ignored;
+            fs::remove_all(*path, ignored);
+        }};
+    using namespace std::chrono_literals;
+    const fs::path socket_path = root / "helper.sock";
+    const std::string path = fs::PathToString(socket_path);
+
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(fd >= 0);
+    Sock listener{static_cast<SOCKET>(fd)};
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    BOOST_REQUIRE(path.size() < sizeof(address.sun_path));
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    BOOST_REQUIRE(listener.Bind(reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    BOOST_REQUIRE(listener.Listen(1) == 0);
+    BOOST_REQUIRE(listener.SetNonBlocking());
+
+    modelnet::HelperLaunchConfig cfg;
+    cfg.rpc_socket = socket_path;
+    cfg.external_socket = true;
+    modelnet::HelperSupervisor supervisor{std::move(cfg)};
+    std::string error;
+    BOOST_REQUIRE(supervisor.Start(error));
+
+    BOOST_REQUIRE(listener.Wait(5s, Sock::RECV));
+    auto peer = listener.Accept(nullptr, nullptr);
+    BOOST_REQUIRE(peer);
+    BOOST_REQUIRE(peer->SetNonBlocking());
+    // The received request proves the connection reached the reply path.
+    CThreadInterrupt interrupt;
+    const auto wire = peer->RecvUntilTerminator('\n', 5s, interrupt, 4096);
+    UniValue request;
+    BOOST_REQUIRE(request.read(wire));
+    BOOST_CHECK_EQUAL(request["method"].get_str(), "getmodelnetworkinfo");
+
+    auto result = std::async(std::launch::async, [&supervisor] {
+        supervisor.Stop();
+    });
+    // Destroy the socket before waiting for the async task, including on unwind.
+    auto pending_peer = std::move(peer);
+    const auto status = result.wait_for(2s);
+    // Unblock the baseline before collecting the result.
+    pending_peer.reset();
+    result.get();
+
+    BOOST_CHECK(status == std::future_status::ready);
+    BOOST_CHECK(supervisor.Snapshot().state == modelnet::HelperState::DISABLED);
+    BOOST_CHECK(!listener.Accept(nullptr, nullptr));
+}
+
+#if defined(__linux__) || defined(__APPLE__)
+BOOST_AUTO_TEST_CASE(owned_helper_shutdown_refuses_a_different_socket_peer)
+{
+    using namespace std::chrono_literals;
+    char dir[] = "/tmp/btx-owned-peer-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(dir) != nullptr);
+    const fs::path root{dir};
+    const auto cleanup = std::unique_ptr<const fs::path, void (*)(const fs::path*)>{
+        &root, [](const fs::path* path) {
+            std::error_code ignored;
+            fs::remove_all(*path, ignored);
+        }};
+    const fs::path socket_path = root / "helper.sock";
+    const fs::path script = root / "helper.sh";
+    {
+        std::ofstream out(script);
+        out << "#!/bin/sh\nexec /bin/sleep 60\n";
+        BOOST_REQUIRE(out.good());
+    }
+    fs::permissions(script, fs::perms::owner_all);
+
+    modelnet::HelperLaunchConfig cfg;
+    cfg.helper_exe = script;
+    cfg.modeldir = root;
+    cfg.rpc_socket = socket_path;
+    modelnet::HelperSupervisor supervisor{std::move(cfg)};
+    std::string error;
+    BOOST_REQUIRE(supervisor.Start(error));
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    auto snapshot = supervisor.Snapshot();
+    while (snapshot.pid <= 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+        snapshot = supervisor.Snapshot();
+    }
+    BOOST_REQUIRE(snapshot.pid > 0);
+    BOOST_REQUIRE(snapshot.managed_by_btxd);
+    BOOST_REQUIRE_NE(snapshot.pid, ::getpid());
+
+    // Bind from the test process after the supervisor has spawned its child.
+    // The listener deliberately answers health checks, so a reachable socket
+    // cannot be mistaken for proof that the child owns it.
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(fd >= 0);
+    Sock listener{static_cast<SOCKET>(fd)};
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    const std::string path = fs::PathToString(socket_path);
+    BOOST_REQUIRE(path.size() < sizeof(address.sun_path));
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    BOOST_REQUIRE(listener.Bind(reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    BOOST_REQUIRE(listener.Listen(4) == 0);
+    BOOST_REQUIRE(listener.SetNonBlocking());
+
+    auto stop = std::async(std::launch::async, [&supervisor] { supervisor.Stop(); });
+    bool received_stop = false;
+    const auto stop_deadline = std::chrono::steady_clock::now() + 8s;
+    while (stop.wait_for(0s) != std::future_status::ready &&
+           std::chrono::steady_clock::now() < stop_deadline) {
+        if (!listener.Wait(100ms, Sock::RECV)) continue;
+        auto peer = listener.Accept(nullptr, nullptr);
+        if (!peer || !peer->SetNonBlocking()) continue;
+        CThreadInterrupt interrupt;
+        try {
+            UniValue request;
+            if (!request.read(peer->RecvUntilTerminator('\n', 1s, interrupt, 4096))) continue;
+            received_stop |= request["method"].get_str() == "stop";
+            const std::string reply{"{\"result\":{},\"error\":null}\n"};
+            peer->SendComplete(reply, 1s, interrupt);
+        } catch (const std::runtime_error&) {
+            // The guarded connection closes without writing an RPC.
+        }
+    }
+    BOOST_CHECK(stop.wait_for(0s) == std::future_status::ready);
+    stop.get();
+    BOOST_CHECK(!received_stop);
+    int status = 0;
+    const auto reaped = ::waitpid(snapshot.pid, &status, WNOHANG);
+    BOOST_CHECK_EQUAL(reaped, -1);
+    BOOST_CHECK_EQUAL(errno, ECHILD);
+    BOOST_CHECK(supervisor.Snapshot().state == modelnet::HelperState::DISABLED);
+}
+#endif
+
 BOOST_AUTO_TEST_CASE(start_spawned_helper_does_not_inherit_descriptors)
 {
     // A descriptor without FD_CLOEXEC, like btxd's P2P listen socket. A helper
@@ -934,6 +1084,70 @@ BOOST_AUTO_TEST_CASE(getmodel_opens_btx_share_file)
     BOOST_CHECK(result["uri"].get_str().rfind("btx://", 0) == 0);
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(export_files_cut_short_are_reported_and_removed)
+{
+    // exportmodellink and createbtxpackage write a file at a caller path. A
+    // write that a full disk cuts short must not be reported as written.
+    // RLIMIT_FSIZE stands in for the full disk.
+    const fs::path tmp = m_path_root / "export-cut-short";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x89, true);
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto cut_short = [](uint64_t limit, auto&& fn) {
+        struct rlimit old_limit {};
+        BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        struct rlimit cut{old_limit};
+        cut.rlim_cur = limit;
+        const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+        const bool ok{fn()};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        std::signal(SIGXFSZ, old_handler);
+        return ok;
+    };
+
+    UniValue full_link(UniValue::VARR);
+    full_link.push_back(imported.model_id.Hex());
+    full_link.push_back(fs::PathToString(tmp / "full.btx"));
+    BOOST_REQUIRE_MESSAGE(call("exportmodellink", full_link), err);
+    const auto link_size = fs::file_size(tmp / "full.btx");
+    BOOST_REQUIRE_GT(link_size, 1U);
+    UniValue short_link(UniValue::VARR);
+    short_link.push_back(imported.model_id.Hex());
+    short_link.push_back(fs::PathToString(tmp / "short.btx"));
+    BOOST_CHECK_MESSAGE(!cut_short(link_size - 1, [&] { return call("exportmodellink", short_link); }),
+                        "exportmodellink reported a link file that was cut short as written");
+    BOOST_CHECK(!fs::exists(tmp / "short.btx"));
+
+    UniValue pkg(UniValue::VOBJ);
+    pkg.pushKV("kind", "btxbundle");
+    pkg.pushKV("schema_version", 1);
+    UniValue no_path_pkg{pkg};
+    no_path_pkg.pushKV("idempotency_key", "export-cut-short-no-path");
+    UniValue no_path(UniValue::VARR);
+    no_path.push_back(no_path_pkg);
+    BOOST_REQUIRE_MESSAGE(call("createbtxpackage", no_path), err);
+    const uint64_t package_size{result["hex"].get_str().size() / 2};
+    BOOST_REQUIRE_GT(package_size, 1U);
+    pkg.pushKV("idempotency_key", "export-cut-short-with-path");
+    pkg.pushKV("path", fs::PathToString(tmp / "short.btxpkg"));
+    UniValue with_path(UniValue::VARR);
+    with_path.push_back(pkg);
+    BOOST_CHECK_MESSAGE(!cut_short(package_size - 1, [&] { return call("createbtxpackage", with_path); }),
+                        "createbtxpackage reported a package file that was cut short as written");
+    BOOST_CHECK(!fs::exists(tmp / "short.btxpkg"));
+}
+#endif // WIN32
 
 BOOST_AUTO_TEST_CASE(exportmodellink_writes_only_new_or_share_files)
 {

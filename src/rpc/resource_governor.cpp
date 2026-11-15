@@ -87,7 +87,7 @@ static RPCHelpMan setresourcegovernorpolicy()
     return RPCHelpMan{
         "setresourcegovernorpolicy",
         "Advanced local override. Rejects unbounded/unsafe values.\n",
-        {{"policy", RPCArg::Type::STR, RPCArg::Optional::NO, "JSON object of bounded fields", RPCArgOptions{.skip_type_check = true}}},
+        {{"policy", RPCArg::Type::OBJ, RPCArg::Optional::NO, "JSON object of bounded fields", std::vector<RPCArg>{}, RPCArgOptions{.skip_type_check = true}}},
         RPCResult{RPCResult::Type::OBJ, "", "", {
             {RPCResult::Type::ELISION, "", "effective policy"},
         }},

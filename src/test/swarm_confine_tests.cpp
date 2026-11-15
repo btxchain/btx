@@ -9,10 +9,10 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <sys/stat.h>
-#include <sys/wait.h>
 
 #ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <time.h>
@@ -190,6 +190,7 @@ BOOST_AUTO_TEST_CASE(path_outside_or_dotdot)
     fs::remove_all(outside_root);
 }
 
+#ifndef _WIN32
 BOOST_AUTO_TEST_CASE(confined_helper_or_namespace_absent)
 {
     // canonical: InsideRoot refuses symlinks, and macOS TMPDIR is below /var.
@@ -219,6 +220,43 @@ BOOST_AUTO_TEST_CASE(confined_helper_or_namespace_absent)
         BOOST_CHECK_EQUAL(WEXITSTATUS(result.child_status), 0);
     }
 }
+#else
+BOOST_AUTO_TEST_CASE(windows_rejects_non_native_helper)
+{
+    const fs::path root = fs::canonical(fs::temp_directory_path()) / "btx-swarm-confine-text";
+    const fs::path helper = WriteRegularFile(root / "helper.sh");
+    std::string err = "stale";
+    const auto result = modelnet::SwarmRunConfined(BaseRequest(helper, root), err);
+    fs::remove_all(root);
+    BOOST_CHECK(!result.launched);
+    BOOST_CHECK(!result.limits_applied);
+    BOOST_CHECK_EQUAL(result.child_status, -1);
+    BOOST_CHECK_EQUAL(result.code, "WINDOWS_SANDBOX_CREATEPROCESS");
+    BOOST_CHECK_EQUAL(err, "WINDOWS_SANDBOX_CREATEPROCESS");
+    BOOST_CHECK(!fs::exists(root));
+}
+
+BOOST_AUTO_TEST_CASE(windows_native_helper_runs_and_cleans_up)
+{
+    const fs::path root = fs::canonical(fs::temp_directory_path()) / "btx-swarm-confine-native";
+    fs::create_directories(root);
+    const fs::path helper = root / "btx-open.exe";
+    BOOST_REQUIRE(fs::copy_file(fs::path{MODELNET_BTX_OPEN_PATH}, helper, fs::copy_options::none));
+    const auto helper_size = fs::file_size(helper);
+    std::string err = "stale";
+    // No arguments: print usage and exit 1 without opening a URI.
+    const auto result = modelnet::SwarmRunConfined(BaseRequest(helper, root), err);
+    const bool helper_preserved = fs::exists(helper) && fs::file_size(helper) == helper_size;
+    fs::remove_all(root);
+    BOOST_CHECK_EQUAL(result.code, "CONFINED");
+    BOOST_CHECK(result.launched);
+    BOOST_CHECK(result.limits_applied);
+    BOOST_CHECK_EQUAL(result.child_status, 1);
+    BOOST_CHECK(err.empty());
+    BOOST_CHECK(helper_preserved);
+    BOOST_CHECK(!fs::exists(root));
+}
+#endif
 
 #if defined(__APPLE__) && defined(BTX_SWARM_JAIL_PROBE)
 namespace {

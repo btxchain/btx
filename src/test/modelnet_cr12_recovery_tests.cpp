@@ -6,6 +6,11 @@
 #include <util/fs.h>
 #include <boost/test/unit_test.hpp>
 
+#ifndef WIN32
+#include <csignal>
+#include <sys/resource.h>
+#endif
+
 BOOST_FIXTURE_TEST_SUITE(modelnet_cr12_recovery_tests, BasicTestingSetup)
 
 BOOST_AUTO_TEST_CASE(cr12_recovery_01)
@@ -215,5 +220,68 @@ BOOST_AUTO_TEST_CASE(cr12_recovery_11_persist_roundtrip)
     BOOST_CHECK_EQUAL(e2->Handle(hcp_test::AuthReq(*e2, "GET", "/layer/roles/role-persist-a", tok2)).status, 200);
     BOOST_CHECK_EQUAL(e2->Handle(hcp_test::AuthReq(*e2, "GET", "/institutional/positions/pos-persist-a", tok2)).status, 200);
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(cr12_recovery_12_persist_cut_short_keeps_state)
+{
+    // HcpEngine::Persist rewrote hcp-state.json in place after every request
+    // and reported success without checking the write. A write that a full
+    // disk cut short left a file Restore cannot parse, so the next start began
+    // without the enrollment, the roles and the positions. RLIMIT_FSIZE stands
+    // in for the full disk.
+    const fs::path dir = m_args.GetDataDirBase() / "cr12-hcp-persist-cut";
+    fs::create_directories(dir);
+    std::string err;
+    auto cfg = modelnet::HcpFundingLabPreset();
+    cfg.persist_dir = dir;
+    cfg.automatic_spend_atoms = 0;
+    {
+        auto e = modelnet::HcpEngine::Create(cfg, err);
+        BOOST_REQUIRE(e);
+        hcp_test::EnrollSelf(*e);
+        auto tok = cr12_test::Tok(*e);
+        UniValue role(UniValue::VOBJ);
+        role.pushKV("role", "DISCOVERY");
+        role.pushKV("manifest_id", "role-cut-a");
+        BOOST_REQUIRE_EQUAL(e->Handle(hcp_test::AuthReq(*e, "POST", "/layer/roles", tok, &role)).status, 201);
+        UniValue pos(UniValue::VOBJ);
+        pos.pushKV("observation_id", "pos-cut-a");
+        pos.pushKV("source", "src-cut");
+        pos.pushKV("generation", "1");
+        pos.pushKV("sequence", "1");
+        pos.pushKV("mandate", "CUSTODY");
+        BOOST_REQUIRE_EQUAL(e->Handle(hcp_test::AuthReq(*e, "POST", "/institutional/positions/batches", tok, &pos)).status, 201);
+        BOOST_REQUIRE(e->Persist());
+
+        UniValue pos2(UniValue::VOBJ);
+        pos2.pushKV("observation_id", "pos-cut-b");
+        pos2.pushKV("source", "src-cut");
+        pos2.pushKV("generation", "1");
+        pos2.pushKV("sequence", "2");
+        pos2.pushKV("mandate", "CUSTODY");
+        BOOST_REQUIRE_EQUAL(e->Handle(hcp_test::AuthReq(*e, "POST", "/institutional/positions/batches", tok, &pos2)).status, 201);
+        struct rlimit old_limit {};
+        BOOST_REQUIRE(::getrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        struct rlimit cut{old_limit};
+        cut.rlim_cur = fs::file_size(dir / "hcp-state.json") / 2;
+        const auto old_handler{std::signal(SIGXFSZ, SIG_IGN)};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &cut) == 0);
+        const bool saved{e->Persist()};
+        BOOST_REQUIRE(::setrlimit(RLIMIT_FSIZE, &old_limit) == 0);
+        std::signal(SIGXFSZ, old_handler);
+        BOOST_CHECK_MESSAGE(!saved, "Persist reported success although hcp-state.json was not written in full");
+        BOOST_CHECK(!fs::exists(dir / "hcp-state.json.tmp"));
+    }
+    // A restart reads the file. It must still hold the state of the last
+    // complete write.
+    auto e2 = modelnet::HcpEngine::Create(cfg, err);
+    BOOST_REQUIRE(e2);
+    BOOST_CHECK_EQUAL(e2->Crl12PositionCount(), 1);
+    hcp_test::EnrollSelf(*e2);
+    auto tok2 = cr12_test::Tok(*e2);
+    BOOST_CHECK_EQUAL(e2->Handle(hcp_test::AuthReq(*e2, "GET", "/layer/roles/role-cut-a", tok2)).status, 200);
+    BOOST_CHECK_EQUAL(e2->Handle(hcp_test::AuthReq(*e2, "GET", "/institutional/positions/pos-cut-a", tok2)).status, 200);
+}
+#endif // WIN32
 
 BOOST_AUTO_TEST_SUITE_END()

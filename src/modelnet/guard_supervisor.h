@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+class UniValue;
 namespace modelnet {
 struct GuardProcessStatus {
     bool enabled{false};
@@ -27,6 +28,8 @@ public:
     GuardSupervisor(const GuardSupervisor&) = delete;
     GuardSupervisor& operator=(const GuardSupervisor&) = delete;
     bool Start(const fs::path& executable, std::string& error);
+    bool Start(const fs::path& executable, const fs::path& security_directory, std::string& error);
+    bool SecurityExchange(const UniValue& request, UniValue& response, std::string& error);
     void Tick();
     void Stop();
     bool Exchange(const std::string& line, std::string& reply, std::string& error);

@@ -3,6 +3,8 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <modelnet/admission_routes.h>
+#include <crypto/sha384.h>
+#include <modelnet/git_snapshot.h>
 #include <modelnet/lab_api.h>
 #include <modelnet/lab_exchange.h>
 #include <modelnet/model_admission.h>
@@ -10,6 +12,7 @@
 #include <univalue.h>
 #include <util/fs.h>
 #include <util/string.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
@@ -275,6 +278,122 @@ BOOST_AUTO_TEST_CASE(failed_write_is_rolled_back_and_does_not_block_later_writes
     BOOST_REQUIRE(disk.read(ReadFile(image)));
     BOOST_CHECK_EQUAL(disk["identity_pk"].size(), identities + 1);
 
+    modelnet::ResetLabApi();
+}
+
+BOOST_AUTO_TEST_CASE(failed_save_keeps_runtime_pause_until_explicit_resume)
+{
+    TempTree root{m_path_root / "lab-rollback-pause"};
+    LabDirEnv env(root.path);
+    PrepareDir(root.path);
+    UniValue result;
+    std::string err;
+    unsigned counter = 0;
+    auto write = [&](const char* method, UniValue req) {
+        req.pushKV("idempotency_key", "rollback-pause-" + std::to_string(++counter));
+        req.pushKV("expected_state", UniValue());
+        return Call(method, req, result, err);
+    };
+    UniValue prepare(UniValue::VOBJ);
+    prepare.pushKV("intent_id", std::string(96, 'a'));
+    BOOST_REQUIRE(write("lab.action_prepare", prepare));
+    const std::string old_permit = result["one_use_permit"].get_str();
+    UniValue bind(UniValue::VOBJ);
+    bind.pushKV("release_id", std::string(96, 'b'));
+    bind.pushKV("environment_ref", UniValue(UniValue::VOBJ));
+    bind.pushKV("requested_grants", UniValue(UniValue::VARR));
+    bind.pushKV("assurance", "LOCAL");
+    BOOST_REQUIRE(write("lab.runtime_bind", bind));
+    const std::string binding = result["record_id"].get_str();
+    UniValue pause(UniValue::VOBJ);
+    pause.pushKV("runtime_binding_id", binding);
+    pause.pushKV("reason", "operator");
+    BOOST_REQUIRE(write("lab.runtime_pause", pause));
+    UniValue execute(UniValue::VOBJ);
+    execute.pushKV("decision_id", std::string(96, 'b'));
+    execute.pushKV("one_use_permit", old_permit);
+    BOOST_CHECK(!write("lab.action_execute", execute));
+    BOOST_CHECK_EQUAL(err, "BTX035_PAUSED");
+    const std::string disk = ReadFile(root.path / "lab.json");
+    fs::create_directory(root.path / "lab.json.tmp");
+    BOOST_CHECK(!Call("lab.identity_create", Identity("unrelated", "rollback-pause-fault"), result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_RECOVERY_REQUIRED");
+    BOOST_CHECK_EQUAL(ReadFile(root.path / "lab.json"), disk);
+    fs::remove(root.path / "lab.json.tmp");
+    // A lost old permit must not be mistaken for an enforced pause.
+    BOOST_CHECK(!write("lab.action_prepare", prepare));
+    BOOST_CHECK_EQUAL(err, "BTX035_PAUSED");
+    UniValue resume(UniValue::VOBJ);
+    resume.pushKV("runtime_binding_id", binding);
+    resume.pushKV("new_grant_id", std::string(96, 'a'));
+    BOOST_REQUIRE(write("lab.runtime_resume", resume));
+    execute.pushKV("one_use_permit", UniValue(old_permit));
+    BOOST_CHECK(!write("lab.action_execute", execute));
+    BOOST_REQUIRE(write("lab.action_prepare", prepare));
+    execute.pushKV("one_use_permit", result["one_use_permit"]);
+    BOOST_REQUIRE(write("lab.action_execute", execute));
+    BOOST_CHECK_EQUAL(result["state"].get_str(), "PERMIT_CONSUMED");
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("unrelated", "rollback-pause-fault"), result, err));
+    modelnet::ResetLabApi();
+}
+
+BOOST_AUTO_TEST_CASE(failed_save_keeps_identity_revoked)
+{
+    TempTree root{m_path_root / "lab-rollback-revocation"};
+    LabDirEnv env(root.path);
+    PrepareDir(root.path);
+    UniValue result;
+    std::string err;
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("revoked", "rollback-identity"), result, err));
+    const std::string identity = result["record_id"].get_str();
+    UniValue payload(UniValue::VOBJ);
+    payload.pushKV("issuer_root", identity);
+    payload.pushKV("revocation_epoch", "1");
+    UniValue targets(UniValue::VARR);
+    targets.push_back(identity);
+    payload.pushKV("targets", targets);
+    payload.pushKV("effective_after_ms", "1");
+    payload.pushKV("reason_code", "operator");
+    payload.pushKV("prior_revocation_id", UniValue());
+    payload.pushKV("quarantine_since_ms", UniValue());
+    UniValue sign(UniValue::VOBJ);
+    sign.pushKV("record_type", "Revocation");
+    sign.pushKV("payload", payload);
+    sign.pushKV("realm_id", std::string(96, 'a'));
+    sign.pushKV("delegation_id", UniValue());
+    sign.pushKV("expires_ms", "4102444800000");
+    sign.pushKV("idempotency_key", "rollback-sign-before");
+    sign.pushKV("expected_state", UniValue());
+    BOOST_REQUIRE(Call("lab.identity_sign", sign, result, err));
+    UniValue import_req(UniValue::VOBJ);
+    import_req.pushKV("envelope", result["envelope"]);
+    import_req.pushKV("publish", false);
+    import_req.pushKV("idempotency_key", "rollback-import-revocation");
+    import_req.pushKV("expected_state", UniValue());
+    BOOST_REQUIRE(Call("lab.record_import", import_req, result, err));
+    UniValue revoke(UniValue::VOBJ);
+    revoke.pushKV("revocation_id", result["record_id"].get_str());
+    revoke.pushKV("idempotency_key", "rollback-revoke-identity");
+    revoke.pushKV("expected_state", UniValue());
+    BOOST_REQUIRE_MESSAGE(Call("lab.identity_revoke", revoke, result, err), err);
+    sign.pushKV("idempotency_key", "rollback-sign-revoked");
+    BOOST_CHECK(!Call("lab.identity_sign", sign, result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_IDENTITY_REVOKED");
+    const std::string disk = ReadFile(root.path / "lab.json");
+    fs::create_directory(root.path / "lab.json.tmp");
+    BOOST_CHECK(!Call("lab.identity_create", Identity("unrelated", "rollback-revocation-fault"), result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_RECOVERY_REQUIRED");
+    BOOST_CHECK_EQUAL(ReadFile(root.path / "lab.json"), disk);
+    fs::remove(root.path / "lab.json.tmp");
+    sign.pushKV("idempotency_key", "rollback-sign-after-failure");
+    BOOST_CHECK(!Call("lab.identity_sign", sign, result, err));
+    BOOST_CHECK_EQUAL(err, "BTX035_IDENTITY_REVOKED");
+    UniValue inspect(UniValue::VOBJ);
+    inspect.pushKV("principal_id", identity);
+    BOOST_REQUIRE(Call("lab.identity_inspect", inspect, result, err));
+    BOOST_CHECK_EQUAL(result["state"].get_str(), "REVOKED");
+    BOOST_REQUIRE(Call("lab.identity_create", Identity("unrelated", "rollback-revocation-fault"), result, err));
+    BOOST_CHECK(ReadFile(root.path / "lab.json").find("identity_sk") == std::string::npos);
     modelnet::ResetLabApi();
 }
 
@@ -652,6 +771,92 @@ BOOST_AUTO_TEST_CASE(registry_write_after_restart_keeps_earlier_rows)
     BOOST_CHECK_EQUAL(ReadFile(file), "{");
     BOOST_CHECK(!modelnet::LivePathAllowed("btx035-lifecycle-unknown", false, code));
     BOOST_CHECK_EQUAL(code, "BTX035_RECOVERY_REQUIRED");
+}
+
+
+BOOST_AUTO_TEST_CASE(rejected_snapshot_import_is_not_saved_by_a_later_write)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    TempTree root{m_path_root / "lab-lifecycle-import-atomicity"};
+    LabDirEnv env(root.path);
+    AdmissionGuard admission;
+    auto object = [](const std::string& kind, const std::string& content) {
+        modelnet::ExchangeObject obj{kind, {}, content};
+        std::string err;
+        const auto* bytes = reinterpret_cast<const unsigned char*>(content.data());
+        BOOST_REQUIRE(modelnet::GitObjectDigest(kind, {bytes, content.size()}, obj.digest, err));
+        return obj;
+    };
+    auto id = [](const std::string& manifest) {
+        unsigned char hash[CSHA384::OUTPUT_SIZE];
+        CSHA384().Write(reinterpret_cast<const unsigned char*>(manifest.data()), manifest.size()).Finalize(hash);
+        return HexStr(hash);
+    };
+    const auto good_model = object("model", "retained valid model");
+    const auto good_piece = object("piece", "v1|" + good_model.digest + "|0|" + HexStr(good_model.content));
+    const auto bad_model = object("model", "rejected model bytes");
+    const auto bad_piece = object("piece", "v1|" + bad_model.digest + "|0|" + HexStr(std::string{"different bytes"}));
+    const std::vector<std::vector<modelnet::ExchangeObject>> invalid{
+        {object("piece", "not-a-piece")},
+        {bad_model, bad_piece},
+    };
+    for (size_t i = 0; i < invalid.size(); ++i) {
+        const fs::path dir = root.path / fs::PathFromString(std::to_string(i));
+        fs::create_directories(dir);
+        env.Point(dir);
+        PrepareDir(dir);
+        UniValue result;
+        std::string err, good, bad;
+        BOOST_REQUIRE(modelnet::WriteExchangeManifest({good_model, good_piece}, good, err));
+        BOOST_REQUIRE(modelnet::WriteExchangeManifest(invalid[i], bad, err));
+        auto request = [](const std::string& manifest, const char* key) {
+            UniValue req(UniValue::VOBJ);
+            req.pushKV("manifest", manifest);
+            req.pushKV("idempotency_key", key);
+            req.pushKV("expected_state", UniValue());
+            return req;
+        };
+        auto exists = [&](const std::string& repo) {
+            UniValue req(UniValue::VOBJ), state;
+            req.pushKV("target_kind", "repository");
+            req.pushKV("target_key", repo);
+            BOOST_REQUIRE(Call("lab.state_get", req, state, err));
+            return state["exists"].get_bool();
+        };
+        BOOST_REQUIRE(Call("lab.snapshot_import", request(good, "snapshot-valid-import"), result, err));
+        BOOST_REQUIRE(exists(id(good)));
+        BOOST_REQUIRE(!exists(id(bad)));
+        const auto before = ReadFile(dir / "lab.json");
+        BOOST_CHECK(!Call("lab.snapshot_import", request(bad, "snapshot-invalid-import"), result, err));
+        BOOST_CHECK_EQUAL(err, i == 0 ? "BTX035_SCHEMA" : "BTX035_ID_MISMATCH");
+        BOOST_CHECK(!exists(id(bad)));
+        BOOST_CHECK_EQUAL(ReadFile(dir / "lab.json"), before);
+        // An unrelated successful write must not persist any rejected import state.
+        BOOST_REQUIRE(Call("lab.identity_create", Identity("save-control", "snapshot-later-save"), result, err));
+        UniValue saved;
+        BOOST_REQUIRE(saved.read(ReadFile(dir / "lab.json")));
+        BOOST_CHECK(!saved["repo_objects"].exists(id(bad)));
+        PrepareDir(dir);
+        BOOST_CHECK(!exists(id(bad)));
+        BOOST_CHECK(exists(id(good)));
+        UniValue export_req(UniValue::VOBJ);
+        export_req.pushKV("repository_id", id(good));
+        export_req.pushKV("idempotency_key", "snapshot-export-control");
+        export_req.pushKV("expected_state", UniValue());
+        BOOST_CHECK(Call("lab.snapshot_export", export_req, result, err));
+        if (err.empty()) {
+            std::vector<modelnet::ExchangeObject> exported;
+            BOOST_REQUIRE(modelnet::VerifyExchangeManifest(result["manifest"].get_str(), exported, err));
+            bool model_kept{false}, piece_kept{false};
+            for (const auto& row : exported) {
+                model_kept |= row.kind == "model" && row.digest == good_model.digest && row.content == good_model.content;
+                piece_kept |= row.kind == "piece" && row.digest == good_piece.digest && row.content == good_piece.content;
+                BOOST_CHECK(row.digest != bad_model.digest);
+            }
+            BOOST_CHECK(model_kept);
+            BOOST_CHECK(piece_kept);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

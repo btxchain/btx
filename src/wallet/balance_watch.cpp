@@ -4,6 +4,7 @@
 
 #include <wallet/balance_watch.h>
 
+#include <addresstype.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <primitives/transaction.h>
@@ -88,6 +89,11 @@ CAmount MineTrustedAtHeight(const CWallet& wallet, int height) EXCLUSIVE_LOCKS_R
     const bool allow_used_addresses = !wallet.IsWalletFlagSet(WALLET_FLAG_AVOID_REUSE);
 
     std::set<COutPoint> spent_at_height;
+    // Destinations spent from at or below `height`: avoid_reuse counts an address
+    // as used once a coin of it was spent, and IsSpentKey() answers for the live
+    // wallet, including spends above `height`. Like IsSpentKey(), only outputs
+    // with a destination can be used.
+    std::set<CTxDestination> used_at_height;
     for (const auto& entry : wallet.mapWallet) {
         const CWalletTx& wtx = entry.second;
         const std::optional<int> confirmed = ConfirmedHeight(wtx);
@@ -95,6 +101,12 @@ CAmount MineTrustedAtHeight(const CWallet& wallet, int height) EXCLUSIVE_LOCKS_R
         for (const CTxIn& txin : wtx.tx->vin) {
             if (txin.prevout.IsNull()) continue;
             spent_at_height.insert(txin.prevout);
+            const auto prev = wallet.mapWallet.find(txin.prevout.hash);
+            CTxDestination used;
+            if (prev != wallet.mapWallet.end() && txin.prevout.n < prev->second.tx->vout.size() &&
+                ExtractDestination(prev->second.tx->vout[txin.prevout.n].scriptPubKey, used)) {
+                used_at_height.insert(used);
+            }
         }
     }
 
@@ -110,7 +122,10 @@ CAmount MineTrustedAtHeight(const CWallet& wallet, int height) EXCLUSIVE_LOCKS_R
             const CTxOut& txout = wtx.tx->vout[i];
             // m_mine_trusted, not the watch-only bucket.
             if ((wallet.IsMine(txout) & ISMINE_SPENDABLE) == 0) continue;
-            if (!allow_used_addresses && wallet.IsSpentKey(txout.scriptPubKey)) continue;
+            if (!allow_used_addresses) {
+                CTxDestination dest;
+                if (ExtractDestination(txout.scriptPubKey, dest) && used_at_height.count(dest) != 0) continue;
+            }
             if (spent_at_height.count(COutPoint(txid, i)) != 0) continue;
             if (!MoneyRange(txout.nValue)) {
                 throw std::runtime_error(std::string(__func__) + ": value out of range");

@@ -4,7 +4,10 @@
 
 #include <modelnet/swarm_evolution.h>
 
+#include <util/readwritefile.h>
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <set>
@@ -18,10 +21,16 @@ bool CopyFile(const fs::path& from, const fs::path& to)
 {
     std::ifstream in(from, std::ios::binary);
     if (!in) return false;
-    std::ofstream out(to, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
-    out << in.rdbuf();
-    return static_cast<bool>(out);
+    return WriteBinaryFileAtomically(to, [&](std::FILE* out) {
+        std::array<char, 8192> bytes;
+        bool copied = false;
+        while (in.read(bytes.data(), bytes.size()) || in.gcount() != 0) {
+            copied = true;
+            const auto count = static_cast<size_t>(in.gcount());
+            if (std::fwrite(bytes.data(), 1, count, out) != count) return false;
+        }
+        return copied && in.eof() && !in.bad();
+    });
 }
 
 } // namespace

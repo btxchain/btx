@@ -48,12 +48,25 @@ Release Process
   only `OPENSSL_3.0.0` and its `libcrypto.so.3` up to `OPENSSL_3.0.9`); a Windows
   `.exe`/`.dll` imports a DLL that is neither a Windows system DLL nor next to
   it (`libgomp-1.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll` must ship
-  beside `btxd.exe`); a Mach-O has ML-DSA keygen but does not define
+  beside `btxd.exe`); a Mach-O dependency or runpath points outside system
+  libraries and dyld-relative paths (every bundled image and universal slice
+  is inspected); a thin 64-bit Mach-O has ML-DSA keygen but does not define
   `_btx_mldsa_randombytes` (the 17c2da89 rename; six files in the official
   v0.34.15 macOS archive fail this); a member is not `root:root`, is
   group/world-writable, or a directory is empty.
   0.35.0rc1 was repacked outside `package_release_archive.py`; the btxd-only
   gate passed all three archives, and all three fail this one (#235, #237).
+  That gate runs on the machine that cut the archive, which has the libraries the
+  build used. Also start the exact Linux `.tar.gz` you upload in clean images,
+  once with `--btxd-arg=-swapnet=0` and once with `--btxd-arg=-swapnet=1`, for
+  example `python3 scripts/release/verify_archive_clean_start.py --archive <file>
+  --engine proot --image /srv/noble --image /srv/trixie --btxd-arg=-swapnet=1`
+  (root directories from `debootstrap --variant=minbase`; a proot built from the
+  v5.4.0 tag, since Ubuntu 24.04's 5.1.0 cannot see files in the root;
+  `--engine chroot` needs root and `/proc` mounted in each root). It unpacks
+  the archive, requires `btxd -version` to exit 0 and a regtest node to answer
+  `getblockchaininfo`, then stops it. A `-swapnet=1` node that cannot start
+  SwapNet stops during init, so it fails here.
   On a gate host that can run the archive's `btxd` (a Mac for the macOS
   archive, Linux for the Linux ones), add `--run-wallet-check`: it starts that
   `btxd` on regtest in a temporary datadir and fails when a new wallet's own
@@ -419,6 +432,7 @@ false until the corresponding campaign bits are actually set.
     - `python3 test/util/publish_github_release_test.py`
     - `python3 test/util/sign_release_bundle_test.py`
     - `python3 test/util/verify_release_btxd_test.py`
+    - `python3 test/util/verify_archive_clean_start_test.py`
     - `python3 test/util/package_release_archive_test.py`
     - `python3 test/util/cut_release_test.py`
     - `python3 test/util/cut_local_release_test.py`

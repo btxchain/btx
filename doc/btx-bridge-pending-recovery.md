@@ -114,7 +114,8 @@ The wallet examines every unresolved pending record and then:
 4. marks the batch `spent_elsewhere` if the funded outpoint is no longer
    available on the active chain and no tracked settlement/refund remains
    active
-5. retries settlement while the refund path is not yet eligible
+5. retries settlement while the refund path is not yet eligible (not for a
+   bridge-in settlement after the shielded-credit sunset, see below)
 6. switches to refund once `refund_lock_height` has been reached and a valid
    refund destination is recorded
 
@@ -178,6 +179,19 @@ without operator input, for example:
 - no valid refund destination is recorded once refund becomes eligible
 - the wallet cannot sign the recovered PSBT
 - PSBT finalization failed
+- a bridge-in (shield) settlement is due after the shielded-credit sunset
+
+### Bridge-in after the shielded-credit sunset
+
+From `nShieldedPoolCreditDisableHeight` (height 125,000 on mainnet, testnet,
+testnet4, signet and shieldedv2dev) consensus no longer credits the shielded pool, so a
+bridge-in settlement can no longer confirm. Automatic recovery then stops
+retrying it: it records `Bridge shield settlement disabled because shielded
+pool credits are disabled` and reports `manual_action_required` until the
+refund path becomes eligible at `refund_lock_height`, and then refunds as
+usual. `bridge_submitshieldtx` and `bridge_buildshieldtx` fail with
+`... is disabled at height <h> because shielded pool credits are disabled by
+consensus`. Record a refund destination and use the refund path below.
 
 ### Transient `bad-shielded-anchor`
 
@@ -427,7 +441,9 @@ signed raw transaction hex exists, final broadcast can happen from any node.
 ### Bridge-in retry
 
 Use this when a transparent-funded bridge output was supposed to settle into
-the shielded pool.
+the shielded pool. After the shielded-credit sunset this settlement is
+refused by consensus; see "Bridge-in after the shielded-credit sunset" above
+and use the refund path instead.
 
 Fast path:
 

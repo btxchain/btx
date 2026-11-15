@@ -30,7 +30,11 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -98,6 +102,55 @@ std::string WithChecksum(const std::string& descriptor)
 {
     if (descriptor.find('#') != std::string::npos) return descriptor;
     return AddChecksum(descriptor);
+}
+
+using PoolSlot = std::tuple<uint32_t, uint32_t, uint32_t>; // account, branch, index
+
+//! The pool slot an address-book label names, in the forms deriveexchangeaddress
+//! looks up: <account>/<deposit|change>/<index>, or deposit/<index> and
+//! change/<index> for account 0.
+std::optional<PoolSlot> PoolSlotFromLabel(const std::string& label)
+{
+    const auto number = [](std::string_view s, uint32_t& out) {
+        if (s.empty() || s.size() > 10 || !std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            return false;
+        }
+        const uint64_t v = std::stoull(std::string{s});
+        if (v > std::numeric_limits<uint32_t>::max()) return false;
+        out = static_cast<uint32_t>(v);
+        return true;
+    };
+    std::string_view rest{label};
+    uint32_t account = 0;
+    const size_t slash = rest.find('/');
+    if (slash != std::string_view::npos && number(rest.substr(0, slash), account)) {
+        rest.remove_prefix(slash + 1);
+    }
+    uint32_t branch = 0;
+    if (rest.rfind("deposit/", 0) == 0) {
+        rest.remove_prefix(8);
+    } else if (rest.rfind("change/", 0) == 0) {
+        branch = 1;
+        rest.remove_prefix(7);
+    } else {
+        return std::nullopt;
+    }
+    uint32_t index = 0;
+    if (!number(rest, index)) return std::nullopt;
+    return PoolSlot{account, branch, index};
+}
+
+//! The address a single-script public descriptor watches.
+bool DescriptorDestination(const std::string& descriptor, CTxDestination& out)
+{
+    FlatSigningProvider keys;
+    std::string parse_err;
+    auto parsed = Parse(WithChecksum(descriptor), keys, parse_err, /*require_checksum=*/true);
+    if (parsed.size() != 1 || !parsed[0]) return false;
+    std::vector<CScript> scripts;
+    FlatSigningProvider expand_keys;
+    if (!parsed[0]->Expand(/*pos=*/0, keys, scripts, expand_keys) || scripts.size() != 1) return false;
+    return ExtractDestination(scripts[0], out);
 }
 
 bool PubkeyHexToDescriptor(const std::string& hex_or_slh, std::string& descriptor, bilingual_str& err)
@@ -287,19 +340,23 @@ bool ItemToDescriptorAndLabel(const UniValue& item, size_t index, std::string& d
     if (item.exists("label") && item["label"].isStr()) {
         label = item["label"].get_str();
     } else if (item.exists("index") && !item["index"].isNull()) {
-        uint32_t branch = 0;
-        uint32_t account = 0;
-        if (item.exists("branch") && item["branch"].isNum()) {
-            const int64_t b = item["branch"].getInt<int64_t>();
-            if (b == 0 || b == 1) branch = static_cast<uint32_t>(b);
-        }
-        if (item.exists("account") && item["account"].isNum()) {
-            const int64_t a = item["account"].getInt<int64_t>();
-            if (a >= 0 && a <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
-                account = static_cast<uint32_t>(a);
+        // Read index, branch and account as deriveexchangeaddress does: a value it
+        // would refuse is an error here too, not a deposit label it cannot find.
+        const auto field = [&](const char* name, int64_t max, int64_t& out) {
+            int64_t v = -1;
+            if (!item[name].isNum() || !ParseInt64(item[name].getValStr(), &v) || v < 0 || v > max) {
+                err = Untranslated(strprintf("Deposit pool item %u: %s must be an integer from 0 to %d", index, name, max));
+                return false;
             }
-        }
-        label = strprintf("%u/%s/%s", account, branch == 1 ? "change" : "deposit", item["index"].getValStr());
+            out = v;
+            return true;
+        };
+        const int64_t u32_max = std::numeric_limits<uint32_t>::max();
+        int64_t pool_index = 0, branch = 0, account = 0;
+        if (!field("index", u32_max, pool_index)) return false;
+        if (item.exists("branch") && !field("branch", 1, branch)) return false;
+        if (item.exists("account") && !field("account", u32_max, account)) return false;
+        label = strprintf("%d/%s/%d", account, branch == 1 ? "change" : "deposit", pool_index);
     }
 
     if (item.exists("desc") && item["desc"].isStr()) {
@@ -509,12 +566,37 @@ bool ImportDepositPool(CWallet& wallet, const UniValue& addresses_or_pubkeys, bi
         return false;
     }
 
-    int imported = 0;
-    int address_only = 0;
+    // Read every item before importing any, so a bad item does not leave the ones
+    // before it imported.
+    std::vector<std::pair<std::string, std::string>> parsed;
+    parsed.reserve(items.size());
     for (size_t i = 0; i < items.size(); ++i) {
         std::string descriptor;
         std::string label;
         if (!ItemToDescriptorAndLabel(items[i], i, descriptor, label, err)) return false;
+        parsed.emplace_back(std::move(descriptor), std::move(label));
+    }
+    // deriveexchangeaddress returns the first address-book entry whose label names
+    // the slot, so a second address on a slot would make the address handed out for
+    // an index depend on address-book order. Refuse it, from this pool or against an
+    // earlier import; importing the same address again is fine.
+    std::map<PoolSlot, CTxDestination> slots;
+    for (const auto& [dest, entry] : wallet.m_address_book) {
+        if (const auto slot = PoolSlotFromLabel(entry.GetLabel())) slots.emplace(*slot, dest);
+    }
+    for (size_t i = 0; i < parsed.size(); ++i) {
+        const auto slot = PoolSlotFromLabel(parsed[i].second);
+        CTxDestination dest;
+        if (!slot || !DescriptorDestination(parsed[i].first, dest)) continue;
+        const auto [it, inserted] = slots.emplace(*slot, dest);
+        if (!inserted && !(it->second == dest)) {
+            err = Untranslated(strprintf("Deposit pool item %u: %s is already imported for another address", i, parsed[i].second));
+            return false;
+        }
+    }
+    int imported = 0;
+    int address_only = 0;
+    for (const auto& [descriptor, label] : parsed) {
         if (descriptor.rfind("addr(", 0) == 0) ++address_only;
         if (!ImportPublicDescriptor(wallet, descriptor, label, err)) return false;
         ++imported;

@@ -159,6 +159,9 @@ public:
     bool Bind(const SubscriptionMandate& m, std::string& err);
     bool EvaluateAndReserve(const SubscriptionEvent& event, const SignedTerms& terms,
                             Reservation& out, int64_t now_ms, std::string& err);
+    /** Take back a reservation EvaluateAndReserve has just made (its event, budget,
+     *  exposure and counters). Does nothing for an event that holds another reservation. */
+    void Unreserve(const Reservation& r);
     void Revoke();
     bool Revoked() const;
     bool Expired(int64_t now_ms) const;
@@ -206,6 +209,8 @@ public:
      *  restart. Without a path the store stays memory-only. */
     bool SetPersistPath(const fs::path& path, std::string& err);
     bool Persisted() const;
+    /** The file the store is backed with, or empty. */
+    fs::path PersistPath() const;
     /** Bind the store to the network the node is actually on. Mandates for another
      *  network are then refused at creation and cannot be reserved against. */
     bool SetNodeNetwork(const std::string& network_hex, std::string& err);

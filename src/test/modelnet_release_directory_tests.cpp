@@ -107,6 +107,28 @@ modelnet::ModelSearchRecord ReleaseRecord(uint16_t model, uint16_t release)
 }
 } // namespace
 
+BOOST_AUTO_TEST_CASE(econ_campaign_index_eviction_restores_retained_model_lookup)
+{
+    using namespace modelnet;
+    CampaignIndex idx;
+    idx.SetCap(2);
+    ReleaseCampaign local;
+    local.model_id = Id(1);
+    local.release_id = Id(2);
+    local.pledged_atoms = 10;
+    std::string err;
+    BOOST_REQUIRE(idx.Put(local, err));
+    idx.IngestFromSearchRecord(ReleaseRecord(1, 3));
+    BOOST_REQUIRE(idx.GetByModel(Id(1)));
+    BOOST_CHECK(idx.GetByModel(Id(1))->release_id == Id(3));
+
+    idx.IngestFromSearchRecord(ReleaseRecord(4, 5));
+    BOOST_CHECK(!idx.GetByRelease(Id(3)));
+    BOOST_CHECK(idx.GetByRelease(Id(2)));
+    BOOST_REQUIRE(idx.GetByModel(Id(1)));
+    BOOST_CHECK(idx.GetByModel(Id(1))->release_id == Id(2));
+}
+
 BOOST_AUTO_TEST_CASE(econ_campaign_index_bounded)
 {
     using namespace modelnet;

@@ -36,7 +36,9 @@ int ComputeMedianTip(std::vector<int> peer_heights)
     if ((peer_heights.size() & 1U) != 0U) {
         return peer_heights[middle];
     }
-    return (peer_heights[middle - 1] + peer_heights[middle]) / 2;
+    // Peer heights come from the VERSION start height a peer sends; add them as
+    // int64 so two large heights cannot overflow int.
+    return static_cast<int>((int64_t{peer_heights[middle - 1]} + peer_heights[middle]) / 2);
 }
 } // namespace
 

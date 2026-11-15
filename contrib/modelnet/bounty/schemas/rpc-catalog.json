@@ -344,7 +344,7 @@
         "lot_ids": "owned lots"
       },
       "result": "RecoveryManifest",
-      "notes": "No seed/private keys; includes complete scripts, control data and lineage."
+      "notes": "No seed/private keys. Lists the lots the helper has observed (lot_id, outpoint, amount_atoms); it holds no scripts, control data or keys. Keep the funding plan to rebuild a refund."
     },
     {
       "name": "commitbountysubmission",
@@ -443,7 +443,7 @@
         "idempotency_key": "caller-scoped"
       },
       "result": "EvaluationJob",
-      "notes": "Asynchronous isolated process. No wallet/signing keys or arbitrary network."
+      "notes": "Isolated child process. The call returns when the child exits or timeout_ms passes (default 15000, at most 600000). No wallet/signing keys or arbitrary network."
     },
     {
       "name": "getbountyevaluationjob",
@@ -468,7 +468,7 @@
         "idempotency_key": "caller-scoped"
       },
       "result": "EvaluationJobStatus",
-      "notes": "Must cancel actual worker and descendants, not only change JSON state."
+      "notes": "A running job cannot be cancelled yet: its job_id is returned only when runbountyevaluation returns. On a finished job the call changes nothing."
     },
     {
       "name": "publishbountyevaluation",
@@ -814,7 +814,7 @@
         "idempotency_key": "caller-scoped"
       },
       "result": "MandateView",
-      "notes": "Blocks new signatures, not already released signatures/broadcasts."
+      "notes": "Blocks new reservemandate reservations under this mandate. The wallet signing RPCs do not read mandates."
     },
     {
       "name": "getagentactivity",

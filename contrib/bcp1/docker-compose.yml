@@ -8,7 +8,7 @@
 #
 #   docker compose -f contrib/bcp1/docker-compose.yml up cert-runner
 #
-# cert-runner mounts the repo and runs ./run-certification, which prints
+# cert-runner mounts the repo and runs ./run-certification.sh, which prints
 # === BCP/1 PASS rows === (PASS/FAIL per case) and N/13 PASS. Requires a
 # host-built monetary-only btxd (BTXD=...) or test/config.ini — no CUDA image.
 #
