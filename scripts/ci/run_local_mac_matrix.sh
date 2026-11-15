@@ -181,7 +181,9 @@ if [[ ! -f "${MATRIX_MANIFEST}" ]]; then
 fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
+TRACKED_DIRTY=false
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+  TRACKED_DIRTY=true
   if [[ "${ALLOW_DIRTY_HEAD}" == "true" ]]; then
     echo "warning: working tree has uncommitted tracked changes; local replica will test committed HEAD ${HEAD_SHA}" >&2
   else
@@ -258,6 +260,29 @@ if [[ ${#jobs[@]} -eq 0 ]]; then
   echo "error: no jobs selected" >&2
   exit 1
 fi
+
+# Persist the selected source even when per-job worktrees are removed.
+# This is a source-selection receipt, not an attestation of produced binaries.
+python3 - "${RUN_DIR}/run.json" "${HEAD_SHA}" "${MATRIX_MANIFEST}" \
+  "${MODE}" "${ALLOW_DIRTY_HEAD}" "${TRACKED_DIRTY}" "${RUN_ID}" <<'PY_RECEIPT'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+output, commit, manifest, mode, allow_dirty, tracked_dirty, run_id = sys.argv[1:]
+receipt = {
+    "schema_version": 1,
+    "source_commit": commit,
+    "manifest_path": manifest,
+    "manifest_sha256": hashlib.sha256(Path(manifest).read_bytes()).hexdigest(),
+    "mode": mode,
+    "allow_dirty_head": allow_dirty == "true",
+    "tracked_dirty": tracked_dirty == "true",
+    "run_id": run_id,
+}
+Path(output).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+PY_RECEIPT
 
 printf 'job_key\tworkflow\tjob_name\ttarget\tstatus\tstarted\tfinished\telapsed_s\ttimeout_min\tlog_path\tworktree\n' > "${SUMMARY_FILE}"
 
