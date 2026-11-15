@@ -3459,26 +3459,39 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
         std::map<std::string, LaunchCheckpoint> launch_trains;
         if (!CollectTrains(objects, trains, launch_trains, err)) return false;
         if (!AttachLineage(objects, observed, err)) return false;
+        // Validate against isolated import state before publishing any changes.
+        // Runtime restrictions and one-use permits remain in the live store.
+        Store pending;
+        pending.records = store.records;
+        pending.models = store.models;
+        pending.model_pieces = store.model_pieces;
+        pending.trains = store.trains;
+        pending.observations = std::move(observed);
+        RestorePublished(pending);
+        RestoreTrains(pending, trains);
+        RestoreLaunch(pending, launch_trains);
+        if (!ApplyReplayAuthors(pending, objects, err)) return false;
+        for (const ExchangeObject& object : objects) {
+            if (object.kind != "model" && object.kind != "piece") continue;
+            if (!AcceptModelObject(pending, object, err)) return false;
+        }
+        for (const ExchangeObject& object : objects) {
+            if (!AcceptBlob(pending, object, err)) return false;
+        }
+        for (const ExchangeObject& object : objects) {
+            if (object.kind != "model") continue;
+            if (!ModelBytesMatch(pending, object.digest, err)) return false;
+        }
         const std::string repo = Id96(RequireStr(req, "manifest"));
         store.repos.insert(repo);
         store.repo_objects[repo] = objects;
         store.snapshots.insert(repo);
-        store.observations = std::move(observed);
-        RestorePublished(store);
-        RestoreTrains(store, trains);
-        RestoreLaunch(store, launch_trains);
-        if (!ApplyReplayAuthors(store, objects, err)) return false;
-        for (const ExchangeObject& object : objects) {
-            if (object.kind != "model" && object.kind != "piece") continue;
-            if (!AcceptModelObject(store, object, err)) return false;
-        }
-        for (const ExchangeObject& object : objects) {
-            if (!AcceptBlob(store, object, err)) return false;
-        }
-        for (const ExchangeObject& object : objects) {
-            if (object.kind != "model") continue;
-            if (!ModelBytesMatch(store, object.digest, err)) return false;
-        }
+        store.observations = std::move(pending.observations);
+        store.published = std::move(pending.published);
+        store.trains = std::move(pending.trains);
+        store.models = std::move(pending.models);
+        store.model_pieces = std::move(pending.model_pieces);
+        store.records = std::move(pending.records);
         result.pushKV("repository_id", repo);
         result.pushKV("object_count", static_cast<int>(objects.size()));
         return true;
