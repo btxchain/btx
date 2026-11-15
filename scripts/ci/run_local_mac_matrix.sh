@@ -384,8 +384,12 @@ collect_finished_jobs() {
     progressed=1
   done
 
-  active_pids=("${new_pids[@]}")
-  active_job_dirs=("${new_job_dirs[@]}")
+  active_pids=()
+  active_job_dirs=()
+  if [[ "${#new_pids[@]}" -gt 0 ]]; then
+    active_pids=("${new_pids[@]}")
+    active_job_dirs=("${new_job_dirs[@]}")
+  fi
 
   if [[ "${progressed}" -eq 1 ]]; then
     return 0
