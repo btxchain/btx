@@ -20,7 +20,7 @@ The host attempts to discover an already-running same-network Bitcoin node using
 
 EVM requires a deliberately configured loopback full-node endpoint and a locally approved contract: exact genesis, chain ID, deployed address and runtime hash. The address is where the funds sit, so the node still pins it. The runtime hash lets the node reject any other code at that address.
 
-The open artifact is `contrib/swapnet/contracts/SwapNetHTLC.sol`, compiled with the profile in `contracts/foundry.toml`: solc 0.8.24 (`0.8.24+commit.e11b9ed9`), optimizer on, 200 runs, `bytecode_hash = none`. That build's runtime keccak256 is `a06e30bad714ff02db5a2401a898bd7194d1c475b61bdab312ae194b1509e45d`. Its creation-code keccak256 is `401e81e4ab795f39e48b76bda608771e10078e23cfc1d807983b05ee3da97cde`.
+The open artifact is `contrib/swapnet/contracts/SwapNetHTLC.sol`, compiled with the profile in `contracts/foundry.toml`: solc 0.8.24 (`0.8.24+commit.e11b9ed9`), EVM version shanghai, optimizer on, 200 runs, `bytecode_hash = none`. Cancun produces the same bytecode for this contract. Paris does not. That build's runtime keccak256 is `a06e30bad714ff02db5a2401a898bd7194d1c475b61bdab312ae194b1509e45d`. Its creation-code keccak256 is `401e81e4ab795f39e48b76bda608771e10078e23cfc1d807983b05ee3da97cde`.
 
 A runtime match does not prove the lock was written by this contract. Other init code can store a Locked record during creation and then return this runtime. Both sides would then pin the same address and the same runtime hash with no ETH behind the lock.
 
