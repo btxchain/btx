@@ -8,6 +8,9 @@
 // Coordinator wires DispatchCapabilityRpc to these symbols.
 
 #include <modelnet/capability.h>
+#ifdef _WIN32
+#include <modelnet/security_v2/common.h>
+#endif
 #include <modelnet/resource_uri.h>
 #include <modelnet/transfer_session.h>
 
@@ -127,6 +130,15 @@ bool FailResult(UniValue& result, std::string& err_code, std::string& err, const
 //! another user there.
 bool EnsurePrivateDir(const fs::path& dir, std::string& err)
 {
+#ifdef _WIN32
+    try {
+        security::EnsurePrivateDirectory(dir);
+        return true;
+    } catch (const security::Error& e) {
+        err = "cannot make private: " + fs::PathToString(dir) + ": " + e.code;
+        return false;
+    }
+#else
     const std::string path{fs::PathToString(dir)};
     if (::mkdir(path.c_str(), 0700) != 0 && errno != EEXIST) {
         err = "cannot create " + path;
@@ -142,6 +154,7 @@ bool EnsurePrivateDir(const fs::path& dir, std::string& err)
         return false;
     }
     return true;
+#endif
 }
 
 int64_t ParseI64(const UniValue& v, int64_t fallback = 0)
