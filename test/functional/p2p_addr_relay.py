@@ -356,7 +356,17 @@ class AddrTest(BitcoinTestFramework):
 
     def rate_limit_tests(self):
         self.mocktime = int(time.time())
-        self.restart_node(0, [])
+        # blocksonly_mode_tests left -blocksonly=1. BTX keeps an InitWarning
+        # on that process's stderr (init.cpp) because a mining or submit node
+        # that does not relay never delivers a winning block to the
+        # ExactReplay signer. Bitcoin's empty-stderr stop does not apply.
+        self.stop_node(0, expected_stderr=(
+            "Warning: This node is running -blocksonly=1. A mining or submit node "
+            "must relay blocks aggressively (-blocksonly=0); otherwise winning "
+            "blocks may never reach the ExactReplay signer and will orphan even "
+            "on the attested chain."
+        ))
+        self.start_node(0, [])
         self.nodes[0].setmocktime(self.mocktime)
 
         for conn_type, no_relay in [("outbound-full-relay", False), ("block-relay-only", True), ("inbound", False)]:
