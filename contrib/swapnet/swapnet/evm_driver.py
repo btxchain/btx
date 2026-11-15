@@ -46,6 +46,13 @@ class EVMDriver:
         require(b and b.get('hash'),'CHAIN_SYNC','EVM chain tip unavailable')
         now=self.now();timestamp=int(b['timestamp'],16)
         return ChainClock('evm',int(b['number'],16),timestamp,now,1,24,now-timestamp>7200)
+    def finality_lag(self):
+        # How far the finalized block, which settlement reads, trails the tip.
+        latest=self.rpc('eth_getBlockByNumber','latest',False)
+        finalized=self.rpc('eth_getBlockByNumber','finalized',False)
+        require(latest and latest.get('hash'),'CHAIN_SYNC','EVM chain tip unavailable')
+        require(finalized and finalized.get('hash'),'FINALITY_UNAVAILABLE','Finalized tag required; no silent latest fallback')
+        return max(0,int(latest['timestamp'],16)-int(finalized['timestamp'],16))
     def commitment(self,h,claim,refund,deadline):
         address_bytes(claim);address_bytes(refund);hex32(h)
         return digest('BTX/SWAPNET/EVM-CONTRACT/2',{'asset':self.asset.id,'contract':self.contract,'runtime_hash':self.runtime_hash,
