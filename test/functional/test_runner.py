@@ -109,6 +109,7 @@ BASE_SCRIPTS = [
     "feature_swapnet.py",
     "rpc_swapnet_principal.py --descriptors",
     "p2p_swapnet_frames.py",
+    "wallet_swapnet_relock.py --descriptors",
     # Scripts that are run by default.
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
