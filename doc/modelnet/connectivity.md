@@ -20,6 +20,8 @@ TLS/PQ terminator, not an identity authority, and not a model authority.
 No X25519, classical TLS, hybrid-only, or WebPKI fallback on the native
 model transport.
 
+**This build.** The helper answers the extension POSTs and can splice one relay connect. It does not dial AutoNAT probes, does not record dial-back reports, does not fill the routing table, and does not run iterative provider lookups. `reachability_state` stays `UNKNOWN`.
+
 ## Fallback order
 
 1. Proven direct global IPv6

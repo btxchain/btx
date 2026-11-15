@@ -7,26 +7,22 @@ never globally complete.
 Language rule: use **observed providers** and **current network view**. Never claim global
 completeness.
 
-Implementation reference: `DirectoryEntryJson`, `SearchResultCard`, `ComputeSwarmHealth` in
-`src/modelnet/search.cpp`; RPC handlers in `DispatchHelperRpc`.
+Implementation reference: `EconomySearchCard` in `src/modelnet/economy.cpp`; RPC handlers in `DispatchHelperRpc`.
+
+**This build.** `getmodeldirectory` and `getmodeldirectoryentry` return schema 3 economy cards (`availability`, `local`, `release`, `search`). They do not return `DirectoryEntryJson`, and they do not add `metadata` or `swarm`. `getmodelavailability` calls `ComputeSwarmHealth` with `pieces_total` 0, so the class is `UNKNOWN`.
 
 ## Directory entry
 
 Returned by `getmodeldirectoryentry`, listed by `getmodeldirectory`, and embedded in search
 `results[]`.
 
-A directory entry is a **result card** plus:
-
-| Extra field | Content |
-|---|---|
-| `metadata` | Full `ModelSearchRecord` JSON (`type: btx-model-search-v1`) |
-| `swarm` | Same object as `availability` on the card (swarm health summary) |
+The RPC result is a schema 3 economy card. It does not add `metadata` or `swarm`.
 
 Core card fields:
 
 | Field | Meaning |
 |---|---|
-| `schema_version` | `2` |
+| `schema_version` | `3` |
 | `model_id`, `artifact_id`, `uri` | Typed roots |
 | `name` | `display_name` or `canonical_name` |
 | `publisher` | `{ id, display_name }` |

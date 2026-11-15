@@ -1,6 +1,8 @@
 # Provider routing
 
 Distributed provider discovery for `btx://` resources. Not a generic DHT.
+
+**This build.** `POST /ext/providers/put` writes the local provider cache. `lookupmodelproviders` reads that cache. The helper does not fill the routing table and does not run iterative lookups, so `routing_table_size` stays 0.
 Not IPFS. Not monetary AddrMan.
 
 ## Record

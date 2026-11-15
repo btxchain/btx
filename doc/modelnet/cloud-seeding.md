@@ -33,9 +33,10 @@ Hostname `*.r2.cloudflarestorage.com` **or** explicit `CLOUDFLARE_R2` →
 - `cloud_object_layout = SOURCE_FILES`
 - `cloud_read_strategy = STREAM_FILE`
 
-One origin GET (or long Range) of the **source file**, then split at
-`PIECE_SIZE` on the node. Do **not** issue one GET per piece against R2
-AUTO. `PIECE_OBJECTS` on R2 requires `--allow-request-heavy-cloud-layout`
+The recorded layout is `SOURCE_FILES` and `STREAM_FILE`. A live origin GET
+happens only when the caller sets `direct_seed` and `direct_seed_fetch` on
+`getmodel`. This build does not split an R2 object into pieces on its own.
+`PIECE_OBJECTS` on R2 requires `--allow-request-heavy-cloud-layout`
 (CLI) / `allow_request_heavy_cloud_layout` (RPC).
 
 ## Direct seed

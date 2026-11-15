@@ -7,6 +7,8 @@ the supervised helper's Unix socket (or an explicit `-modelrpcsocket`). If the h
 methods are available directly on the helper unix socket (researcher
 profile, no `btxd`).
 
+A wallet-restricted `-rpcauth` user is refused the server-path methods (`importmodel`, `hostmodel`, `previewmodelimport`, `exportmodellink`, `qualifymodel`, `scanmodelwatch`, `executemodelimport`, `resumemodelimport`, the `btx` package, plan, and execute methods, `setcloudstorage`, `addmodelstorage`, `preparebountyevaluation`, `runbountyevaluation`, `ensurebtxcapability`) and `modelsecurity`. Directory, search, feed, and release reads are rewritten to the restricted view and are joined only to that wallet. Other model and bounty helper methods still reach the shared helper. Spend RPCs can use only the named wallet.
+
 **Coverage rule:** Search and directory methods return `schema_version: 2` and a
 `coverage` object with **`complete: false`** (and usually `global_complete: false`).
 The `note` / `coverage_disclaimer` strings state **current network view; not a

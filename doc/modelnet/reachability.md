@@ -2,6 +2,8 @@
 
 A listen socket is not proof of public reachability.
 
+**This build.** `POST /ext/autonat/probe` admits the request and returns `would_dial: true`. It does not open a connection. `POST /ext/autonat/report` returns 403 `OWNER_ONLY`. Dial-back reports are not recorded, so `getmodelnetworkinfo` leaves `reachability_state` at `UNKNOWN`. The states below are the labels the field can take.
+
 ## States
 
 | State | Meaning |

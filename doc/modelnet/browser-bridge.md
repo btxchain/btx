@@ -10,7 +10,7 @@ Omitting the bridge is the PQ-only profile.
 |---|---|---|
 | Native `btx-modeld` | PQ1 only (ML-KEM-768, ML-DSA-44, AES-256-GCM-SHA384) | End-to-end PQ for that hop |
 | Browser HTTP(S) | Conventional HTTP at a **separately deployed** loopback process | Explicitly **not** end-to-end PQ |
-| Bridge → BTX | PQ1, or unix RPC to the helper (`getmodel` / `listmodels`) | Never a native-client TLS fallback |
+| Bridge → BTX | Unix RPC `listmodels` when `--rpc-socket` is set | The process does not open PQ1 and does not call `getmodel` |
 
 D09 is not permission to restore classical TLS inside `btx-modeld`. The
 bridge is never wallet RPC, never a release of secrets, never BanMan, and
@@ -30,13 +30,14 @@ features.
      |  conventional HTTP (disclosed weaker)
      v
   contrib/modelbridge (127.0.0.1 only; separate process)
-     |  unix RPC getmodel/listmodels  --or--  decode only
+     |  unix RPC listmodels when --rpc-socket is set, or decode only
      v
   btx-modeld  (strict PQ1)     btxd (monetary; untouched)
 ```
 
-Default bind is **127.0.0.1**. There is no `0.0.0.0` default. The Python
-server refuses non-loopback hosts.
+Default bind is **127.0.0.1**. A non-loopback host needs `--allow-non-loopback`
+or `BTX_BRIDGE_NON_LOOPBACK=1`. Binding `0.0.0.0` also needs
+`BTX_BRIDGE_PUBLIC_EDGE=1`.
 
 ## HTTP surface
 

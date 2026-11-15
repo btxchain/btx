@@ -2,6 +2,8 @@
 
 A model relay is **connectivity infrastructure only**.
 
+**This build.** `POST /ext/relay/reserve` and `POST /ext/relay/connect` are served when `-modelrelay` is on. A successful connect splices TCP. The helper does not send those posts itself and does not mark a relay healthy. `-modelrelay` defaults off.
+
 It may: hold bounded reservations, forward opaque bytes, assist
 rendezvous and hole punch, and introduce providers.
 
