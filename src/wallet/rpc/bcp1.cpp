@@ -456,6 +456,10 @@ CTxDestination WatchOmnibus(const CWallet& wallet)
     for (const auto& [dest, entry] : wallet.m_address_book) {
         if (!IsValidDestination(dest)) continue;
         const std::string label = entry.GetLabel();
+        // importdepositpool labels every entry without an index bcp1-deposit, so
+        // here that label names no slot: the first such entry is just the first
+        // customer deposit address in address-book order.
+        if (label == "bcp1-deposit") continue;
         if (LabelMatchesPool(label, 0, bcp1::BRANCH_CHANGE, 0)) return dest;
         if (!deposit0 && LabelMatchesPool(label, 0, bcp1::BRANCH_DEPOSIT, 0)) deposit0 = dest;
     }
