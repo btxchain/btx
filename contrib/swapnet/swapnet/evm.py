@@ -190,6 +190,8 @@ class EVMAdapter:
         self._monotonic=monotonic or time.monotonic;self._identity_until=self._sync_until=0.0;self._code_at=set()
     def check_chain(self,force=False):
         now=self._monotonic()
+        # A forced check that fails must not leave the previous success in force.
+        if force:self._identity_until=self._sync_until=0.0
         if force or now>=self._identity_until:
             require(int(self.rpc('eth_chainId'),16)==self.chain_id,'CHAIN_ID','Wrong EVM chain ID')
             require(self.rpc('eth_getBlockByNumber','0x0',False)['hash'][2:]==self.genesis,'GENESIS_MISMATCH','Wrong EVM genesis')
@@ -199,17 +201,23 @@ class EVMAdapter:
         if force or now>=self._sync_until:
             require(self.rpc('eth_syncing') is False,'CHAIN_SYNC','EVM client still syncing')
             self._sync_until=now+self.SYNC_TTL
+    def _runtime_at_block(self,tag,block_hash):
+        # The code of a block hash does not change. The block at a number can, so the
+        # cache key is the hash, and only after the number still names that hash.
+        if block_hash in self._code_at:return
+        if self.rpc('eth_getBlockByNumber',tag,False)['hash']!=block_hash:return
+        code=bytes.fromhex(self.rpc('eth_getCode',self.contract,tag)[2:])
+        require(keccak256(code).hex()==self.runtime_hash,'CONTRACT_CODE','Historical runtime differs')
+        if self.rpc('eth_getBlockByNumber',tag,False)['hash']!=block_hash:return
+        if len(self._code_at)>=256:self._code_at.clear()
+        self._code_at.add(block_hash)
     def observe(self,swap_id,expected,now):
         self.check_chain();hex32(swap_id)
         finalized=self.rpc('eth_getBlockByNumber','finalized',False)
         require(finalized and 'hash' in finalized,'FINALITY_UNAVAILABLE','Finalized tag required; no silent latest fallback')
         tag=finalized['number']
         call={'to':self.contract,'data':'0x'+calldata('getSwap(bytes32)',bytes.fromhex(swap_id)).hex()}
-        if tag not in self._code_at:  # the code at a finalized block cannot change
-            code=bytes.fromhex(self.rpc('eth_getCode',self.contract,tag)[2:])
-            require(keccak256(code).hex()==self.runtime_hash,'CONTRACT_CODE','Historical runtime differs')
-            if len(self._code_at)>=256:self._code_at.clear()
-            self._code_at.add(tag)
+        self._runtime_at_block(tag,finalized['hash'])
         raw=bytes.fromhex(self.rpc('eth_call',call,tag)[2:])
         require(len(raw)==7*32,'CONTRACT_ABI','Unexpected HTLC view layout')
         words=[raw[i:i+32] for i in range(0,len(raw),32)]
