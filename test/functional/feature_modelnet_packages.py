@@ -69,10 +69,9 @@ PREVIEWED_TODAY = frozenset({
     "unknown-schema-version.btx",
 })
 
-# getInt<int>() throws past the isNum() guard and btx-open terminates. It
-# refuses to preview, which is the invariant this test enforces, but it dies on
-# a signal instead of printing an error.
-ABORTS_TODAY = frozenset({"int-overflow-core-version.btx"})
+# int-overflow-core-version.btx used to SIGABRT in getInt after isNum();
+# InspectCoreVersion now refuses it with UNSUPPORTED_CORE_VERSION on stderr.
+ABORTS_TODAY = frozenset()
 
 # Economy vectors, not package frames: they are cached-observation payloads.
 ECONOMY_VECTORS = frozenset({
