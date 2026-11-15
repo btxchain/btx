@@ -51,11 +51,14 @@ class SafetyPolicy:
     require_evm_finalized: bool = True
     # Finished swaps stay watched for deep reorgs; one of them is re-observed at most this often (0 = every tick).
     terminal_recheck_seconds: int = 60
+    # A swap whose chain call failed waits 1, 2, 4 ... up to this many seconds before its next tick (0 = every tick).
+    rpc_retry_max_seconds: int = 60
 
     def __post_init__(self):
         for name in ("btx_confirmations", "btc_confirmations", "settlement_margin_seconds", "reveal_margin_seconds", "max_observation_age_seconds", "quote_ttl_seconds", "planning_headroom_seconds"):
             integer(getattr(self, name), lo=1)
         integer(self.terminal_recheck_seconds, lo=0)
+        integer(self.rpc_retry_max_seconds, lo=0, hi=3600)
         require(type(self.require_evm_finalized) is bool, "POLICY", "Invalid finality policy")
 
     def confirmations(self, family):
