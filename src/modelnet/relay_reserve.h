@@ -33,6 +33,7 @@ struct RelayReservation {
     int conn_ceiling{RELAY_DEFAULT_CONN_CEILING};
     int stream_ceiling{RELAY_DEFAULT_STREAM_CEILING};
     uint64_t bytes_used{0};
+    uint64_t bytes_pending{0};
     int conns{0};
     int streams{0};
     int64_t last_activity_ms{0};
@@ -63,7 +64,11 @@ public:
                   RelayReservation& out, std::string& err);
     void Expire(int64_t now_ms);
     bool AllowForward(const std::string& reservation_id, uint64_t nbytes, int64_t now_ms, std::string& err);
-    void AddForwardedBytes(const std::string& reservation_id, uint64_t nbytes, int64_t now_ms);
+    // Callers serialize table access. Pending claims count against the shared ceiling.
+    uint64_t ReserveForwardBytes(const std::string& reservation_id, uint64_t max_bytes, int64_t now_ms);
+    bool FinishForwardBytes(const std::string& reservation_id, uint64_t reserved_bytes,
+                            uint64_t forwarded_bytes, int64_t now_ms);
+    uint64_t AddForwardedBytes(const std::string& reservation_id, uint64_t nbytes, int64_t now_ms);
     void CloseConn(const std::string& reservation_id);
     bool Has(const std::string& reservation_id) const;
     bool Get(const std::string& reservation_id, RelayReservation& out) const;

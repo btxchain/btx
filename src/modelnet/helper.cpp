@@ -3638,7 +3638,6 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         resp.splice_host = host;
         resp.splice_port = port;
         resp.splice_reservation_id = rr.reservation_id;
-        resp.splice_byte_ceiling = rsvp.byte_ceiling > rsvp.bytes_used ? rsvp.byte_ceiling - rsvp.bytes_used : 0;
         return true;
     }
     if (req.path == root + "ext/autonat/probe" && req.method == "POST") {
@@ -12496,13 +12495,10 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
                 }
                 freeaddrinfo(res);
             }
-            const uint64_t cap = nresp.splice_byte_ceiling > 0 ? nresp.splice_byte_ceiling : RELAY_DEFAULT_BYTE_CEILING;
             if (dfd >= 0) {
                 SetPq1SocketOpts(dfd, true);
-                uint64_t moved = 0;
                 const auto splice_start = std::chrono::steady_clock::now();
                 while (!stop || !stop->load()) {
-                    if (moved >= cap) break;
                     if (std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - splice_start)
                             .count() >= PQ1_RELAY_SPLICE_MS) {
@@ -12516,28 +12512,49 @@ void HandlePq1Fd(int cfd, ModelCatalog& cat, Pq1Context& pq, std::atomic<bool>* 
                     const int pr = poll(pf, 2, 1000);
                     if (pr <= 0) break;
                     unsigned char buf[16384];
-                    if (pf[0].revents & POLLIN) {
-                        const int n = SSL_read(ssl, buf, sizeof(buf));
-                        if (n <= 0) break;
-                        if (::send(dfd, buf, n, 0) != n) break;
-                        moved += static_cast<uint64_t>(n);
-                    }
-                    if (pf[1].revents & POLLIN) {
-                        const int n = ::recv(dfd, buf, sizeof(buf), 0);
-                        if (n <= 0) break;
-                        if (SSL_write(ssl, buf, n) != n) break;
-                        moved += static_cast<uint64_t>(n);
-                    }
+                    // Claim before each read: all connections and both directions share the budget.
+                    auto forward = [&](bool from_client) {
+                        uint64_t granted;
+                        bool pending = false;
+                        {
+                            std::lock_guard<std::mutex> lock(g_swarm.conn_mu);
+                            const int64_t now = ConnNowMs();
+                            granted = g_swarm.relays.ReserveForwardBytes(
+                                nresp.splice_reservation_id, sizeof(buf), now);
+                            RelayReservation current;
+                            pending = granted == 0 &&
+                                g_swarm.relays.Get(nresp.splice_reservation_id, current) &&
+                                current.expiry_ms > now && current.bytes_pending > 0 &&
+                                current.bytes_used < current.byte_ceiling;
+                        }
+                        if (granted == 0) {
+                            if (!pending) return false;
+                            // Another read can return unused allowance. Keep this connection alive
+                            // within the existing splice deadline, without spinning on a ready fd.
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                            return true;
+                        }
+                        const int n = from_client ? SSL_read(ssl, buf, static_cast<int>(granted))
+                                                  : ::recv(dfd, buf, static_cast<size_t>(granted), 0);
+                        const int sent = n <= 0 ? 0 : (from_client ? ::send(dfd, buf, n, 0)
+                                                                 : SSL_write(ssl, buf, n));
+                        {
+                            std::lock_guard<std::mutex> lock(g_swarm.conn_mu);
+                            (void)g_swarm.relays.FinishForwardBytes(
+                                nresp.splice_reservation_id, granted,
+                                sent > 0 ? static_cast<uint64_t>(sent) : 0, ConnNowMs());
+                        }
+                        return n > 0 && sent == n;
+                    };
+                    if ((pf[0].revents & POLLIN) && !forward(true)) break;
+                    if ((pf[1].revents & POLLIN) && !forward(false)) break;
                 }
                 close(dfd);
-                if (moved > 0 && !nresp.splice_reservation_id.empty()) {
-                    std::lock_guard<std::mutex> lock(g_swarm.conn_mu);
-                    g_swarm.relays.AddForwardedBytes(nresp.splice_reservation_id, moved, ConnNowMs());
-                }
             }
             if (!nresp.splice_reservation_id.empty()) {
                 std::lock_guard<std::mutex> lock(g_swarm.conn_mu);
                 g_swarm.relays.CloseConn(nresp.splice_reservation_id);
+                g_swarm.relays.Expire(ConnNowMs());
             }
             break;
         }

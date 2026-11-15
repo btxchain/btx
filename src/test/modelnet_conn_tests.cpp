@@ -250,6 +250,92 @@ BOOST_AUTO_TEST_CASE(conn_dial_route_follows_onlynet)
     BOOST_CHECK(route("fd00::1", /*manual=*/false) == ModelDialRoute::REFUSED);
 }
 
+
+BOOST_AUTO_TEST_CASE(relay_shared_byte_budget)
+{
+    using namespace modelnet;
+    RelayLimits limits;
+    limits.byte_ceiling = 100;
+    RelayTable table{limits};
+    RelayReservation r, current;
+    std::string err;
+    BOOST_REQUIRE(table.Reserve("svc", "ng", "203.0.113.1:29447", 0, r, err));
+    BOOST_REQUIRE(table.AllowForward(r.reservation_id, 0, 1, err));
+    BOOST_REQUIRE(table.AllowForward(r.reservation_id, 0, 2, err));
+    const uint64_t a = table.ReserveForwardBytes(r.reservation_id, 60, 3);
+    const uint64_t b = table.ReserveForwardBytes(r.reservation_id, 60, 4);
+    BOOST_REQUIRE_EQUAL(a, 60);
+    BOOST_REQUIRE_EQUAL(b, 40);
+    BOOST_CHECK_EQUAL(table.ReserveForwardBytes(r.reservation_id, 1, 5), 0);
+    // A temporary pending claim is not permanent byte exhaustion.
+    BOOST_REQUIRE(table.AllowForward(r.reservation_id, 0, 5, err));
+    table.CloseConn(r.reservation_id);
+    BOOST_REQUIRE(table.FinishForwardBytes(r.reservation_id, a, a, 6));
+    BOOST_REQUIRE(table.FinishForwardBytes(r.reservation_id, b, b, 7));
+    table.CloseConn(r.reservation_id);
+    table.CloseConn(r.reservation_id);
+    BOOST_REQUIRE(table.Get(r.reservation_id, current));
+    BOOST_CHECK_EQUAL(current.bytes_used, 100);
+    BOOST_CHECK_EQUAL(current.bytes_pending, 0);
+    BOOST_CHECK_EQUAL(current.conns, 0);
+    BOOST_CHECK_EQUAL(table.ForwardedBytes(), 100);
+    BOOST_CHECK(!table.AllowForward(r.reservation_id, 0, 8, err));
+}
+
+BOOST_AUTO_TEST_CASE(relay_byte_claim_cleanup)
+{
+    using namespace modelnet;
+    RelayLimits limits;
+    limits.byte_ceiling = 100;
+    RelayTable table{limits};
+    RelayReservation r, current;
+    std::string err;
+    BOOST_REQUIRE(table.Reserve("svc", "ng", "203.0.113.1:29447", 0, r, err));
+    BOOST_REQUIRE(table.AllowForward(r.reservation_id, 0, 1, err));
+    const uint64_t claim = table.ReserveForwardBytes(r.reservation_id, 100, 2);
+    BOOST_REQUIRE_EQUAL(claim, 100);
+    // A failed write must return its entire claim; partial writes debit only sent bytes.
+    BOOST_REQUIRE(table.FinishForwardBytes(r.reservation_id, claim, 0, 3));
+    BOOST_REQUIRE_EQUAL(table.ReserveForwardBytes(r.reservation_id, 100, 4), 100);
+    BOOST_CHECK(!table.FinishForwardBytes(r.reservation_id, 100, 101, 5));
+    BOOST_REQUIRE(table.FinishForwardBytes(r.reservation_id, 100, 7, 6));
+    BOOST_REQUIRE_EQUAL(table.ReserveForwardBytes(r.reservation_id, 100, 7), 93);
+    BOOST_REQUIRE(table.FinishForwardBytes(r.reservation_id, 93, 13, 8));
+    table.CloseConn(r.reservation_id);
+    BOOST_REQUIRE(table.Get(r.reservation_id, current));
+    BOOST_CHECK_EQUAL(current.bytes_used, 20);
+    BOOST_CHECK_EQUAL(current.bytes_pending, 0);
+    BOOST_CHECK_EQUAL(current.conns, 0);
+    BOOST_CHECK_EQUAL(table.ForwardedBytes(), 20);
+    BOOST_REQUIRE_EQUAL(table.ReserveForwardBytes(r.reservation_id, 100, 9), 80);
+    BOOST_REQUIRE(table.FinishForwardBytes(r.reservation_id, 80, 0, 10));
+}
+
+BOOST_AUTO_TEST_CASE(relay_claim_expires_without_fresh_allowance)
+{
+    using namespace modelnet;
+    RelayLimits limits;
+    limits.byte_ceiling = 100;
+    limits.ttl_ms = 20;
+    RelayTable table{limits};
+    RelayReservation r;
+    std::string err;
+    BOOST_REQUIRE(table.Reserve("svc", "ng", "203.0.113.1:29447", 0, r, err));
+    BOOST_REQUIRE(table.AllowForward(r.reservation_id, 0, 1, err));
+    BOOST_REQUIRE_EQUAL(table.ReserveForwardBytes(r.reservation_id, UINT64_MAX, 2), 100);
+    BOOST_CHECK_EQUAL(table.ReserveForwardBytes(r.reservation_id, 1, 21), 0);
+    table.Expire(21);
+    BOOST_CHECK(table.Has(r.reservation_id));
+    BOOST_CHECK(!table.AllowForward(r.reservation_id, 0, 21, err));
+    BOOST_REQUIRE(table.FinishForwardBytes(r.reservation_id, 100, 0, 22));
+    table.CloseConn(r.reservation_id);
+    table.Expire(22);
+    BOOST_CHECK_EQUAL(table.StatusJson()["active_forwarded"].getInt<int>(), 0);
+    BOOST_CHECK(!table.Has(r.reservation_id));
+    BOOST_CHECK(!table.AllowForward(r.reservation_id, 0, 23, err));
+    BOOST_CHECK_EQUAL(table.ReserveForwardBytes(r.reservation_id, 1, 24), 0);
+}
+
 BOOST_AUTO_TEST_CASE(conn_rly_01_to_10)
 {
     using namespace modelnet;
