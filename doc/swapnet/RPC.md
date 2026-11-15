@@ -4,7 +4,7 @@ All calls take one optional named request object. Authentication/owner status co
 
 A market is named from the taker's side. `sell_asset` is what the taker pays and `buy_asset` is what the taker receives. The maker pays `buy_asset`, so `createswapmandate` for that maker must use `buy_asset`, and the maker's inventory is denominated in `buy_asset`. `max_receive_network_fee_atoms` and the taker's `claim_fee_atoms` are atomic units of `buy_asset`. `refund_fee_atoms` is atomic units of the asset that party refunds.
 
-`runtime_hash` in an EVM asset policy is the keccak256 of the deployed runtime bytecode. Copy it from that build. An anvil node reports `finalized` as block 0 until it is started with `--slots-in-an-epoch 1`.
+`runtime_hash` in an EVM asset policy is the keccak256 of the deployed runtime bytecode. For the artifact in this tree the value, the CREATE2 salt, and the address anyone can deploy are in `OPERATIONS.md`. The policy still names both the address and the hash. An anvil node reports `finalized` as block 0 until it is started with `--slots-in-an-epoch 1`.
 
 ## getswapnetworkinfo
 
