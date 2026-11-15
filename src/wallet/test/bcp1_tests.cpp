@@ -433,6 +433,62 @@ BOOST_AUTO_TEST_CASE(package_roundtrip)
     BOOST_CHECK_EQUAL(from_vector.inputs[0].amount, spend.amount);
 }
 
+BOOST_AUTO_TEST_CASE(decode_rejects_automatic_spend_fields_recursively)
+{
+    const auto seed = MasterSeedFromDerivation();
+    const Bcp1Spend spend = MakeSpend(seed);
+    const UniValue encoded = bcp1::Encode(PackageFromSpend(spend));
+
+    // A valid package and unrelated extension metadata must remain accepted.
+    const auto check_accepted = [&](const UniValue& json) {
+        bcp1::Package decoded;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(bcp1::Decode(json, decoded, err), err);
+        BOOST_REQUIRE_MESSAGE(bcp1::ValidateStructure(decoded, err), err);
+        BOOST_CHECK_EQUAL(bcp1::Encode(decoded).write(), encoded.write());
+    };
+    check_accepted(encoded);
+    UniValue metadata(UniValue::VOBJ);
+    metadata.pushKV("note", "unit-test extension");
+    UniValue benign = encoded;
+    benign.pushKV("metadata", metadata);
+    check_accepted(benign);
+
+    const auto check_rejected = [&](const UniValue& json, const char* location) {
+        BOOST_TEST_CONTEXT(location) {
+            bcp1::Package decoded;
+            std::string err;
+            BOOST_CHECK(!bcp1::Decode(json, decoded, err));
+            BOOST_CHECK_EQUAL(err, bcp1::ERR_AUTOMATIC_SPEND_FORBIDDEN);
+        }
+    };
+
+    // Rejection is based on field presence, including a zero or null value.
+    UniValue top = encoded;
+    top.pushKV("automatic_spend_atoms", 0);
+    check_rejected(top, "top-level zero");
+    UniValue null_value = encoded;
+    null_value.pushKV("automatic_spend_atoms", UniValue());
+    check_rejected(null_value, "top-level null");
+
+    UniValue forbidden(UniValue::VOBJ);
+    forbidden.pushKV("automatic_spend_atoms", 0);
+    UniValue nested = encoded;
+    nested.pushKV("metadata", forbidden);
+    check_rejected(nested, "nested object");
+
+    UniValue array(UniValue::VARR);
+    array.push_back(metadata);
+    benign = encoded;
+    benign.pushKV("metadata", array);
+    check_accepted(benign);
+
+    array.push_back(forbidden);
+    nested = encoded;
+    nested.pushKV("metadata", array);
+    check_rejected(nested, "object inside array");
+}
+
 BOOST_AUTO_TEST_CASE(corrupt_mldsa_signature_rejected)
 {
     const UniValue corrupt_v = ReadBcp1Json("negative-corrupt-signature.json");
