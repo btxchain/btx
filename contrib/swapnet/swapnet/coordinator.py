@@ -23,6 +23,7 @@ class Coordinator:
     def __init__(self,journal,authority,drivers,identity,vault,emit,*,clock=None,policy=None):
         self.journal,self.authority,self.drivers,self.identity,self.vault,self.emit=journal,authority,drivers,identity,vault,emit
         self.now=clock or (lambda:int(time.time()));self.policy=policy or SafetyPolicy();self._cursor=0;self._terminal_cursor=0
+        self._terminal_due=0
     def _driver(self,asset):
         require(asset in self.drivers,'ASSET_UNAVAILABLE','No qualified local chain driver for this asset')
         return self.drivers[asset]
@@ -564,9 +565,11 @@ class Coordinator:
         if active:
             start=self._cursor % len(active);selected=(active+active)[start:start+min(4,len(active))]
             self._cursor=(start+len(selected)) % len(active)
-        if terminal:
+        # Deep-reorg watch of finished swaps: not one session every one-second tick (that alone kept a node pair
+        # at ~1,900 EVM RPCs a minute after a single swap), but one per policy.terminal_recheck_seconds.
+        if terminal and self.now()>=self._terminal_due:
             selected.append(terminal[self._terminal_cursor % len(terminal)])
-            self._terminal_cursor+=1
+            self._terminal_cursor+=1;self._terminal_due=self.now()+self.policy.terminal_recheck_seconds
         for sid,_,s in selected:
             try:self.tick_one(sid)
             except SwapError as e:

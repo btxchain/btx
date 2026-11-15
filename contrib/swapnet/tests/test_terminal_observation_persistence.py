@@ -184,3 +184,21 @@ def test_terminal_poll_clears_persisted_error(terminal_pair):
     assert saved_snapshot(pair) == cleared
     pair.nodes['alice'][3].tick()
     assert saved_snapshot(pair) == cleared
+
+
+def test_finished_swaps_are_rechecked_once_per_interval(terminal_pair, monkeypatch):
+    """Production policy: a finished swap is re-observed once a minute, not on every one-second tick."""
+    pair = terminal_pair
+    coordinator = pair.nodes['alice'][3]
+    coordinator.policy = replace(coordinator.policy, terminal_recheck_seconds=60)
+    coordinator._terminal_due = 0
+    seen = []
+    original = coordinator.tick_one
+    monkeypatch.setattr(coordinator, 'tick_one', lambda sid: (seen.append(sid), original(sid))[1])
+    for _ in range(10):
+        pair.time.n += 1
+        coordinator.tick()
+    assert seen == [pair.sid]
+    pair.time.n += 60
+    coordinator.tick()
+    assert seen == [pair.sid, pair.sid]
