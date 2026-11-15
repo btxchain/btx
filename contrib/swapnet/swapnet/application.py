@@ -45,12 +45,15 @@ class NativeIdentity:
 
 class Application:
     def __init__(self,store,network,identity,vault,drivers,send,*,clock=None,policy=None,configure_asset=None,
-                 wallet_info=None,export_recovery=None):
+                 wallet_info=None,export_recovery=None,client_version=None):
         self.store,self.network,self.identity,self.vault,self.drivers,self.send=store,hex32(network),identity,vault,drivers,send
         self.now=clock or (lambda:int(time.time()));self.journal=Journal(store);self.authority=Authority(store,self.journal,self.now)
         self.routes={};self.peers=set();self.relay_seen=OrderedDict();self.packet_errors=0
         self.recent_packet_errors=[];self.last_tick_error=None
         self.configure_asset,self.wallet_info,self.export_recovery=configure_asset,wallet_info,export_recovery
+        # The host build, e.g. "v0.34.17". VERSION names the SwapNet protocol source, not the release.
+        # It is only reported, so an unusable value is dropped instead of stopping the runtime.
+        self.client_version=client_version if type(client_version) is str and 0<len(client_version)<=128 else None
         self.service=Service(store,network,identity.verify,clock=self.now,enqueue=lambda *args:None)
         self.coordinator=Coordinator(self.journal,self.authority,drivers,identity,vault,self.emit,clock=self.now,policy=policy)
         self.maker=None;self._last_advertisement=0;self._last_maintenance=0
@@ -370,6 +373,6 @@ class Application:
             if ctx.owner or body.get('swap_id',body.get('id')) in allowed:events.append({'sequence':seq,'event':body,'hash':h})
         return {'events':events,'next_sequence':rows[-1][0] if rows else after}
     def rpc_getswapvalidationinfo(self,ctx):
-        return {'source_version':VERSION,'qualification_source':'package evidence/VALIDATION_REPORT.json',
+        return {'source_version':VERSION,'client_version':self.client_version,'qualification_source':'package evidence/VALIDATION_REPORT.json',
                 'runtime_observations_are_not_release_certification':True,'protocol_profile':'native-btx-btc-eth-htlc-v2'}
     def close(self):self.journal.checkpoint();self.store.close()
