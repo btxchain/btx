@@ -49,10 +49,13 @@ class SafetyPolicy:
     quote_ttl_seconds: int = 120
     planning_headroom_seconds: int = 600
     require_evm_finalized: bool = True
+    # Finished swaps stay watched for deep reorgs; one of them is re-observed at most this often (0 = every tick).
+    terminal_recheck_seconds: int = 60
 
     def __post_init__(self):
         for name in ("btx_confirmations", "btc_confirmations", "settlement_margin_seconds", "reveal_margin_seconds", "max_observation_age_seconds", "quote_ttl_seconds", "planning_headroom_seconds"):
             integer(getattr(self, name), lo=1)
+        integer(self.terminal_recheck_seconds, lo=0)
         require(type(self.require_evm_finalized) is bool, "POLICY", "Invalid finality policy")
 
     def confirmations(self, family):

@@ -98,7 +98,8 @@ class Pair:
         v=ForeignKeyVault(folder/'vault.json',b'0123456789abcdef0123456789abcdef')
         c=Coordinator(j,auth,{A:Driver(self.a,n),B:Driver(self.b,n)},self.identities[n],v,
                       lambda peer,kind,sid,body:self.queue.append((n,peer,kind,sid,body)),clock=self.time,
-                      policy=SafetyPolicy(btx_confirmations=2,btc_confirmations=2,settlement_margin_seconds=10,reveal_margin_seconds=10))
+                      policy=SafetyPolicy(btx_confirmations=2,btc_confirmations=2,settlement_margin_seconds=10,reveal_margin_seconds=10,
+                                          terminal_recheck_seconds=0))  # one tick is one simulated step
         self.nodes[n]=(store,j,auth,c)
     def close(self,n):self.nodes[n][0].close()
     def restart(self,n):self.close(n);self.open(n)
