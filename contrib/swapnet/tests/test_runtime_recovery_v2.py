@@ -124,6 +124,30 @@ def test_fee_bump_early_and_cross_principal_refused(pair):
     with pytest.raises(SwapError,match='REFUND_EARLY'):bump(c,Principal('alice'),pair.sid,'refund','20')
     with pytest.raises(SwapError,match='REPLACEMENT_KIND'):bump(c,Principal('alice'),pair.sid,'fund','20')
 
+def test_live_route_survives_another_peer(apps):
+    alice = apps[0]['alice']
+    now = alice.now()
+    alice._learn_route('maker', 1, now + 100)
+    alice._learn_route('maker', 2, now + 100)
+    assert alice.routes['maker'][0] == 1
+    alice._learn_route('maker', 1, now + 200)
+    assert alice.routes['maker'] == (1, now + 200)
+
+def test_expired_route_can_move(apps):
+    alice = apps[0]['alice']
+    now = alice.now()
+    alice._learn_route('maker', 1, now - 1)
+    alice._learn_route('maker', 2, now + 50)
+    assert alice.routes['maker'][0] == 2
+
+def test_wallet_info_requires_owner(apps):
+    alice = apps[0]['alice']
+    with pytest.raises(SwapError) as raised:
+        alice.rpc(Principal('reader', False, ''), 'getswapwalletinfo')
+    assert raised.value.code == 'OWNER_REQUIRED'
+    info = alice.rpc(Principal('owner', True, ''), 'getswapwalletinfo')
+    assert 'assets' in info
+
 def test_future_financial_schema_is_not_silently_downgraded(tmp_path):
     folder=tmp_path/'future';folder.mkdir(mode=0o700);store=Store(folder/'state.sqlite')
     try:

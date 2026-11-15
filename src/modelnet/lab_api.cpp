@@ -3225,7 +3225,7 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
                 if (store.verified_rings[rollout_id].size() >= 2 && owner_ok) {
                     if (!store.rollout.ActivateGeneration(rollout_id, true, true, err)) return false;
                 }
-                if (store.plans.count(rollout_id)) {
+                if (store.plans.count(rollout_id) && store.plans[rollout_id] != "PAUSED") {
                     const bool active = store.verified_rings[rollout_id].size() >= 2 && owner_ok;
                     store.plans[rollout_id] = active ? "ACTIVE" : "CANARY";
                 }
@@ -3481,6 +3481,14 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
         for (const ExchangeObject& object : objects) {
             if (object.kind != "model") continue;
             if (!ModelBytesMatch(pending, object.digest, err)) return false;
+        }
+        for (const ExchangeObject& object : objects) {
+            if (object.kind != "piece") continue;
+            std::string model_digest;
+            size_t piece_index = 0;
+            std::string piece_chunk;
+            if (!DecodePieceLine(object.content, model_digest, piece_index, piece_chunk, err)) return false;
+            if (!ModelBytesMatch(pending, model_digest, err)) return false;
         }
         const std::string repo = Id96(RequireStr(req, "manifest"));
         store.repos.insert(repo);

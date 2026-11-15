@@ -4,7 +4,7 @@
 
 Install the qualified binary with its matched Python runtime/standard library and `cryptography`. The Linux release archive carries them in `lib/` (`libpython3.12.so.1.0`, `python3.12/`, the build host's `cryptography`); start it through `bin/btxd` or `bin/btx-qt`. Launch BTX normally. `-swapnet` stays off unless it is set. With `-swapnet=1`, existing peer connections discover compatible nodes; no new port, seed list, domain name, hosted service, or external identity registration is required. If that explicit start fails, the node does not finish starting.
 
-Run `getswapnetworkinfo`, `getswapbootstrapinfo`, `listswapassets` and `getswapwalletinfo`. An empty provider list or `awaiting_compatible_peer` is an accurate state, not an error to hide. Discovery alone never spends.
+Run `getswapnetworkinfo`, `getswapbootstrapinfo` and `listswapassets`. `getswapwalletinfo` is owner scope. An empty provider list or `awaiting_compatible_peer` is an accurate state, not an error to hide. Discovery alone never spends.
 
 Load exactly one native wallet or select one with `-swapnetwallet=<name>`. The binding is persisted and cannot be switched by an unprivileged caller. `createwallet` does not load that wallet on the next start; `loadwallet` is required, and `getswapnetworkinfo` reports `wallet_loaded` and `wallet_warning` until it is loaded. Unlock the native wallet through its normal owner workflow when an authorized operation requires it. Wallet-unloaded, locked, read-only or ambiguous-wallet conditions fail rather than choosing somebody else's funds.
 

@@ -176,7 +176,7 @@ No request fields.
 
 ## getswapwalletinfo
 
-Scope: `read`.
+Scope: `owner`. The result names the node's identity and foreign-chain accounts.
 
 No request fields.
 

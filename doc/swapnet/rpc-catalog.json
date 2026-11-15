@@ -634,7 +634,7 @@
     },
     {
       "name": "getswapwalletinfo",
-      "scope": "read",
+      "scope": "owner",
       "params": {
         "type": "object",
         "properties": {},

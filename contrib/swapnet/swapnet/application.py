@@ -20,7 +20,7 @@ from .errors import require,SwapError
 
 VERSION='2.0.0'
 NEW_METHODS={
- 'setswapmarket':'owner','listswapmarkets':'read','getswapwalletinfo':'read',
+ 'setswapmarket':'owner','listswapmarkets':'read','getswapwalletinfo':'owner',
  'setswapassetpolicy':'owner','listswapassetpolicies':'read','getswaprouteinfo':'read',
  'exportswaprecovery':'owner','bumpswapfee':'trade','getswapevents':'audit',
  'getswapvalidationinfo':'read'
@@ -65,6 +65,10 @@ class Application:
         return self.maker
     def markets(self):return self.journal.setting('markets',[])
     def _learn_route(self,identity,peer,expires):
+        # A live next hop stays until it expires. A replay delivered by another
+        # peer must not replace it and black-hole later messages.
+        current=self.routes.get(identity)
+        if current and current[1]>self.now() and current[0]!=peer:return
         if identity not in self.routes and len(self.routes)>=8192:
             oldest=min(self.routes,key=lambda k:self.routes[k][1]);self.routes.pop(oldest)
         self.routes[identity]=(peer,expires)
