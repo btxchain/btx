@@ -3220,6 +3220,13 @@ std::vector<ShieldedCoin> CShieldedWallet::GetRecoveryExitCandidates(CAmount fee
     return out;
 }
 
+// SelectExactOrdinarySpend keeps one table entry per reachable (note count, sum)
+// for each recipient. With many distinct note values the table grows with
+// C(values, max_notes) and is built in full under cs_wallet and cs_shielded:
+// 24 values took about 1.3M entries and 0.5 GiB, 30 values about 8.6M entries
+// and 2 GiB. Stop at a fixed size (about 0.4 GiB) instead of growing further.
+static constexpr size_t MAX_EXACT_EXIT_TABLE_ENTRIES{size_t{1} << 20};
+
 std::optional<std::vector<ShieldedCoin>> CShieldedWallet::SelectExactOrdinarySpend(
     CAmount target,
     size_t max_notes,
@@ -3248,6 +3255,7 @@ std::optional<std::vector<ShieldedCoin>> CShieldedWallet::SelectExactOrdinarySpe
         grouped[coin.note.recipient_pk_hash].push_back(std::move(coin));
     }
 
+    bool table_limit_hit{false};
     for (auto& [_, notes] : grouped) {
         std::sort(notes.begin(), notes.end(), [](const ShieldedCoin& a, const ShieldedCoin& b) {
             if (a.note.value != b.note.value) return a.note.value > b.note.value;
@@ -3264,10 +3272,12 @@ std::optional<std::vector<ShieldedCoin>> CShieldedWallet::SelectExactOrdinarySpe
 
         std::vector<std::map<CAmount, std::vector<std::pair<CAmount, size_t>>>> dp(max_notes + 1);
         dp[0][0] = {};
+        size_t entries{1};
+        bool over_limit{false};
         for (const auto& [value, bucket] : by_value) {
             std::vector<std::map<CAmount, std::vector<std::pair<CAmount, size_t>>>> next = dp;
             const size_t max_use = std::min(bucket.size(), max_notes);
-            for (size_t used_before = 0; used_before <= max_notes; ++used_before) {
+            for (size_t used_before = 0; used_before <= max_notes && !over_limit; ++used_before) {
                 for (const auto& [sum_before, plan_before] : dp[used_before]) {
                     for (size_t use = 1; use <= max_use && used_before + use <= max_notes; ++use) {
                         if (value > std::numeric_limits<CAmount>::max() / static_cast<CAmount>(use)) break;
@@ -3277,13 +3287,26 @@ std::optional<std::vector<ShieldedCoin>> CShieldedWallet::SelectExactOrdinarySpe
                         if (!sum_after || !MoneyRange(*sum_after) || *sum_after > target) break;
                         auto& slot = next[used_before + use];
                         if (slot.count(*sum_after) != 0) continue;
+                        if (entries >= MAX_EXACT_EXIT_TABLE_ENTRIES) {
+                            over_limit = true;
+                            break;
+                        }
                         auto plan = plan_before;
                         plan.emplace_back(value, use);
                         slot.emplace(*sum_after, std::move(plan));
+                        ++entries;
                     }
+                    if (over_limit) break;
                 }
             }
+            if (over_limit) break;
             dp = std::move(next);
+        }
+        if (over_limit) {
+            // Do not pick from a partial table: that could choose other notes
+            // than the full search. Try the next recipient's notes.
+            table_limit_hit = true;
+            continue;
         }
 
         for (size_t count = 1; count <= max_notes; ++count) {
@@ -3303,6 +3326,9 @@ std::optional<std::vector<ShieldedCoin>> CShieldedWallet::SelectExactOrdinarySpe
         }
     }
 
+    if (table_limit_hit) {
+        return fail("exact shielded exit search exceeded its limit; use z_sweeptotransparent or send a smaller amount");
+    }
     return fail("no exact ordinary shielded note set available for transparent exit");
 }
 

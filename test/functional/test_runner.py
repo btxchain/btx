@@ -695,6 +695,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_autoshield_optin.py',
     'wallet_shielded_sunset_rpc_guards.py',
     'wallet_shielded_c002_sunset_lifecycle.py',
+    'wallet_shielded_exact_exit_search_limit.py',
     'wallet_c002_slh_mempool_boundary.py',
     'wallet_shielded_velocity_cap.py',
     'mining_shielded_exit_velocity_template.py',
