@@ -225,6 +225,8 @@ Scope: `read`.
 
 No request fields.
 
+`client_version` in the result is the btxd build, the same string as `clientversion` in `getgeneralinfo`. `source_version` is the SwapNet source version and does not change with every release.
+
 ## Result and error handling
 
 Native RPC results are returned directly; rejected requests use a normal JSON-RPC error whose message starts with a stable SwapNet error code. Protocol/privacy/safety constraints are also enforced inside the application, so schema validity does not grant authority. A timeout can be ambiguous once execution started: inspect the recorded swap/operation before retrying.

@@ -4,6 +4,7 @@
 #include <swapnet/node.h>
 #include <swapnet/runtime.h>
 #include <chainparams.h>
+#include <clientversion.h>
 #include <node/context.h>
 #include <interfaces/wallet.h>
 #include <rpc/protocol.h>
@@ -110,6 +111,8 @@ bool StartNode(node::NodeContext& node) {
         // Chain class comes from local parameters. Startup must not call RPC:
         // the RPC server is still in warmup until this function returns.
         config.pushKV("chain",ChainTypeToString(args.GetChainType()));
+        // getswapvalidationinfo reports the build, since the SwapNet source version alone does not change per release.
+        config.pushKV("client_version",FormatFullVersion());
         config.pushKV("datadir",fs::PathToString(args.GetDataDirNet()));config.pushKV("wallet",args.GetArg("-swapnetwallet",""));
         Callbacks callbacks;
         callbacks.core=[&node](const auto& wallet,const auto& method,const auto& params){return CoreCall(node,wallet,method,params);};

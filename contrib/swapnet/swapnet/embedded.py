@@ -63,7 +63,8 @@ class Host:
             except SwapError as e:self.startup_errors['bitcoin_auto']=e.code
         self.app=Application(self.store,self.network,self.identity,self.vault,self.drivers,self.send,
                              configure_asset=self.configure_asset,wallet_info=self.wallet_info,
-                             export_recovery=lambda passphrase:export_bundle(self.journal,self.directory,passphrase,self.network))
+                             export_recovery=lambda passphrase:export_bundle(self.journal,self.directory,passphrase,self.network),
+                             client_version=self.config.get('client_version'))
         # btxd refuses native RPC until this host is built (RPC warmup), so
         # reserved funding inputs are locked again from the first ticks.
         self._relock_pending=set(self.drivers)
