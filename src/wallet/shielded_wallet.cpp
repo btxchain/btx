@@ -8079,6 +8079,29 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
     return rehydrated;
 }
 
+bool CShieldedWallet::HasShieldedKeyMaterial() const
+{
+    AssertLockHeld(cs_shielded);
+    return !m_key_sets.empty() || !m_notes.empty() || m_next_spending_index > 0 || m_next_kem_index > 0;
+}
+
+void CShieldedWallet::ResetEmptyGapForImportedSeed()
+{
+    AssertLockHeld(cs_shielded);
+    m_empty_gap_search_done = false;
+    m_next_spending_index = 0;
+    m_next_kem_index = 0;
+    // Drop the persisted shielded state. In this branch it holds only the old
+    // seed's completed empty-gap result (no key sets, no notes), and PersistState
+    // deliberately refuses to overwrite an encrypted blob with empty key sets, so
+    // without erasing it the next rehydrate would reload the old flag and skip the
+    // search. After erasing, the next MaybeRehydrateSpendingKeys() derives and
+    // scans from the imported seed, exactly as a freshly restored wallet does.
+    WalletBatch batch(m_parent_wallet.GetDatabase());
+    batch.EraseCryptedShieldedState();
+    batch.EraseShieldedState();
+}
+
 void CShieldedWallet::CatchUpToChainTip()
 {
     AssertLockHeld(cs_shielded);
