@@ -233,6 +233,7 @@ run_lint() {
   python3 test/lint/lint-python-dead-code.py
   python3 test/lint/lint-python-utf8-encoding.py
   python3 test/lint/lint-tests.py
+  python3 test/lint/lint-rpc-fuzz-lists.py
   python3 test/lint/lint-op-success-p2tr.py
   python3 test/lint/lint-shell.py
   python3 test/lint/lint-ci-base-install.py
