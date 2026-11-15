@@ -14,6 +14,6 @@ The SwapNetHTLC artifact in this tree is open. Its runtime keccak256, under solc
 
 An incomplete admitted catalog entry can be filled by ordinary `getmodel` from configured cloud storage. That path does not require `direct_seed`. It does not rebuild a catalog from bucket objects alone. `direct_seed` and `direct_seed_fetch` remain a separate fetch.
 
-The Linux archives link libevent, libsqlite3, libzmq, and libgomp from the host. A base image without them cannot start `btxd`. Ubuntu 24.04 and Debian 13 install `libevent-2.1-7t64`, `libevent-core-2.1-7t64`, `libevent-extra-2.1-7t64`, `libevent-pthreads-2.1-7t64`, `libsqlite3-0`, `libzmq5`, and `libgomp1`. The archive launcher prints that list. Those libraries stay host packages so the archive does not carry a newer glibc.
+The Linux archives carry libevent, libsqlite3, libzmq, libgomp, and the libraries those need. A base image does not have to install them. libc and libstdc++ stay on the host. The NVIDIA driver library is not in the archive. Every bundled library is within GLIBC 2.38.
 
 The external-sign, bounty, and model-plane documents now say what this build returns. Reachability stays `UNKNOWN`. Availability from `getmodelavailability` stays `UNKNOWN` because that call passes no piece total. A search record may still name a publisher that did not sign it. A pending deposit that leaves the mempool still becomes `UNKNOWN` without a new event.

@@ -627,6 +627,91 @@ def bundle_linux_python_runtime(release_root: Path, source_root: Path, python: s
     return written
 
 
+# The C library, the C++ runtime and the dynamic loader stay on the host.
+# Everything else btxd needs, including the libevent, sqlite, ZeroMQ and
+# libgomp packages a clean image does not have, is copied into lib/.
+_HOST_SYSTEM_SONAMES = frozenset({
+    "linux-vdso.so.1",
+    "ld-linux-x86-64.so.2",
+    "libc.so.6",
+    "libm.so.6",
+    "libdl.so.2",
+    "libpthread.so.0",
+    "librt.so.1",
+    "libresolv.so.2",
+    "libutil.so.1",
+    "libgcc_s.so.1",
+    "libstdc++.so.6",
+})
+
+
+def _ldd_shared_objects(path: Path) -> list[tuple[str, Path]]:
+    try:
+        out = subprocess.check_output(["ldd", str(path)], text=True, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    found: list[tuple[str, Path]] = []
+    for line in out.splitlines():
+        if "=>" not in line:
+            continue
+        soname, rest = line.split("=>", 1)
+        soname = soname.strip()
+        token = rest.strip().split()
+        if not token or token[0] == "not":
+            continue
+        library = Path(token[0])
+        if library.is_file():
+            found.append((soname, library))
+    return found
+
+
+def _host_driver_soname(soname: str) -> bool:
+    return soname.startswith("libcuda.so") or soname.startswith("libnvidia")
+
+
+def bundle_linux_runtime_closure(release_root: Path) -> list[str]:
+    """Copy the shared libraries a base image does not provide into lib/.
+
+    A clean Ubuntu or Debian root can load libc and libstdc++, and then fails
+    on libevent, libsqlite3, libzmq and libgomp. Installing those packages
+    also installs what ZeroMQ itself needs. The archive carries that closure.
+    The NVIDIA driver library is not one of them.
+    """
+    lib_dir = release_root / "lib"
+    libexec_dir = release_root / "libexec"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    pending: list[Path] = []
+    if libexec_dir.is_dir():
+        pending.extend(path for path in libexec_dir.iterdir() if path.is_file())
+    pending.extend(path for path in lib_dir.glob("*.so*") if path.is_file())
+    seen: set[Path] = set()
+    written: list[str] = []
+    bundle = _load_qt_bundle()
+    while pending:
+        current = pending.pop()
+        for soname, source in _ldd_shared_objects(current):
+            if soname in _HOST_SYSTEM_SONAMES or _host_driver_soname(soname):
+                continue
+            if source in seen:
+                continue
+            seen.add(source)
+            destination = lib_dir / source.name
+            if not destination.exists():
+                shutil.copy2(source, destination)
+                destination.chmod(destination.stat().st_mode | 0o755)
+                if bundle._needed(destination):
+                    bundle._set_rpath(destination, "$ORIGIN")
+                written.append(str(destination.relative_to(release_root)))
+            pending.append(destination if destination.exists() else source)
+    if written:
+        print(
+            "package_release_archive: bundled host runtime libraries "
+            f"({', '.join(Path(item).name for item in written)})",
+            file=sys.stderr,
+        )
+    return written
+
+
 def set_linux_bundled_lib_runpath(path: Path) -> None:
     """Point a staged ELF executable at the archive's shared libraries."""
     bundle = _load_qt_bundle()
@@ -807,7 +892,7 @@ def stage_release_tree(
                 "CUDA archive is missing libcublasLt next to --btxd. "
                 "Run scripts/release/bundle_cuda_runtime_libs.py on that binary first. "
                 "The NVIDIA driver does not provide libcublasLt. "
-                "libevent, libzmq5, and libgomp1 stay host packages."
+                "libcuda stays on the host. libevent, sqlite, ZeroMQ and libgomp are bundled."
             )
 
     if platform_id.startswith("linux-"):
@@ -818,6 +903,7 @@ def stage_release_tree(
             shutil.copy2(source, destination)
             destination.chmod(destination.stat().st_mode | 0o111)
             included.append(str(destination.relative_to(release_root)))
+        included += bundle_linux_runtime_closure(release_root)
 
     if platform_id.startswith("macos-"):
         metallib_by_name: dict[str, Path] = {}
