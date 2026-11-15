@@ -47,6 +47,7 @@ class Driver:
     def ready(self):return True
     def inventory(self):return 10**12
     def clock(self):return ChainClock(self.family,self.ledger.height,self.ledger.time(),self.ledger.time(),1,1)
+    def finality_lag(self):return 0  # The in-memory ledger has no finality delay.
     def new_key(self,role):
         self.key_n+=1
         return {'public':self.name+role+str(self.key_n),'handle':self.name+role+str(self.key_n),
