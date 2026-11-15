@@ -64,9 +64,9 @@ class Host:
         self.app=Application(self.store,self.network,self.identity,self.vault,self.drivers,self.send,
                              configure_asset=self.configure_asset,wallet_info=self.wallet_info,
                              export_recovery=lambda passphrase:export_bundle(self.journal,self.directory,passphrase,self.network))
-        for asset,driver in self.drivers.items():
-            try:driver.relock()
-            except SwapError as e:self.startup_errors[asset]=e.code
+        # btxd refuses native RPC until this host is built (RPC warmup), so
+        # reserved funding inputs are locked again from the first ticks.
+        self._relock_pending=set(self.drivers)
     def native(self,method,*params):return self._call('',method,params)
     def selected_wallet(self):
         wallets=self.native('listwallets')
@@ -164,7 +164,16 @@ class Host:
         try:self.app.on_message(peer,command,payload)
         except SwapError as e:self.app.note_packet_error(e.code,e.message)
         except Exception:self.app.note_packet_error('PACKET','Rejected packet')
+    def relock(self):
+        # Retried every tick until it works, so a wallet loaded after startup
+        # still gets its reserved inputs back before new funding is planned.
+        for asset in sorted(self._relock_pending):
+            try:self.drivers[asset].relock()
+            except SwapError as e:self.startup_errors[asset]=e.code
+            else:
+                self._relock_pending.discard(asset);self.startup_errors.pop(asset,None)
     def tick(self):
+        if self._relock_pending:self.relock()
         try:self.app.tick()
         except SwapError as e:self.app.last_tick_error=e.as_dict()
     def close(self):self.app.close()

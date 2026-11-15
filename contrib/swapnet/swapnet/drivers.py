@@ -327,5 +327,13 @@ class UTXODriver:
         with self.journal.store.lock:
             rows=self.journal.store.db.execute('SELECT outpoint FROM coinlocks WHERE chain=?',(self.asset.id,)).fetchall()
         if rows:
-            out=[{'txid':v.rsplit(':',1)[0],'vout':int(v.rsplit(':',1)[1])} for (v,) in rows]
-            self.wallet('lockunspent',False,out)
+            # A broadcast funding has spent its recorded inputs, and lockunspent
+            # refuses the whole call when one output is spent. Lock each input
+            # on its own so the inputs of a funding not yet broadcast stay
+            # reserved after a restart. A wallet that cannot be reached still
+            # fails here, before any lock is tried.
+            self.wallet('getwalletinfo')
+            for (v,) in rows:
+                coin={'txid':v.rsplit(':',1)[0],'vout':int(v.rsplit(':',1)[1])}
+                try:self.wallet('lockunspent',False,[coin])
+                except SwapError:pass
