@@ -47,8 +47,11 @@ STDLIB_EXCLUDED_PREFIXES = ("config-",)  # static libpython, Makefile and header
 # Extension modules for a terminal, dbm files, crypt(3) and CPython's own tests. Distros
 # ship several of them as separate packages; leaving them out keeps readline, ncurses,
 # Berkeley DB and libcrypt out of the archive. The SwapNet sources import none of them.
+# termios on CPython 3.14 binds cf*speed at GLIBC_2.42, above the archive ceiling.
+# SwapNet does not import it.
 DYNLOAD_EXCLUDED_PREFIXES = ("readline.", "_curses.", "_curses_panel.", "_dbm.", "_gdbm.", "_crypt.",
-                             "_tkinter.", "_test", "_xxtestfuzz.", "xxlimited", "xxsubtype.", "_ctypes_test.")
+                             "_tkinter.", "_test", "_xxtestfuzz.", "xxlimited", "xxsubtype.", "_ctypes_test.",
+                             "termios.")
 
 
 def _skip_dynload(name: str) -> bool:
