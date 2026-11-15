@@ -550,6 +550,18 @@ public:
      *  a locked-wallet startup (tree-only fallback). */
     bool MaybeRehydrateSpendingKeys() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
 
+    /** True if this wallet already holds shielded key material of its own:
+     *  a key set, a note, or an issued (non-zero) derivation index. Used by
+     *  importwalletbundle to refuse replacing the PQ seed under existing
+     *  shielded keys, which would make their notes unspendable. */
+    [[nodiscard]] bool HasShieldedKeyMaterial() const EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
+    /** Forget the completed empty-gap search and reset the derivation indices,
+     *  so the next MaybeRehydrateSpendingKeys() derives and scans from a freshly
+     *  imported PQ seed. Only valid when no key material exists
+     *  (HasShieldedKeyMaterial() is false). */
+    void ResetEmptyGapForImportedSeed() EXCLUSIVE_LOCKS_REQUIRED(cs_shielded);
+
     /** Wipe the spending keys held in memory, for CWallet::Lock(). The viewing
      *  keys, notes and spend-authority flags stay, and the next
      *  MaybeRehydrateSpendingKeys() after an unlock derives the keys again. */
