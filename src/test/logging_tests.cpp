@@ -177,6 +177,21 @@ BOOST_FIXTURE_TEST_CASE(logging_LogPrintMacros, LogSetup)
     BOOST_CHECK_EQUAL_COLLECTIONS(log_lines.begin(), log_lines.end(), expected.begin(), expected.end());
 }
 
+BOOST_FIXTURE_TEST_CASE(logging_embedded_newline_stays_on_one_line, LogSetup)
+{
+    // Text from a peer or an RPC caller must not be able to start a log line of its own.
+    const std::string untrusted{"getblock\nERROR: forged line"};
+    LogInfo("not allowed to call method %s", untrusted);
+    // One conventional trailing newline is not escaped.
+    LogInfo("trailing newline\n");
+    std::vector<std::string> log_lines{ReadDebugLogLines()};
+    std::vector<std::string> expected = {
+        R"(not allowed to call method getblock\x0aERROR: forged line)",
+        "trailing newline",
+    };
+    BOOST_CHECK_EQUAL_COLLECTIONS(log_lines.begin(), log_lines.end(), expected.begin(), expected.end());
+}
+
 BOOST_FIXTURE_TEST_CASE(logging_LogPrintMacros_CategoryName, LogSetup)
 {
     LogInstance().EnableCategory(BCLog::LogFlags::ALL);
