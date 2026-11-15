@@ -395,6 +395,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=str(ROOT),
         help="Repository root used to source helper scripts and docs (default: repo root).",
     )
+    parser.add_argument("--windows-openmp-runtime", type=Path,
+                        help="Explicit redistributable x64 LLVM OpenMP input directory with licence")
+    parser.add_argument("--windows-python-runtime", type=Path,
+                        help="Prepared matching x64 embeddable Python distribution with pinned dependencies")
     parser.add_argument(
         "--python",
         help="Interpreter matching the linked Python ABI (Linux shared library or macOS framework).",
@@ -645,6 +649,8 @@ def stage_release_tree(
     require_gui: bool = False,
     require_model_helpers: bool = False,
     python: str | None = None,
+    windows_python_runtime: Path | None = None,
+    windows_openmp_runtime: Path | None = None,
 ) -> tuple[Path, list[str], list[str]]:
     config = PLATFORM_CONFIGS[platform_id]
     release_root = temp_root / f"btx-{version}"
@@ -672,8 +678,13 @@ def stage_release_tree(
         *resolve_optional_sibling_binaries(btxd_path, config["exe_suffix"]),
         *model_helpers,
     ]
-    verify_shipped_btxd(btxd_path)
-    verify_shipped_cli(btx_cli_path)
+    # Mac build inputs still name the linked CPython framework. Verify the
+    # finished native images after relocation, as the Qt deployment does.
+    # Other platforms retain their existing input admission order.
+    macos = platform_id.startswith("macos-")
+    if not macos:
+        verify_shipped_btxd(btxd_path)
+        verify_shipped_cli(btx_cli_path)
     qt_source = next((source for source, dest_name in binary_pairs if dest_name.startswith("btx-qt")), None)
     if require_gui and qt_source is None:
         raise FileNotFoundError(
@@ -681,9 +692,9 @@ def stage_release_tree(
             "-DWITH_QT_VERSION=6 (Qt 6 on Linux, the host Qt on macOS) and pass --require-gui."
         )
     for helper_path, helper_name in binary_pairs[3:]:
-        # The macOS GUI is rewritten by macdeployqt into btx-qt.app. The build-tree
-        # binary still names Homebrew Qt; the deployed app is checked after that copy.
-        if helper_name.startswith("btx-qt") and platform_id.startswith("macos-"):
+        # macOS input dependencies are relocated during Python/Qt deployment.
+        # Verify the final real images below, not the unbundled producers.
+        if macos:
             continue
         verify_shipped_helper(helper_path)
 
@@ -742,6 +753,14 @@ def stage_release_tree(
                               if not name.startswith(("btx-qt", "btx-atlas"))],
             )
 
+    if platform_id.startswith("windows-"):
+        script = Path(__file__).with_name("bundle_windows_python_runtime.py")
+        spec = importlib.util.spec_from_file_location("bundle_windows_python_runtime", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        included += module.bundle_windows_python(release_root, windows_python_runtime)
+        included += module.bundle_windows_openmp(release_root, windows_openmp_runtime)
+
     if platform_id.startswith("linux-"):
         # After the Qt bundle: libpython it already placed in lib/ must match.
         included += bundle_linux_python_runtime(release_root, source_root, python)
@@ -754,6 +773,14 @@ def stage_release_tree(
         included += mac_python.bundle_macos_python(
             release_root, source_root=source_root, python=python,
             architecture=config["triple"].split("-", 1)[0])
+        # Run the unchanged shipping gates on real bundled images, never the
+        # shell wrappers. No archive is emitted unless these checks succeed.
+        verify_shipped_btxd(libexec_dir / "btxd.real")
+        verify_shipped_cli(libexec_dir / "btx-cli.real")
+        for _, helper_name in binary_pairs[2:]:
+            if helper_name.startswith("btx-qt"):
+                continue  # deploy_macos_qt_app already checks the deployed app.
+            verify_shipped_helper(libexec_dir / f"{helper_name}.real")
 
     if "cuda" in platform_id:
         # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
@@ -902,6 +929,8 @@ def main(argv: list[str]) -> int:
             require_gui=args.require_gui,
             require_model_helpers=args.require_model_helpers,
             python=args.python,
+            windows_python_runtime=args.windows_python_runtime,
+            windows_openmp_runtime=args.windows_openmp_runtime,
         )
         if PLATFORM_CONFIGS[args.platform_id]["archive_format"] == "zip":
             write_zip(archive_path, release_root)

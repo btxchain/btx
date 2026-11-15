@@ -200,6 +200,10 @@ def bundle_macos_python(release_root, *, source_root, python=None, architecture=
     for src in roots.values():
         target = destination / 'lib' / ('python' + version) / 'site-packages' / src.name
         copy_package(src, target, linux)
+        # Homebrew can place standalone native modules outside the framework.
+        # Record the exact copied file just as put() records framework images.
+        if src.is_file() and macho(target):
+            mapping[src.resolve()] = target
     # Keep distribution attribution/licences alongside the selected third-party modules.
     wanted = {name.lower().replace('_', '-') for name in roots}
     if '_cffi_backend' in roots:
