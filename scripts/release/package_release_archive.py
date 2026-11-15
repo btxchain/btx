@@ -666,7 +666,12 @@ def _ldd_shared_objects(path: Path) -> list[tuple[str, Path]]:
 
 
 def _host_driver_soname(soname: str) -> bool:
-    return soname.startswith("libcuda.so") or soname.startswith("libnvidia")
+    # libcuda is the driver. The CUDA toolkit libraries already sit next to btxd.
+    return soname.startswith((
+        "libcuda.so", "libnvidia",
+        "libcublasLt.so", "libcublas.so", "libcudart.so",
+        "libnvJitLink.so", "libnvrtc.so", "libculibos.so",
+    ))
 
 
 def bundle_linux_runtime_closure(release_root: Path) -> list[str]:
@@ -846,6 +851,31 @@ def stage_release_tree(
         included += module.bundle_windows_python(release_root, windows_python_runtime)
         included += module.bundle_windows_openmp(release_root, windows_openmp_runtime)
 
+    if "cuda" in platform_id:
+        # libcublasLt has to sit next to btxd.real before the Python bundler
+        # runs ldd. The NVIDIA driver library is not copied.
+        cuda_lib_re = re.compile(
+            r"^lib(cublasLt|cublas|cudart|nvJitLink|nvrtc|culibos)(\.so(\.\d+)*)$"
+        )
+        libexec_dir.mkdir(parents=True, exist_ok=True)
+        bundled_cublaslt = False
+        for source in sorted(btxd_path.parent.glob("lib*.so*")):
+            if not cuda_lib_re.match(source.name):
+                continue
+            destination = libexec_dir / source.name
+            shutil.copy2(source, destination)
+            destination.chmod(destination.stat().st_mode | 0o111)
+            included.append(str(destination.relative_to(release_root)))
+            if source.name.startswith("libcublasLt.so"):
+                bundled_cublaslt = True
+        if not bundled_cublaslt:
+            raise FileNotFoundError(
+                "CUDA archive is missing libcublasLt next to --btxd. "
+                "Run scripts/release/bundle_cuda_runtime_libs.py on that binary first. "
+                "The NVIDIA driver does not provide libcublasLt. "
+                "libcuda stays on the host. libevent, sqlite, ZeroMQ and libgomp are bundled."
+            )
+
     if platform_id.startswith("linux-"):
         # After the Qt bundle: libpython it already placed in lib/ must match.
         included += bundle_linux_python_runtime(release_root, source_root, python)
@@ -866,34 +896,6 @@ def stage_release_tree(
             if helper_name.startswith("btx-qt"):
                 continue  # deploy_macos_qt_app already checks the deployed app.
             verify_shipped_helper(libexec_dir / f"{helper_name}.real")
-
-    if "cuda" in platform_id:
-        # libcublasLt and toolkit siblings live next to btxd.real ($ORIGIN).
-        # bundle_cuda_runtime_libs.py must have been run on --btxd first.
-        cuda_lib_re = re.compile(
-            r"^lib(cublasLt|cublas|cudart|nvJitLink|nvrtc|culibos)(\.so(\.\d+)*)$"
-        )
-        libexec_dir.mkdir(parents=True, exist_ok=True)
-        bundled_cublaslt = False
-        for source in sorted(btxd_path.parent.glob("lib*.so*")):
-            if not cuda_lib_re.match(source.name):
-                continue
-            destination = libexec_dir / source.name
-            shutil.copy2(source, destination)
-            destination.chmod(destination.stat().st_mode | 0o111)
-            included.append(str(destination.relative_to(release_root)))
-            if source.name.startswith("libcublasLt.so"):
-                bundled_cublaslt = True
-        # Launch verification runs on the build host, which already has the
-        # toolkit on the loader path. A CUDA tarball without libcublasLt
-        # then fails on a machine that only has the NVIDIA driver.
-        if not bundled_cublaslt:
-            raise FileNotFoundError(
-                "CUDA archive is missing libcublasLt next to --btxd. "
-                "Run scripts/release/bundle_cuda_runtime_libs.py on that binary first. "
-                "The NVIDIA driver does not provide libcublasLt. "
-                "libcuda stays on the host. libevent, sqlite, ZeroMQ and libgomp are bundled."
-            )
 
     if platform_id.startswith("linux-"):
         lib_dir = release_root / "lib"
