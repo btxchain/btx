@@ -836,8 +836,13 @@ bool ModelWatchStore::ApplySignedChannel(SignedChannel ch, std::string& err)
                 return false;
             }
         }
-        m_channels[key] = ch;
-        if (!PersistChannelsLocked(err)) return false;
+        auto previous = m_channels.extract(key);
+        m_channels.emplace(key, ch);
+        if (!PersistChannelsLocked(err)) {
+            m_channels.erase(key);
+            if (!previous.empty()) m_channels.insert(std::move(previous));
+            return false;
+        }
     }
     if (!m_journal) return true;
     ev.event_type = ModelEventType::CHANNEL_UPDATED;
