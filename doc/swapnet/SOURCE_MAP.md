@@ -40,4 +40,4 @@
 
 ## Tools
 
-The package installer, diff planner, manifest verifier, schema checker, linked-host tests, local qualification runner and offline recovery tool are in `tools/`. Native/real-chain qualification source is in `qualification/` and `overlay/test/functional/`. The exact performed tests are listed in `evidence/VALIDATION_REPORT.json`.
+The offline recovery tool is `contrib/swapnet/tools/restore_recovery.py`. The package's installer, diff planner, manifest verifier, schema checker, linked-host tests, local qualification runner, `qualification/` sources and `evidence/VALIDATION_REPORT.json` are not in this tree. `TESTING_AND_RELEASE.md` lists the tests that are.
