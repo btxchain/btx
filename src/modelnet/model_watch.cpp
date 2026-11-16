@@ -699,8 +699,12 @@ bool ModelWatchStore::PutWatch(ModelWatch& w, std::string& err)
         return false;
     }
     std::lock_guard<std::mutex> lock(m_mu);
-    m_watches[w.watch_id] = w;
-    return PersistWatchesLocked(err);
+    auto previous = m_watches.extract(w.watch_id);
+    m_watches.emplace(w.watch_id, w);
+    if (PersistWatchesLocked(err)) return true;
+    m_watches.erase(w.watch_id);
+    if (!previous.empty()) m_watches.insert(std::move(previous));
+    return false;
 }
 
 bool ModelWatchStore::GetWatch(const std::string& watch_id, ModelWatch& out) const
