@@ -13,7 +13,7 @@ from pathlib import Path
 import urllib.request
 import urllib.parse
 import urllib.error
-from .errors import require,SwapError
+from .errors import require,SwapError,RPCConnectionRefused
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):raise SwapError('RPC_REDIRECT','RPC redirects forbidden')
@@ -46,6 +46,10 @@ class LocalRPC:
             except urllib.error.HTTPError as e:
                 if e.code in (400,404,500):response=e
                 else:raise
+            except urllib.error.URLError as e:
+                if isinstance(e.reason,ConnectionRefusedError):
+                    raise RPCConnectionRefused() from e
+                raise
             with response:
                 raw=response.read(4_194_305)
             require(len(raw)<=4_194_304,'RPC_RESPONSE_LIMIT','RPC response too large')

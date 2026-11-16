@@ -9,3 +9,8 @@ class SwapError(Exception):
 def require(condition, code, message):
     if not condition:
         raise SwapError(code, message)
+
+class RPCConnectionRefused(SwapError):
+    """Internal transport classification; retain the public unavailable code."""
+    def __init__(self):
+        super().__init__("RPC_UNAVAILABLE", "Local chain client connection refused")
