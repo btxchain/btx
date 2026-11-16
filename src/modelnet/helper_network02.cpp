@@ -1281,6 +1281,15 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
     if (method == "setmodelswarmhealer") {
         uint32_t piece_count = o.exists("piece_count") && o["piece_count"].isNum() ?
             o["piece_count"].getInt<uint32_t>() : 0;
+        // The caller sets piece_count, and EndangeredPieces walks and may list
+        // every piece below it. Keep it within the bound that piece index lists
+        // use elsewhere: up to 2^32-1 pieces kept a RPC worker busy for minutes
+        // and allocated gigabytes.
+        if (piece_count > MAX_PIECE_INDEX_LIST) {
+            err_code = "INVALID_PARAMETER";
+            err = "piece_count too large";
+            return false;
+        }
         uint32_t file_index = o.exists("file_index") && o["file_index"].isNum() ?
             o["file_index"].getInt<uint32_t>() : 0;
         std::vector<SourceAvailability> sources;
