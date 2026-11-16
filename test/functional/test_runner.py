@@ -268,6 +268,7 @@ BASE_SCRIPTS = [
     'p2p_headers_nonzero_txcount.py',
     'p2p_trailing_block_headers_data.py',
     'p2p_block_chunk_transport.py',
+    'p2p_block_chunk_request_race.py',
     'p2p_large_block_transport.py',
     'p2p_inv_announcement_bounds.py',
     'rpc_createmultisig.py',

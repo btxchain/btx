@@ -18597,7 +18597,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         if (!WITH_LOCK(cs_main, return IsBlockRequestedFromPeer(
                 manifest.block_hash, pfrom.GetId()))) {
-            Misbehaving(*peer, "unsolicited blkchnkman");
+            // The request may have been released after this peer was asked:
+            // another source delivered the block first (processing a new block
+            // releases its request for every peer), or an in-flight reclaim,
+            // timeout or getblockfrompeer moved it. That benign race cannot be
+            // told apart from a manifest that was never requested, and the
+            // full BLOCK path punishes neither. As in the global-pressure path
+            // below, the sender has begun an ordered stream: end it cleanly
+            // rather than discouraging the peer or treating its following
+            // chunks as misbehavior. No stream state was reserved for it.
+            LogDebug(BCLog::NET,
+                     "Dropping unsolicited blkchnkman %s, disconnecting peer=%d\n",
+                     manifest.block_hash.ToString(), pfrom.GetId());
+            pfrom.fDisconnect = true;
             return;
         }
         bool global_pressure{false};
