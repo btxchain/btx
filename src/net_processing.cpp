@@ -11415,9 +11415,12 @@ void PeerManagerImpl::HandleUnconnectingHeaders(CNode& pfrom, Peer& peer,
     // we can use this peer to download.
     WITH_LOCK(cs_main, UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash()));
 
-    if (pfrom.PunishInvalidBlocks()) {
-        pfrom.fDisconnect = true;
-    }
+    // No connection-type disconnect here. A peer announces with HEADERS when
+    // it believes we have the parent, which it records from the headers it
+    // sent us; this node deliberately drops sent headers while keeping the
+    // peer (verification-budget deferral, the unauthenticated-lead cap), so
+    // the next announcement is benign. A compact block with an unknown parent
+    // is not punished either. The flood bound above applies to every peer.
 }
 
 bool PeerManagerImpl::CheckHeadersAreContinuous(const std::vector<CBlockHeader>& headers) const
