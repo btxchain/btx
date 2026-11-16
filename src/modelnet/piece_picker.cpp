@@ -518,6 +518,30 @@ bool ParseAvailabilitySources(const UniValue& availability_json,
     return true;
 }
 
+void TakePeerAvailability(const UniValue& availability_json,
+                          const PeerId& peer,
+                          const Digest48& artifact,
+                          uint32_t file_index,
+                          int64_t observed_at_ms,
+                          std::vector<SourceAvailability>& out)
+{
+    // One source per endpoint: the retrieve may ask the same endpoint more
+    // than once, and each answer may name another service_id.
+    for (const auto& have : out) {
+        if (have.peer.endpoint == peer.endpoint) return;
+    }
+    std::vector<SourceAvailability> parsed;
+    std::string err;
+    // A malformed entry ends the parse; what was read before it is used, as before.
+    (void)ParseAvailabilitySources(availability_json, peer.endpoint, peer, artifact, parsed, err, observed_at_ms);
+    for (auto& src : parsed) {
+        if (src.file_index != file_index) continue;
+        src.peer = peer;
+        out.push_back(std::move(src));
+        return;
+    }
+}
+
 UniValue SwarmSnapshotJson(const SwarmSnapshot& snap)
 {
     UniValue o(UniValue::VOBJ);

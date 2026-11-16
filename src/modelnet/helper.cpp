@@ -11680,12 +11680,14 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                 if (aj.exists("service_id") && aj["service_id"].isStr()) {
                     pid.service_id = aj["service_id"].get_str();
                 }
-                std::string perr;
                 // Peer data: the parser throws on a field of another type. Drop
                 // this source's entries; the other sources keep the retrieve going.
+                // One source per peer for this file: every entry of the answer
+                // was a source of its own, under the netgroup and service_id it
+                // named, and the pickers below walk every source for every piece.
                 const size_t had = sources.size();
                 try {
-                    (void)ParseAvailabilitySources(aj, pid.endpoint, pid, artifact, sources, perr, ConnNowMs());
+                    TakePeerAvailability(aj, pid, artifact, file_index, ConnNowMs(), sources);
                 } catch (const std::exception&) {
                     sources.resize(had);
                 }
