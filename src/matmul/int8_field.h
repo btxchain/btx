@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_INT8_FIELD_H
 #define BTX_MATMUL_INT8_FIELD_H
 
+#include <compat/wide128.h>
 #include <cstddef>
 #include <cstdint>
 
@@ -145,7 +146,7 @@ inline constexpr Fq kFieldPrime = (static_cast<Fq>(1) << 61) - 1;
 
 /** Reduce a full 128-bit product into canonical form mod q via the Mersenne
  *  multiply-and-fold (§D.3: "one 64-bit multiply + fold per MAC"). */
-[[nodiscard]] Fq FqReduce(unsigned __int128 x);
+[[nodiscard]] Fq FqReduce(btx::U128 x);
 
 [[nodiscard]] Fq FqAdd(Fq a, Fq b);
 [[nodiscard]] Fq FqSub(Fq a, Fq b);

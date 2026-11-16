@@ -5,6 +5,7 @@
 #ifndef BITCOIN_METAL_NONCE_ACCEL_H
 #define BITCOIN_METAL_NONCE_ACCEL_H
 
+#include <compat/wide128.h>
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -29,8 +30,8 @@ inline uint64_t MulDivU64ByU32(uint64_t lhs, uint32_t rhs, uint32_t divisor)
     uint64_t remainder = 0;
     return _udiv128(high, low, divisor, &remainder);
 #else
-    const unsigned __int128 product =
-        static_cast<unsigned __int128>(lhs) * static_cast<unsigned __int128>(rhs);
+    const btx::U128 product =
+        static_cast<btx::U128>(lhs) * static_cast<btx::U128>(rhs);
     return static_cast<uint64_t>(product / divisor);
 #endif
 }

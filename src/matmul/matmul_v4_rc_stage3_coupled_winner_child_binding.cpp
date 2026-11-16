@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_winner_child_binding.h>
 
 #include <crypto/common.h>
@@ -291,9 +292,9 @@ bool CheckedAccumulate(
         return false;
     }
     for (uint64_t i = 0; i < accumulator.size(); ++i) {
-        const __int128 next =
-            static_cast<__int128>(accumulator[i]) +
-            static_cast<__int128>(addend[i]);
+        const btx::I128 next =
+            static_cast<btx::I128>(accumulator[i]) +
+            static_cast<btx::I128>(addend[i]);
         if (next <
                 std::numeric_limits<int64_t>::min() ||
             next >

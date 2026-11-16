@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_p2_transcript_binding.h>
 
 #include <algorithm>
@@ -336,8 +337,8 @@ bool ReconstructActiveEvents(
         const gf::Fp3 challenge =
             Fri3AlgP2SqueezeChallengeFp3(
                 fs, "fra3_query", query);
-        const unsigned __int128 wide =
-            (static_cast<unsigned __int128>(
+        const btx::U128 wide =
+            (static_cast<btx::U128>(
                  gf::Canonical(challenge.c1))
              << 64) |
             gf::Canonical(challenge.c0);

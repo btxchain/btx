@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/dt_mask/dt_mask.h>
 #include <modelnet/nifdt_contract/contract.h>
 
@@ -10,18 +11,18 @@
 namespace modelnet {
 namespace {
 
-bool FitsInt64(__int128 v)
+bool FitsInt64(btx::I128 v)
 {
-    return v <= static_cast<__int128>(std::numeric_limits<int64_t>::max()) &&
-           v >= static_cast<__int128>(std::numeric_limits<int64_t>::min());
+    return v <= static_cast<btx::I128>(std::numeric_limits<int64_t>::max()) &&
+           v >= static_cast<btx::I128>(std::numeric_limits<int64_t>::min());
 }
 
-__int128 Gcd128(__int128 a, __int128 b)
+btx::I128 Gcd128(btx::I128 a, btx::I128 b)
 {
     if (a < 0) a = -a;
     if (b < 0) b = -b;
     while (b != 0) {
-        const __int128 t = a % b;
+        const btx::I128 t = a % b;
         a = b;
         b = t;
     }
@@ -29,10 +30,10 @@ __int128 Gcd128(__int128 a, __int128 b)
 }
 
 /** Reduce num/den into int64 with a positive denominator. */
-bool ReduceToInt64(__int128 num, __int128 den, int64_t& out_num, int64_t& out_den)
+bool ReduceToInt64(btx::I128 num, btx::I128 den, int64_t& out_num, int64_t& out_den)
 {
     if (den == 0) return false;
-    const __int128 g = Gcd128(num, den);
+    const btx::I128 g = Gcd128(num, den);
     num /= g;
     den /= g;
     if (den < 0) {
@@ -77,8 +78,8 @@ bool DtMask::Reduce(std::string& err)
         return false;
     }
 
-    __int128 sum_gradient = 0;
-    __int128 sum_tokens = 0;
+    btx::I128 sum_gradient = 0;
+    btx::I128 sum_tokens = 0;
     for (const auto& entry : m_samples) {
         sum_gradient += entry.second.gradient;
         sum_tokens += entry.second.tokens;

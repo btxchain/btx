@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_air_quotient.h>
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
@@ -4972,9 +4973,9 @@ bool SplitRapCodecShape(
         }
     }
 
-    unsigned __int128 bytes =
+    btx::U128 bytes =
         4 + 4 + 4 + 4 +
-        static_cast<unsigned __int128>(
+        static_cast<btx::U128>(
             proof.base_column_indices.size()) *
             4 +
         24 + 4 + batch_bytes + 4;
@@ -4984,11 +4985,11 @@ bool SplitRapCodecShape(
         for (const auto& row : next) {
             bytes +=
                 4 +
-                static_cast<unsigned __int128>(
+                static_cast<btx::U128>(
                     row.values.size()) *
                     24 +
                 4 +
-                static_cast<unsigned __int128>(
+                static_cast<btx::U128>(
                     row.siblings.size()) *
                     32;
         }

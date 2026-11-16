@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/swarm_clearing.h>
 
 #include <univalue.h>
@@ -66,11 +67,11 @@ bool ReadRaw(const fs::path& path, std::string& raw)
     return true;
 }
 
-bool AddDelta(__int128& slot, int64_t change)
+bool AddDelta(btx::I128& slot, int64_t change)
 {
-    const __int128 next = slot + static_cast<__int128>(change);
-    if (next > static_cast<__int128>(std::numeric_limits<int64_t>::max()) ||
-        next < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
+    const btx::I128 next = slot + static_cast<btx::I128>(change);
+    if (next > static_cast<btx::I128>(std::numeric_limits<int64_t>::max()) ||
+        next < static_cast<btx::I128>(std::numeric_limits<int64_t>::min())) {
         return false;
     }
     slot = next;
@@ -97,7 +98,7 @@ bool ParseClearing(const std::string& raw, int64_t& capacity, int64_t& sequence,
             err = "CLEARING_JSON";
             return false;
         }
-        __int128 sum = 0;
+        btx::I128 sum = 0;
         for (const UniValue& row : root["balances"].getValues()) {
             if (!row.isObject() || !row.exists("pool_id") || !row["pool_id"].isStr() || !row.exists("atoms") ||
                 !row["atoms"].isNum()) {
@@ -110,9 +111,9 @@ bool ParseClearing(const std::string& raw, int64_t& capacity, int64_t& sequence,
                 err = "CLEARING_JSON";
                 return false;
             }
-            sum += static_cast<__int128>(atoms);
+            sum += static_cast<btx::I128>(atoms);
         }
-        if (balances.empty() || sum != static_cast<__int128>(capacity)) {
+        if (balances.empty() || sum != static_cast<btx::I128>(capacity)) {
             err = "CLEARING_JSON";
             return false;
         }
@@ -147,7 +148,7 @@ bool SwarmClearingBook::Open(int64_t capacity, const std::vector<SwarmPoolSlice>
         return false;
     }
     std::map<std::string, int64_t> balances;
-    __int128 sum = 0;
+    btx::I128 sum = 0;
     for (const SwarmPoolSlice& slice : slices) {
         if (slice.pool_id.empty() || slice.reserved <= 0) {
             err = "SLICE";
@@ -157,9 +158,9 @@ bool SwarmClearingBook::Open(int64_t capacity, const std::vector<SwarmPoolSlice>
             err = "DUPLICATE_POOL";
             return false;
         }
-        sum += static_cast<__int128>(slice.reserved);
+        sum += static_cast<btx::I128>(slice.reserved);
     }
-    if (sum != static_cast<__int128>(capacity)) {
+    if (sum != static_cast<btx::I128>(capacity)) {
         err = "CAPACITY";
         return false;
     }
@@ -180,7 +181,7 @@ bool SwarmClearingBook::Apply(const std::vector<SwarmCoordinatedPayment>& paymen
         return false;
     }
     std::set<std::string> batch_ids;
-    std::map<std::string, __int128> delta;
+    std::map<std::string, btx::I128> delta;
     for (const SwarmCoordinatedPayment& payment : payments) {
         if (m_balances.find(payment.from_pool) == m_balances.end() ||
             m_balances.find(payment.to_pool) == m_balances.end()) {
@@ -199,8 +200,8 @@ bool SwarmClearingBook::Apply(const std::vector<SwarmCoordinatedPayment>& paymen
             err = "REPLAY";
             return false;
         }
-        __int128& from_delta = delta[payment.from_pool];
-        __int128& to_delta = delta[payment.to_pool];
+        btx::I128& from_delta = delta[payment.from_pool];
+        btx::I128& to_delta = delta[payment.to_pool];
         if (!AddDelta(from_delta, -payment.atoms) || !AddDelta(to_delta, payment.atoms)) {
             err = "INSUFFICIENT";
             return false;
@@ -213,8 +214,8 @@ bool SwarmClearingBook::Apply(const std::vector<SwarmCoordinatedPayment>& paymen
             err = "POOL";
             return false;
         }
-        const __int128 next = static_cast<__int128>(it->second) + entry.second;
-        if (next < 0 || next > static_cast<__int128>(std::numeric_limits<int64_t>::max())) {
+        const btx::I128 next = static_cast<btx::I128>(it->second) + entry.second;
+        if (next < 0 || next > static_cast<btx::I128>(std::numeric_limits<int64_t>::max())) {
             err = "INSUFFICIENT";
             return false;
         }

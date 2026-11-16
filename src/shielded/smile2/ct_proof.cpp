@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/domain_separation.h>
 #include <shielded/smile2/serialize.h>
@@ -3387,14 +3388,14 @@ bool VerifyCT(
         const int64_t tuple_coin_sigma = ComputeTupleFirstRoundSigma();
         // Check z_0 norm bound for each input
         // ||z_0[inp]||_2 < β_0 = SIGMA_KEY * sqrt(2 * KEY_COLS * POLY_DEGREE)
-        __int128 beta0_sq = static_cast<__int128>(SIGMA_KEY) * SIGMA_KEY * 2 * KEY_COLS * POLY_DEGREE;
+        btx::I128 beta0_sq = static_cast<btx::I128>(SIGMA_KEY) * SIGMA_KEY * 2 * KEY_COLS * POLY_DEGREE;
         for (size_t inp = 0; inp < num_inputs; ++inp) {
-            __int128 z0_norm_sq = 0;
+            btx::I128 z0_norm_sq = 0;
             for (size_t j = 0; j < proof.z0[inp].size(); ++j) {
                 for (size_t c = 0; c < POLY_DEGREE; ++c) {
                     int64_t val = mod_q(proof.z0[inp][j].coeffs[c]);
                     if (val > half_q) val -= Q;
-                    z0_norm_sq += static_cast<__int128>(val) * val;
+                    z0_norm_sq += static_cast<btx::I128>(val) * val;
                 }
             }
             if (z0_norm_sq >= beta0_sq) {
@@ -3409,15 +3410,15 @@ bool VerifyCT(
 
         // Check z norm bound
         // ||z||_2 < β = SIGMA_MASK * sqrt(2 * rand_dim * POLY_DEGREE)
-        __int128 z_norm_sq = 0;
+        btx::I128 z_norm_sq = 0;
         for (size_t j = 0; j < proof.z.size(); ++j) {
             for (size_t c = 0; c < POLY_DEGREE; ++c) {
                 int64_t val = mod_q(proof.z[j].coeffs[c]);
                 if (val > half_q) val -= Q;
-                z_norm_sq += static_cast<__int128>(val) * val;
+                z_norm_sq += static_cast<btx::I128>(val) * val;
             }
         }
-        __int128 beta_sq = static_cast<__int128>(SIGMA_MASK) * SIGMA_MASK * 2 * aux_ck.rand_dim() * POLY_DEGREE;
+        btx::I128 beta_sq = static_cast<btx::I128>(SIGMA_MASK) * SIGMA_MASK * 2 * aux_ck.rand_dim() * POLY_DEGREE;
         if (z_norm_sq >= beta_sq) {
             LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [step 7b-z]: z norm too large. "
                       "||z||^2=%lld >= beta^2=%lld (SIGMA_MASK=%lld rand_dim=%u z.size=%u)\n",
@@ -3430,16 +3431,16 @@ bool VerifyCT(
                                          int64_t sigma,
                                          const char* label,
                                          const char* kind) {
-            __int128 norm_sq = 0;
+            btx::I128 norm_sq = 0;
             for (const auto& poly : response) {
                 for (size_t c = 0; c < POLY_DEGREE; ++c) {
                     int64_t val = mod_q(poly.coeffs[c]);
                     if (val > half_q) val -= Q;
-                    norm_sq += static_cast<__int128>(val) * val;
+                    norm_sq += static_cast<btx::I128>(val) * val;
                 }
             }
-            const __int128 bound_sq =
-                static_cast<__int128>(sigma) * sigma * 2 * response.size() * POLY_DEGREE;
+            const btx::I128 bound_sq =
+                static_cast<btx::I128>(sigma) * sigma * 2 * response.size() * POLY_DEGREE;
             if (norm_sq >= bound_sq) {
                 LogDebug(BCLog::VALIDATION, "VerifyCT FAIL [%s]: %s norm too large. "
                           "||z||^2=%lld >= bound^2=%lld (sigma=%lld size=%u)\n",
@@ -3876,7 +3877,7 @@ bool VerifyCT(
         const NttForm gamma_ntt = NttForward(proof.balance_carry);
         const int64_t CARRY_BOUND =
             4 * (static_cast<int64_t>(num_inputs) + static_cast<int64_t>(num_outputs) + 1);
-        __int128 gamma_eval = 0;
+        btx::I128 gamma_eval = 0;
         for (size_t j = 0; j < NUM_NTT_SLOTS; ++j) {
             for (size_t k = 1; k < SLOT_DEGREE; ++k) {
                 if (mod_q(gamma_ntt.slots[j].coeffs[k]) != 0) {
@@ -3890,7 +3891,7 @@ bool VerifyCT(
             }
             // 4^j via multiply (NOT signed-left-shift: d can be negative — e.g. honest {2,2}->{4} has
             // Gamma_0=-4 — and a signed left shift of a negative value is undefined behavior / consensus split).
-            gamma_eval += static_cast<__int128>(d) * (static_cast<__int128>(1) << (2 * j));
+            gamma_eval += static_cast<btx::I128>(d) * (static_cast<btx::I128>(1) << (2 * j));
         }
         if (gamma_eval != 0) {
             return false;

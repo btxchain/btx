@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_gkr_mle_adapter.h>
 
 #include <matmul/matmul_v4_rc_stage3_safe_v12.h>
@@ -936,40 +937,40 @@ std::optional<size_t> EstimateProofBytesV1(
     constexpr uint64_t FP3_BYTES = 24U;
     constexpr uint64_t DIGEST_BYTES = 32U;
     // Exact MultiRowCodecShape fixed envelope for exactly three groups.
-    const unsigned __int128 fixed =
+    const btx::U128 fixed =
         28U +
         3U * 48U +
-        4U + 4U * static_cast<unsigned __int128>(width) +
+        4U + 4U * static_cast<btx::U128>(width) +
         3U * FP3_BYTES +
         2U * (4U +
               FP3_BYTES *
-                  static_cast<unsigned __int128>(width)) +
+                  static_cast<btx::U128>(width)) +
         2U * FP3_BYTES +
         4U +
         36U *
-            static_cast<unsigned __int128>(folds + 1U) +
+            static_cast<btx::U128>(folds + 1U) +
         FP3_BYTES +
         4U +
         FP3_BYTES *
-            static_cast<unsigned __int128>(folds) +
+            static_cast<btx::U128>(folds) +
         4U;
-    const unsigned __int128 path_depth_sum =
-        static_cast<unsigned __int128>(folds) *
+    const btx::U128 path_depth_sum =
+        static_cast<btx::U128>(folds) *
             row_depth -
-        static_cast<unsigned __int128>(folds) *
+        static_cast<btx::U128>(folds) *
             (folds - 1U) / 2U;
-    const unsigned __int128 query =
+    const btx::U128 query =
         36U +
         FP3_BYTES *
-            static_cast<unsigned __int128>(width) +
+            static_cast<btx::U128>(width) +
         3U * DIGEST_BYTES * row_depth +
-        64U * static_cast<unsigned __int128>(folds) +
+        64U * static_cast<btx::U128>(folds) +
         64U * path_depth_sum;
     // Adapter wrapper fixed prefix (magic/version/roots/sigmas/ids/length).
     constexpr uint64_t WRAPPER_BYTES =
         4U + 2U + 2U + 4U * 32U +
         2U * 24U + 4U * 4U + 4U;
-    const unsigned __int128 total =
+    const btx::U128 total =
         WRAPPER_BYTES + fixed +
         kRCFri3AlgNumQueries * query;
     if (total >

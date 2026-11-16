@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 // Unique native Cognitive Reserve v1.1 cases.
 
+#include <compat/wide128.h>
 #include <test/modelnet_cr11_test.h>
 #include <test/util/setup_common.h>
 #include <boost/test/unit_test.hpp>
@@ -113,7 +114,7 @@ BOOST_AUTO_TEST_CASE(cr11_tco_10_external_route_stays_planning)
 BOOST_AUTO_TEST_CASE(cr11_tco_11_break_even_is_exact)
 {
     // local / (unit * years) at 1e18 used to form a 1e36-scaled product that
-    // overflows __int128 already for the worked case.
+    // overflows btx::I128 already for the worked case.
     UniValue out;
     std::string err;
     BOOST_REQUIRE(modelnet::Cr11Tco("20000000", "0.01", 3, "50000", "65000", true, true, out, err));

@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/bounty.h>
 
 #include <modelnet/catalog.h>
@@ -133,10 +134,10 @@ int64_t AtomsToBps(int64_t atoms, int64_t total)
 {
     if (total <= 0 || atoms <= 0) return 0;
     if (atoms >= total) return 10000;
-    const unsigned __int128 num =
-        static_cast<unsigned __int128>(static_cast<uint64_t>(atoms)) * 10000u;
+    const btx::U128 num =
+        static_cast<btx::U128>(static_cast<uint64_t>(atoms)) * 10000u;
     const int64_t bps =
-        static_cast<int64_t>(num / static_cast<unsigned __int128>(static_cast<uint64_t>(total)));
+        static_cast<int64_t>(num / static_cast<btx::U128>(static_cast<uint64_t>(total)));
     return bps > 10000 ? 10000 : bps;
 }
 
@@ -581,10 +582,10 @@ bool EligibleBps(const std::string& principal, const std::string& frozen_total, 
         err = "eligibility range";
         return false;
     }
-    const unsigned __int128 lhs =
-        static_cast<unsigned __int128>(static_cast<uint64_t>(p)) * 10000u;
-    const unsigned __int128 rhs = static_cast<unsigned __int128>(static_cast<uint64_t>(t)) *
-                                  static_cast<unsigned __int128>(static_cast<uint32_t>(min_bps));
+    const btx::U128 lhs =
+        static_cast<btx::U128>(static_cast<uint64_t>(p)) * 10000u;
+    const btx::U128 rhs = static_cast<btx::U128>(static_cast<uint64_t>(t)) *
+                                  static_cast<btx::U128>(static_cast<uint32_t>(min_bps));
     return lhs >= rhs;
 }
 

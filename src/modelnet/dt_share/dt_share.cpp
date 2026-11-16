@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/dt_share/dt_share.h>
 
 #include <modelnet/nifdt_contract/contract.h>
@@ -15,9 +16,9 @@ namespace {
 
 bool AddInt(std::int64_t left, std::int64_t right, std::int64_t& next)
 {
-    const __int128 sum = static_cast<__int128>(left) + static_cast<__int128>(right);
-    if (sum > static_cast<__int128>(std::numeric_limits<std::int64_t>::max()) ||
-        sum < static_cast<__int128>(std::numeric_limits<std::int64_t>::min())) {
+    const btx::I128 sum = static_cast<btx::I128>(left) + static_cast<btx::I128>(right);
+    if (sum > static_cast<btx::I128>(std::numeric_limits<std::int64_t>::max()) ||
+        sum < static_cast<btx::I128>(std::numeric_limits<std::int64_t>::min())) {
         return false;
     }
     next = static_cast<std::int64_t>(sum);

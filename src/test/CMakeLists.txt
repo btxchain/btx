@@ -47,6 +47,7 @@ add_executable(test_btx
   content_elimination_tests.cpp
   core_write_tests.cpp
   crypto_tests.cpp
+  wide128_tests.cpp
   cuckoocache_tests.cpp
   dbwrapper_tests.cpp
   dandelion_tests.cpp

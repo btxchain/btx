@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/economy.h>
 
 #include <util/strencodings.h>
@@ -99,8 +100,8 @@ bool FundedPercentMilli(int64_t funded_atoms, int64_t target_atoms, int64_t& mil
 {
     milli_out = 0;
     if (target_atoms <= 0 || funded_atoms < 0) return false;
-    unsigned __int128 num = static_cast<unsigned __int128>(static_cast<uint64_t>(funded_atoms)) * 100000u;
-    milli_out = static_cast<int64_t>(num / static_cast<unsigned __int128>(target_atoms));
+    btx::U128 num = static_cast<btx::U128>(static_cast<uint64_t>(funded_atoms)) * 100000u;
+    milli_out = static_cast<int64_t>(num / static_cast<btx::U128>(target_atoms));
     return true;
 }
 

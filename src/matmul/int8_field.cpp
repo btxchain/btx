@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/int8_field.h>
 
 #include <crypto/common.h>
@@ -126,7 +127,7 @@ int32_t ExactDot(const int8_t* a, const int8_t* b, uint32_t len)
 // Independent Freivalds soundness field F_q, q = 2^61 - 1.
 // ---------------------------------------------------------------------------
 
-Fq FqReduce(unsigned __int128 x)
+Fq FqReduce(btx::U128 x)
 {
     // Mersenne fold for q = 2^61 - 1. For any product of two canonical
     // elements x < q^2 < 2^122, one fold brings the value below 2^62 and a
@@ -161,7 +162,7 @@ Fq FqSub(Fq a, Fq b)
 
 Fq FqMul(Fq a, Fq b)
 {
-    return FqReduce(static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b));
+    return FqReduce(static_cast<btx::U128>(a) * static_cast<btx::U128>(b));
 }
 
 Fq FqNeg(Fq a)
@@ -175,10 +176,10 @@ Fq FqNeg(Fq a)
 Fq FqFromSigned(int64_t x)
 {
     if (x >= 0) {
-        return FqReduce(static_cast<unsigned __int128>(static_cast<uint64_t>(x)));
+        return FqReduce(static_cast<btx::U128>(static_cast<uint64_t>(x)));
     }
     const uint64_t magnitude = static_cast<uint64_t>(-(x + 1)) + 1; // safe for INT64_MIN
-    return FqNeg(FqReduce(static_cast<unsigned __int128>(magnitude)));
+    return FqNeg(FqReduce(static_cast<btx::U128>(magnitude)));
 }
 
 Fq FqFromInt32(int32_t x)

@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_pow.h>
 
 #include <crypto/common.h>
@@ -87,9 +88,9 @@ Matrix LowRankProductScalar(const Matrix& left, const Matrix& right, uint64_t* o
 }
 
 #if defined(BTX_HAVE_ACCELERATE)
-field::Element ReduceMersenne128(unsigned __int128 value)
+field::Element ReduceMersenne128(btx::U128 value)
 {
-    constexpr unsigned __int128 kModulus = static_cast<unsigned __int128>(field::MODULUS);
+    constexpr btx::U128 kModulus = static_cast<btx::U128>(field::MODULUS);
     // At most ceil(128/31) = 5 reduction steps are needed for 128-bit inputs.
     // Add a defensive iteration bound to prevent infinite loops on pathological inputs.
     for (int iter = 0; iter < 8 && value > kModulus; ++iter) {
@@ -160,10 +161,10 @@ Matrix LowRankProductAccelerateSplit16(const Matrix& left, const Matrix& right, 
             const uint64_t hl = static_cast<uint64_t>(std::max<long long>(hl_raw, 0));
             const uint64_t hh = static_cast<uint64_t>(std::max<long long>(hh_raw, 0));
 
-            const unsigned __int128 total =
-                static_cast<unsigned __int128>(ll) +
-                (static_cast<unsigned __int128>(lh + hl) << 16) +
-                (static_cast<unsigned __int128>(hh) << 32);
+            const btx::U128 total =
+                static_cast<btx::U128>(ll) +
+                (static_cast<btx::U128>(lh + hl) << 16) +
+                (static_cast<btx::U128>(hh) << 32);
             out.at(row, col) = ReduceMersenne128(total);
 
             if (op_count != nullptr) {

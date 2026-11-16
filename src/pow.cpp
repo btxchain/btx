@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <pow.h>
 
 #include <arith_uint256.h>
@@ -2720,11 +2721,11 @@ arith_uint256 CalculateMatMulAsertTarget(
     // mainnet 199299→199300). Do not "fix" the pairing here: it is shipped
     // mainnet behavior. 0.34 must not add another ASERT re-anchor.
     //   exponent = ((time_diff - target_spacing * (height_diff + 1)) * 2^16) / half_life
-    const __int128 ideal_delta = static_cast<__int128>(target_spacing) *
-        static_cast<__int128>(height_diff + 1);
-    const __int128 exponent_input = static_cast<__int128>(time_diff) - ideal_delta;
-    const __int128 exponent_scaled = exponent_input << ASERT_RADIX_BITS;
-    const __int128 exponent_q = exponent_scaled / static_cast<__int128>(half_life);
+    const btx::I128 ideal_delta = static_cast<btx::I128>(target_spacing) *
+        static_cast<btx::I128>(height_diff + 1);
+    const btx::I128 exponent_input = static_cast<btx::I128>(time_diff) - ideal_delta;
+    const btx::I128 exponent_scaled = exponent_input << ASERT_RADIX_BITS;
+    const btx::I128 exponent_q = exponent_scaled / static_cast<btx::I128>(half_life);
     int64_t exponent;
     if (exponent_q > std::numeric_limits<int64_t>::max()) {
         exponent = std::numeric_limits<int64_t>::max();
@@ -2737,10 +2738,10 @@ arith_uint256 CalculateMatMulAsertTarget(
     const int64_t shifts = exponent >> ASERT_RADIX_BITS;
     const uint32_t frac = static_cast<uint32_t>(exponent) & ((1U << ASERT_RADIX_BITS) - 1U);
 
-    const __int128 poly = static_cast<__int128>(ASERT_POLY_COEFF_1) * frac
-        + static_cast<__int128>(ASERT_POLY_COEFF_2) * frac * frac
-        + static_cast<__int128>(ASERT_POLY_COEFF_3) * frac * frac * frac
-        + (static_cast<__int128>(1) << 47);
+    const btx::I128 poly = static_cast<btx::I128>(ASERT_POLY_COEFF_1) * frac
+        + static_cast<btx::I128>(ASERT_POLY_COEFF_2) * frac * frac
+        + static_cast<btx::I128>(ASERT_POLY_COEFF_3) * frac * frac * frac
+        + (static_cast<btx::I128>(1) << 47);
     const uint32_t factor = (1U << ASERT_RADIX_BITS) + static_cast<uint32_t>(poly >> 48);
 
     const int64_t net_shift = shifts - ASERT_RADIX_BITS;

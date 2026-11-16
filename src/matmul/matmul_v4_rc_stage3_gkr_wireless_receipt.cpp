@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_gkr_wireless_receipt.h>
 
 #include <matmul/matmul_v4_rc_stage3_safe_v12.h>
@@ -573,35 +574,35 @@ EstimateQ192V13ProofBytesV1(
     constexpr uint64_t FP3_BYTES = 24U;
     constexpr uint64_t DIGEST_BYTES = 32U;
     const uint64_t width = batch_columns;
-    const unsigned __int128 fixed =
+    const btx::U128 fixed =
         64U +
-        4U * static_cast<unsigned __int128>(width) +
+        4U * static_cast<btx::U128>(width) +
         3U * FP3_BYTES +
         2U * (4U +
               FP3_BYTES *
-                  static_cast<unsigned __int128>(width)) +
+                  static_cast<btx::U128>(width)) +
         2U * FP3_BYTES +
         4U +
         36U *
-            static_cast<unsigned __int128>(folds + 1U) +
+            static_cast<btx::U128>(folds + 1U) +
         FP3_BYTES +
         4U +
         FP3_BYTES *
-            static_cast<unsigned __int128>(folds) +
+            static_cast<btx::U128>(folds) +
         4U;
-    const unsigned __int128 fold_path_depth_sum =
-        static_cast<unsigned __int128>(folds) *
+    const btx::U128 fold_path_depth_sum =
+        static_cast<btx::U128>(folds) *
             row_path_depth -
-        static_cast<unsigned __int128>(folds) *
+        static_cast<btx::U128>(folds) *
             (folds - 1U) / 2U;
-    const unsigned __int128 query_bytes =
+    const btx::U128 query_bytes =
         16U +
         FP3_BYTES *
-            static_cast<unsigned __int128>(width) +
+            static_cast<btx::U128>(width) +
         DIGEST_BYTES * row_path_depth +
-        64U * static_cast<unsigned __int128>(folds) +
+        64U * static_cast<btx::U128>(folds) +
         64U * fold_path_depth_sum;
-    const unsigned __int128 total =
+    const btx::U128 total =
         fixed +
         kRCFri3AlgNumQueries * query_bytes;
     if (total >

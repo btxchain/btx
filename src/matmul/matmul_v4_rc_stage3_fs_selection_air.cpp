@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_fs_selection_air.h>
 
 #include <matmul/matmul_v4_rc_alg_hash.h>
@@ -870,9 +871,9 @@ AlgebraicQueryIndexAirV1 BuildAlgebraicQueryIndexAirFromLaneV1(
     const uint64_t canonical = gf::Canonical(lane0);
     uint64_t bits_source = canonical;
     if (use_aliased_witness) {
-        const unsigned __int128 aliased =
-            static_cast<unsigned __int128>(canonical) +
-            static_cast<unsigned __int128>(gf::kP);
+        const btx::U128 aliased =
+            static_cast<btx::U128>(canonical) +
+            static_cast<btx::U128>(gf::kP);
         if (aliased >> 64) {
             out.note =
                 "stage3:fs_selection_air:alg_query_no_64bit_alias";
@@ -1161,8 +1162,8 @@ uint32_t Fri3AlgV3QueryIndexFromChallengeV1(
     // in-AIR mask below is cross-checked against an INDEPENDENT evaluation of
     // the same rule.  A one-sided edit shows up as a mismatch instead of
     // agreeing with itself.
-    const unsigned __int128 wide =
-        (static_cast<unsigned __int128>(gf::Canonical(challenge.c1)) << 64) |
+    const btx::U128 wide =
+        (static_cast<btx::U128>(gf::Canonical(challenge.c1)) << 64) |
         gf::Canonical(challenge.c0);
     return static_cast<uint32_t>(wide % modulus);
 }

@@ -17,6 +17,7 @@
 //       leaf domain seeds) pinned by checksum, plus μ/D/Le verbatim — any
 //       change to SampleFp / the domain tag / SHA256d is caught immediately.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_alg_hash.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <test/util/setup_common.h>
@@ -84,20 +85,20 @@ static_assert(ah::kAlgHashFullRounds + ah::kAlgHashPartialRounds >= 30);
 /** e = 7^{-1} mod (p−1) by extended Euclid (mirrors the module's derivation). */
 [[nodiscard]] uint64_t InverseSboxExponent()
 {
-    const unsigned __int128 m = gf::kP - 1;
-    __int128 old_r = 7, r = static_cast<__int128>(m);
-    __int128 old_s = 1, s = 0;
+    const btx::U128 m = gf::kP - 1;
+    btx::I128 old_r = 7, r = static_cast<btx::I128>(m);
+    btx::I128 old_s = 1, s = 0;
     while (r != 0) {
-        const __int128 q = old_r / r;
-        const __int128 tr = old_r - q * r;
+        const btx::I128 q = old_r / r;
+        const btx::I128 tr = old_r - q * r;
         old_r = r;
         r = tr;
-        const __int128 ts = old_s - q * s;
+        const btx::I128 ts = old_s - q * s;
         old_s = s;
         s = ts;
     }
     BOOST_REQUIRE(old_r == 1);
-    if (old_s < 0) old_s += static_cast<__int128>(m);
+    if (old_s < 0) old_s += static_cast<btx::I128>(m);
     return static_cast<uint64_t>(old_s);
 }
 
@@ -172,7 +173,7 @@ BOOST_AUTO_TEST_CASE(alg_hash_sbox_bijective)
 {
     const uint64_t e = InverseSboxExponent();
     // 7·e ≡ 1 (mod p−1)
-    const unsigned __int128 prod = static_cast<unsigned __int128>(e) * 7u;
+    const btx::U128 prod = static_cast<btx::U128>(e) * 7u;
     BOOST_CHECK_EQUAL(static_cast<uint64_t>(prod % (gf::kP - 1)), 1u);
 
     uint64_t seed = 0x5B0C7ULL;
@@ -447,14 +448,14 @@ BOOST_AUTO_TEST_CASE(alg_hash_column_streaming_row_leaf_is_exact)
 namespace {
 
 /** Independent oracle: the obvious (slow) modulo. NOT the implementation. */
-[[nodiscard]] Fp ReferenceReduce128(unsigned __int128 x)
+[[nodiscard]] Fp ReferenceReduce128(btx::U128 x)
 {
     return static_cast<Fp>(x % gf::kP);
 }
 
-[[nodiscard]] unsigned __int128 U128(uint64_t hi, uint64_t lo)
+[[nodiscard]] btx::U128 U128(uint64_t hi, uint64_t lo)
 {
-    return (static_cast<unsigned __int128>(hi) << 64) | lo;
+    return (static_cast<btx::U128>(hi) << 64) | lo;
 }
 
 } // namespace
@@ -479,7 +480,7 @@ BOOST_AUTO_TEST_CASE(gkr_field_reduce128_matches_modulo_reference)
     // extremes (hh = 0xFFFFFFFF, hl = 0xFFFFFFFF) including x = 2^128 − 1.
     for (const uint64_t hi : edges) {
         for (const uint64_t lo : edges) {
-            const unsigned __int128 x = U128(hi, lo);
+            const btx::U128 x = U128(hi, lo);
             const Fp got = gf::Reduce128(x);
             BOOST_REQUIRE_MESSAGE(got == ReferenceReduce128(x),
                                   "Reduce128 mismatch hi=" << hi << " lo=" << lo);
@@ -491,7 +492,7 @@ BOOST_AUTO_TEST_CASE(gkr_field_reduce128_matches_modulo_reference)
     // Products of edge field values — the actual shape Mul() feeds in.
     for (const uint64_t a : edges) {
         for (const uint64_t b : edges) {
-            const unsigned __int128 x = static_cast<unsigned __int128>(a) * b;
+            const btx::U128 x = static_cast<btx::U128>(a) * b;
             BOOST_REQUIRE_EQUAL(gf::Reduce128(x), ReferenceReduce128(x));
         }
     }
@@ -501,7 +502,7 @@ BOOST_AUTO_TEST_CASE(gkr_field_reduce128_matches_modulo_reference)
     for (int i = 0; i < 200000; ++i) {
         const uint64_t hi = SplitMix64(st);
         const uint64_t lo = SplitMix64(st);
-        const unsigned __int128 x = U128(hi, lo);
+        const btx::U128 x = U128(hi, lo);
         const Fp got = gf::Reduce128(x);
         BOOST_REQUIRE_MESSAGE(got == ReferenceReduce128(x),
                               "Reduce128 random mismatch hi=" << hi << " lo=" << lo);
@@ -531,8 +532,8 @@ namespace {
 /** Independent oracle: the previous widening implementation of Add. */
 [[nodiscard]] Fp ReferenceAdd(Fp a, Fp b)
 {
-    const unsigned __int128 s =
-        static_cast<unsigned __int128>(gf::Canonical(a)) + gf::Canonical(b);
+    const btx::U128 s =
+        static_cast<btx::U128>(gf::Canonical(a)) + gf::Canonical(b);
     return s >= gf::kP ? static_cast<Fp>(s - gf::kP) : static_cast<Fp>(s);
 }
 

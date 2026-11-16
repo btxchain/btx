@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_air_recurse.h>
@@ -296,8 +297,8 @@ BOOST_AUTO_TEST_CASE(
     const auto& first = product.inventory.exported.front();
     const uint64_t small = 7;
     BOOST_REQUIRE((
-        static_cast<unsigned __int128>(small) + gf::kP <
-        static_cast<unsigned __int128>(
+        static_cast<btx::U128>(small) + gf::kP <
+        static_cast<btx::U128>(
             std::numeric_limits<uint64_t>::max()) + 1));
     aliased_input.event_output[first.event][first.lane] =
         small + gf::kP;

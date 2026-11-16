@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <shielded/smile2/membership.h>
 #include <shielded/smile2/domain_separation.h>
 
@@ -129,7 +130,7 @@ public:
     int64_t UniformModQ() {
         uint64_t hi = Next();
         uint64_t lo = Next();
-        __int128 combined = (static_cast<__int128>(hi) << 32) | (lo & 0xFFFFFFFF);
+        btx::I128 combined = (static_cast<btx::I128>(hi) << 32) | (lo & 0xFFFFFFFF);
         return static_cast<int64_t>(static_cast<uint64_t>(combined % Q));
     }
 
@@ -1470,32 +1471,32 @@ bool VerifyMembership(
     {
         int64_t half_q = Q / 2;
         // Check z_0 norm bound
-        __int128 z0_norm_sq = 0;
+        btx::I128 z0_norm_sq = 0;
         for (size_t j = 0; j < proof.z0.size(); ++j) {
             for (size_t c = 0; c < POLY_DEGREE; ++c) {
                 int64_t val = mod_q(proof.z0[j].coeffs[c]);
                 if (val > half_q) val -= Q;
-                z0_norm_sq += static_cast<__int128>(val) * val;
+                z0_norm_sq += static_cast<btx::I128>(val) * val;
             }
         }
         // β_0^2 = s_0^2 * 2 * KEY_COLS * POLY_DEGREE
-        __int128 beta0_sq =
-            static_cast<__int128>(MEMBERSHIP_SIGMA_KEY) * MEMBERSHIP_SIGMA_KEY *
+        btx::I128 beta0_sq =
+            static_cast<btx::I128>(MEMBERSHIP_SIGMA_KEY) * MEMBERSHIP_SIGMA_KEY *
             2 * KEY_COLS * POLY_DEGREE;
         if (z0_norm_sq >= beta0_sq) return false;
 
         // Check z norm bound
         // ||z||_2 < β = s * sqrt(2 * rand_dim * POLY_DEGREE)
-        __int128 z_norm_sq = 0;
+        btx::I128 z_norm_sq = 0;
         for (size_t j = 0; j < proof.z.size(); ++j) {
             for (size_t c = 0; c < POLY_DEGREE; ++c) {
                 int64_t val = mod_q(proof.z[j].coeffs[c]);
                 if (val > half_q) val -= Q;
-                z_norm_sq += static_cast<__int128>(val) * val;
+                z_norm_sq += static_cast<btx::I128>(val) * val;
             }
         }
-        __int128 beta_sq =
-            static_cast<__int128>(MEMBERSHIP_SIGMA_MASK) * MEMBERSHIP_SIGMA_MASK *
+        btx::I128 beta_sq =
+            static_cast<btx::I128>(MEMBERSHIP_SIGMA_MASK) * MEMBERSHIP_SIGMA_MASK *
             2 * ck.rand_dim() * POLY_DEGREE;
         if (z_norm_sq >= beta_sq) return false;
     }

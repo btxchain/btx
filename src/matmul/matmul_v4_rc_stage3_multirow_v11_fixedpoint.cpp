@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_fixedpoint.h>
 
 #include <matmul/matmul_v4_rc_fri.h>
@@ -269,9 +270,9 @@ size_t SaturatingMulDivCeil(
     size_t value, uint64_t numerator, uint64_t denominator)
 {
     if (denominator == 0) return 0;
-    const unsigned __int128 product =
-        static_cast<unsigned __int128>(value) * numerator;
-    const unsigned __int128 result =
+    const btx::U128 product =
+        static_cast<btx::U128>(value) * numerator;
+    const btx::U128 result =
         (product + denominator - 1) / denominator;
     return result > std::numeric_limits<size_t>::max()
         ? std::numeric_limits<size_t>::max()
