@@ -870,21 +870,32 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
         if (err != "destination artifact exists") return false;
         for (auto& m : m_models) {
             if (m.artifact_id != artifact_id) continue;
-            if (pin && !m.pinned) {
+            const bool promote_pin = pin && !m.pinned;
+            if (m.source_path != path || promote_pin) {
+                const auto previous_source_path = m.source_path;
+                const bool previous_pin = m.pinned;
                 const auto previous_admission = m.admission;
                 const bool previous_verification = m.bytes_verified;
-                m.pinned = true;
-                m.admission = AdmissionLevel::PINNED;
-                m.bytes_verified = true;
+                // This import verified the same artifact at the caller's path.
+                // Keep that usable source across subsequent calls and restarts.
+                m.source_path = path;
+                if (promote_pin) {
+                    m.pinned = true;
+                    m.admission = AdmissionLevel::PINNED;
+                    m.bytes_verified = true;
+                }
                 if (!PersistLocked(err)) {
-                    m.pinned = false;
+                    m.source_path = previous_source_path;
+                    m.pinned = previous_pin;
                     m.admission = previous_admission;
                     m.bytes_verified = previous_verification;
                     return false;
                 }
-                std::string pin_err;
-                m_store.Pin(model_id, pin_err);
-                m_store.Pin(artifact_id, pin_err);
+                if (promote_pin) {
+                    std::string pin_err;
+                    m_store.Pin(model_id, pin_err);
+                    m_store.Pin(artifact_id, pin_err);
+                }
             }
             err.clear();
             out = m;
