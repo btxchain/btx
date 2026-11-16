@@ -876,19 +876,55 @@ bool MandateBudget::LoadState(const UniValue& state, std::string& err)
 
 void BountyChainIndex::Observe(const BountyChainFact& f)
 {
-    m_undo.push_back(m_facts);
+    // Keep only what this step changes. A copy of every fact per step made an
+    // N-lot importbountyrecovery hold N*(N-1)/2 facts until restart.
+    UndoStep step{f.outpoint, std::nullopt};
+    if (const auto it{m_facts.find(f.outpoint)}; it != m_facts.end()) step.previous = it->second;
+    m_undo_bytes += StepBytes(step);
+    m_undo.push_back(std::move(step));
+    while (!m_undo.empty() && (m_undo.size() > MAX_UNDO_STEPS || m_undo_bytes > MAX_UNDO_BYTES)) {
+        DropOldestUndo();
+    }
     m_facts[f.outpoint] = f;
     if (f.height > m_height) m_height = f.height;
     ++m_epoch;
 }
 
+size_t BountyChainIndex::StepBytes(const UndoStep& step)
+{
+    size_t bytes{sizeof(UndoStep) + step.outpoint.size()};
+    if (step.previous) {
+        bytes += step.previous->outpoint.size() + step.previous->lot_id.size() + step.previous->bounty_id.size();
+    }
+    return bytes;
+}
+
+void BountyChainIndex::DropOldestUndo()
+{
+    m_undo_bytes -= StepBytes(m_undo.front());
+    m_undo.pop_front();
+}
+
 void BountyChainIndex::DisconnectTip()
 {
     if (!m_undo.empty()) {
-        m_facts = m_undo.back();
+        UndoStep step{std::move(m_undo.back())};
         m_undo.pop_back();
+        m_undo_bytes -= StepBytes(step);
+        if (step.previous) {
+            m_facts[step.outpoint] = std::move(*step.previous);
+        } else {
+            m_facts.erase(step.outpoint);
+        }
         ++m_epoch;
     }
+}
+
+size_t BountyChainIndex::UndoFactsHeld() const
+{
+    size_t held{0};
+    for (const auto& step : m_undo) held += step.previous ? 1 : 0;
+    return held;
 }
 
 const BountyChainFact* BountyChainIndex::Get(const std::string& outpoint) const
@@ -1018,6 +1054,7 @@ bool BountyChainIndex::LoadState(const UniValue& state, std::string& err)
     }
     m_facts = std::move(facts);
     m_undo.clear();
+    m_undo_bytes = 0;
     m_height = height;
     ++m_epoch;
     return true;
@@ -1027,6 +1064,7 @@ void BountyChainIndex::Clear()
 {
     m_facts.clear();
     m_undo.clear();
+    m_undo_bytes = 0;
     m_height = 0;
     ++m_epoch;
 }

@@ -13,9 +13,11 @@
 #include <util/fs.h>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -87,14 +89,34 @@ struct BountyChainFact {
 };
 
 class BountyChainIndex {
+    //! What one Observe() changed: the outpoint and the fact it replaced
+    //! (none if the outpoint was new). Not a copy of every fact.
+    struct UndoStep {
+        std::string outpoint;
+        std::optional<BountyChainFact> previous;
+    };
     std::map<std::string, BountyChainFact> m_facts;
-    std::vector<std::map<std::string, BountyChainFact>> m_undo;
+    std::deque<UndoStep> m_undo;
+    size_t m_undo_bytes{0};
     uint32_t m_height{0};
     uint64_t m_epoch{1};
 
+    static size_t StepBytes(const UndoStep& step);
+    void DropOldestUndo();
+
 public:
+    //! Observe() steps that DisconnectTip() can take back. The oldest steps
+    //! are dropped beyond either limit, so the history stays bounded in steps
+    //! and in the bytes of the strings it holds.
+    static constexpr size_t MAX_UNDO_STEPS{10'000};
+    static constexpr size_t MAX_UNDO_BYTES{8 << 20};
+
     void Observe(const BountyChainFact& f);
     void DisconnectTip();
+    //! Undo steps held, the facts and the bytes they hold (for tests).
+    size_t UndoSteps() const { return m_undo.size(); }
+    size_t UndoFactsHeld() const;
+    size_t UndoBytes() const { return m_undo_bytes; }
     void SetHeight(uint32_t h) { m_height = h; }
     uint32_t Height() const { return m_height; }
     uint64_t Epoch() const { return m_epoch; }
