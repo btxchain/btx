@@ -15,22 +15,23 @@ class DeriveaddressesTest(BitcoinTestFramework):
         assert_raises_rpc_error(-5, "Missing checksum", self.nodes[0].deriveaddresses, "a")
 
         descriptor = "wpkh(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/1/1/0)#t6wfjs64"
-        address = "bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5"
+        # BTX regtest uses the bech32 HRP btxrt (Bitcoin: bcrt); the witness programs are unchanged.
+        address = "btxrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferrm9e774"
         assert_equal(self.nodes[0].deriveaddresses(descriptor), [address])
 
         descriptor = descriptor[:-9]
         assert_raises_rpc_error(-5, "Missing checksum", self.nodes[0].deriveaddresses, descriptor)
 
         descriptor_pubkey = "wpkh(tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B/1/1/0)#s9ga3alw"
-        address = "bcrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferr34acd5"
+        address = "btxrt1qjqmxmkpmxt80xz4y3746zgt0q3u3ferrm9e774"
         assert_equal(self.nodes[0].deriveaddresses(descriptor_pubkey), [address])
 
         ranged_descriptor = "wpkh(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/1/1/*)#kft60nuy"
-        assert_equal(self.nodes[0].deriveaddresses(ranged_descriptor, [1, 2]), ["bcrt1qhku5rq7jz8ulufe2y6fkcpnlvpsta7rq4442dy", "bcrt1qpgptk2gvshyl0s9lqshsmx932l9ccsv265tvaq"])
-        assert_equal(self.nodes[0].deriveaddresses(ranged_descriptor, 2), [address, "bcrt1qhku5rq7jz8ulufe2y6fkcpnlvpsta7rq4442dy", "bcrt1qpgptk2gvshyl0s9lqshsmx932l9ccsv265tvaq"])
+        assert_equal(self.nodes[0].deriveaddresses(ranged_descriptor, [1, 2]), ["btxrt1qhku5rq7jz8ulufe2y6fkcpnlvpsta7rql93v79", "btxrt1qpgptk2gvshyl0s9lqshsmx932l9ccsv2sy02wp"])
+        assert_equal(self.nodes[0].deriveaddresses(ranged_descriptor, 2), [address, "btxrt1qhku5rq7jz8ulufe2y6fkcpnlvpsta7rql93v79", "btxrt1qpgptk2gvshyl0s9lqshsmx932l9ccsv2sy02wp"])
 
         ranged_descriptor = descsum_create("wpkh(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/1/<0;1>/*)")
-        assert_equal(self.nodes[0].deriveaddresses(ranged_descriptor, [1, 2]), [["bcrt1q7c8mdmdktrzs8xgpjmqw90tjn65j5a3yj04m3n", "bcrt1qs6n37uzu0v0qfzf0r0csm0dwa7prc0v5uavgy0"], ["bcrt1qhku5rq7jz8ulufe2y6fkcpnlvpsta7rq4442dy", "bcrt1qpgptk2gvshyl0s9lqshsmx932l9ccsv265tvaq"]])
+        assert_equal(self.nodes[0].deriveaddresses(ranged_descriptor, [1, 2]), [["btxrt1q7c8mdmdktrzs8xgpjmqw90tjn65j5a3ycl3azj", "btxrt1qs6n37uzu0v0qfzf0r0csm0dwa7prc0v5kdgwhw"], ["btxrt1qhku5rq7jz8ulufe2y6fkcpnlvpsta7rql93v79", "btxrt1qpgptk2gvshyl0s9lqshsmx932l9ccsv2sy02wp"]])
 
         assert_raises_rpc_error(-8, "Range should not be specified for an un-ranged descriptor", self.nodes[0].deriveaddresses, descsum_create("wpkh(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/1/1/0)"), [0, 2])
 
@@ -55,7 +56,7 @@ class DeriveaddressesTest(BitcoinTestFramework):
         # positive value of a signed int32, and - currently - the
         # maximum value that the deriveaddresses bitcoin RPC call
         # accepts as derivation index.
-        assert_equal(self.nodes[0].deriveaddresses(descsum_create("wpkh(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/1/1/*)"), [2147483647, 2147483647]), ["bcrt1qtzs23vgzpreks5gtygwxf8tv5rldxvvsyfpdkg"])
+        assert_equal(self.nodes[0].deriveaddresses(descsum_create("wpkh(tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK/1/1/*)"), [2147483647, 2147483647]), ["btxrt1qtzs23vgzpreks5gtygwxf8tv5rldxvvswe9t9f"])
 
         hardened_without_privkey_descriptor = descsum_create("wpkh(tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B/1'/1/0)")
         assert_raises_rpc_error(-5, "Cannot derive script without private keys", self.nodes[0].deriveaddresses, hardened_without_privkey_descriptor)
