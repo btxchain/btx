@@ -289,6 +289,8 @@ class SearchIndex {
     size_t m_cap{100000};
     std::vector<std::string> m_index_peers;
     uint64_t m_seq{0};
+    //! search-index.json was there but could not be read: keep it, do not save over it.
+    bool m_unreadable{false};
 
 public:
     /**
@@ -315,6 +317,8 @@ public:
     UniValue StatusJson() const;
     bool Save(const fs::path& path, std::string& err) const;
     bool Load(const fs::path& path, int64_t now_ms, std::string& err);
+    //! True after Load found a file it could not read; Save then refuses until it is repaired.
+    bool Unreadable() const { return m_unreadable; }
     std::vector<ModelSearchRecord> All() const;
     void SetCap(size_t cap) { m_cap = cap; }
     /** Drop records for a new helper dir. Index peers are kept. */

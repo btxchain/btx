@@ -1317,6 +1317,13 @@ UniValue SearchIndex::StatusJson() const
 
 bool SearchIndex::Save(const fs::path& path, std::string& err) const
 {
+    // The file also holds the operator's search policy (hidden models, muted
+    // publishers). Feed reads, publishing and moderation save it, so an index
+    // that could not be read must not be written over until it is repaired.
+    if (m_unreadable) {
+        err = "search-index.json cannot be read; repair it before the search index is saved";
+        return false;
+    }
     UniValue arr(UniValue::VARR);
     for (const auto& kv : m_by_model) {
         const ModelSearchRecord& rec = kv.second;
@@ -1365,17 +1372,25 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
 
 bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
 {
-    if (!fs::exists(path)) return true;
+    m_unreadable = false;
+    std::error_code ec;
+    const bool present{std::filesystem::exists(path, ec) || (ec && ec != std::errc::no_such_file_or_directory)};
+    if (!present) return true;
+    const auto keep_unreadable = [&](const std::string& why) {
+        m_unreadable = true;
+        std::cerr << "btx-modeld: search-index.json cannot be read (" << why
+                  << "); keeping it and not saving the search index until it is repaired\n";
+        return true;
+    };
     try {
         std::ifstream in(path);
+        if (!in) return keep_unreadable("open");
         std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         UniValue o;
-        if (!o.read(raw) || !o.isObject() || !o.exists("records")) return true;
-        if (!o["records"].isArray()) {
-            LogSkippedJson("records type");
-            return true;
-        }
-        for (const auto& recj : o["records"].getValues()) {
+        if (!o.read(raw) || !o.isObject()) return keep_unreadable("parse");
+        if (o.exists("records") && !o["records"].isArray()) return keep_unreadable("records type");
+        const UniValue no_records(UniValue::VARR);
+        for (const auto& recj : (o.exists("records") ? o["records"] : no_records).getValues()) {
             ModelSearchRecord rec;
             std::string ierr;
             try {
@@ -1393,20 +1408,19 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
             }
             (void)Put(rec, now_ms, err);
         }
+        // The operator's policy: a list that cannot be read keeps the file.
         const auto load_ids = [&](const char* key, std::set<std::string>& dest) {
-            if (!o.exists(key)) return;
-            if (!o[key].isArray()) {
-                LogSkippedJson(std::string(key) + " type");
-                return;
-            }
+            if (!o.exists(key)) return true;
+            if (!o[key].isArray()) return false;
             for (const auto& v : o[key].getValues()) {
                 if (!v.isStr()) continue;
                 const std::string id = ToLower(v.get_str());
                 if (id.size() == 96 && IsHex(id)) dest.insert(id);
             }
+            return true;
         };
-        load_ids("hidden", m_hidden);
-        load_ids("muted_publishers", m_muted_publishers);
+        if (!load_ids("hidden", m_hidden)) return keep_unreadable("hidden type");
+        if (!load_ids("muted_publishers", m_muted_publishers)) return keep_unreadable("muted_publishers type");
         if (o.exists("sequence")) {
             if (!o["sequence"].isNum()) {
                 LogSkippedJson("sequence type");
@@ -1422,17 +1436,16 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
         return true;
     } catch (const std::exception& ex) {
         err = ex.what();
-        LogSkippedJson(err);
-        return true;
+        return keep_unreadable(err);
     } catch (...) {
         err = "search index";
-        LogSkippedJson(err);
-        return true;
+        return keep_unreadable(err);
     }
 }
 
 void SearchIndex::Clear()
 {
+    m_unreadable = false;
     m_by_model.clear();
     m_hidden.clear();
     m_muted_publishers.clear();
