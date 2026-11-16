@@ -602,4 +602,67 @@ BOOST_AUTO_TEST_CASE(addpeer_refuses_endpoint_that_cannot_be_dialed)
     BOOST_CHECK(reloaded.Peers() == std::vector<std::string>{"192.0.2.1:29447"});
 }
 
+// A pin label is cut to 96 bytes and an operator note to 192. A cut inside a
+// multi-byte character wrote invalid UTF-8, the next load could not parse the
+// file and started from an empty list: every pin or advisory was gone.
+BOOST_AUTO_TEST_CASE(non_ascii_pin_label_survives_restart)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-utf8-pin";
+    modelnet::GlobalSafety().Bind(tmp);
+    const std::string plain(96, 'e');
+    const std::string cut(96, 'd');
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(plain, "vendor", err));
+    // Byte 96 is the first byte of a two-byte character.
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(cut, std::string(95, 'a') + "\xc3\xa4", err));
+    std::ifstream in{tmp / "safety_publishers.json"};
+    UniValue saved;
+    const bool parsed{saved.read(std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()})};
+    BOOST_CHECK(parsed);
+    bool found{false};
+    for (const auto& p : parsed ? saved["publishers"].getValues() : std::vector<UniValue>{}) {
+        if (p["id"].get_str() != cut) continue;
+        found = true;
+        BOOST_CHECK_EQUAL(p["label"].get_str(), std::string(95, 'a'));
+    }
+    BOOST_CHECK(found);
+
+    modelnet::GlobalSafety().ResetForTests();
+    BOOST_REQUIRE(!modelnet::GlobalSafety().PublisherPinned(plain));
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(plain));
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(cut));
+}
+
+BOOST_AUTO_TEST_CASE(non_ascii_operator_note_survives_restart)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-utf8-note";
+    modelnet::GlobalSafety().Bind(tmp);
+    const std::string first(96, 'a');
+    const std::string second(96, 'b');
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(first, modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    // Byte 192 is the first byte of a two-byte character.
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(second, modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, std::string(191, 'n') + "\xc3\xa4", 0, err));
+    std::ifstream in{tmp / "safety_advisories.json"};
+    UniValue saved;
+    const bool parsed{saved.read(std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()})};
+    BOOST_CHECK(parsed);
+    bool found{false};
+    for (const auto& a : parsed ? saved["advisories"].getValues() : std::vector<UniValue>{}) {
+        if (a["target_id"].get_str() != second) continue;
+        found = true;
+        BOOST_CHECK_EQUAL(a["note"].get_str(), std::string(191, 'n'));
+    }
+    BOOST_CHECK(found);
+
+    modelnet::GlobalSafety().ResetForTests();
+    BOOST_REQUIRE(!modelnet::GlobalSafety().SubjectBlocked(first));
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(first));
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(second));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

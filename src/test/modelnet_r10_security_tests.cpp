@@ -545,6 +545,33 @@ BOOST_AUTO_TEST_CASE(r10_pex_message_caps_and_ttl_clamp)
     }
 }
 
+// A peer's availability text is cut to 64 bytes. A cut inside a multi-byte
+// character left invalid UTF-8 in the cache, Advertise passed it on, and every
+// peer refused this node's whole PEX answer, its own providers included.
+BOOST_AUTO_TEST_CASE(r10_pex_availability_cut_keeps_advertise_valid)
+{
+    using namespace modelnet;
+    const int64_t now = 1'000'000;
+    ProviderExchange pex;
+    UniValue hint(UniValue::VOBJ);
+    hint.pushKV("endpoint", "203.0.113.1:29447");
+    // Byte 64 is the first byte of a two-byte character.
+    hint.pushKV("availability", std::string(63, 'a') + "\xc3\xa4");
+    UniValue arr(UniValue::VARR);
+    arr.push_back(hint);
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("schema_version", 2);
+    body.pushKV("providers", arr);
+    std::vector<ProviderHint> accepted;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(pex.Ingest("peer-a", body, now, accepted, err), err);
+    BOOST_REQUIRE_EQUAL(accepted.size(), 1U);
+    BOOST_REQUIRE_EQUAL(pex.Recent(now).size(), 1U);
+    BOOST_CHECK_EQUAL(accepted[0].availability_summary, std::string(63, 'a'));
+    UniValue sent;
+    BOOST_CHECK(sent.read(pex.Advertise(now, 16).write()));
+}
+
 BOOST_AUTO_TEST_CASE(r10_probe_targets_and_probe_budget)
 {
     using namespace modelnet;
