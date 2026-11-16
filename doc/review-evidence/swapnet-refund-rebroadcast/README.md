@@ -24,4 +24,15 @@ The native experiment used a retained local regtest fixture, equivalent before/a
 
 ## Limits
 
-Native execution covers production UTXODriver/Journal/Store on Bitcoin Core, not the full native btxd coordinator or bilateral swap. BTX offline-refund caller controls use simulated RPC; native BTX still needs verification, including confirmed/mempool reconciliation and the same recovery path. No native Linux/Windows, EVM, full suite or release qualification. Existing Bitcoin fixture and terminal-recovery tests were reused; no consensus, authority, signature, fee or budget policy changed. Prepared with Codex; bounded code/evidence review is not an independent native-platform run.
+Native execution covers production UTXODriver/Journal/Store on Bitcoin Core, not the full native btxd coordinator or bilateral swap. BTX offline-refund caller controls use simulated RPC. Additional actual native BTX wallet/presence controls are described below; full native HTLC/coordinator/default-profile qualification remains untested. No native Linux/Windows, EVM, full suite or release qualification. Existing Bitcoin fixture and terminal-recovery tests were reused; no consensus, authority, signature, fee or budget policy changed. Prepared with Codex; bounded code/evidence review is not an independent native-platform run.
+
+
+## Additional native BTX wallet controls
+
+Saved Mac ARM64 package source949a98e34222cc4cdb5b1d5bd650aa3b7bcbff72, artifact14147748488; current PR777 external UTXODriver/Journal. Archive and daemon hashes are pinned in native-btx-receipt.json. Reused documented CPU wallet test flags: autoshieldcoinbase=0; regtestmatmulbindingheight/productdigestheight/v4height=2147483647; regtestmatmulrequireproductpayload=0. These postpone MatMul activation for this regtest fixture; they do not qualify default ExactReplay/MatMul.
+
+Candidate controls passed: native confirmed/mempool recognition and duplicate suppression; wallet-known dropped transaction absent after rollback and restart; premature native non-final refusal with probe remaining prepared; exactly one original-byte rebroadcast after maturity; one confirmation, unchanged native decoded outputs/raw and consumed original inputs; zero new fund operations during recovery. The node stopped and the1.25GiB storage reserve remained intact. No rebuild.
+
+This was an ordinary native timelocked P2MR wallet spend, **not an HTLC refund**; journal kind refund is a fixture label. These are candidate-only BTX compatibility controls, not a native BTX before/after claim. The matched real HTLC-refund before/after remains the separate Bitcoin result above. No full native btxd coordinator, bilateral swap, current native1e2build, full suites or release qualification.
+
+native-btx-result.json retains the observed control results (RPC help text omitted). native-btx-harness.py is the unchanged locally executed audit harness: it depends on the retained artifact/runtime layout and current candidate Python directory and is **not a turnkey fresh-checkout command**. Use the maintained regression command above for the branch's directly runnable test. The native checkpoint/wallet data are not published.
