@@ -609,6 +609,7 @@ if(WITH_MODELNET)
     modelnet_035_discovery_tests.cpp
     modelnet_035_training_tests.cpp
     modelnet_035_launch_tests.cpp
+    modelnet_security_artifacts_tests.cpp
     modelnet_035_complete_tests.cpp
     modelnet_035_disk_tests.cpp
     swarm_observer_tests.cpp
