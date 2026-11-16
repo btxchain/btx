@@ -15,16 +15,34 @@ from test_framework.util import (
 )
 from test_framework.blocktools import (
     TIME_GENESIS_BLOCK,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
 )
 
 
 class CreateTxWalletTest(BitcoinTestFramework):
     def add_options(self, parser):
-        self.add_wallet_options(parser)
+        self.add_wallet_options(parser, legacy=False)
 
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
+        self.extra_args = [list(REGTEST_GENERIC_P2P_MATMUL_ARGS) + [
+            "-autoshieldcoinbase=0", "-addresstype=p2mr", "-fallbackfee=0.0002",
+            "-walletrejectlongchains=1", "-spendzeroconfchange=1",
+            "-limitancestorcount=100", "-limitdescendantcount=100",
+            "-limitancestorsize=1024", "-limitdescendantsize=1024",
+            "-swapnet=0", "-autoupdate=0", "-networkactive=0",
+        ]]
+
+    def setup_network(self):
+        if self.config["components"].getboolean("ENABLE_MODELNET", fallback=False):
+            self.extra_args[0].append("-nomodelnet")
+        super().setup_network()
+
+    def restart_with_fee_settings(self, *fee_settings):
+        # TestNode replaces extra_args; retain the shared profile, while each
+        # fee row replaces rather than accumulates the previous fee override.
+        self.restart_node(0, extra_args=self.extra_args[0] + list(fee_settings))
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -84,13 +102,13 @@ class CreateTxWalletTest(BitcoinTestFramework):
 
     def test_tx_size_too_large(self):
         # More than 10kB of outputs, so that we hit -maxtxfee with a high feerate
-        outputs = {self.nodes[0].getnewaddress(address_type='bech32'): 0.000025 for _ in range(400)}
+        outputs = {self.nodes[0].getnewaddress(address_type='p2mr'): 0.000025 for _ in range(400)}
         raw_tx = self.nodes[0].createrawtransaction(inputs=[], outputs=outputs)
         msg = "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)"
 
         for fee_setting in ['-minrelaytxfee=0.01', '-mintxfee=0.01', '-paytxfee=0.01']:
             self.log.info('Check maxtxfee in combination with {}'.format(fee_setting))
-            self.restart_node(0, extra_args=[fee_setting])
+            self.restart_with_fee_settings(fee_setting)
             assert_raises_rpc_error(
                 -6,
                 "Fee exceeds maximum configured by user (e.g. -maxtxfee, maxfeerate)",
@@ -103,7 +121,7 @@ class CreateTxWalletTest(BitcoinTestFramework):
             )
 
         self.log.info('Check maxtxfee in combination with settxfee')
-        self.restart_node(0)
+        self.restart_with_fee_settings()
         self.nodes[0].settxfee(0.01)
         assert_raises_rpc_error(
             -6,
@@ -130,22 +148,41 @@ class CreateTxWalletTest(BitcoinTestFramework):
         self.nodes[0].createwallet("too_long")
         test_wallet = self.nodes[0].get_wallet_rpc("too_long")
 
-        tx_data = df_wallet.send(outputs=[{test_wallet.getnewaddress(): 25}], options={"change_position": 0})
-        txid = tx_data['txid']
-        vout = 1
-
-        self.nodes[0].syncwithvalidationinterfacequeue()
-        options = {"change_position": 0, "add_inputs": False}
-        for i in range(1, 25):
-            options['inputs'] = [{'txid': txid, 'vout': vout}]
-            tx_data = test_wallet.send(outputs=[{test_wallet.getnewaddress(): 25 - i}], options=options)
-            txid = tx_data['txid']
+        # One confirmed coin avoids unsafe inbound/extra change inputs.
+        # Start with 1 BTX so the final 0.3 payment is otherwise affordable.
+        address = test_wallet.getnewaddress()
+        funding = df_wallet.sendtoaddress(address, Decimal("1"), fee_rate=2)
+        self.generate(self.nodes[0], 1)
+        coins = test_wallet.listunspent()
+        assert_equal(len(coins), 1)
+        assert_equal(coins[0]["txid"], funding)
+        previous = (funding, coins[0]["vout"])
+        chain = []
+        for count in range(1, 101):
+            txid = test_wallet.sendall([test_wallet.getnewaddress()], fee_rate=2)["txid"]
+            decoded = self.nodes[0].decoderawtransaction(test_wallet.gettransaction(txid)["hex"])
+            assert_equal([(x["txid"], x["vout"]) for x in decoded["vin"]], [previous])
+            assert_equal(len(decoded["vout"]), 1)
+            entry = self.nodes[0].getmempoolentry(txid)
+            assert_equal(entry["ancestorcount"], count)
+            assert entry["ancestorsize"] <= 1024 * 1000
+            previous = (txid, 0)
+            chain.append(txid)
+        coins = test_wallet.listunspent(0)
+        assert_equal(len(coins), 1)
+        assert_equal((coins[0]["txid"], coins[0]["vout"]), previous)
+        assert_equal(coins[0]["confirmations"], 0)
+        assert coins[0]["safe"] and coins[0]["spendable"]
+        assert coins[0]["amount"] > Decimal("0.31")
 
         # Sending one more chained transaction will fail
-        options = {"minconf": 0, "include_unsafe": True, 'add_inputs': True}
+        options = {"minconf": 0, "include_unsafe": True, "add_inputs": True, "fee_rate": 2}
         assert_raises_rpc_error(-4, "Unconfirmed UTXOs are available, but spending them creates a chain of transactions that will be rejected by the mempool",
                                 test_wallet.send, outputs=[{test_wallet.getnewaddress(): 0.3}], options=options)
 
+        # The refusal must not consume the otherwise affordable long-chain coin.
+        assert self.nodes[0].gettxout(*previous) is not None
+        assert set(chain) <= set(self.nodes[0].getrawmempool())
         test_wallet.unloadwallet()
 
     def test_version3(self):
@@ -167,10 +204,10 @@ class CreateTxWalletTest(BitcoinTestFramework):
 
     def test_setfeerate(self):
         self.log.info("Test setfeerate")
-        self.restart_node(0, extra_args=[
+        self.restart_with_fee_settings(
             "-incrementalrelayfee=0.00001",
             "-mintxfee=0.00003141",  # 3.141 sat/vB
-        ])
+        )
         node = self.nodes[0]
 
         def test_response(*, requested=0, expected=0, error=None, msg):
