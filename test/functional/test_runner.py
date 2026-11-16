@@ -653,6 +653,7 @@ BTX_BASE_SCRIPTS = [
     'feature_bcp1.py --descriptors',
     'wallet_bcp1_object_form.py --descriptors',
     'wallet_bcp1_lock_unspents.py --descriptors',
+    'wallet_custody_recovery.py --descriptors',
     'feature_p2mr_end_to_end.py',
     'p2mr_end_to_end.py',
     'rpc_pq_wallet.py',
