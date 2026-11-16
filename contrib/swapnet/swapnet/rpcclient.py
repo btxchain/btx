@@ -13,7 +13,7 @@ from pathlib import Path
 import urllib.request
 import urllib.parse
 import urllib.error
-from .errors import require,SwapError,RPCConnectionRefused
+from .errors import require,SwapError,RPCConnectionRefused,RPCTransportTimeout
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args,**kwargs):raise SwapError('RPC_REDIRECT','RPC redirects forbidden')
@@ -49,9 +49,16 @@ class LocalRPC:
             except urllib.error.URLError as e:
                 if isinstance(e.reason,ConnectionRefusedError):
                     raise RPCConnectionRefused() from e
+                if isinstance(e.reason,TimeoutError):
+                    raise RPCTransportTimeout() from e
                 raise
+            except TimeoutError as e:
+                raise RPCTransportTimeout() from e
             with response:
-                raw=response.read(4_194_305)
+                try:raw=response.read(4_194_305)
+                except TimeoutError as e:
+                    if isinstance(response,urllib.error.HTTPError):raise
+                    raise RPCTransportTimeout() from e
             require(len(raw)<=4_194_304,'RPC_RESPONSE_LIMIT','RPC response too large')
             obj=json.loads(raw,parse_float=Decimal)
             require(obj.get('id')=='swapnet','RPC_RESPONSE_ID','Unexpected RPC response ID')

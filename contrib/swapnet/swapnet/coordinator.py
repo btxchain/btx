@@ -11,7 +11,7 @@ import time
 from .authorization import Principal,Grant
 from .assets import Asset
 from .canonical import atoms,hex32,hashlock,digest,exact_fields,integer
-from .errors import require,SwapError,RPCConnectionRefused
+from .errors import require,SwapError,RPCConnectionRefused,RPCTransportTimeout
 from .machine import Session,decide
 from .policy import SafetyPolicy,Deadline
 from .quote import Quote,SignedQuote
@@ -438,7 +438,7 @@ class Coordinator:
         try:
             rb=self._observe(b,agr.short_leg,s['refs'].get('b'),required=s['role']=='responder')
         except SwapError as error:
-            unavailable=(isinstance(error,RPCConnectionRefused)
+            unavailable=(isinstance(error,(RPCConnectionRefused,RPCTransportTimeout))
                          or (error.code=='RPC_COOKIE' and error.message=='RPC cookie unavailable'))
             if not unavailable or not self._refund_without_bitcoin(sid,s,rev,agr,a,ra):
                 raise

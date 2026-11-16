@@ -1,0 +1,41 @@
+{
+  "before_code": "19e3a8ce5ae8dec78d2a46bfe3bdc11a68eeaf78",
+  "release_ancestor": "1e2f8b5f12295002334d3390c12cac0bb4ae2aff",
+  "platform": "macOS ARM64; Python3.12.14; pytest8.4.2",
+  "before": {
+    "failed": 8,
+    "passed": 8,
+    "seconds": 17.1,
+    "failure_breakdown": "3 automatic recovery, 3 internal classification, 2 guard-path assertions (baseline exits with generic unavailable before conflict check)"
+  },
+  "after": {
+    "passed": 16,
+    "seconds": 30.52
+  },
+  "controls": {
+    "passed": 15,
+    "seconds": 5.68
+  },
+  "candidate_files_sha256": {
+    "contrib/swapnet/swapnet/errors.py": "f649174e0378550a9faefb42ef7187ccfe5ea6177cc4192686adf079f57166bc",
+    "contrib/swapnet/swapnet/rpcclient.py": "cef18741707dc79562d8cad8743eb23bc74558114b80eae6285ad90a05781936",
+    "contrib/swapnet/swapnet/coordinator.py": "fed3578e64de70c7bf0cbf4eebe400afe534b1d5ff43b84271cde10bb2bd1b20",
+    "contrib/swapnet/tests/test_refused_connection_recovery.py": "b59929e40596be246cbd54258cb005dd9224f705205c5076af3130c47c4f61ab",
+    "contrib/swapnet/tests/test_refused_connection_controls.py": "5ae74f01f7e4e412459da47a44b95275a37832552a7dd49c46385755eb93747d",
+    "contrib/swapnet/tests/test_timeout_refund_recovery.py": "ce6c93552019494986ac87c19a4e13c5f560219244e1b52b8f993d328b81410e"
+  },
+  "evidence_files_sha256": {
+    "controls.log": "c5195fb282c4d674a3b64b0c17a854154b3cb921a3c639b1082980b1eb0cb838",
+    "mac-probe-fixture.py": "bc5b5d872d0b5ebb3a73452e7606de445bea8a8868391049a4173da21941b642",
+    "README.md": "db8224d665fed5f21d8b9a893c75c434876391a7a87f6b2ecc4cd01e1406e22a",
+    "before.log": "86f8adcc01ef01959d223aefd825b3d84d4f357d09697ad36b7b48f9ec830d16",
+    "mac-probe-after.log": "2214b4ae574f5a4215c35c318d2ff8b5168c2c3e418b6284f4539efc1dae8dfc",
+    "mac-probe-before.log": "d93bf17cd9b91d9c13407b1e714245ee68eb98ba4df90407da705f350dbf52ea",
+    "after.log": "d9fad5af1e2d84f422b4b09e0424b29e80783f4375abaca6818d350c775ff7ab"
+  },
+  "scope": "Maintained connect timeout injected at opener; real HTTP header/body timeouts. Earlier real Darwin connect timeout retained separately. Chains/signing simulated.",
+  "refund_helper_ast_unchanged": true,
+  "drivers_unchanged": true,
+  "native_nodes": false,
+  "sanitization": "Only absolute workspace path prefix replaced in logs; outcomes unchanged"
+}

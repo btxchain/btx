@@ -14,3 +14,8 @@ class RPCConnectionRefused(SwapError):
     """Internal transport classification; retain the public unavailable code."""
     def __init__(self):
         super().__init__("RPC_UNAVAILABLE", "Local chain client connection refused")
+
+class RPCTransportTimeout(SwapError):
+    """Internal open/read timeout; not permission to bypass recovery checks."""
+    def __init__(self):
+        super().__init__("RPC_UNAVAILABLE", "Local chain client request timed out")

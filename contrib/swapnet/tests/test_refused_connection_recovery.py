@@ -144,7 +144,7 @@ def test_actual_http_errors_never_authorize_refund(tmp_path, kind):
         server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 
-@pytest.mark.parametrize('reason', [TimeoutError(), ConnectionResetError(), 'connection refused'])
+@pytest.mark.parametrize('reason', [ConnectionResetError(), 'connection refused'])
 def test_unqualified_transport_errors_remain_generic(tmp_path, reason):
     client = LocalRPC('http://127.0.0.1:1', timeout=1)
     class Broken:
