@@ -23,7 +23,7 @@ class Coordinator:
     def __init__(self,journal,authority,drivers,identity,vault,emit,*,clock=None,policy=None):
         self.journal,self.authority,self.drivers,self.identity,self.vault,self.emit=journal,authority,drivers,identity,vault,emit
         self.now=clock or (lambda:int(time.time()));self.policy=policy or SafetyPolicy();self._cursor=0;self._terminal_cursor=0
-        self._terminal_due=0
+        self._terminal_due=0;self._retry={}
     def _driver(self,asset):
         require(asset in self.drivers,'ASSET_UNAVAILABLE','No qualified local chain driver for this asset')
         return self.drivers[asset]
@@ -572,8 +572,16 @@ class Coordinator:
             selected.append(terminal[self._terminal_cursor % len(terminal)])
             self._terminal_cursor+=1;self._terminal_due=self.now()+self.policy.terminal_recheck_seconds
         for sid,_,s in selected:
-            try:self.tick_one(sid)
+            # A swap whose endpoint keeps failing is not retried on every tick, so a rate-limited provider can
+            # recover. The delay is per swap: one failing swap never holds up the others.
+            retry=self._retry.get(sid);cap=self.policy.rpc_retry_max_seconds
+            if retry and 0<retry[1]-self.now()<=cap:continue
+            try:
+                self.tick_one(sid);self._retry.pop(sid,None)
             except SwapError as e:
+                if cap and e.code in ('RPC_UNAVAILABLE','CHAIN_RPC'):
+                    n=retry[0] if retry else 0;self._retry[sid]=(n+1,self.now()+min(cap,2**min(n,12)))
+                else:self._retry.pop(sid,None)
                 rev,current=self.journal.load(sid)
                 current['last_error']={'code':e.code,'message':e.message};current['updated_at']=self.now()
                 self._save(sid,current,rev)
