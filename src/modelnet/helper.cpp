@@ -980,6 +980,19 @@ fs::path HelperDir(const ModelCatalog& cat)
     return cat.Store().Root().parent_path();
 }
 
+/** A new directory in the helper directory that no other call uses, or an
+ *  empty path. Files keep their usual names inside it: an imported file's
+ *  name is part of the model's identity. */
+fs::path NewHelperTempDir(const ModelCatalog& cat, const std::string& prefix)
+{
+    unsigned char rnd[16];
+    GetStrongRandBytes(Span<unsigned char>{rnd, sizeof(rnd)});
+    const fs::path dir = HelperDir(cat) / fs::PathFromString(prefix + HexStr(Span<const unsigned char>{rnd, sizeof(rnd)}));
+    std::error_code ec;
+    if (!fs::create_directory(dir, ec) || ec) return {};
+    return dir;
+}
+
 bool ReadJsonFile(const fs::path& path, UniValue& out)
 {
     std::ifstream in(path);
@@ -9283,6 +9296,13 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             err = "refund_height must be a block height below 500000000";
             return false;
         }
+        // Checked before the ciphertext below is imported, which a refused
+        // campaign would leave behind.
+        if (!ValidRefundWindow(1, 1, 1, static_cast<uint32_t>(refund_height)) && refund_height < 10) {
+            err_code = "INVALID_PARAMETER";
+            err = "refund_height too low";
+            return false;
+        }
         Resource r;
         if (!DecodeResource(uri, r, err) || r.kind != ResourceKind::MODEL) {
             err_code = "INVALID_PARAMETER";
@@ -9314,16 +9334,30 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 std::vector<unsigned char> wrapped;
                 if (WrapBtxEnc2(Span<const unsigned char>{secret->data(), secret->size()},
                                  Span<const unsigned char>{plain.data(), plain.size()}, wrapped, rerr)) {
-                    const fs::path tmp = HelperDir(cat) / "tmp-cipher.btxenc";
-                    {
+                    // A directory of its own per call: the two helper RPC workers
+                    // can run createmodelrelease at once, and a shared file let
+                    // one campaign import the other's ciphertext.
+                    const fs::path tmp_dir = NewHelperTempDir(cat, "tmp-cipher-");
+                    const fs::path tmp = tmp_dir / "tmp-cipher.btxenc";
+                    bool wrote{false};
+                    if (!tmp_dir.empty()) {
                         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
                         out.write(reinterpret_cast<const char*>(wrapped.data()), static_cast<std::streamsize>(wrapped.size()));
+                        out.close();
+                        wrote = !out.fail();
                     }
                     CatalogEntry enc;
-                    if (cat.ImportPath(fs::PathToString(tmp), /*pin=*/false, enc, rerr)) {
-                        c.ciphertext_artifact_id = enc.artifact_id.IsNull() ? enc.model_id : enc.artifact_id;
+                    const bool imported{wrote && cat.ImportPath(fs::PathToString(tmp), /*pin=*/false, enc, rerr)};
+                    std::error_code remove_ec;
+                    if (!tmp_dir.empty()) fs::remove_all(tmp_dir, remove_ec);
+                    if (!imported) {
+                        // The ciphertext was made but not stored: the campaign
+                        // would name the plaintext object instead.
+                        err_code = "INTERNAL";
+                        err = "could not store the release ciphertext" + (rerr.empty() ? std::string{} : ": " + rerr);
+                        return false;
                     }
-                    fs::remove(tmp);
+                    c.ciphertext_artifact_id = enc.artifact_id.IsNull() ? enc.model_id : enc.artifact_id;
                 }
             } else if (LooksLikeBtxEnc2(Span<const unsigned char>{plain.data(), plain.size()})) {
                 c.ciphertext_artifact_id = local.artifact_id;
@@ -9336,11 +9370,6 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         if (params.isArray() && params.size() > 3 && Arg(3).isNum()) c.target_atoms = Arg(3).getInt<int64_t>();
         else if (options.exists("target_atoms")) c.target_atoms = options["target_atoms"].getInt<int64_t>();
         c.campaign_created_at = ConnNowMs();
-        if (!ValidRefundWindow(1, 1, 1, c.refund_height) && c.refund_height < 10) {
-            err_code = "INVALID_PARAMETER";
-            err = "refund_height too low";
-            return false;
-        }
         {
             UniValue store;
             ReadJsonFile(HelperDir(cat) / "identities.json", store);
@@ -9672,20 +9701,25 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     std::vector<unsigned char> plain;
                     if (UnwrapBtxEnc2(Span<const unsigned char>{secret->data(), secret->size()},
                                        Span<const unsigned char>{wrapped.data(), wrapped.size()}, plain, err)) {
-                        const fs::path tmp = HelperDir(cat) / "tmp-unlock.safetensors";
-                        {
+                        const fs::path tmp_dir = NewHelperTempDir(cat, "tmp-unlock-");
+                        const fs::path tmp = tmp_dir / "tmp-unlock.safetensors";
+                        bool wrote{false};
+                        if (!tmp_dir.empty()) {
                             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
                             out.write(reinterpret_cast<const char*>(plain.data()), static_cast<std::streamsize>(plain.size()));
+                            out.close();
+                            wrote = !out.fail();
                         }
                         CatalogEntry pub;
-                        if (cat.ImportPath(fs::PathToString(tmp), /*pin=*/true, pub, err)) {
+                        if (wrote && cat.ImportPath(fs::PathToString(tmp), /*pin=*/true, pub, err)) {
                             unlocked = true;
                             commit_unlock(true);
                             DemandSeedIfDownloadable(cat, pub.model_id, err);
                             result.pushKV("plaintext_model_id", pub.model_id.Hex());
                             result.pushKV("plaintext_artifact_id", pub.artifact_id.Hex());
                         }
-                        fs::remove(tmp);
+                        std::error_code remove_ec;
+                        if (!tmp_dir.empty()) fs::remove_all(tmp_dir, remove_ec);
                     }
                 } else {
                     unlocked = true;

@@ -793,7 +793,10 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     bool has_weights = false;
     for (const auto& file : files) {
         const auto lower = ToLower(file.second);
-        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors") || lower.ends_with(".exl3")) {
+        // The same weight files RoleFromRelPath names, so the BtxEnc2
+        // ciphertext that createmodelrelease imports counts as weights.
+        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors") || lower.ends_with(".exl3") ||
+            lower.ends_with(".btxenc")) {
             has_weights = true;
             break;
         }
