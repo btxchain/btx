@@ -4,6 +4,7 @@
 
 #include <modelnet/provider_exchange.h>
 #include <modelnet/model_nat.h>
+#include <modelnet/types.h>
 
 #include <algorithm>
 #include <cctype>
@@ -57,7 +58,7 @@ bool ParseProviderHint(const UniValue& obj, int64_t now_ms, int64_t ttl_ms, Prov
         }
     }
     if (obj.exists("availability") && obj["availability"].isStr()) {
-        out.availability_summary = obj["availability"].get_str().substr(0, 64);
+        out.availability_summary = CutUtf8(obj["availability"].get_str(), 64);
     }
     int64_t expiry = now_ms + ttl_ms;
     try {

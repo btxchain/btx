@@ -253,4 +253,13 @@ bool FileRoleFromName(const std::string& name, FileRole& out)
     return false;
 }
 
+std::string CutUtf8(const std::string& s, size_t max_bytes)
+{
+    if (s.size() <= max_bytes) return s;
+    size_t n = max_bytes;
+    // Step back over continuation bytes (10xxxxxx) to the start of the character.
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) --n;
+    return s.substr(0, n);
+}
+
 } // namespace modelnet

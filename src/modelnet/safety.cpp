@@ -291,7 +291,7 @@ bool SafetyRegistry::PinPublisher(const std::string& publisher_id_hex, const std
         err = "too many safety publishers";
         return false;
     }
-    m_publishers[id] = label.substr(0, 96);
+    m_publishers[id] = CutUtf8(label, 96);
     RebuildLocked(0);
     return PersistLocked(err);
 }
@@ -343,7 +343,7 @@ bool SafetyRegistry::LocalReport(const std::string& target_hex, uint8_t target_k
     a.target_id = tid;
     a.target_kind = target_kind;
     a.severity = severity;
-    a.note = note.substr(0, 192);
+    a.note = CutUtf8(note, 192);
     a.expires_at = now > 0 ? now + 30 * DAY_SECONDS : 0;
     a.local = true;
     a.content_sha384 = std::string(96, '0');
