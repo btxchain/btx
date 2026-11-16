@@ -155,6 +155,11 @@ def output_key_to_p2tr(key, main=False):
     assert len(key) == 32
     return program_to_witness(1, key, main)
 
+def merkle_root_to_p2mr(root, main=False):
+    """Address of a P2MR (witness v2) output committing to a 32-byte script Merkle root."""
+    assert len(root) == 32
+    return program_to_witness(2, root, main)
+
 def p2a(main=False):
     return program_to_witness(1, "4e73", main)
 

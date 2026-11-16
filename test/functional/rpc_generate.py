@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.wallet import MiniWallet
+from test_framework.wallet import MiniWallet, MiniWalletMode
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
@@ -32,7 +32,7 @@ class RPCGenerateTest(BitcoinTestFramework):
 
     def test_generateblock(self):
         node = self.nodes[0]
-        miniwallet = MiniWallet(node)
+        miniwallet = MiniWallet(node, mode=MiniWalletMode.ADDRESS_OP_TRUE)  # BTX: these checks expect MiniWallet's non-standard P2TR output; keep it until they are ported to P2MR
 
         def derive_one(descriptor: str) -> str:
             return node.deriveaddresses(node.getdescriptorinfo(descriptor)["descriptor"])[0]
