@@ -1007,15 +1007,6 @@ UniValue DirectoryEntryJson(const SearchHit& h)
 
 namespace {
 
-void PruneExpiredSearch(std::map<std::string, ModelSearchRecord>& by_model, int64_t now_ms)
-{
-    for (auto it = by_model.begin(); it != by_model.end();) {
-        const int64_t exp = it->second.expires_at;
-        if (exp > 0 && exp <= now_ms) it = by_model.erase(it);
-        else ++it;
-    }
-}
-
 std::string PublisherQuotaKey(const ModelSearchRecord& r, const std::string& transport_endpoint)
 {
     // Charge the key that signed the record (Put() has verified it by now).
@@ -1056,7 +1047,25 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
             return false;
         }
     }
-    PruneExpiredSearch(m_by_model, now_ms);
+    // A peer record counts against its publisher quota while it is in the
+    // index. One that expired is pruned here and gives its place back, or 64
+    // records seen since the start block every new one of that key.
+    const auto release = [this](const std::string& model_key) {
+        const auto c = m_pub_charge.find(model_key);
+        if (c == m_pub_charge.end()) return;
+        const auto w = m_pub_window.find(c->second);
+        if (w != m_pub_window.end() && --w->second <= 0) m_pub_window.erase(w);
+        m_pub_charge.erase(c);
+    };
+    for (auto pit = m_by_model.begin(); pit != m_by_model.end();) {
+        const int64_t exp = pit->second.expires_at;
+        if (exp > 0 && exp <= now_ms) {
+            release(pit->first);
+            pit = m_by_model.erase(pit);
+        } else {
+            ++pit;
+        }
+    }
     const std::string key = r.model_id.Hex();
     auto it = m_by_model.find(key);
     if (it != m_by_model.end()) {
@@ -1097,6 +1106,7 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
             return false;
         }
         m_pub_window[qk] += 1;
+        m_pub_charge[key] = qk;
     }
     ModelSearchRecord stored = r;
     stored.signed_ok = verified;
@@ -1427,6 +1437,7 @@ void SearchIndex::Clear()
     m_hidden.clear();
     m_muted_publishers.clear();
     m_pub_window.clear();
+    m_pub_charge.clear();
     m_seq = 0;
 }
 

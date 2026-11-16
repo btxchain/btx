@@ -514,6 +514,42 @@ BOOST_AUTO_TEST_CASE(search_quota_charges_the_signer)
     BOOST_CHECK_EQUAL(err, "publisher spam");
 }
 
+// The quota limits how many records one key keeps in the index. Records that
+// expired and were pruned counted on: 64 records seen since the start refused
+// every new model of that key until btx-modeld restarted.
+BOOST_AUTO_TEST_CASE(search_quota_counts_live_records)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    const auto rec = [&](int i, int64_t expires_at) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = 3;
+        r.model_id.data[1] = static_cast<unsigned char>(i);
+        r.canonical_name = "live" + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.pubkey = pk;
+        r.expires_at = expires_at;
+        BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        return r;
+    };
+    SearchIndex idx;
+    for (int i = 0; i < 64; ++i) BOOST_REQUIRE_MESSAGE(idx.Put(rec(i, 1000), 1, err, "203.0.113.7:29447"), err);
+    BOOST_CHECK(!idx.Put(rec(64, 1000), 1, err, "203.0.113.7:29447"));
+    BOOST_CHECK_EQUAL(err, "publisher spam");
+
+    // All 64 have expired; the next Put prunes them and the key may publish again.
+    BOOST_CHECK_MESSAGE(idx.Put(rec(65, 100'000), 2000, err, "203.0.113.7:29447"), err);
+    for (int i = 0; i < 64; ++i) BOOST_CHECK(idx.Get(rec(i, 1000).model_id) == nullptr);
+    BOOST_CHECK(idx.Get(rec(65, 100'000).model_id) != nullptr);
+
+    // 64 live records still fill the quota.
+    for (int i = 66; i < 129; ++i) BOOST_REQUIRE_MESSAGE(idx.Put(rec(i, 100'000), 2000, err, "203.0.113.7:29447"), err);
+    BOOST_CHECK(!idx.Put(rec(129, 100'000), 2000, err, "203.0.113.7:29447"));
+    BOOST_CHECK_EQUAL(err, "publisher spam");
+}
+
 BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
 {
     using namespace modelnet;
