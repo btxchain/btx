@@ -17,6 +17,14 @@ from test_framework.wallet_util import generate_keypair, WalletUnlock
 
 EMPTY_PASSPHRASE_MSG = "Empty string given as passphrase, wallet will not be encrypted."
 LEGACY_WALLET_MSG = "Wallet created successfully. The legacy wallet type is being deprecated and support for creating and opening legacy wallets will be removed in the future."
+# BTX descriptor wallets hold one P2MR pair built like GeneratePQWalletDescriptor (src/wallet/walletutil.cpp):
+# mr(pqhd(seed/1h/0h/<change>/*),pk_slh(...)) on test chains, not BIP84 wpkh() descriptors.
+P2MR_SEED = "01" * 32
+
+
+def p2mr_desc(*, internal=False):
+    pqhd = f"pqhd({P2MR_SEED}/1h/0h/{1 if internal else 0}/*)"
+    return descsum_create(f"mr({pqhd},pk_slh({pqhd}))")
 
 
 class CreateWalletTest(BitcoinTestFramework):
@@ -85,12 +93,12 @@ class CreateWalletTest(BitcoinTestFramework):
         # Set the seed
         if self.options.descriptors:
             w3.importdescriptors([{
-                'desc': descsum_create('wpkh(tprv8ZgxMBicQKsPcwuZGKp8TeWppSuLMiLe2d9PupB14QpPeQsqoj3LneJLhGHH13xESfvASyd4EFLJvLrG8b7DrLxEuV7hpF9uUc6XruKA1Wq/0h/*)'),
+                'desc': p2mr_desc(),
                 'timestamp': 'now',
                 'active': True
             },
             {
-                'desc': descsum_create('wpkh(tprv8ZgxMBicQKsPcwuZGKp8TeWppSuLMiLe2d9PupB14QpPeQsqoj3LneJLhGHH13xESfvASyd4EFLJvLrG8b7DrLxEuV7hpF9uUc6XruKA1Wq/1h/*)'),
+                'desc': p2mr_desc(internal=True),
                 'timestamp': 'now',
                 'active': True,
                 'internal': True
@@ -115,12 +123,12 @@ class CreateWalletTest(BitcoinTestFramework):
             # Now set a seed and it should work. Wallet should also be encrypted
             if self.options.descriptors:
                 w4.importdescriptors([{
-                    'desc': descsum_create('wpkh(tprv8ZgxMBicQKsPcwuZGKp8TeWppSuLMiLe2d9PupB14QpPeQsqoj3LneJLhGHH13xESfvASyd4EFLJvLrG8b7DrLxEuV7hpF9uUc6XruKA1Wq/0h/*)'),
+                    'desc': p2mr_desc(),
                     'timestamp': 'now',
                     'active': True
                 },
                 {
-                    'desc': descsum_create('wpkh(tprv8ZgxMBicQKsPcwuZGKp8TeWppSuLMiLe2d9PupB14QpPeQsqoj3LneJLhGHH13xESfvASyd4EFLJvLrG8b7DrLxEuV7hpF9uUc6XruKA1Wq/1h/*)'),
+                    'desc': p2mr_desc(internal=True),
                     'timestamp': 'now',
                     'active': True,
                     'internal': True
@@ -155,11 +163,11 @@ class CreateWalletTest(BitcoinTestFramework):
         w6 = node.get_wallet_rpc('w6')
         assert_raises_rpc_error(-13, "Error: Please enter the wallet passphrase with walletpassphrase first.", w6.signmessage, "needanargument", "test")
         with WalletUnlock(w6, "thisisapassphrase"):
-            w6.signmessage(w6.getnewaddress('', 'legacy'), "test")
+            w6.signmessage(w6.getnewaddress('', 'p2mr'), "test")
             w6.keypoolrefill(1)
-            # There should only be 1 key for legacy, 3 for descriptors
+            # One key per active descriptor: BTX has a single P2MR pair (Bitcoin: one per output type)
             walletinfo = w6.getwalletinfo()
-            keys = 4 if self.options.descriptors else 1
+            keys = 1
             assert_equal(walletinfo['keypoolsize'], keys)
             assert_equal(walletinfo['keypoolsize_hd_internal'], keys)
         # Allow empty passphrase, but there should be a warning
