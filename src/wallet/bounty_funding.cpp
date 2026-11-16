@@ -534,6 +534,11 @@ UniValue BountyPlanToJson(const BountyEscrowPlan& plan)
     o.pushKV("award_height", static_cast<int64_t>(plan.award_height));
     o.pushKV("refund_height", static_cast<int64_t>(plan.refund_height));
     o.pushKV("threshold", plan.threshold);
+    // The council keys are part of the escrow terms: without them the plan
+    // that prepare and sign return cannot rebuild the escrow for a refund.
+    UniValue council(UniValue::VARR);
+    for (const auto& k : plan.council_keys) council.push_back(k);
+    o.pushKV("council_keys", council);
     o.pushKV("refund_key", plan.refund_key);
     o.pushKV("descriptor", plan.descriptor);
     if (!plan.output_script.empty()) o.pushKV("output_script", HexStr(plan.output_script));

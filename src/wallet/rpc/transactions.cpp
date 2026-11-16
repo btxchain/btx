@@ -594,6 +594,17 @@ static std::vector<RPCResult> TransactionDescriptionString()
            {RPCResult::Type::NUM_TIME, "time", "The transaction time expressed in " + UNIX_EPOCH_TIME + "."},
            {RPCResult::Type::NUM_TIME, "timereceived", "The time received expressed in " + UNIX_EPOCH_TIME + "."},
            {RPCResult::Type::STR, "comment", /*optional=*/true, "If a comment is associated with the transaction, only present if not empty."},
+           {RPCResult::Type::STR, "bounty_descriptor", /*optional=*/true, "Bounty funding submitted with its plan: the escrow descriptor."},
+           {RPCResult::Type::STR, "bounty_output_vout", /*optional=*/true, "Bounty funding: the escrow output index."},
+           {RPCResult::Type::STR, "bounty_refund_pubkey", /*optional=*/true, "Bounty funding: the refund key."},
+           {RPCResult::Type::STR, "bounty_refund_height", /*optional=*/true, "Bounty funding: the refund height."},
+           {RPCResult::Type::STR, "bounty_award_height", /*optional=*/true, "Bounty funding, council escrow: the award height."},
+           {RPCResult::Type::STR, "bounty_threshold", /*optional=*/true, "Bounty funding, council escrow: the council threshold."},
+           {RPCResult::Type::STR, "bounty_council_keys", /*optional=*/true, "Bounty funding, council escrow: the council keys, comma-separated."},
+           {RPCResult::Type::STR, "bounty_hashlock", /*optional=*/true, "Bounty funding, staged escrow: the sha256 hashlock."},
+           {RPCResult::Type::STR, "bounty_claimant", /*optional=*/true, "Bounty funding, staged escrow: the claimant key."},
+           {RPCResult::Type::STR, "bounty_id", /*optional=*/true, "Bounty funding: the bounty id from the plan."},
+           {RPCResult::Type::STR, "bounty_lot_id", /*optional=*/true, "Bounty funding: the lot id from the plan."},
            {RPCResult::Type::STR, "bip125-replaceable", "(\"yes|no|unknown\") Whether this transaction signals BIP125 replaceability or has an unconfirmed ancestor signaling BIP125 replaceability.\n"
                "May be unknown for unconfirmed transactions not in the mempool because their unconfirmed ancestors are unknown."},
            {RPCResult::Type::ARR, "parent_descs", /*optional=*/true, "Only if 'category' is 'received'. List of parent descriptors for the output script of this coin.", {
