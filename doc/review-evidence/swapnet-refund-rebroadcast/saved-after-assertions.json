@@ -1,0 +1,7 @@
+{
+  "confirmed_once": true,
+  "expected_98000_sat": true,
+  "recipient_script_preserved": true,
+  "original_funding_consumed": true,
+  "method": "Explicit assertions against saved after.json; no duplicate native run"
+}

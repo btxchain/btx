@@ -1,0 +1,14 @@
+test_confirmed_active_block_is_present (__main__.TransactionPresenceTests.test_confirmed_active_block_is_present) ... ok
+test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) ... ok
+test_mempool_entry_is_present (__main__.TransactionPresenceTests.test_mempool_entry_is_present) ... ok
+test_offline_refund_shortcut_keeps_output_safety_checks (__main__.TransactionPresenceTests.test_offline_refund_shortcut_keeps_output_safety_checks) ... ok
+test_orphan_block_is_not_active (__main__.TransactionPresenceTests.test_orphan_block_is_not_active) ... ok
+test_read_failure_is_not_treated_as_missing (__main__.TransactionPresenceTests.test_read_failure_is_not_treated_as_missing) ... ok
+test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) ... ok
+test_unknown_transaction_is_absent (__main__.TransactionPresenceTests.test_unknown_transaction_is_absent) ... ok
+test_wallet_history_without_block_is_not_active (__main__.TransactionPresenceTests.test_wallet_history_without_block_is_not_active) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.004s
+
+OK
