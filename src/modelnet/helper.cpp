@@ -10087,6 +10087,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "getmodelpolicy" || method == "setmodelpolicy") {
+        std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
         PreservationPolicy live = cat.Policy();
         if (method == "setmodelpolicy") {
             UniValue patch = Arg(0);
@@ -10109,14 +10110,18 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err_code = "INVALID_PARAMETER";
                 return false;
             }
-            cat.SetPolicy(live);
-            g_runtime.follow_peers = live.follow_configured_peers;
-            g_runtime.preserve_rare = live.preserve_rare;
-            const UniValue dumped = PolicyToJson(cat.Policy());
+            const uint64_t hard = cat.QuotaBytes();
+            if (live.storage_quota_bytes == 0 || live.storage_quota_bytes > hard) {
+                live.storage_quota_bytes = hard;
+            }
+            const UniValue dumped = PolicyToJson(live);
             if (!WriteJsonFile(HelperDir(cat) / "policy.json", dumped, err)) {
                 err_code = "IO";
                 return false;
             }
+            cat.SetPolicy(live);
+            g_runtime.follow_peers = live.follow_configured_peers;
+            g_runtime.preserve_rare = live.preserve_rare;
         }
         result = PolicyToJson(cat.Policy());
         result.pushKV("auto_pay", false);
