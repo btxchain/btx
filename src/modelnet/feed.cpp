@@ -435,6 +435,10 @@ bool FeedStore::Save(std::string& err) const
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", FEED_SCHEMA_VERSION);
     o.pushKV("sequence", static_cast<int64_t>(m_seq));
+    // Only membership matters: a publisher remains known after its feed events expire.
+    UniValue publishers(UniValue::VARR);
+    for (const auto& [publisher, count] : m_publisher_models) publishers.push_back(publisher);
+    o.pushKV("seen_publishers", publishers);
     UniValue arr(UniValue::VARR);
     for (const auto& kv : m_by_id) {
         UniValue e(UniValue::VOBJ);
@@ -584,6 +588,7 @@ bool FeedStore::Load(int64_t now_ms, std::string& err)
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_path.empty() || !fs::exists(m_path)) return true;
     m_by_id.clear();
+    m_publisher_models.clear();
     m_seq = 0;
     try {
         std::ifstream in(m_path);
@@ -608,6 +613,16 @@ bool FeedStore::Load(int64_t now_ms, std::string& err)
                 }
             }
         }
+        const bool has_publisher_history = o.exists("seen_publishers") && o["seen_publishers"].isArray();
+        if (has_publisher_history) {
+            for (const auto& publisher : o["seen_publishers"].getValues()) {
+                Digest48 id;
+                std::string perr;
+                if (publisher.isStr() && Digest48::FromHex(publisher.get_str(), id, perr) && !id.IsNull()) {
+                    m_publisher_models[id.Hex()] = 1;
+                }
+            }
+        }
         for (const auto& ej : o["events"].getValues()) {
             FeedEvent ev;
             std::string eerr;
@@ -622,6 +637,15 @@ bool FeedStore::Load(int64_t now_ms, std::string& err)
             } catch (...) {
                 LogSkippedFeed("event");
                 continue;
+            }
+            // Older feed files have no publisher list. Recover what they still record
+            // before expiry removes events; history already absent cannot be recovered.
+            const bool records_publisher = ev.event_type == FeedEventType::MODEL_PUBLISHED ||
+                                           ev.event_type == FeedEventType::MODEL_METADATA_UPDATED ||
+                                           ev.event_type == FeedEventType::RELEASE_CAMPAIGN_CREATED ||
+                                           ev.event_type == FeedEventType::PUBLISHER_FIRST_OBSERVED;
+            if (!has_publisher_history && records_publisher && !ev.rec.publisher_identity.IsNull()) {
+                m_publisher_models[ev.rec.publisher_identity.Hex()] = 1;
             }
             if (ev.sequence > m_seq) m_seq = ev.sequence;
             m_by_id[ev.event_id] = std::move(ev);
