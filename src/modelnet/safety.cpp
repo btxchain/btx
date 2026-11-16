@@ -46,9 +46,26 @@ bool ReadJson(const fs::path& path, UniValue& out)
 //! or anything other than a regular file at the path, reads as an empty list.
 bool ReadJsonKeepsUnreadable(const fs::path& path, UniValue& out)
 {
-    if (ReadJson(path, out)) return false;
     std::error_code ec;
-    return fs::is_regular_file(path, ec) && !ec;
+    const bool regular{fs::is_regular_file(path, ec)};
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        // The path cannot even be inspected; something may be there, as for
+        // bounty-store.json (a status error other than "missing" is present).
+        out = UniValue(UniValue::VOBJ);
+        return true;
+    }
+    if (!regular) {
+        out = UniValue(UniValue::VOBJ);
+        return false;
+    }
+    // ReadJson reads a file it cannot open as an empty list. A regular file
+    // that is there but cannot be opened (permissions, EMFILE, EIO) may still
+    // hold entries, as in bounty-store.json.
+    if (!std::ifstream{path}) {
+        out = UniValue(UniValue::VOBJ);
+        return true;
+    }
+    return !ReadJson(path, out);
 }
 
 bool WriteJsonAtomic(const fs::path& path, const UniValue& obj, std::string& err)

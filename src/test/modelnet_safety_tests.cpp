@@ -21,6 +21,9 @@
 
 #include <ctime>
 #include <fstream>
+#ifndef WIN32
+#include <unistd.h>
+#endif
 #include <iterator>
 #include <string>
 #include <vector>
@@ -293,6 +296,40 @@ BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)
     std::string serr;
     BOOST_CHECK(!cat.Seed(imported.model_id, true, serr));
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(unopenable_publisher_file_is_kept)
+{
+    // A safety_publishers.json that is there but cannot be opened (here: no
+    // read permission) is kept like an unparsable one, not read as missing.
+    if (::geteuid() == 0) return; // root opens it anyway
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-unopenable-publishers";
+    modelnet::GlobalSafety().Bind(tmp);
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string pub = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub, "vendor", err));
+    const fs::path pubs = tmp / "safety_publishers.json";
+    const std::string saved{ReadAll(pubs)};
+    BOOST_REQUIRE(saved.find(pub) != std::string::npos);
+
+    fs::permissions(pubs, fs::perms::none);
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string other = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_CHECK(!modelnet::GlobalSafety().PinPublisher(other, "other", err));
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    fs::permissions(pubs, fs::perms::owner_read | fs::perms::owner_write);
+    BOOST_CHECK(ReadAll(pubs) == saved);
+
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(pub));
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(full_record_cache_does_not_stop_pinned_takedown)
 {
