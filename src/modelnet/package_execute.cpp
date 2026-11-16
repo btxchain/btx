@@ -104,9 +104,21 @@ bool ReadAll(const std::string& path, std::string& bytes, std::string& err)
         err = "source open";
         return false;
     }
-    bytes.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (bytes.size() > ACQ_EXECUTE_MAX_FILE_BYTES) {
-        err = "file too large";
+    // Read at most one chunk past the limit: a model file of many gigabytes
+    // at the destination, or a source that never ends, was read whole first.
+    char buf[1 << 16];
+    while (in) {
+        in.read(buf, sizeof(buf));
+        bytes.append(buf, static_cast<size_t>(in.gcount()));
+        if (bytes.size() > ACQ_EXECUTE_MAX_FILE_BYTES) {
+            bytes.clear();
+            err = "file too large";
+            return false;
+        }
+    }
+    if (in.bad()) {
+        bytes.clear();
+        err = "source read";
         return false;
     }
     return true;
@@ -284,6 +296,7 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
             release_on_fail();
             return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
         }
+        bool stale{false};
         if (fs::exists(dest) && !std::filesystem::is_directory(dest)) {
             std::string have, herr;
             const std::string expect = StoredDigestFor(req, f.relative_path);
@@ -291,12 +304,8 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
                 paths.push_back(dest_s);
                 continue;
             }
-            std::error_code ec;
-            std::filesystem::remove(dest, ec);
-            if (ec || std::filesystem::is_symlink(dest) || fs::exists(dest)) {
-                release_on_fail();
-                return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "stale cache not replaced");
-            }
+            // Replace it only once verified bytes are at hand (below).
+            stale = true;
         }
         if (f.source_path.empty()) {
             release_on_fail();
@@ -316,6 +325,20 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
         if (got != expect) {
             release_on_fail();
             return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "source hash mismatch");
+        }
+        if (stale) {
+            // Checked again: the source was read since the check above, and
+            // remove() follows a symlinked directory on the way.
+            if (HasSymlinkBelow(dest_root, f.relative_path)) {
+                release_on_fail();
+                return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
+            }
+            std::error_code ec;
+            std::filesystem::remove(dest, ec);
+            if (ec || std::filesystem::is_symlink(dest) || fs::exists(dest)) {
+                release_on_fail();
+                return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "stale cache not replaced");
+            }
         }
         if (!ExclusiveNofollowWrite(dest_root, dest_s, bytes, err_code, err)) {
             release_on_fail();
