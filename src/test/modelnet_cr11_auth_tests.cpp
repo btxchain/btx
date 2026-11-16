@@ -17,7 +17,7 @@ BOOST_AUTO_TEST_CASE(cr11_auth_01_wrong_sender_key)
     req.headers["dpop"] = e->LabDpop("POST", e->Cfg().api_base + "/capital/allocations", tok);
     // swap jkt by using other key
     UniValue p;
-    p.read(req.headers["dpop"]);
+    BOOST_REQUIRE(p.read(req.headers["dpop"]));
     p.pushKV("jkt", e->LabJktOther());
     req.headers["dpop"] = p.write();
     auto r = e->Handle(req);
