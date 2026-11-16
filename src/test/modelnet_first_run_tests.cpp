@@ -1591,4 +1591,88 @@ BOOST_AUTO_TEST_CASE(search_index_changes_are_saved)
     BOOST_CHECK_MESSAGE(has_alias(saved_record(dir_a, model_id), "r16-saved-alias"), "importmodelindex not saved");
 }
 
+
+BOOST_AUTO_TEST_CASE(rejected_policy_save_keeps_live_settings_and_allows_retry)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "rejected-policy-save";
+    ModelCatalog cat{dir, 8 << 20};
+    const auto request = [&](const std::string& method, const UniValue& patch, UniValue& out, std::string& code, std::string& err) {
+        UniValue req(UniValue::VOBJ), args(UniValue::VARR);
+        req.pushKV("method", method);
+        if (!patch.isNull()) args.push_back(patch);
+        req.pushKV("params", args);
+        return DispatchHelperRpc(cat, req, out, code, err);
+    };
+    UniValue out, initial(UniValue::VOBJ);
+    std::string code, err;
+    initial.pushKV("seed", "off");
+    initial.pushKV("preserve_rare", false);
+    initial.pushKV("follow_configured_peers", false);
+    initial.pushKV("upload_bps", 1024);
+    BOOST_REQUIRE(request("setmodelpolicy", initial, out, code, err));
+    const UniValue before = out;
+    const auto bytes = [&]() {
+        std::ifstream f(dir / "policy.json");
+        return std::string(std::istreambuf_iterator<char>(f), {});
+    };
+    const std::string saved = bytes();
+    fs::create_directory(dir / "policy.json.tmp");
+    UniValue patch(UniValue::VOBJ);
+    patch.pushKV("preserve_rare", true);
+    BOOST_CHECK(!request("setmodelpolicy", patch, out, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(!err.empty());
+    BOOST_CHECK_EQUAL(bytes(), saved);
+    BOOST_REQUIRE(request("getmodelpolicy", UniValue(), out, code, err));
+    BOOST_CHECK_EQUAL(out.write(), before.write());
+    BOOST_CHECK(!cat.Policy().preserve_rare);
+    fs::remove(dir / "policy.json.tmp");
+    BOOST_REQUIRE(request("setmodelpolicy", patch, out, code, err));
+    BOOST_CHECK(out["preserve_rare"].get_bool());
+    BOOST_CHECK_EQUAL(out["seed"].get_str(), "off");
+    BOOST_CHECK(!out["follow_configured_peers"].get_bool());
+    BOOST_CHECK_EQUAL(out["upload_bps"].getInt<uint64_t>(), 1024U);
+    UniValue persisted;
+    BOOST_REQUIRE(persisted.read(bytes()));
+    BOOST_CHECK(persisted["preserve_rare"].get_bool());
+    BOOST_CHECK_EQUAL(persisted["upload_bps"].getInt<uint64_t>(), 1024U);
+    const std::string healthy = out.write(), healthy_file = bytes();
+    for (const auto& field : {"auto_pay", "automatic_spend_atoms"}) {
+        UniValue bad(UniValue::VOBJ);
+        if (std::string(field) == "auto_pay") bad.pushKV(field, true);
+        else bad.pushKV(field, 1);
+        BOOST_CHECK(!request("setmodelpolicy", bad, out, code, err));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+        BOOST_REQUIRE(request("getmodelpolicy", UniValue(), out, code, err));
+        BOOST_CHECK_EQUAL(out.write(), healthy);
+        BOOST_CHECK_EQUAL(bytes(), healthy_file);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(saved_policy_quota_matches_catalog_normalization)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "normalized-policy-save";
+    constexpr uint64_t hard = 8 << 20;
+    ModelCatalog cat{dir, hard};
+    for (const uint64_t requested : {uint64_t{0}, hard + 1, hard / 2}) {
+        UniValue req(UniValue::VOBJ), args(UniValue::VARR), patch(UniValue::VOBJ), out;
+        patch.pushKV("storage_quota_bytes", requested);
+        args.push_back(patch);
+        req.pushKV("method", "setmodelpolicy");
+        req.pushKV("params", args);
+        std::string code, err;
+        BOOST_REQUIRE(DispatchHelperRpc(cat, req, out, code, err));
+        const auto normalized = requested == 0 || requested > hard ? hard : requested;
+        BOOST_CHECK_EQUAL(out["storage_quota_bytes"].getInt<uint64_t>(), normalized);
+        BOOST_CHECK_EQUAL(cat.Policy().storage_quota_bytes, normalized);
+        std::ifstream in(dir / "policy.json");
+        UniValue saved;
+        BOOST_REQUIRE(saved.read(std::string(std::istreambuf_iterator<char>(in), {})));
+        BOOST_CHECK_EQUAL(saved["storage_quota_bytes"].getInt<uint64_t>(), normalized);
+        BOOST_CHECK_EQUAL(saved["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
