@@ -1511,6 +1511,70 @@ BOOST_AUTO_TEST_CASE(remaining_identity_policy_circle_release_ops)
     }
 }
 
+// importmodelindex, like the alias and tombstone RPCs, saves search-index.json.
+// When it was the first RPC to touch the index after a helper start, it saved
+// the index in memory, which had not read this directory's file, over it.
+BOOST_AUTO_TEST_CASE(import_into_a_fresh_helper_keeps_the_saved_policy)
+{
+    const fs::path root_src = m_path_root / "import-policy-src";
+    fs::create_directories(root_src / "m");
+    {
+        const auto st = MinimalSafeTensors();
+        std::ofstream out(root_src / "m" / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    modelnet::ModelCatalog cat_src{root_src, 8 << 20};
+    UniValue hp(UniValue::VARR);
+    hp.push_back(fs::PathToString(root_src / "m"));
+    Dispatch(cat_src, Rpc("hostmodel", hp));
+    const UniValue exported = Dispatch(cat_src, Rpc("exportmodelindex"));
+    BOOST_REQUIRE_GE(exported["records"].size(), 1U);
+
+    const fs::path root_dst = m_path_root / "import-policy-dst";
+    modelnet::ModelCatalog cat_dst{root_dst, 8 << 20};
+    const fs::path index = cat_dst.Store().Root().parent_path() / "search-index.json";
+    fs::create_directories(index.parent_path());
+    const std::string muted(96, 'd');
+    std::string err;
+    {
+        modelnet::SearchIndex saved;
+        saved.MutePublisher(muted, true);
+        BOOST_REQUIRE_MESSAGE(saved.Save(index, err), err);
+    }
+
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("records", exported["records"]);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(body);
+    const UniValue imported = Dispatch(cat_dst, Rpc("importmodelindex", ip));
+    BOOST_REQUIRE_GE(imported["imported"].getInt<int>(), 1);
+
+    modelnet::SearchIndex reread;
+    BOOST_REQUIRE(reread.Load(index, 1, err));
+    BOOST_CHECK_MESSAGE(reread.Muted(muted), "importmodelindex replaced the saved policy");
+    BOOST_CHECK_GE(reread.Size(), 1U);
+
+    // With a file that cannot be read the import is refused, not answered as
+    // done while it lives in memory only.
+    const fs::path root_cut = m_path_root / "import-policy-cut";
+    modelnet::ModelCatalog cat_cut{root_cut, 8 << 20};
+    const fs::path cut_index = cat_cut.Store().Root().parent_path() / "search-index.json";
+    fs::create_directories(cut_index.parent_path());
+    const std::string cut{"{\"records\": ["};
+    {
+        std::ofstream out(cut_index, std::ios::binary | std::ios::trunc);
+        out << cut;
+    }
+    UniValue result;
+    std::string code;
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat_cut, Rpc("importmodelindex", ip), result, code, err));
+    BOOST_CHECK_EQUAL(code, "INTERNAL");
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    std::ifstream in(cut_index, std::ios::binary);
+    const std::string left((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    BOOST_CHECK(left == cut);
+}
+
 // setmodelalias, removemodelalias, removemodelsearchrecord and importmodelindex
 // changed the search index in memory only. search-index.json is what the helper
 // loads after a restart, so each change must be in that file.

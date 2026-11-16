@@ -16,6 +16,9 @@
 #include <boost/test/unit_test.hpp>
 #include <chrono>
 #include <fstream>
+#ifndef WIN32
+#include <unistd.h>
+#endif
 #include <string>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_search_tests, BasicTestingSetup)
@@ -281,6 +284,93 @@ BOOST_AUTO_TEST_CASE(search_index_01_to_10)
     ModelSearchRecord bad;
     BOOST_CHECK(!SearchRecordFromJson(junk, bad, err));
     BOOST_CHECK(!SearchTouchesMonetaryConsensus());
+}
+
+// search-index.json also holds the operator's search policy (hidden models,
+// muted publishers), and signed records from peers trigger saves. A file that
+// is there but cannot be read must be kept, not replaced by the next save.
+BOOST_AUTO_TEST_CASE(search_index_unreadable_file_is_kept)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "search-index-unreadable";
+    fs::create_directories(dir);
+    const fs::path path = dir / "search-index.json";
+    const auto read_all = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto write_all = [](const fs::path& p, const std::string& data) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        out << data;
+    };
+    const std::string muted(96, 'a');
+    std::string err;
+    SearchIndex idx;
+    idx.MutePublisher(muted, true);
+    BOOST_REQUIRE_MESSAGE(idx.Save(path, err), err);
+    const std::string saved{read_all(path)};
+    BOOST_REQUIRE(saved.find(muted) != std::string::npos);
+
+    const std::string cut{saved.substr(0, saved.size() / 2)};
+    write_all(path, cut);
+    SearchIndex reloaded;
+    BOOST_CHECK(reloaded.Load(path, 1, err));
+    BOOST_CHECK(reloaded.Unreadable());
+    BOOST_CHECK(!reloaded.Muted(muted));
+    BOOST_CHECK(!reloaded.Save(path, err));
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    BOOST_CHECK(read_all(path) == cut);
+
+    write_all(path, saved);
+    SearchIndex repaired;
+    BOOST_CHECK(repaired.Load(path, 1, err));
+    BOOST_CHECK(!repaired.Unreadable());
+    BOOST_CHECK(repaired.Muted(muted));
+    BOOST_CHECK(repaired.Save(path, err));
+
+#ifndef WIN32
+    // The same for a file that is there but cannot be opened.
+    if (::geteuid() != 0) {
+        fs::permissions(path, fs::perms::none);
+        SearchIndex locked;
+        BOOST_CHECK(locked.Load(path, 1, err));
+        BOOST_CHECK(locked.Unreadable());
+        BOOST_CHECK(!locked.Save(path, err));
+        fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write);
+        SearchIndex reopened;
+        BOOST_CHECK(reopened.Load(path, 1, err));
+        BOOST_CHECK(reopened.Muted(muted));
+    }
+#endif
+    // A missing file still loads as an empty index that can be saved.
+    SearchIndex fresh;
+    BOOST_CHECK(fresh.Load(dir / "absent.json", 1, err));
+    BOOST_CHECK(!fresh.Unreadable());
+    BOOST_CHECK(fresh.Save(dir / "absent.json", err));
+
+    // A file without records still holds the policy.
+    const fs::path policy_only = dir / "policy-only.json";
+    {
+        std::ofstream out(policy_only, std::ios::binary | std::ios::trunc);
+        out << "{\"muted_publishers\":[\"" << muted << "\"]}";
+    }
+    SearchIndex policy;
+    BOOST_CHECK(policy.Load(policy_only, 1, err));
+    BOOST_CHECK(!policy.Unreadable());
+    BOOST_CHECK(policy.Muted(muted));
+
+    // A policy list of another type cannot be read, so the file is kept.
+    const fs::path odd = dir / "odd-policy.json";
+    const std::string odd_text{"{\"records\":[],\"hidden\":\"not a list\"}"};
+    {
+        std::ofstream out(odd, std::ios::binary | std::ios::trunc);
+        out << odd_text;
+    }
+    SearchIndex odd_index;
+    BOOST_CHECK(odd_index.Load(odd, 1, err));
+    BOOST_CHECK(odd_index.Unreadable());
+    BOOST_CHECK(!odd_index.Save(odd, err));
+    BOOST_CHECK(read_all(odd) == odd_text);
 }
 
 BOOST_AUTO_TEST_CASE(search_net_01_to_13)

@@ -2610,6 +2610,17 @@ static bool CampaignFileWritable(std::string& err)
     return false;
 }
 
+// A change to the search index while search-index.json cannot be read could
+// not be saved and would be gone after the next start; refuse it instead.
+static bool SearchIndexWritable(std::string& err_code, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(g_search_mu);
+    if (!g_search_idx.Unreadable()) return true;
+    err_code = "INTERNAL";
+    err = "search-index.json cannot be read; repair it and restart btx-modeld";
+    return false;
+}
+
 // g_search_mu must be held: Save() walks the index that Put() rewrites on
 // the other unix worker. The campaign lock is taken second, as elsewhere.
 static void PersistEconomyLocked(ModelCatalog& cat)
@@ -7644,7 +7655,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "removemodelalias") {
-        EnsureSearchBound();
+        EnsureEconomy(cat); // read search-index.json before it is saved
+        if (!SearchIndexWritable(err_code, err)) return false;
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
         if (id.IsNull() || !Arg(1).isStr()) {
             err_code = "INVALID_PARAMETER";
@@ -7774,7 +7786,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "setmodelalias") {
-        EnsureSearchBound();
+        EnsureEconomy(cat); // read search-index.json before it is saved
+        if (!SearchIndexWritable(err_code, err)) return false;
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
         if (id.IsNull() || !Arg(1).isStr()) {
             err_code = "INVALID_PARAMETER";
@@ -8145,7 +8158,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "removemodelsearchrecord") {
-        EnsureSearchBound();
+        EnsureEconomy(cat); // read search-index.json before it is saved
+        if (!SearchIndexWritable(err_code, err)) return false;
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
         if (id.IsNull()) {
             err_code = "INVALID_PARAMETER";
@@ -8214,7 +8228,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "importmodelindex") {
-        EnsureSearchBound();
+        EnsureEconomy(cat); // read search-index.json before it is saved
+        if (!SearchIndexWritable(err_code, err)) return false;
         if (!Arg(0).isObject() || !Arg(0).exists("records")) {
             err_code = "INVALID_PARAMETER";
             err = "records";
@@ -8656,7 +8671,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         return true;
     }
     if (method == "hidesearchmodel" || method == "unhidesearchmodel") {
-        EnsureSearchBound();
+        // Load this directory's search-index.json first; saving an index that
+        // was never loaded replaced the file and every earlier policy entry.
+        EnsureEconomy(cat);
+        if (!SearchIndexWritable(err_code, err)) return false;
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
         if (id.IsNull()) {
             err_code = "INVALID_PARAMETER";
@@ -8664,14 +8682,22 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         std::lock_guard<std::mutex> lock(g_search_mu);
+        const bool was_hidden{g_search_idx.Hidden(id)};
         g_search_idx.Hide(id, method == "hidesearchmodel");
         std::string save_err;
-        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
+        if (!g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err)) {
+            // Keep memory as the file has it, as the campaign RPCs do.
+            g_search_idx.Hide(id, was_hidden);
+            err_code = "INTERNAL";
+            err = save_err;
+            return false;
+        }
         result.pushKV("hidden", method == "hidesearchmodel");
         return true;
     }
     if (method == "mutesearchpublisher" || method == "unmutesearchpublisher") {
-        EnsureSearchBound();
+        EnsureEconomy(cat);
+        if (!SearchIndexWritable(err_code, err)) return false;
         const std::string publisher = ToLower(Arg(0).get_str());
         if (publisher.size() != 96 || !IsHex(publisher)) {
             err_code = "INVALID_PARAMETER";
@@ -8679,9 +8705,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         std::lock_guard<std::mutex> lock(g_search_mu);
+        const bool was_muted{g_search_idx.Muted(publisher)};
         g_search_idx.MutePublisher(publisher, method == "mutesearchpublisher");
         std::string save_err;
-        (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
+        if (!g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err)) {
+            g_search_idx.MutePublisher(publisher, was_muted);
+            err_code = "INTERNAL";
+            err = save_err;
+            return false;
+        }
         result.pushKV("muted", method == "mutesearchpublisher");
         return true;
     }
