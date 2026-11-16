@@ -791,6 +791,87 @@ BOOST_AUTO_TEST_CASE(bounty_chain_facts_survive_a_store_restart)
     BOOST_CHECK_EQUAL(saved["chain"]["facts"].size(), 0U);
 }
 
+// bounty-store.json holds the drafts, bounties, mandates with their spent
+// budgets and the chain facts. When it was there but could not be parsed (a
+// write cut short, an edit by hand), the store started empty and the next
+// change saved that over the file.
+BOOST_AUTO_TEST_CASE(unreadable_bounty_store_is_not_replaced)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "bounty-store-unreadable";
+    fs::create_directories(dir);
+    const fs::path file = dir / "bounty-store.json";
+    std::string code, err;
+    UniValue result;
+    const auto one = [](const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        return params;
+    };
+    const auto draft = [&](BountyStore& store) {
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch("createbountydraft", one(DefaultTerms(ZeroNet())), result, code, err);
+    };
+    const auto facts = [&](BountyStore& store, const std::string& bounty_id) {
+        UniValue idp(UniValue::VARR);
+        idp.push_back(bounty_id);
+        BOOST_REQUIRE(store.Dispatch("getbountyfunding", idp, result, code, err));
+        return result["facts"].size();
+    };
+    const auto read = [&] {
+        std::ifstream in{file, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    };
+    std::string bounty_id;
+    {
+        BountyStore store;
+        store.Bind(dir, ZeroNet());
+        BOOST_REQUIRE_MESSAGE(draft(store), err);
+        UniValue pub(UniValue::VOBJ);
+        pub.pushKV("draft_id", result["draft_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("publishbounty", one(pub), result, code, err), err);
+        bounty_id = result["bounty_id"].get_str();
+        UniValue fact(UniValue::VOBJ);
+        fact.pushKV("outpoint", std::string(64, 'a') + ":0");
+        fact.pushKV("bounty_id", bounty_id);
+        fact.pushKV("lot_id", "lot1");
+        fact.pushKV("amount_atoms", "100000");
+        fact.pushKV("confirmations", 6);
+        fact.pushKV("height", 120);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("observebountychain", one(fact), result, code, err), err);
+    }
+    const std::string good{read()};
+    BOOST_REQUIRE(good.find(bounty_id) != std::string::npos);
+
+    BountyStore restarted;
+    for (const std::string broken : {"{", ""}) {
+        {
+            std::ofstream out{file, std::ios::trunc};
+            out << broken;
+        }
+        restarted.Bind(dir, ZeroNet());
+        BOOST_CHECK(!draft(restarted));
+        BOOST_CHECK_EQUAL(err, "bounty-store.json cannot be read; repair it before changing bounties");
+        BOOST_CHECK_EQUAL(read(), broken);
+    }
+
+    // Repaired while running: the next bind reads it, chain facts included,
+    // and changes save again.
+    {
+        std::ofstream out{file, std::ios::trunc};
+        out << good;
+    }
+    restarted.Bind(dir, ZeroNet());
+    BOOST_CHECK_EQUAL(facts(restarted, bounty_id), 1U);
+    BOOST_CHECK_MESSAGE(draft(restarted), err);
+    BountyStore again;
+    again.Bind(dir, ZeroNet());
+    BOOST_CHECK_EQUAL(facts(again, bounty_id), 1U);
+    BOOST_CHECK(read().find(bounty_id) != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_signed_records_survive_a_store_restart)
 {
     // The store saves drafts, bounties, submissions, jobs and awards, but kept
