@@ -58,6 +58,11 @@ private:
     std::vector<Advisory> m_warnings;
     std::unordered_set<std::string> m_deny;
     std::unordered_set<std::string> m_quarantine;
+    // Set when a persisted file is present but could not be read. The in-memory
+    // list then starts empty, but the file is kept and not saved over, so it can
+    // be repaired and the pins or advisories recovered on the next start.
+    bool m_publishers_unreadable{false};
+    bool m_advisories_unreadable{false};
 
     void RebuildLocked(int64_t now);
     bool PersistLocked(std::string& err) const;
