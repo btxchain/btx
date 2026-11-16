@@ -6,10 +6,13 @@
   },
   "evidence_files": {
     "before.json": "508fb5ce9dfdbcc654467ca0a277e372ca19d500ea21995a201b1d34644dcb93",
+    "native-btx-receipt.json": "fc9b0eb7bab728b5cd1917c86eba40c67593c2a80372b22530b5684a1e815416",
     "unit-after.log": "c97e6965eac10442311bb0fdf60f2d577fa46680777c3185bdb5d97851981d45",
     "unit-before.log": "ee25862b9673b556b85cd28234b47ee22aa6902b8b6dfa835b35b804632745af",
     "after.json": "eb1c159a9bc6936b1b850f36f82a27c96f6aab4c017bd58c398a1b177e66d8a7",
-    "README.md": "634925c4223691d4caf8c3823dbd68dcceef9a3735654189c8d3080201e73566",
+    "README.md": "5ff2226f45d8e587637d7dc91390b683730b92bdc2516eef014ddf58bce843fa",
+    "native-btx-harness.py": "b30bd1ee3debe5a97bcbdcf398077ddcd4421fd3cb38f9c320d65bafe318a1d5",
+    "native-btx-result.json": "dda02a340640adb6cf1ec8c05acf543b74bdf6ff6f2077d4d0337f4de3d6b7b5",
     "saved-after-assertions.json": "5f4ea6a30cab712ebb41875651aef9194712565dc9405ba64e54028fba8a3d3d"
   }
 }
