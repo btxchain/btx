@@ -1291,6 +1291,17 @@ bool CWallet::IsSpent(const COutPoint& outpoint) const
     return false;
 }
 
+//! Txids of the wallet transactions that spend outpoint, in any state. Unlike
+//! IsSpent, the caller filters by state (abandoned/conflicted/confirmed).
+std::vector<uint256> CWallet::GetSpendingTxids(const COutPoint& outpoint) const
+{
+    AssertLockHeld(cs_wallet);
+    std::vector<uint256> txids;
+    const auto range = mapTxSpends.equal_range(outpoint);
+    for (auto it = range.first; it != range.second; ++it) txids.push_back(it->second);
+    return txids;
+}
+
 void CWallet::AddToSpends(const COutPoint& outpoint, const uint256& wtxid, WalletBatch* batch)
 {
     mapTxSpends.insert(std::make_pair(outpoint, wtxid));

@@ -199,16 +199,16 @@ void RememberDisconnect(const CWallet& wallet, const uint256& txid, const uint25
 [[nodiscard]] std::optional<uint256> FindWalletSpender(const CWallet& wallet, const COutPoint& outpoint)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
 {
+    // The wallet's spends index lists every wallet transaction that spends
+    // outpoint; walking all of mapWallet for each spent deposit was quadratic.
     std::optional<uint256> spent_by;
-    for (const auto& [txid, wtx] : wallet.mapWallet) {
-        if (wtx.isAbandoned() || wtx.isBlockConflicted() || wtx.isMempoolConflicted()) {
+    for (const uint256& txid : wallet.GetSpendingTxids(outpoint)) {
+        const CWalletTx* wtx = wallet.GetWalletTx(txid);
+        if (!wtx || wtx->isAbandoned() || wtx->isBlockConflicted() || wtx->isMempoolConflicted()) {
             continue;
         }
-        for (const CTxIn& vin : wtx.tx->vin) {
-            if (vin.prevout != outpoint) continue;
-            spent_by = txid;
-            if (wtx.isConfirmed()) return spent_by;
-        }
+        spent_by = txid;
+        if (wtx->isConfirmed()) return spent_by;
     }
     return spent_by;
 }
