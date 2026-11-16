@@ -1638,6 +1638,88 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     BOOST_CHECK(!budget.Reserve("k5", 10, err));
 }
 
+// importbountyrecovery and observebountychain reach BountyChainIndex through
+// the helper proxy, also for a -rpcauth user limited to one wallet. Each
+// Observe() kept a copy of every fact for reorgbountychain, so one manifest of
+// N lots held N*(N-1)/2 facts, and the history never shrank before a restart.
+BOOST_AUTO_TEST_CASE(bounty_chain_undo_holds_only_what_changed)
+{
+    using namespace modelnet;
+    constexpr int LOTS{1000};
+    UniValue lots(UniValue::VARR);
+    for (int i = 0; i < LOTS; ++i) {
+        UniValue lot(UniValue::VOBJ);
+        lot.pushKV("outpoint", strprintf("%064x:%d", i, i % 4));
+        lot.pushKV("lot_id", strprintf("lot%d", i));
+        lot.pushKV("amount_atoms", "1");
+        lots.push_back(lot);
+    }
+    UniValue man(UniValue::VOBJ);
+    man.pushKV("bounty_id", "undo");
+    man.pushKV("lots", lots);
+    BountyChainIndex chain;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(chain.ImportManifest(man, err), err);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS);
+    // One step per lot, and none of them replaced a fact.
+    BOOST_CHECK_EQUAL(chain.UndoSteps(), static_cast<size_t>(LOTS));
+    BOOST_CHECK_EQUAL(chain.UndoFactsHeld(), 0U);
+
+    // Taking steps back still restores the state before each of them,
+    // both for a replaced fact and for a new one.
+    BountyChainFact first{*chain.Get(strprintf("%064x:%d", 0, 0))};
+    BountyChainFact spent{first};
+    spent.spent = true;
+    spent.confirmations = 7;
+    chain.Observe(spent);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS - 1);
+    BOOST_CHECK_EQUAL(chain.UndoFactsHeld(), 1U);
+    chain.DisconnectTip();
+    BOOST_REQUIRE(chain.Get(first.outpoint) != nullptr);
+    BOOST_CHECK(!chain.Get(first.outpoint)->spent);
+    BOOST_CHECK_EQUAL(chain.Get(first.outpoint)->confirmations, first.confirmations);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS);
+    chain.DisconnectTip();
+    BOOST_CHECK(chain.Get(strprintf("%064x:%d", LOTS - 1, (LOTS - 1) % 4)) == nullptr);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS - 1);
+    BOOST_CHECK_EQUAL(chain.UndoSteps(), static_cast<size_t>(LOTS - 1));
+
+    // Repeated observations of one outpoint stay bounded too.
+    BountyChainIndex watched;
+    BountyChainFact f;
+    f.outpoint = "watched:0";
+    f.bounty_id = "watched";
+    f.amount_atoms = 5;
+    for (size_t i = 0; i < BountyChainIndex::MAX_UNDO_STEPS + 50; ++i) {
+        f.confirmations = static_cast<int>(i);
+        watched.Observe(f);
+    }
+    BOOST_CHECK_EQUAL(watched.UndoSteps(), BountyChainIndex::MAX_UNDO_STEPS);
+    BOOST_CHECK_EQUAL(watched.UndoFactsHeld(), BountyChainIndex::MAX_UNDO_STEPS);
+    watched.DisconnectTip();
+    BOOST_CHECK_EQUAL(watched.Get("watched:0")->confirmations,
+                      static_cast<int>(BountyChainIndex::MAX_UNDO_STEPS + 48));
+
+    // Large fields stay bounded in bytes, not only in steps.
+    BountyChainIndex wide;
+    BountyChainFact w;
+    w.outpoint = "wide:0";
+    w.bounty_id = "wide";
+    w.lot_id = std::string(64 * 1024, 'x');
+    for (int i = 0; i < 200; ++i) {
+        w.confirmations = i;
+        wide.Observe(w);
+    }
+    BOOST_CHECK(wide.UndoBytes() <= BountyChainIndex::MAX_UNDO_BYTES);
+    BOOST_CHECK(wide.UndoSteps() < 200U);
+    wide.DisconnectTip();
+    BOOST_CHECK_EQUAL(wide.Get("wide:0")->confirmations, 198);
+    wide.Clear();
+    BOOST_CHECK_EQUAL(wide.UndoSteps(), 0U);
+    BOOST_CHECK_EQUAL(wide.UndoBytes(), 0U);
+}
+
+
 #ifndef WIN32
 BOOST_AUTO_TEST_CASE(evaluation_report_larger_than_the_pipe_buffer_completes)
 {
