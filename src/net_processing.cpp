@@ -1285,6 +1285,10 @@ struct Peer {
     int m_matmul_protocol_ignored GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
     /** Consecutive unconnecting HEADERS messages. Reset when headers connect. */
     int m_unconnecting_headers GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
+    /** Last block this peer announced in a HEADERS message that did not
+     *  connect. Its body, pushed right after the header, is dropped like the
+     *  announcement rather than failed as BLOCK_MISSING_PREV. */
+    uint256 m_unconnecting_announced GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
 
     /** WP-8 / H9/H10: per-peer MMSKETCH ingress token bucket (see
      *  MATMUL_SKETCH_RECV_BUCKET_MAX), same lazy-refill idiom as the serve
@@ -11414,6 +11418,7 @@ void PeerManagerImpl::HandleUnconnectingHeaders(CNode& pfrom, Peer& peer,
     // eventually get the headers - even from a different peer -
     // we can use this peer to download.
     WITH_LOCK(cs_main, UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash()));
+    peer.m_unconnecting_announced = headers.back().GetHash();
 
     // No connection-type disconnect here. A peer announces with HEADERS when
     // it believes we have the parent, which it records from the headers it
@@ -22777,6 +22782,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         const CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
+
+        // A peer that believes we hold the parent sends the next body right
+        // after its header (NewPoWValidBlock "next honest body", deferred fast
+        // bodies). If that header did not connect here, HandleUnconnectingHeaders
+        // already asked for the missing headers and noted the block for download,
+        // and the body cannot connect either. Drop it once, like that
+        // announcement, instead of failing it as BLOCK_MISSING_PREV, which
+        // disconnects an outbound peer. A block whose header was not announced
+        // this way, or the same body sent again, keeps the usual handling.
+        if (!prev_block && pblock->GetHash() == peer->m_unconnecting_announced) {
+            peer->m_unconnecting_announced.SetNull();
+            LogDebug(BCLog::NET, "Dropping block %s from peer=%d: its announced header did not connect\n",
+                     pblock->GetHash().ToString(), pfrom.GetId());
+            WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), pfrom.GetId()));
+            return;
+        }
 
         // Check for possible mutation if it connects to something we know so we can check for DEPLOYMENT_SEGWIT being active
         if (prev_block && IsBlockMutated(/*block=*/*pblock,

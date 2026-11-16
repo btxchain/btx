@@ -14,13 +14,17 @@ MAX_UNCONNECTING_HEADERS flood bound still applies to every peer.
 
 Scenario: the receiver sits on a short branch. An honest outbound peer serves
 the heavier branch, the receiver stores it only up to the lead cap, and the
-peer then announces its next block.
+peer then announces its next block. A BTX peer pushes that block's body right
+after the header (NewPoWValidBlock "next honest body"), so the body must not
+disconnect the peer either. A block with an unknown parent whose header was
+not announced first still disconnects an outbound peer, as before.
 """
 
 from test_framework.messages import (
     CBlock,
     CBlockHeader,
     from_hex,
+    msg_block,
     msg_headers,
     msg_ping,
 )
@@ -90,6 +94,7 @@ class P2POutboundUnconnectingHeadersTest(BitcoinTestFramework):
         assert_equal(receiver.getblockcount(), tip_height)
         served = self.headers_of(source, heavy[:-1])
         [announced] = self.headers_of(source, heavy[-1:])
+        announced_body = from_hex(CBlock(), source.getblock(heavy[-1], 0))
         results = {}
 
         self.log.info("An honest outbound peer serves the heavier branch")
@@ -105,6 +110,10 @@ class P2POutboundUnconnectingHeadersTest(BitcoinTestFramework):
         self.log.info("The peer announces its next block, as BIP 130 tells it to")
         results["honest heavier-branch peer kept"] = self.kept_after(
             majority, [msg_headers(headers=[announced])])
+
+        self.log.info("The peer pushes that block's body right after the header")
+        results["honest peer kept after the pushed body"] = self.kept_after(
+            majority, [msg_block(announced_body)])
 
         self.log.info("One unconnecting announcement from a block-relay-only peer")
         anchor = receiver.add_outbound_p2p_connection(
@@ -122,6 +131,35 @@ class P2POutboundUnconnectingHeadersTest(BitcoinTestFramework):
             with receiver.assert_debug_log(["(header flood / body-withhold)"]):
                 results["dropped at the next one"] = not self.kept_after(
                     flooder, [msg_headers(headers=[announced])])
+
+        self.log.info("A block with an unknown parent and no announced header still disconnects")
+        orphan_sender = receiver.add_outbound_p2p_connection(
+            P2PInterface(), p2p_idx=3, connection_type="outbound-full-relay")
+        with receiver.assert_debug_log(["prev-blk-not-found"]):
+            results["unannounced orphan block disconnects"] = not self.kept_after(
+                orphan_sender, [msg_block(announced_body)])
+
+        self.log.info("A body with another hash than the announced header still disconnects")
+        other_sender = receiver.add_outbound_p2p_connection(
+            P2PInterface(), p2p_idx=4, connection_type="outbound-full-relay")
+        other_body = from_hex(CBlock(), source.getblock(heavy[-2], 0))
+        announced_ok = self.kept_after(other_sender, [msg_headers(headers=[announced])])
+        other_dropped = False
+        if announced_ok:
+            with receiver.assert_debug_log(["prev-blk-not-found"]):
+                other_dropped = not self.kept_after(other_sender, [msg_block(other_body)])
+        results["body with another hash than announced disconnects"] = announced_ok and other_dropped
+
+        self.log.info("The announced body is dropped once, not when it comes again")
+        repeat_sender = receiver.add_outbound_p2p_connection(
+            P2PInterface(), p2p_idx=5, connection_type="outbound-full-relay")
+        first_ok = self.kept_after(
+            repeat_sender, [msg_headers(headers=[announced]), msg_block(announced_body)])
+        repeat_dropped = False
+        if first_ok:
+            with receiver.assert_debug_log(["prev-blk-not-found"]):
+                repeat_dropped = not self.kept_after(repeat_sender, [msg_block(announced_body)])
+        results["the same body sent again disconnects"] = first_ok and repeat_dropped
 
         for what, ok in results.items():
             self.log.info(f"{'ok  ' if ok else 'FAIL'} {what}")
