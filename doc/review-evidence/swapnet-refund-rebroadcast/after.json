@@ -1,0 +1,69 @@
+{
+  "status": "PASS_AUTOMATIC_RECOVERY",
+  "source": "1e2f8b5f12295002334d3390c12cac0bb4ae2aff",
+  "original_funding": {
+    "txid": "1b5d0d8c64f798196a2d26d4016b07db2fbe4792fb749a18e71bfaecf7e97320",
+    "vout": 1
+  },
+  "original_refund": "eef65e672544181988cb555e447ecc3a7733535858ae19993cce592bff21cfb3",
+  "original_raw_sha256": "cbf9edff2955f8eb8f64c80a7ceb55b834ef94d3fd74edc084b34c1d2279ae93",
+  "scope": "Saved actual funded Core32.1 HTLC; production UTXODriver and Journal, persisted operation/reopen. No full native btxd coordinator or bilateral swap.",
+  "after_invalidate": {
+    "tip": 104,
+    "refund_in_mempool": false,
+    "wallet_tx": {
+      "txid": "eef65e672544181988cb555e447ecc3a7733535858ae19993cce592bff21cfb3",
+      "confirmations": 0,
+      "walletconflicts": []
+    }
+  },
+  "nonfinal_refusal": "non-final",
+  "after_restart": {
+    "tip": 104,
+    "known": false,
+    "mempool": false,
+    "operation_state": "broadcast"
+  },
+  "eligible_acceptance": {
+    "txid": "eef65e672544181988cb555e447ecc3a7733535858ae19993cce592bff21cfb3",
+    "wtxid": "630a49cf47c4700dcb215d2e425d0794f084b2c8cf6e95c228eafb2ba859ea19",
+    "allowed": true,
+    "vsize_adjusted": 131,
+    "vsize": 131,
+    "vsize_bip141": 131,
+    "fees": {
+      "base": "0.00002000",
+      "effective-feerate": "0.00015267",
+      "effective-includes": [
+        "630a49cf47c4700dcb215d2e425d0794f084b2c8cf6e95c228eafb2ba859ea19"
+      ]
+    }
+  },
+  "after_production_retry": {
+    "sendraw_calls": 1,
+    "mempool": true,
+    "operation_state": "broadcast"
+  },
+  "mempool_duplicate_suppressed": true,
+  "after_next_block": {
+    "tip": 106,
+    "refund_output": {
+      "bestblock": "0b042e2cc08da9fa3a7039f988d96ada3a6fb8c30ec4168f4885d02d33d1b6d7",
+      "confirmations": 1,
+      "value": "0.00098000",
+      "scriptPubKey": {
+        "asm": "0 9cd172b622d98af2eb17a2de09c519c9db6b7e67",
+        "desc": "addr(bcrt1qnngh9d3zmx9096ch5t0qn3gee8dkkln820yf7d)#msrww3qj",
+        "hex": "00149cd172b622d98af2eb17a2de09c519c9db6b7e67",
+        "address": "bcrt1qnngh9d3zmx9096ch5t0qn3gee8dkkln820yf7d",
+        "type": "witness_v0_keyhash"
+      },
+      "coinbase": false
+    },
+    "funding_output": null
+  },
+  "automatic_recovered": true,
+  "fund_operations": 0,
+  "confirmed_duplicate_suppressed": true,
+  "node_stopped": true
+}

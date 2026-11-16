@@ -251,8 +251,20 @@ class UTXODriver:
             except SwapError:pass
         return self.rpc('getrawtransaction',txid,True)
     def has_transaction(self,txid):
-        try:return self._read_tx(txid).get('txid')==txid
-        except SwapError:return False
+        # Wallet history survives eviction and reorgs; it is not broadcast proof.
+        try:
+            entry=self.rpc('getmempoolentry',txid)
+        except SwapError as error:
+            if error.code!='CHAIN_RPC':raise
+        else:
+            require(isinstance(entry,dict) and bool(entry),'CHAIN_RESPONSE','Invalid mempool entry')
+            return True
+        try:tx=self._read_tx(txid)
+        except SwapError as error:
+            if error.code!='CHAIN_RPC':raise
+            return False
+        if tx.get('txid')!=txid or not tx.get('blockhash'):return False
+        return self.rpc('getblockheader',tx['blockhash']).get('confirmations',0)>0
     def broadcast(self,raw):
         # sendrawtransaction has its own fee-rate sanity check. Never bypass it.
         return self.rpc('sendrawtransaction',raw)
