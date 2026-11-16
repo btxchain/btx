@@ -2247,11 +2247,68 @@ static RPCHelpMan NamedBountySubmit(const std::string& name)
             CMutableTransaction mtx;
             const std::string hex = o.exists("hex") ? o["hex"].get_str() : o.exists("signed_transaction") ? o["signed_transaction"].get_str() : "";
             if (!wallet::DecodeFundingTxHex(hex, mtx, err)) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, err);
+            // submitbountyfunding may get the plan that signbountyfunding returned.
+            // Keep its escrow terms with the wallet transaction, as
+            // submitmodelfunding does: after refund_height the refund needs the
+            // descriptor and the refund key, and preparebountyfunding may have
+            // created that key, so only the prepare/sign JSON held them. The
+            // terms are rebuilt from the plan and kept only when this
+            // transaction pays the rebuilt escrow script.
+            wallet::BountyEscrowPlan plan;
+            int escrow_vout{-1};
+            bool staged{false};
+            if (request.strMethod == "submitbountyfunding") {
+                std::string plan_err;
+                if (wallet::ParseBountyPlan(o, plan, plan_err)) {
+                    plan.output_script.clear();
+                    staged = plan.mode == "STAGED_RELEASE" || (!plan.hashlock_hex.empty() && !plan.claimant_key.empty());
+                    if (staged ? wallet::BuildStagedHtlcDescriptor(plan, plan_err) : wallet::BuildBountyEscrowDescriptor(plan, plan_err)) {
+                        for (size_t i = 0; i < mtx.vout.size(); ++i) {
+                            if (!plan.output_script.empty() && mtx.vout[i].scriptPubKey == plan.output_script) escrow_vout = static_cast<int>(i);
+                        }
+                    }
+                }
+            }
             node::NodeContext& node = EnsureAnyNodeContext(request.context);
             std::string err_string;
             const CTransactionRef tx = MakeTransactionRef(mtx);
+            // With terms to keep, wait until the wallet has seen the transaction.
             const node::TransactionError err_code = node::BroadcastTransaction(
-                node, tx, err_string, node::DEFAULT_MAX_RAW_TX_FEE_RATE, /*relay=*/true, /*wait_callback=*/false);
+                node, tx, err_string, node::DEFAULT_MAX_RAW_TX_FEE_RATE, /*relay=*/true, /*wait_callback=*/escrow_vout >= 0);
+            if (escrow_vout >= 0 && (err_code == node::TransactionError::OK || err_code == node::TransactionError::ALREADY_IN_UTXO_SET)) {
+                std::shared_ptr<wallet::CWallet> pwallet;
+                try {
+                    pwallet = WalletForModelFunding(request);
+                } catch (const UniValue&) {
+                    pwallet = nullptr;
+                }
+                if (pwallet) {
+                    LOCK(pwallet->cs_wallet);
+                    auto it = pwallet->mapWallet.find(tx->GetHash().ToUint256());
+                    if (it != pwallet->mapWallet.end()) {
+                        auto& mv = it->second.mapValue;
+                        mv["bounty_output_vout"] = std::to_string(escrow_vout);
+                        mv["bounty_descriptor"] = plan.descriptor;
+                        mv["bounty_refund_pubkey"] = plan.refund_key;
+                        mv["bounty_refund_height"] = std::to_string(plan.refund_height);
+                        if (!plan.bounty_id.empty()) mv["bounty_id"] = plan.bounty_id;
+                        if (!plan.lot_id.empty()) mv["bounty_lot_id"] = plan.lot_id;
+                        if (staged) {
+                            mv["bounty_hashlock"] = ToLower(plan.hashlock_hex);
+                            mv["bounty_claimant"] = plan.claimant_key;
+                        } else {
+                            mv["bounty_award_height"] = std::to_string(plan.award_height);
+                            mv["bounty_threshold"] = std::to_string(plan.threshold);
+                            std::string keys;
+                            for (const auto& k : plan.council_keys) keys += (keys.empty() ? "" : ",") + k;
+                            mv["bounty_council_keys"] = keys;
+                        }
+                        // The wallet added this transaction from the mempool
+                        // without these fields; WriteTx makes them durable.
+                        wallet::WalletBatch(pwallet->GetDatabase()).WriteTx(it->second);
+                    }
+                }
+            }
             UniValue out(UniValue::VOBJ);
             out.pushKV("txid", tx->GetHash().GetHex());
             out.pushKV("submitted", err_code == node::TransactionError::OK);
