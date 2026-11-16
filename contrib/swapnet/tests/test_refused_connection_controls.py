@@ -46,7 +46,7 @@ def test_other_cookie_and_network_errors_do_not_authorize(tmp_path, code, messag
         assert identities(p) == before and len(p.a.transactions) == 1
 
 
-def test_read_timeout_is_not_refusal():
+def test_read_timeout_is_classified():
     client = LocalRPC('http://127.0.0.1:1', timeout=1)
     class Response:
         def __enter__(self): return self
@@ -56,5 +56,5 @@ def test_read_timeout_is_not_refusal():
         def open(self, *args, **kwargs): return Response()
     client.opener = Opener()
     with pytest.raises(SwapError) as error: client('getblockcount')
-    assert type(error.value) is SwapError
+    assert type(error.value).__name__ == 'RPCTransportTimeout'
     assert error.value.code == 'RPC_UNAVAILABLE'
