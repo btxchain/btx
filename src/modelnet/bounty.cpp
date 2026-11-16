@@ -15,12 +15,14 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <set>
 #include <sstream>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace modelnet {
@@ -1204,22 +1206,32 @@ bool BountyStore::Save(std::string& err) const
 bool BountyStore::LoadIdentity(std::vector<unsigned char>& pk, std::vector<unsigned char>& sk, Digest48& id,
                               std::string& err)
 {
-    UniValue store;
-    ReadJson(m_dir / "research_identity.json", store);
-    if (store.exists("pk_hex") && store.exists("sk_hex")) {
-        pk = ParseHex(store["pk_hex"].get_str());
-        sk = ParseHex(store["sk_hex"].get_str());
-        if (pk.size() == MLDSA44_PK && sk.size() == MLDSA44_SK) {
-            id = ResearchIdentityId(pk);
-            return true;
+    const fs::path path = m_dir / "research_identity.json";
+    // Only a missing file gets a new key. A file that is there but cannot be
+    // read or parsed still holds the key this node signed its bounties with;
+    // writing a new one over it would lose that key for good.
+    std::error_code ec;
+    const auto st = std::filesystem::status(path, ec);
+    const bool present = ec ? ec != std::errc::no_such_file_or_directory : fs::exists(st);
+    if (present) {
+        UniValue store;
+        if (ReadJson(path, store) && store["pk_hex"].isStr() && store["sk_hex"].isStr()) {
+            pk = ParseHex(store["pk_hex"].get_str());
+            sk = ParseHex(store["sk_hex"].get_str());
+            if (pk.size() == MLDSA44_PK && sk.size() == MLDSA44_SK) {
+                id = ResearchIdentityId(pk);
+                return true;
+            }
         }
+        err = "research identity unreadable";
+        return false;
     }
     if (!GenerateMlDsa44(pk, sk, err)) return false;
     id = ResearchIdentityId(pk);
-    store.setObject();
+    UniValue store(UniValue::VOBJ);
     store.pushKV("pk_hex", HexStr(pk));
     store.pushKV("sk_hex", HexStr(sk));
-    return WriteJson(m_dir / "research_identity.json", store, err);
+    return WriteJson(path, store, err);
 }
 
 bool BountyStore::Idem(const std::string& method, const std::string& key, UniValue& out) const

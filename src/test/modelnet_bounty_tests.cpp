@@ -12,6 +12,7 @@
 #include <modelnet/http_bridge.h>
 #include <modelnet/identity.h>
 #include <modelnet/resource_uri.h>
+#include <modelnet/safety.h>
 #include <modelnet/search.h>
 #include <script/script.h>
 #include <span.h>
@@ -2541,5 +2542,95 @@ BOOST_AUTO_TEST_CASE(bounty_store_keeps_its_state_when_a_save_is_cut_short)
                         "the first draft was lost from bounty-store.json: " + err);
 }
 #endif
+
+// The research identity signs this node's bounty, search, safety and service
+// records. A file that is there but cannot be parsed (a write cut short by a
+// crash, an edit by hand) must not be replaced by a new key: the old key would
+// be gone for good, and with it the control over what it signed.
+namespace {
+const char* const BROKEN_IDENTITY_FILES[]{"{", "{}", "{\"pk_hex\":1,\"sk_hex\":2}"};
+
+std::string ReadWhole(const fs::path& p)
+{
+    std::ifstream in{p, std::ios::binary};
+    return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(bounty_store_keeps_an_unreadable_research_identity)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-identity-kept";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    const fs::path ident = dir / "research_identity.json";
+    UniValue result;
+    std::string code, err;
+    const auto publish = [&] {
+        UniValue draft_params(UniValue::VARR);
+        draft_params.push_back(DefaultTerms(ZeroNet()));
+        result = UniValue(UniValue::VOBJ);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", draft_params, result, code, err), err);
+        UniValue pub(UniValue::VOBJ);
+        pub.pushKV("draft_id", result["draft_id"].get_str());
+        UniValue params(UniValue::VARR);
+        params.push_back(pub);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch("publishbounty", params, result, code, err);
+    };
+    // publishbounty signs with the identity and creates it when it is missing.
+    BOOST_REQUIRE(!fs::exists(ident));
+    BOOST_REQUIRE_MESSAGE(publish(), err);
+    BOOST_REQUIRE(fs::exists(ident));
+    for (const std::string broken : BROKEN_IDENTITY_FILES) {
+        {
+            std::ofstream out{ident, std::ios::trunc};
+            out << broken;
+        }
+        BOOST_CHECK(!publish());
+        BOOST_CHECK_EQUAL(err, "research identity unreadable");
+        BOOST_CHECK_EQUAL(ReadWhole(ident), broken);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(helper_keeps_an_unreadable_research_identity)
+{
+    using namespace modelnet;
+    // reportmodelmalicious keeps its local report in memory only while the
+    // safety registry is not bound, then signs an advisory with the identity.
+    GlobalSafety().ResetForTests();
+    const fs::path root = m_path_root / "helper-identity-kept";
+    ModelCatalog cat{root, 1 << 20};
+    const fs::path ident = root / "research_identity.json";
+    UniValue result;
+    const auto report = [&] {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "reportmodelmalicious");
+        UniValue params(UniValue::VARR);
+        params.push_back(std::string(96, 'a'));
+        req.pushKV("params", params);
+        std::string code, err;
+        result = UniValue(UniValue::VOBJ);
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), err);
+    };
+    BOOST_REQUIRE(!fs::exists(ident));
+    report();
+    BOOST_REQUIRE(result["signed"].isTrue());
+    BOOST_REQUIRE(fs::exists(ident));
+    for (const std::string broken : BROKEN_IDENTITY_FILES) {
+        {
+            std::ofstream out{ident, std::ios::trunc};
+            out << broken;
+        }
+        report();
+        BOOST_CHECK(result["signed"].isFalse());
+        BOOST_CHECK_EQUAL(result.exists("sign_error") ? result["sign_error"].get_str() : "", "research identity unreadable");
+        BOOST_CHECK_EQUAL(ReadWhole(ident), broken);
+    }
+    GlobalSafety().ResetForTests();
+}
 
 BOOST_AUTO_TEST_SUITE_END()
