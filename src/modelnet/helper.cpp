@@ -3,6 +3,7 @@
 // file COPYING or https://opensource.org/license/mit/.
 
 #include <modelnet/helper.h>
+#include <modelnet/thread_join.h>
 #include <modelnet/security_v2/peer.h>
 #include <modelnet/security_v2/mesh.h>
 
@@ -4425,7 +4426,12 @@ struct RetrieveJob {
     ~RetrieveJob()
     {
         cancel.store(true);
-        if (worker.joinable()) worker.join();
+        // The worker lambda holds a reference to this job too. When pruning
+        // dropped the map's reference while the worker was finishing, the last
+        // reference falls on the worker itself and this destructor runs there,
+        // where join() would join the thread to itself. JoinWorkerUnlessSelf
+        // detaches in that case instead of throwing from this noexcept dtor.
+        JoinWorkerUnlessSelf(worker);
     }
 };
 
