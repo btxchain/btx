@@ -281,7 +281,11 @@ class SearchIndex {
     std::map<std::string, ModelSearchRecord> m_by_model;
     std::set<std::string> m_hidden;
     std::set<std::string> m_muted_publishers;
+    //! Records in the index per publisher quota key (see Put()).
     std::map<std::string, int> m_pub_window;
+    //! The quota key each counted record was charged to, by model id. The key
+    //! is not always in the record ("ep:" names the peer that sent it).
+    std::map<std::string, std::string> m_pub_charge;
     size_t m_cap{100000};
     std::vector<std::string> m_index_peers;
     uint64_t m_seq{0};
