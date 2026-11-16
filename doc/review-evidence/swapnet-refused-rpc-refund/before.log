@@ -1,0 +1,39 @@
+F.F.........................                                             [100%]
+=================================== FAILURES ===================================
+__________ test_mature_original_refund_recovers_across_reopen[False] ___________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/repair-runtime-source/test_mature_original_refund_re0')
+missing_cookie = False
+
+    @pytest.mark.parametrize('missing_cookie', [False, True])
+    def test_mature_original_refund_recovers_across_reopen(tmp_path, missing_cookie):
+        with funded_pair(tmp_path / 'pair') as p, refused_client(tmp_path, missing_cookie) as client:
+            original = identities(p)
+            c = wire(p, client)
+            c.tick()
+>           assert p.state('alice')['stage'] == 'refund_broadcast'
+E           AssertionError: assert 'funded' == 'refund_broadcast'
+E             
+E             - refund_broadcast
+E             + funded
+
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/test_refused_connection_recovery.py:91: AssertionError
+_________________ test_real_connection_refusal_classification __________________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/repair-runtime-source/test_real_connection_refusal_c0')
+
+    def test_real_connection_refusal_classification(tmp_path):
+        with refused_client(tmp_path) as client, pytest.raises(SwapError) as error:
+            client('getblockcount')
+        assert error.value.code == 'RPC_UNAVAILABLE'
+>       assert type(error.value).__name__ == 'RPCConnectionRefused'
+E       AssertionError: assert 'SwapError' == 'RPCConnectionRefused'
+E         
+E         - RPCConnectionRefused
+E         + SwapError
+
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/test_refused_connection_recovery.py:111: AssertionError
+=========================== short test summary info ============================
+FAILED work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/test_refused_connection_recovery.py::test_mature_original_refund_recovers_across_reopen[False]
+FAILED work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/test_refused_connection_recovery.py::test_real_connection_refusal_classification
+2 failed, 26 passed in 5.02s

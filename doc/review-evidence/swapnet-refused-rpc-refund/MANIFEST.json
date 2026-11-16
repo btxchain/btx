@@ -1,0 +1,49 @@
+{
+  "base": "1e2f8b5f12295002334d3390c12cac0bb4ae2aff",
+  "platform": "macOS ARM64; Python3.12.14; pytest8.4.2",
+  "before": {
+    "failed": 2,
+    "passed": 26,
+    "seconds": 5.02,
+    "failures": [
+      "retained-cookie original refund recovery",
+      "internal refused-connection classification"
+    ]
+  },
+  "after": {
+    "passed": 28,
+    "failed": 0,
+    "seconds": 5.01
+  },
+  "additional_controls": {
+    "passed": 7,
+    "failed": 0,
+    "seconds": 1.97
+  },
+  "source_files_sha256": {
+    "contrib/swapnet/swapnet/errors.py": "e657726cdb68b9956445afc7e031f8cb248b74e70bb9586c297bb4aaf3661672",
+    "contrib/swapnet/swapnet/rpcclient.py": "ec6e6b73a8a4df38ad0392a5271898d5f7c667587178d2e5fe5b3d5a67ea7b9a",
+    "contrib/swapnet/swapnet/coordinator.py": "e650026065a369cbc0d7bf1abd17feddd3231a9a30d50e65da23d31c76acad4c",
+    "contrib/swapnet/tests/test_refused_connection_recovery.py": "8371352ec70e00785a760f4e1606bc73f2d9e07de049a8cb0ab662656e7b4e34",
+    "contrib/swapnet/tests/test_refused_connection_controls.py": "aa21d0213adde9f901b2c8e78eb83684694e77937274930debb52d2bbe811a7e"
+  },
+  "evidence_files_sha256": {
+    "README.md": "28af4f4c9ab8b002a0a8872c4d5c652342f2d90e7e44c3579a46cc75e7d59f2b",
+    "before.log": "1153152b55dd7af291d314bed6a00e0b847b051eb8529c3d5a0c787d46133d93",
+    "after.log": "a75d9a1855facd06e825dd2a50b99e09c9884fd018c53de8ab47aa0629cdb4da",
+    "controls.log": "e896381035d608f7011b43fdec1c4b8c6f32c6fc9f08ae64a5b1e89c4ddf1535"
+  },
+  "logs_sanitized": "Only absolute workspace prefix replaced; outcomes/assertions unchanged",
+  "real": [
+    "LocalRPC/TCP/HTTP",
+    "Coordinator/SQLite/Journal/Vault reopen"
+  ],
+  "simulated": [
+    "BTX/BTC ledger and signing",
+    "chain clocks/UTXO/script RPC fixture",
+    "timeout/reset error injection controls"
+  ],
+  "native_nodes": false,
+  "refund_helper_ast_unchanged": true,
+  "drivers_unchanged": true
+}
