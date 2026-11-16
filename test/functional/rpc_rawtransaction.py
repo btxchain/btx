@@ -38,6 +38,7 @@ from test_framework.util import (
 from test_framework.wallet import (
     getnewdestination,
     MiniWallet,
+    MiniWalletMode,
 )
 
 
@@ -82,7 +83,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.connect_nodes(0, 2)
 
     def run_test(self):
-        self.wallet = MiniWallet(self.nodes[0])
+        self.wallet = MiniWallet(self.nodes[0], mode=MiniWalletMode.ADDRESS_OP_TRUE)  # BTX: these checks expect MiniWallet's non-standard P2TR output; keep it until they are ported to P2MR
         probe_tx_hex = self.wallet.create_self_transfer()["tx"].serialize().hex()
         probe = self.nodes[0].testmempoolaccept([probe_tx_hex])[0]
         if not probe.get("allowed", False) and probe.get("reject-reason") == "scriptpubkey":

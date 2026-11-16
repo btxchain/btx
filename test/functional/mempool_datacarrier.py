@@ -14,7 +14,7 @@ from test_framework.script import (
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.test_node import TestNode
 from test_framework.util import assert_raises_rpc_error
-from test_framework.wallet import MiniWallet
+from test_framework.wallet import MiniWallet, MiniWalletMode
 
 from random import randbytes
 
@@ -44,7 +44,7 @@ class DataCarrierTest(BitcoinTestFramework):
             assert_raises_rpc_error(-26, "scriptpubkey", self.wallet.sendrawtransaction, from_node=node, tx_hex=tx_hex)
 
     def run_test(self):
-        self.wallet = MiniWallet(self.nodes[0])
+        self.wallet = MiniWallet(self.nodes[0], mode=MiniWalletMode.ADDRESS_OP_TRUE)  # BTX: these checks expect MiniWallet's non-standard P2TR output; keep it until they are ported to P2MR
 
         # BTX rejects null-data outputs independent of the inherited
         # -datacarrier/-datacarriersize knobs.

@@ -7,6 +7,7 @@
 from copy import deepcopy
 from decimal import Decimal
 from enum import Enum
+import random
 from typing import (
     Any,
     Optional,
@@ -17,9 +18,11 @@ from test_framework.address import (
     key_to_p2pkh,
     key_to_p2sh_p2wpkh,
     key_to_p2wpkh,
+    merkle_root_to_p2mr,
     output_key_to_p2tr,
 )
 from test_framework.blocktools import COINBASE_MATURITY
+from test_framework.crypto.mldsa import MLDSA44Key
 from test_framework.descriptors import descsum_create
 from test_framework.key import (
     ECKey,
@@ -37,9 +40,14 @@ from test_framework.messages import (
 from test_framework.script import (
     CScript,
     OP_1,
+    OP_CHECKSIG_MLDSA,
     OP_NOP,
     OP_RETURN,
     OP_TRUE,
+    SIGHASH_ANYONECANPAY,
+    SIGHASH_NONE,
+    P2MRSignatureHash,
+    p2mr_single_leaf,
     sign_input_legacy,
     taproot_construct,
 )
@@ -58,39 +66,69 @@ from test_framework.wallet_util import generate_keypair
 
 DEFAULT_FEE = Decimal("0.0001")
 
+# vsize of a 1-in-1-out ADDRESS_P2MR self-transfer: 96 bytes of non-witness
+# data plus the witness (2421-byte ML-DSA-44 signature with its sighash byte,
+# 1316-byte leaf script, 1-byte control block). BTX has no witness discount.
+P2MR_SELF_TRANSFER_VSIZE = 3842
+# Same, spending one of the pre-mined P2TR OP_TRUE coins.
+OP_TRUE_SELF_TRANSFER_VSIZE = 133
+
+
 class MiniWalletMode(Enum):
     """Determines the transaction type the MiniWallet is creating and spending.
 
-    For most purposes, the default mode ADDRESS_OP_TRUE should be sufficient;
-    it simply uses a fixed bech32m P2TR address whose coins are spent with a
-    witness stack of OP_TRUE, i.e. following an anyone-can-spend policy.
+    BTX relays only P2MR (witness v2) and OP_RETURN outputs, so the default
+    mode depends on the node the wallet is created for: ADDRESS_P2MR when the
+    node enforces standardness, and ADDRESS_OP_TRUE when it was started with
+    -acceptnonstdtxn=1.
+
+    ADDRESS_P2MR pays to a fixed P2MR address whose single leaf is
+    <ML-DSA-44 pubkey> OP_CHECKSIG_MLDSA. The framework signs each input with
+    SIGHASH_NONE|SIGHASH_ANYONECANPAY, so a created transaction stays valid
+    when the caller changes or adds outputs or adds inputs (but not when it
+    changes the version, the locktime or a signed input). It can also spend the
+    pre-mined ADDRESS_OP_TRUE coins of the test chain (spending them is
+    standard, only creating them is not), so a fresh wallet has mature coins.
+    Spends of its own outputs are large (P2MR_SELF_TRANSFER_VSIZE).
+
+    ADDRESS_OP_TRUE uses a fixed bech32m P2TR address whose coins are spent
+    with a witness stack of OP_TRUE, i.e. following an anyone-can-spend policy.
     However, if the transactions need to be modified by the user (e.g. prepending
     scriptSig for testing opcodes that are activated by a soft-fork), or the txs
     should contain an actual signature, the raw modes RAW_OP_TRUE, RAW_P2PK and
     RAW_P2PKH can be useful. In order to avoid mixing of UTXOs between different
-    MiniWallet instances, a tag name can be passed to the default mode, to create
+    MiniWallet instances, a tag name can be passed to the address modes, to create
     different output scripts. Note that the UTXOs from the pre-generated test
     chain can only be spent if no tag is passed. Summary of modes:
 
                     |      output       |           |  tx is   | can modify |  needs
          mode       |    description    |  address  | standard | scriptSig  | signing
     ----------------+-------------------+-----------+----------+------------+----------
-    ADDRESS_OP_TRUE | anyone-can-spend  |  bech32m  |   yes    |    no      |   no
+    ADDRESS_P2MR    | ML-DSA-44 leaf    |  bech32m  |   yes    |    no      |   yes
+    ADDRESS_OP_TRUE | anyone-can-spend  |  bech32m  |   no     |    no      |   no
     RAW_OP_TRUE     | anyone-can-spend  |  - (raw)  |   no     |    yes     |   no
-    RAW_P2PK        | pay-to-public-key |  - (raw)  |   yes    |    yes     |   yes
-    RAW_P2PKH       | pay-to-pubkey-hash|  - (raw)  |   yes    |    yes     |   yes
+    RAW_P2PK        | pay-to-public-key |  - (raw)  |   no     |    yes     |   yes
+    RAW_P2PKH       | pay-to-pubkey-hash|  - (raw)  |   no     |    yes     |   yes
     """
     ADDRESS_OP_TRUE = 1
     RAW_OP_TRUE = 2
     RAW_P2PK = 3
     RAW_P2PKH = 4
+    ADDRESS_P2MR = 5
 
 
 class MiniWallet:
-    def __init__(self, test_node, *, mode=MiniWalletMode.ADDRESS_OP_TRUE, tag_name=None):
+    def __init__(self, test_node, *, mode=None, tag_name=None):
         self._test_node = test_node
         self._utxos = []
+        if mode is None:
+            mode = MiniWalletMode.ADDRESS_OP_TRUE if getattr(test_node, "accept_nonstd_txn", True) else MiniWalletMode.ADDRESS_P2MR
         self._mode = mode
+        # ADDRESS_P2MR bookkeeping: values (in satoshis) of outpoints this
+        # wallet has seen, and which of them are pre-mined OP_TRUE coins.
+        self._outpoint_values = {}
+        self._op_true_outpoints = set()
+        self._op_true_script = None
 
         assert isinstance(mode, MiniWalletMode)
         if mode == MiniWalletMode.RAW_OP_TRUE:
@@ -111,6 +149,14 @@ class MiniWallet:
             internal_key = None if tag_name is None else compute_xonly_pubkey(hash256(tag_name.encode()))[0]
             self._address, self._taproot_info = create_deterministic_address_bcrt1_p2tr_op_true(internal_key)
             self._scriptPubKey = address_to_scriptpubkey(self._address)
+        elif mode == MiniWalletMode.ADDRESS_P2MR:
+            self._p2mr_key = MLDSA44Key(hash256(b"MiniWallet ADDRESS_P2MR" + (tag_name or "").encode()))
+            self._leaf_script = CScript([self._p2mr_key.pubkey, OP_CHECKSIG_MLDSA])
+            self._scriptPubKey, self._control_block = p2mr_single_leaf(self._leaf_script)
+            self._address = merkle_root_to_p2mr(self._scriptPubKey[2:])
+            if tag_name is None:
+                op_true_address, self._taproot_info = create_deterministic_address_bcrt1_p2tr_op_true()
+                self._op_true_script = address_to_scriptpubkey(op_true_address)
 
         # When the pre-mined test framework chain is used, it contains coinbase
         # outputs to the MiniWallet's default address in blocks 76-100
@@ -120,6 +166,7 @@ class MiniWallet:
         self.rescan_utxos()
 
     def _create_utxo(self, *, txid, vout, value, height, coinbase, confirmations):
+        self._outpoint_values[(txid, vout)] = int(value * COIN)
         return {"txid": txid, "vout": vout, "value": value, "height": height, "coinbase": coinbase, "confirmations": confirmations}
 
     def _bulk_tx(self, tx, target_vsize):
@@ -188,9 +235,14 @@ class MiniWallet:
     def rescan_utxos(self, *, include_mempool=True):
         """Drop all utxos and rescan the utxo set"""
         self._utxos = []
-        res = self._test_node.scantxoutset(action="start", scanobjects=[self.get_descriptor()])
+        scanobjects = [self.get_descriptor()]
+        if self._op_true_script is not None:
+            scanobjects.append(descsum_create(f'raw({self._op_true_script.hex()})'))
+        res = self._test_node.scantxoutset(action="start", scanobjects=scanobjects)
         assert_equal(True, res['success'])
         for utxo in res['unspents']:
+            if self._op_true_script is not None and utxo["scriptPubKey"] == self._op_true_script.hex():
+                self._op_true_outpoints.add((utxo["txid"], utxo["vout"]))
             self._utxos.append(
                 self._create_utxo(txid=utxo["txid"],
                                   vout=utxo["vout"],
@@ -217,7 +269,10 @@ class MiniWallet:
             except StopIteration:
                 pass
         for out in tx['vout']:
-            if out['scriptPubKey']['hex'] == self._scriptPubKey.hex():
+            is_op_true = self._op_true_script is not None and out['scriptPubKey']['hex'] == self._op_true_script.hex()
+            if out['scriptPubKey']['hex'] == self._scriptPubKey.hex() or is_op_true:
+                if is_op_true:
+                    self._op_true_outpoints.add((tx["txid"], out["n"]))
                 self._utxos.append(self._create_utxo(txid=tx["txid"], vout=out["n"], value=out["value"], height=0, coinbase=False, confirmations=0))
 
     def scan_txs(self, txs):
@@ -265,8 +320,52 @@ class MiniWallet:
                     leaf_info.script,
                     bytes([leaf_info.version | self._taproot_info.negflag]) + self._taproot_info.internal_pubkey,
                 ]
+        elif self._mode == MiniWalletMode.ADDRESS_P2MR:
+            hash_type = SIGHASH_NONE | SIGHASH_ANYONECANPAY
+            tx.wit.vtxinwit = [CTxInWitness() for _ in tx.vin]
+            for index, (txin, wit) in enumerate(zip(tx.vin, tx.wit.vtxinwit)):
+                outpoint = (f"{txin.prevout.hash:064x}", txin.prevout.n)
+                if self._is_op_true_outpoint(outpoint):
+                    leaf_info = list(self._taproot_info.leaves.values())[0]
+                    wit.scriptWitness.stack = [
+                        leaf_info.script,
+                        bytes([leaf_info.version | self._taproot_info.negflag]) + self._taproot_info.internal_pubkey,
+                    ]
+                    continue
+                # ANYONECANPAY commits to this input's own prevout only, so the
+                # other entries of spent_utxos are never read.
+                spent_utxos = [CTxOut() for _ in tx.vin]
+                spent_utxos[index] = CTxOut(self._outpoint_value(outpoint), self._scriptPubKey)
+                sighash = P2MRSignatureHash(tx, spent_utxos, hash_type, index, leaf_script=self._leaf_script)
+                wit.scriptWitness.stack = [
+                    self._p2mr_key.sign(sighash) + bytes([hash_type]),
+                    bytes(self._leaf_script),
+                    self._control_block,
+                ]
         else:
             assert False
+
+    def _is_op_true_outpoint(self, outpoint):
+        """Whether an outpoint spent by this ADDRESS_P2MR wallet is a pre-mined OP_TRUE coin."""
+        if self._op_true_script is None:
+            return False
+        if outpoint in self._op_true_outpoints:
+            return True
+        if outpoint in self._outpoint_values:
+            return False
+        txout = self._test_node.gettxout(txid=outpoint[0], n=outpoint[1], include_mempool=True)
+        if txout is not None and txout["scriptPubKey"]["hex"] == self._op_true_script.hex():
+            self._op_true_outpoints.add(outpoint)
+            return True
+        return False
+
+    def _outpoint_value(self, outpoint):
+        """Value in satoshis of an outpoint this ADDRESS_P2MR wallet signs for (P2MR sighashes commit to it)."""
+        if outpoint not in self._outpoint_values:
+            txout = self._test_node.gettxout(txid=outpoint[0], n=outpoint[1], include_mempool=True)
+            assert txout is not None, f"MiniWallet ADDRESS_P2MR cannot sign for unknown outpoint {outpoint[0]}:{outpoint[1]}"
+            self._outpoint_values[outpoint] = int(txout["value"] * COIN)
+        return self._outpoint_values[outpoint]
 
     def generate(self, num_blocks, **kwargs):
         """Generate blocks with coinbase outputs to the internal address, and call rescan_utxos"""
@@ -288,7 +387,7 @@ class MiniWallet:
         return descsum_create(f'raw({self._scriptPubKey.hex()})')
 
     def get_address(self):
-        assert_equal(self._mode, MiniWalletMode.ADDRESS_OP_TRUE)
+        assert self._mode in (MiniWalletMode.ADDRESS_OP_TRUE, MiniWalletMode.ADDRESS_P2MR)
         return self._address
 
     def get_utxo(self, *, txid: str = '', vout: Optional[int] = None, mark_as_spent=True, confirmed_only=False) -> dict:
@@ -385,6 +484,10 @@ class MiniWallet:
         utxos_to_spend = utxos_to_spend or [self.get_utxo(confirmed_only=confirmed_only)]
         sequence = [sequence] * len(utxos_to_spend) if type(sequence) is int else sequence
         assert_equal(len(utxos_to_spend), len(sequence))
+        for utxo in utxos_to_spend:  # ADDRESS_P2MR signatures commit to the spent value
+            outpoint = (utxo['txid'], utxo['vout'])
+            if not self._is_op_true_outpoint(outpoint):
+                self._outpoint_values.setdefault(outpoint, int(COIN * utxo['value']))
 
         # calculate output amount
         inputs_value_total = sum([int(COIN * utxo['value']) for utxo in utxos_to_spend])
@@ -443,7 +546,10 @@ class MiniWallet:
         elif self._mode == MiniWalletMode.ADDRESS_OP_TRUE:
             # BTX has no witness discount (WITNESS_SCALE_FACTOR=1), so the
             # two witness framing bytes plus the 27-byte witness are counted.
-            vsize = Decimal(133)
+            vsize = Decimal(OP_TRUE_SELF_TRANSFER_VSIZE)
+        elif self._mode == MiniWalletMode.ADDRESS_P2MR:
+            spends_op_true = self._is_op_true_outpoint((utxo_to_spend["txid"], utxo_to_spend["vout"]))
+            vsize = Decimal(OP_TRUE_SELF_TRANSFER_VSIZE if spends_op_true else P2MR_SELF_TRANSFER_VSIZE)
         elif self._mode == MiniWalletMode.RAW_P2PK:
             vsize = Decimal(168)  # P2PK (73 bytes scriptSig + 35 bytes scriptPubKey + 60 bytes other)
         elif self._mode == MiniWalletMode.RAW_P2PKH:
@@ -500,12 +606,17 @@ class MiniWallet:
         return chain
 
 
-def getnewdestination(address_type='bech32m'):
+def getnewdestination(address_type='p2mr'):
     """Generate a random destination of the specified type and return the
        corresponding public key, scriptPubKey and address. Supported types are
-       'legacy', 'p2sh-segwit', 'bech32' and 'bech32m'. Can be used when a random
+       'legacy', 'p2sh-segwit', 'bech32', 'bech32m' and 'p2mr' (the default:
+       BTX relays only P2MR and OP_RETURN outputs). Can be used when a random
        destination is needed, but no compiled wallet is available (e.g. as
        replacement to the getnewaddress/getaddressinfo RPCs)."""
+    if address_type == 'p2mr':
+        pubkey = MLDSA44Key(random.randbytes(32)).pubkey
+        scriptpubkey, _ = p2mr_single_leaf(CScript([pubkey, OP_CHECKSIG_MLDSA]))
+        return pubkey, scriptpubkey, merkle_root_to_p2mr(scriptpubkey[2:])
     key, pubkey = generate_keypair()
     if address_type == 'legacy':
         scriptpubkey = key_to_p2pkh_script(pubkey)

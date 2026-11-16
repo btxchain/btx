@@ -22,6 +22,7 @@ TEST_FRAMEWORK_MODULES = [
     "crypto.ellswift",
     "key",
     "messages",
+    "crypto.mldsa",
     "crypto.muhash",
     "crypto.poly1305",
     "crypto.ripemd160",
