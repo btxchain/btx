@@ -256,6 +256,7 @@ BASE_SCRIPTS = [
     'p2p_feefilter.py',
     'feature_csv_activation.py',
     'p2p_sendheaders.py',
+    'p2p_outbound_unconnecting_headers.py',
     'p2p_shielded_relay.py',
     'feature_config_args.py',
     'feature_io_errors.py --descriptors',
