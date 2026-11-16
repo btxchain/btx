@@ -79,8 +79,8 @@ FILTER_TYPE_BASIC = 0
 # functional suite and produced false mempool/orphan size failures.
 WITNESS_SCALE_FACTOR = 1
 
-DEFAULT_ANCESTOR_LIMIT = 25    # default max number of in-mempool ancestors
-DEFAULT_DESCENDANT_LIMIT = 25  # default max number of in-mempool descendants
+DEFAULT_ANCESTOR_LIMIT = 100    # default max number of in-mempool ancestors (src/policy/policy.h)
+DEFAULT_DESCENDANT_LIMIT = 100  # default max number of in-mempool descendants (src/policy/policy.h)
 
 # Default setting for -datacarriersize. 80 bytes of data, +1 for OP_RETURN, +2 for the pushdata opcodes.
 MAX_OP_RETURN_RELAY = 83
