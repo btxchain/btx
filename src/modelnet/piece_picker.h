@@ -169,6 +169,20 @@ bool ParseAvailabilitySources(const UniValue& availability_json,
                                std::string& err,
                                int64_t observed_at_ms = 0);
 
+/**
+ * Add the source that a remote peer's availability answer gives for one file
+ * of `artifact`: at most one, under the peer's own `peer` (observed endpoint
+ * and host), and none when `out` already holds a source from that endpoint. The answer is the peer's claim alone, so further entries, or
+ * netgroup and service_id fields in them, do not add sources. Throws, like
+ * ParseAvailabilitySources, on a field of another type.
+ */
+void TakePeerAvailability(const UniValue& availability_json,
+                          const PeerId& peer,
+                          const Digest48& artifact,
+                          uint32_t file_index,
+                          int64_t observed_at_ms,
+                          std::vector<SourceAvailability>& out);
+
 UniValue SwarmSnapshotJson(const SwarmSnapshot& snap);
 
 } // namespace modelnet
