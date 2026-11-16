@@ -1155,24 +1155,36 @@ static std::mutex g_helper_store_mu;
 bool LoadOrCreateResearchIdentity(const fs::path& dir, std::vector<unsigned char>& pk, std::vector<unsigned char>& sk,
                                   Digest48& id, std::string& err)
 {
-    UniValue store;
-    ReadJsonFile(dir / "research_identity.json", store);
-    if (store.exists("pk_hex") && store.exists("sk_hex")) {
-        auto pkb = TryParseHex<unsigned char>(store["pk_hex"].get_str());
-        auto skb = TryParseHex<unsigned char>(store["sk_hex"].get_str());
-        if (pkb && skb) {
-            pk = *pkb;
-            sk = *skb;
-            id = ResearchIdentityId(pk);
-            return true;
+    const fs::path path = dir / "research_identity.json";
+    // Only a missing file gets a new key. A file that is there but cannot be
+    // read or parsed still holds the key this node signed its records with;
+    // writing a new one over it would lose that key for good.
+    std::error_code ec;
+    const auto st = std::filesystem::status(path, ec);
+    const bool present = ec ? ec != std::errc::no_such_file_or_directory : fs::exists(st);
+    if (present) {
+        UniValue store;
+        std::optional<std::vector<unsigned char>> pkb, skb;
+        if (ReadJsonFile(path, store) && store["pk_hex"].isStr() && store["sk_hex"].isStr()) {
+            pkb = TryParseHex<unsigned char>(store["pk_hex"].get_str());
+            skb = TryParseHex<unsigned char>(store["sk_hex"].get_str());
         }
+        if (!pkb || !skb) {
+            err = "research identity unreadable";
+            return false;
+        }
+        pk = *pkb;
+        sk = *skb;
+        id = ResearchIdentityId(pk);
+        return true;
     }
     if (!GenerateMlDsa44(pk, sk, err)) return false;
     id = ResearchIdentityId(pk);
+    UniValue store(UniValue::VOBJ);
     store.pushKV("pk_hex", HexStr(pk));
     store.pushKV("sk_hex", HexStr(sk));
     store.pushKV("id", id.Hex());
-    return WriteJsonFile(dir / "research_identity.json", store, err);
+    return WriteJsonFile(path, store, err);
 }
 
 fs::path PublisherSecretPath(const fs::path& dir, const std::string& hexid)
