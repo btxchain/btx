@@ -17,6 +17,9 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
+#include <iterator>
+
 #include <atomic>
 #include <chrono>
 #include <set>
@@ -1014,6 +1017,126 @@ BOOST_AUTO_TEST_CASE(mirror_keep_latest_keeps_one_watch_per_selector)
     const UniValue cleared = set_mirror(0, "mirror-keep-c");
     BOOST_CHECK(keep_watches().empty());
     BOOST_CHECK(!cleared.exists("watch_id"));
+}
+
+
+static void CheckRejectedChannelSave(const fs::path& dir, bool replacing)
+{
+    using namespace modelnet;
+    fs::create_directories(dir);
+    ModelEventJournal journal(dir, 64);
+    ModelWatchStore store(dir);
+    store.BindJournal(&journal);
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    Digest48 first{}, second{};
+    first.data[0] = 1;
+    second.data[0] = 2;
+    std::string uri1, uri2;
+    BOOST_REQUIRE(EncodeResource(ResourceKind::MODEL, first, uri1, err));
+    BOOST_REQUIRE(EncodeResource(ResourceKind::MODEL, second, uri2, err));
+    SignedChannel other;
+    other.pubkey = pk;
+    other.name = "unrelated";
+    other.channel = "stable";
+    other.sequence = 1;
+    other.target_uri = uri1;
+    BOOST_REQUIRE(SignSignedChannel(other, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    BOOST_REQUIRE(store.ApplySignedChannel(other, err));
+    SignedChannel prior = other;
+    prior.name = "target";
+    BOOST_REQUIRE(SignSignedChannel(prior, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    if (replacing) BOOST_REQUIRE(store.ApplySignedChannel(prior, err));
+    SignedChannel wanted = prior;
+    wanted.sequence = 2;
+    wanted.target_uri = uri2;
+    BOOST_REQUIRE(SignSignedChannel(wanted, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    SignedChannel invalid = wanted;
+    invalid.sig.clear();
+    BOOST_CHECK(!store.ApplySignedChannel(invalid, err));
+    ModelWatch watch;
+    watch.watch_id = "queued-watch";
+    watch.kind = WatchKind::PUBLISHER;
+    watch.publisher_id = "watch-publisher";
+    watch.action = ActionPolicy::FREE_DOWNLOAD;
+    BOOST_REQUIRE(store.PutWatch(watch, err));
+    store.NoteEvent(MakeSigned(watch.publisher_id, "queued-object"));
+    BOOST_REQUIRE_EQUAL(store.PeekActions().size(), 1U);
+    const auto queue = [&]() {
+        UniValue a(UniValue::VARR);
+        for (const auto& item : store.PeekActions()) a.push_back(WatchActionToJson(item));
+        return a.write();
+    };
+    const std::string queued = queue();
+    const auto bytes = [&]() {
+        std::ifstream in(dir / "channels.json");
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string saved = bytes();
+    const auto events_before = journal.ReplayAfter(0, 64).size();
+    BOOST_CHECK_EQUAL(events_before, replacing ? 2U : 1U);
+    fs::create_directory(dir / "channels.json.tmp");
+    err.clear();
+    BOOST_CHECK(!store.ApplySignedChannel(wanted, err));
+    BOOST_CHECK(!err.empty());
+    BOOST_CHECK_EQUAL(bytes(), saved);
+    BOOST_CHECK_EQUAL(journal.ReplayAfter(0, 64).size(), events_before);
+    SignedChannel got;
+    const bool found = store.GetChannel(prior.publisher_id, "target", "stable", got);
+    BOOST_CHECK_EQUAL(found, replacing);
+    if (replacing && found) {
+        BOOST_CHECK_EQUAL(got.sequence, 1U);
+        BOOST_CHECK_EQUAL(got.target_uri, uri1);
+    }
+    BOOST_CHECK_EQUAL(queue(), queued);
+    {
+        ModelWatchStore reopened(dir);
+        BOOST_CHECK_EQUAL(reopened.GetChannel(prior.publisher_id, "target", "stable", got), replacing);
+        if (replacing) BOOST_CHECK_EQUAL(got.sequence, 1U);
+        BOOST_REQUIRE(reopened.GetChannel(other.publisher_id, "unrelated", "stable", got));
+        BOOST_CHECK_EQUAL(got.target_uri, uri1);
+    }
+    fs::remove(dir / "channels.json.tmp");
+    err.clear();
+    // The exact rejected signature and sequence must now work, without reopening store.
+    BOOST_REQUIRE_MESSAGE(store.ApplySignedChannel(wanted, err), err);
+    const auto events = journal.ReplayAfter(0, 64);
+    BOOST_REQUIRE_EQUAL(events.size(), events_before + 1);
+    BOOST_CHECK(events.back().event_type == ModelEventType::CHANNEL_UPDATED);
+    BOOST_CHECK_EQUAL(events.back().record_sequence, wanted.sequence);
+    BOOST_CHECK_EQUAL(events.back().new_state, uri2);
+    BOOST_CHECK_EQUAL(events.back().publisher_id, wanted.publisher_id);
+    BOOST_CHECK_EQUAL(queue(), queued);
+    // Once persisted, genuine duplicate and decreasing sequences remain refused.
+    BOOST_CHECK(!store.ApplySignedChannel(wanted, err));
+    BOOST_CHECK(!store.ApplySignedChannel(prior, err));
+    invalid.sequence = 3;
+    BOOST_CHECK(!store.ApplySignedChannel(invalid, err));
+    BOOST_CHECK_EQUAL(journal.ReplayAfter(0, 64).size(), events.size());
+    ModelWatchStore reopened(dir);
+    BOOST_REQUIRE(reopened.GetChannel(wanted.publisher_id, "target", "stable", got));
+    BOOST_CHECK_EQUAL(got.sequence, wanted.sequence);
+    BOOST_CHECK_EQUAL(got.target_uri, uri2);
+    BOOST_CHECK(got.signature_ok);
+    BOOST_REQUIRE(reopened.GetChannel(other.publisher_id, "unrelated", "stable", got));
+    BOOST_CHECK_EQUAL(got.sequence, 1U);
+    BOOST_CHECK_EQUAL(got.target_uri, uri1);
+    ModelEventJournal reopened_journal(dir, 64);
+    const auto durable_events = reopened_journal.ReplayAfter(0, 64);
+    BOOST_REQUIRE_EQUAL(durable_events.size(), events.size());
+    BOOST_CHECK_EQUAL(durable_events.back().record_sequence, wanted.sequence);
+    BOOST_CHECK_EQUAL(durable_events.back().new_state, uri2);
+}
+
+BOOST_AUTO_TEST_CASE(rejected_channel_creation_allows_identical_retry)
+{
+    CheckRejectedChannelSave(m_path_root / "channel-create-save", false);
+}
+
+BOOST_AUTO_TEST_CASE(rejected_channel_replacement_allows_identical_retry)
+{
+    CheckRejectedChannelSave(m_path_root / "channel-replace-save", true);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
