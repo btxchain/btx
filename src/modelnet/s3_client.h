@@ -82,6 +82,9 @@ bool S3HostBlockedAsMetadata(std::string_view host);
 bool LoadS3Secrets(const CredentialRef& ref, std::string& access_key_id, std::string& secret_access_key,
                    std::string& err);
 
+/** Recognize a complete S3 multipart-success envelope, not full XML validation. */
+bool S3MultipartCompletionSucceeded(std::string_view xml);
+
 /** OpenSSL classical TLS client transport for S3/R2/MinIO is linked into bitcoin_modelnet. */
 bool S3HttpsTransportAvailable();
 

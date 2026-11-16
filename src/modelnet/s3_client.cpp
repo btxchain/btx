@@ -911,6 +911,44 @@ std::string HostPortKey(const ParsedS3Endpoint& p)
 
 } // namespace
 
+bool S3MultipartCompletionSucceeded(std::string_view xml)
+{
+    // S3 may send 200 before completion fails. Recognize the success envelope,
+    // not an arbitrary success tag inside an Error message. This is not a
+    // general XML validator; the transport already bounds the control body.
+    if (xml.starts_with("\xef\xbb\xbf")) xml.remove_prefix(3);
+    auto skip_misc = [](std::string_view& text) {
+        for (;;) {
+            const auto nonspace = text.find_first_not_of(" \t\r\n");
+            if (nonspace == std::string_view::npos) { text = {}; return true; }
+            text.remove_prefix(nonspace);
+            const bool comment = text.starts_with("<!--");
+            if (!comment && !text.starts_with("<?")) return true;
+            const auto end = text.find(comment ? "-->" : "?>", comment ? 4 : 2);
+            if (end == std::string_view::npos) return false;
+            text.remove_prefix(end + (comment ? 3 : 2));
+        }
+    };
+    if (!skip_misc(xml) || !xml.starts_with("<")) return false;
+    const auto name_end = xml.find_first_of(" \t\r\n>/", 1);
+    if (name_end == std::string_view::npos) return false;
+    const auto qualified = xml.substr(1, name_end - 1);
+    const auto colon = qualified.find(':');
+    const auto local = colon == std::string_view::npos ? qualified : qualified.substr(colon + 1);
+    if (local != "CompleteMultipartUploadResult" || colon == 0 ||
+        (colon != std::string_view::npos && qualified.find(':', colon + 1) != std::string_view::npos)) return false;
+    const auto open_end = xml.find('>', name_end);
+    if (open_end == std::string_view::npos || xml[open_end - 1] == '/') return false;
+    const std::string close = "</" + std::string(qualified);
+    const auto close_start = xml.rfind(close);
+    if (close_start == std::string_view::npos || close_start <= open_end) return false;
+    auto tail = xml.substr(close_start + close.size());
+    const auto close_end = tail.find_first_not_of(" \t\r\n");
+    if (close_end == std::string_view::npos || tail[close_end] != '>') return false;
+    tail.remove_prefix(close_end + 1);
+    return skip_misc(tail) && tail.empty();
+}
+
 bool S3HttpRedirectRefused(int status)
 {
     return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
@@ -1998,6 +2036,11 @@ bool S3Client::PutStream(const std::string& key, std::istream& body, uint64_t co
                            err) ||
             !FinishS3Http(res, err)) {
             err = FailCloud(err, m_write_secret.empty() ? m_secret : m_write_secret);
+            return false;
+        }
+        const std::string response(res.body.begin(), res.body.end());
+        if (!S3MultipartCompletionSucceeded(response)) {
+            err = FailCloud("s3 https multipart completion response is not successful");
             return false;
         }
         return true;
