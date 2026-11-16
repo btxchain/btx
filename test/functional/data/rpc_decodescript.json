@@ -3,7 +3,7 @@
         "5120eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         {
             "asm": "1 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "address": "bcrt1pamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhqz6nvlh",
+            "address": "btxrt1pamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhq78acaq",
             "desc": "rawtr(eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee)#jk7c6kys",
             "type": "witness_v1_taproot"
         }
@@ -12,8 +12,8 @@
         "5102eeee",
         {
             "asm": "1 -28398",
-            "address": "bcrt1pamhqk96edn",
-            "desc": "addr(bcrt1pamhqk96edn)#vkh8uj5a",
+            "address": "btxrt1pamhq8gq8e7",
+            "desc": "addr(btxrt1pamhq8gq8e7)#0eqzmxvs",
             "type": "witness_unknown"
         }
     ],
@@ -21,8 +21,8 @@
         "0020eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         {
             "asm": "0 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "address": "bcrt1qamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhqgdn98t",
-            "desc": "addr(bcrt1qamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhqgdn98t)#afaecevx",
+            "address": "btxrt1qamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhq5sa39u",
+            "desc": "addr(btxrt1qamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhq5sa39u)#04fn062d",
             "type": "witness_v0_scripthash",
             "p2sh": "2MwGk8mw1GBP6U9D5X8gTvgvXpuknmAK3fo"
         }
@@ -69,9 +69,9 @@
             "p2sh": "2N34iiGoUUkVSPiaaTFpJjB1FR9TXQu3PGM",
             "segwit": {
                 "asm": "0 96c2368fc30514a438a8bd909f93c49a1549d77198ccbdb792043b666cb24f42",
-                "desc": "addr(bcrt1qjmprdr7rq522gw9ghkgfly7yng25n4m3nrxtmdujqsakvm9jfapqk795l5)#5akkdska",
+                "desc": "addr(btxrt1qjmprdr7rq522gw9ghkgfly7yng25n4m3nrxtmdujqsakvm9jfapq2rtqar)#h3uphjva",
                 "hex": "002096c2368fc30514a438a8bd909f93c49a1549d77198ccbdb792043b666cb24f42",
-                "address": "bcrt1qjmprdr7rq522gw9ghkgfly7yng25n4m3nrxtmdujqsakvm9jfapqk795l5",
+                "address": "btxrt1qjmprdr7rq522gw9ghkgfly7yng25n4m3nrxtmdujqsakvm9jfapq2rtqar",
                 "type": "witness_v0_scripthash",
                 "p2sh-segwit": "2MtoejEictTQ6XtmHYzoYttt35Ec6krqFKN"
             }
