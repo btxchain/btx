@@ -145,6 +145,47 @@ class Journal:
                        (sid,rev,body['principal'],body['peer'],body['stage'],local_dump(body)))
             self.store._audit(db,{'type':'swap_v2_saved','id':sid,'revision':rev,'stage':body['stage']})
         return rev
+    def close_unfunded_terminal(self, sid, body, expected):
+        """Atomically close an unfunded session, including old partial closeouts."""
+        require(body['stage'] in {'cancelled','rejected'}, 'SESSION_STATE', 'Expected unfunded terminal state')
+        with self.store.transaction() as db:
+            current = db.execute('SELECT revision,body FROM sn_negotiations WHERE id=?', (sid,)).fetchone()
+            require(current and current[0] == expected, 'REVISION_CONFLICT', 'Concurrent swap update')
+            state = local_load(current[1])
+            rid = state.get('reservation_id')
+            require(body.get('reservation_id') == rid, 'RECOVERY_CONFLICT', 'Reservation changed')
+            require(not any(state.get(k) for k in ('funding_prepared','funding_broadcast',
+                    'recovery_ready','secret_exposed','fund_op','refund_op','evm_refund_plan')),
+                    'FUNDS_LOCKED', 'Prepared/funded swaps require refund recovery')
+            own = 'a' if state['role'] == 'initiator' else 'b'
+            require(not state.get('refs', {}).get(own), 'FUNDS_LOCKED', 'Local funding reference requires recovery')
+            require(not db.execute('SELECT 1 FROM sn_operations WHERE swap_id=?', (sid,)).fetchone(),
+                    'FUNDS_LOCKED', 'Durable operations require recovery')
+            if rid:
+                require(not db.execute('SELECT 1 FROM coinlocks WHERE reservation_id=?', (rid,)).fetchone(),
+                        'FUNDS_LOCKED', 'Reserved inputs require recovery')
+            grants = db.execute('SELECT id,principal,body,consumed FROM sn_grants WHERE swap_id=?', (sid,)).fetchall()
+            for gid, principal, raw, consumed in grants:
+                grant = local_load(raw)
+                require(not consumed, 'FUNDS_LOCKED', 'Consumed funding grant requires recovery')
+                require(principal == state['principal'] and grant['principal'] == principal
+                        and grant['swap_id'] == sid and grant['reservation_id'] == rid,
+                        'RECOVERY_CONFLICT', 'Signing grant does not match session reservation')
+            require(not state.get('grant_id') or any(g[0] == state['grant_id'] for g in grants),
+                    'RECOVERY_CONFLICT', 'Saved signing grant missing')
+            if rid:
+                reservation = db.execute('SELECT principal,state FROM reservations WHERE id=?', (rid,)).fetchone()
+                require(reservation and reservation[0] == state['principal'],
+                        'RECOVERY_CONFLICT', 'Reservation does not match session owner')
+                require(reservation[1] in {'held','closed'}, 'FUNDS_LOCKED', 'Funded reservation requires recovery')
+                if reservation[1] == 'held':
+                    self.store._settle_reservation(db, rid, 0)
+                # Old code could commit release but fail the session write.
+                # Complete only the terminal state without touching mandate
+                # counters again or weakening global settlement guards.
+            db.execute('UPDATE sn_grants SET revoked=1 WHERE swap_id=?', (sid,))
+            return self.save(sid, body, expected, db=db)
+
     def close_unfunded_responder(self, sid, body, expected):
         """Release an unfunded responder after the caller verifies the remote refund."""
         rid = body["reservation_id"]

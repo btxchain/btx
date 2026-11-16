@@ -230,8 +230,8 @@ class Coordinator:
         require(not self._imported_unknown(sid,s),'RECOVERY_READ_ONLY','Imported payment state is unresolved')
         require(not s['funding_prepared'] and not s['funding_broadcast'],'FUNDS_LOCKED','Prepared/funded swaps require refund recovery')
         if s['stage']=='cancelled':return self._safe_view(sid,s)
-        self.journal.store.settle_reservation(s['reservation_id'],'0')
-        s['stage']='cancelled';s['updated_at']=self.now();self._save(sid,s,rev)
+        s['stage']='cancelled';s['updated_at']=self.now()
+        self.journal.close_unfunded_terminal(sid,s,rev)
         self.emit(s['peer'],'cancel',sid,{'quote_id':s['quote_id']})
         return self._safe_view(sid,s)
     def receive_cancel(self,sender,sid,body):
@@ -241,9 +241,9 @@ class Coordinator:
         try:rev,s=self.journal.load(sid)
         except SwapError:return
         if s['peer']!=sender or s['funding_prepared'] or s['funding_broadcast'] or s['stage'] in TERMINAL:return
-        if s.get('reservation_id'):self.journal.store.settle_reservation(s['reservation_id'],'0')
+        if self._imported_unknown(sid,s):return
         s['stage']='rejected';s['decline']={'code':body['code'],'message':body['message']}
-        s['updated_at']=self.now();self._save(sid,s,rev)
+        s['updated_at']=self.now();self.journal.close_unfunded_terminal(sid,s,rev)
     def _persist_prepared(self,sid,asset,kind,prepared):
         return self.journal.prepare(sid,asset,kind,prepared.txid,prepared.raw,
                                     {**prepared.metadata,'reference':prepared.reference,'fee_atoms':prepared.fee_atoms})

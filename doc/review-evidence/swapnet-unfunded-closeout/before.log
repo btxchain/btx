@@ -1,0 +1,149 @@
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+____________________ test_atomic_rollback_and_retry[cancel] ____________________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/repair-runtime-before/test_atomic_rollback_and_retry0')
+kind = 'cancel'
+
+    @pytest.mark.parametrize('kind',['cancel','decline'])
+    def test_atomic_rollback_and_retry(tmp_path,kind):
+        with session(tmp_path/'pair',kind) as p:
+            st=p.nodes['alice'][0];before=accounting(p);grants=grant_rows(p)
+            terminal='cancelled' if kind=='cancel' else 'rejected'
+            st.db.execute("CREATE TEMP TRIGGER fail_terminal BEFORE UPDATE ON sn_negotiations "
+              "WHEN NEW.id='"+p.sid+"' AND NEW.stage='"+terminal+"' "
+              "BEGIN SELECT RAISE(ABORT,'injected terminal write failure'); END")
+            with pytest.raises(sqlite3.IntegrityError,match='injected terminal write failure'):terminate(p,kind)
+>           assert accounting(p)==before  # release and session update must roll back together
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AssertionError: assert {'cost': 1050...mmitted', ...} == {'cost': 1050...mmitted', ...}
+E             
+E             Omitting 3 identical items, use -vv to show
+E             Differing items:
+E             {'held': 0} != {'held': 10500}
+E             {'reservation': 'closed'} != {'reservation': 'held'}
+E             Use -v to get more diff
+
+work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py:62: AssertionError
+___________________ test_atomic_rollback_and_retry[decline] ____________________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/repair-runtime-before/test_atomic_rollback_and_retry1')
+kind = 'decline'
+
+    @pytest.mark.parametrize('kind',['cancel','decline'])
+    def test_atomic_rollback_and_retry(tmp_path,kind):
+        with session(tmp_path/'pair',kind) as p:
+            st=p.nodes['alice'][0];before=accounting(p);grants=grant_rows(p)
+            terminal='cancelled' if kind=='cancel' else 'rejected'
+            st.db.execute("CREATE TEMP TRIGGER fail_terminal BEFORE UPDATE ON sn_negotiations "
+              "WHEN NEW.id='"+p.sid+"' AND NEW.stage='"+terminal+"' "
+              "BEGIN SELECT RAISE(ABORT,'injected terminal write failure'); END")
+            with pytest.raises(sqlite3.IntegrityError,match='injected terminal write failure'):terminate(p,kind)
+>           assert accounting(p)==before  # release and session update must roll back together
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           AssertionError: assert {'cost': 1050...roposed', ...} == {'cost': 1050...roposed', ...}
+E             
+E             Omitting 3 identical items, use -vv to show
+E             Differing items:
+E             {'held': 0} != {'held': 10500}
+E             {'reservation': 'closed'} != {'reservation': 'held'}
+E             Use -v to get more diff
+
+work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py:62: AssertionError
+_________ test_legacy_partial_recovery_preserves_other_budget[cancel] __________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/repair-runtime-before/test_legacy_partial_recovery_p0')
+kind = 'cancel'
+
+    @pytest.mark.parametrize('kind',['cancel','decline'])
+    def test_legacy_partial_recovery_preserves_other_budget(tmp_path,kind):
+        with session(tmp_path/'pair',kind) as p:
+            st,j,auth,c=p.nodes['alice'];s=p.state('alice');rid=s['reservation_id']
+            mid=st.db.execute('SELECT mandate_id FROM reservations WHERE id=?',(rid,)).fetchone()[0]
+            q=Quote.parse(s['quote']['quote'])
+            used=st.reserve(replace(q,nonce='77'*32,sequence=2),mid,'alice','500',p.time())
+            st.settle_reservation(used,'50')
+            other=st.reserve(replace(q,nonce='88'*32,sequence=3),mid,'alice','500',p.time())
+            # Recreate exactly the persisted legacy split state already reproduced:
+            # release committed, terminal session save never committed.
+            st.settle_reservation(rid,'0');before=accounting(p)
+            assert before['reservation']=='closed' and before['held']>0 and before['used']==50
+            totals=st.db.execute('SELECT id,held,used FROM mandates ORDER BY id').fetchall()
+            assert close_count(p)==1
+>           p.restart('alice');terminate(p,kind)
+                               ^^^^^^^^^^^^^^^^^
+
+work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py:86: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py:45: in terminate
+    if kind=='cancel':return c.cancel(Principal(actor),p.sid)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/coordinator.py:233: in cancel
+    self.journal.store.settle_reservation(s['reservation_id'],'0')
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/store.py:148: in settle_reservation
+    self._settle_reservation(db, reservation_id, cost, verified_terminal=verified_terminal)
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/store.py:153: in _settle_reservation
+    require(row[2] in {'held','funded'},"RESERVATION_FINAL","Reservation already finalized")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+condition = False, code = 'RESERVATION_FINAL'
+message = 'Reservation already finalized'
+
+    def require(condition, code, message):
+        if not condition:
+>           raise SwapError(code, message)
+E           swapnet.errors.SwapError: RESERVATION_FINAL: Reservation already finalized
+
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/errors.py:11: SwapError
+_________ test_legacy_partial_recovery_preserves_other_budget[decline] _________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/repair-runtime-before/test_legacy_partial_recovery_p1')
+kind = 'decline'
+
+    @pytest.mark.parametrize('kind',['cancel','decline'])
+    def test_legacy_partial_recovery_preserves_other_budget(tmp_path,kind):
+        with session(tmp_path/'pair',kind) as p:
+            st,j,auth,c=p.nodes['alice'];s=p.state('alice');rid=s['reservation_id']
+            mid=st.db.execute('SELECT mandate_id FROM reservations WHERE id=?',(rid,)).fetchone()[0]
+            q=Quote.parse(s['quote']['quote'])
+            used=st.reserve(replace(q,nonce='77'*32,sequence=2),mid,'alice','500',p.time())
+            st.settle_reservation(used,'50')
+            other=st.reserve(replace(q,nonce='88'*32,sequence=3),mid,'alice','500',p.time())
+            # Recreate exactly the persisted legacy split state already reproduced:
+            # release committed, terminal session save never committed.
+            st.settle_reservation(rid,'0');before=accounting(p)
+            assert before['reservation']=='closed' and before['held']>0 and before['used']==50
+            totals=st.db.execute('SELECT id,held,used FROM mandates ORDER BY id').fetchall()
+            assert close_count(p)==1
+>           p.restart('alice');terminate(p,kind)
+                               ^^^^^^^^^^^^^^^^^
+
+work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py:86: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py:46: in terminate
+    return c.receive_decline(p.state(actor)['peer'],p.sid,{'code':'UNAVAILABLE','message':'Legitimate proposal decline'})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/coordinator.py:244: in receive_decline
+    if s.get('reservation_id'):self.journal.store.settle_reservation(s['reservation_id'],'0')
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/store.py:148: in settle_reservation
+    self._settle_reservation(db, reservation_id, cost, verified_terminal=verified_terminal)
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/store.py:153: in _settle_reservation
+    require(row[2] in {'held','funded'},"RESERVATION_FINAL","Reservation already finalized")
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+condition = False, code = 'RESERVATION_FINAL'
+message = 'Reservation already finalized'
+
+    def require(condition, code, message):
+        if not condition:
+>           raise SwapError(code, message)
+E           swapnet.errors.SwapError: RESERVATION_FINAL: Reservation already finalized
+
+work/btx-lanes/session-1/swapnet-foreign-rpc-refund-recovery/source/swapnet/errors.py:11: SwapError
+=========================== short test summary info ============================
+FAILED work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py::test_atomic_rollback_and_retry[cancel]
+FAILED work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py::test_atomic_rollback_and_retry[decline]
+FAILED work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py::test_legacy_partial_recovery_preserves_other_budget[cancel]
+FAILED work/btx-lanes/session-1/swapnet-unfunded-closeout-recovery/test_atomic_closeout.py::test_legacy_partial_recovery_preserves_other_budget[decline]
+4 failed, 23 deselected in 0.46s

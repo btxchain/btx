@@ -1,0 +1,36 @@
+{
+  "base": "1e2f8b5f12295002334d3390c12cac0bb4ae2aff",
+  "platform": "macOS ARM64; Python3.12.14; pytest8.4.2",
+  "before": {
+    "selected_core_failures": 4,
+    "deselected": 23,
+    "seconds": 0.46,
+    "cases": "same atomic rollback/retry and legacy partial recovery cases"
+  },
+  "after": {
+    "full_candidate_passed": 27,
+    "seconds": 2.15
+  },
+  "additional_controls": {
+    "passed": 9,
+    "seconds": 3.6,
+    "scope": "2importedBTC cases plus normal settlement/restart/refund/early-refusal and proposal/start rollback",
+    "source_note": "Run before added own-reference guard; selected paths have no own reference when entering new helper, and existing responder-refund helper unchanged. Imported BTC cases also rerun in final27.",
+    "distinct_additional_existing_controls": 7
+  },
+  "candidate_files_sha256": {
+    "contrib/swapnet/swapnet/coordinator.py": "840b25d3a933ae74663ca43b8ff90f0d5c74bfe58ac20b5d787e5aeb0dd8f05e",
+    "contrib/swapnet/swapnet/journal.py": "dc22f7a54f3cc36db109b6bd098a336015af6f281091f102d50cb4fbc6f96a23",
+    "contrib/swapnet/tests/test_atomic_closeout.py": "cd807e043202915c0703f36fbc96fd15d1957a5d549822a76ff6214860398b0d"
+  },
+  "evidence_files_sha256": {
+    "controls.log": "30164ee3151f2c846ae2b744c53bf78e8e1da63e275ce52dfe9f13616da2a8db",
+    "README.md": "2b20a65f7432d86a6095dff6664a85e330e0eb6c61b59d5a996f9c00bb2853a0",
+    "before.log": "72ff8dbed2a755723aedd5e07a304753007dcf1b562f40ed2693010e16720aa6",
+    "after.log": "08e2fba6158dfcfe23f942ecd297ea9e9ad7e4ddff14d0f2eeddc81e563175c3"
+  },
+  "real": "Mac production Coordinator/Journal/Store/Authority + SQLite trigger abort/rollback/reopen; real reservation/audit/grant accounting",
+  "simulated": "Pair ledgers, signing, chain calls; native chain/wallet not run",
+  "native_nodes": false,
+  "sanitization": "Only absolute workspace prefix replaced in logs; assertions/results unchanged"
+}
