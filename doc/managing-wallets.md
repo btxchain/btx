@@ -160,6 +160,106 @@ See [BTX Browser Wallet and Node Wallet Interop](btxwallet-browser-node-interop.
 for the full `.btxwallet` schema boundary, browser/node import and export flows,
 and why native node wallets should usually use encrypted `.bundle.btx` archives.
 
+#### Recovery when historical blocks are unavailable
+
+A successful `.btxwallet` seed import does not mean that all historical payments
+have been found. `rescan=false` skips the explicit import rescan; shielded key
+rehydration can still scan and report missing history. A zero displayed balance
+is not a reliable recovery result while discovery is incomplete.
+
+Deferred encrypted seed restore on pruned history requires a build containing
+[the fresh-restore correction in #753](https://github.com/btxchain/btx/pull/753).
+Check that the correction is present before relying on this route. The procedure
+below starts from a **successful encrypted seed restore** whose scan is
+incomplete. A failed restore can leave a destination wallet behind; its presence
+does not prove that the requested seed was installed. Preserve that destination
+and the original bundle rather than overwriting its seed or deleting it to retry.
+Use a fresh wallet name for another restore attempt.
+
+##### Identify incomplete discovery
+
+Unlock the successfully restored wallet using its wallet passphrase, then check
+`z_verifywalletintegrity`. `scan_incomplete=true` means discovery is incomplete;
+`z_getbalance` can also report that condition. Missing seed/key warnings while
+locked must be re-evaluated after unlock. A full `rescanblockchain 0` cannot read
+blocks that the node has pruned, and a failed or aborted scan is not recovery.
+
+Keep the original `.btxwallet` file private: it contains the plaintext master
+seed. For the continuation below, use `backupwallet` to copy the restored wallet
+database. This is different from another seed export or an archive export; an
+encrypted database backup still requires its wallet passphrase. See the
+[backup and archive formats](#143-btx-wallet-bundle-archive-rpc) and
+[encrypted backup recovery guidance](wallet-encrypted-backup-recovery.md) for
+their separate credential and address-discovery requirements.
+
+##### Preserve the database and move to available history
+
+The following examples use `seed-recovery` for the successfully restored wallet
+on the incomplete-history node. Use an existing private backup directory and a new filename. Protect the
+backup and its wallet passphrase. Check each command succeeds before continuing.
+On that node:
+
+```sh
+btx-cli -rpcwallet=seed-recovery walletlock
+btx-cli -rpcwallet=seed-recovery backupwallet "/secure/recovery/seed-recovery.dat"
+```
+
+After confirming that the backup succeeded, unload the source wallet:
+
+```sh
+btx-cli unloadwallet "seed-recovery" false
+```
+
+Transfer that backup to a
+trusted full-history node and verify that the copied file matches it. These steps assume both nodes
+use the same network and the same corrected build, as in the tested route. The destination must have the historical
+blocks needed for a scan from genesis and be synchronized with the chain being
+recovered. Turning pruning off alone does not restore blocks already deleted.
+
+On the full-history node, choose an unused destination name and restore the
+copied database. The path below refers to a file on that node:
+
+```sh
+btx-cli restorewallet "recovered-wallet" "/secure/recovery/seed-recovery.dat"
+```
+
+Only after that restore succeeds, unlock the newly restored wallet and scan:
+
+```sh
+btx-cli -rpcwallet=recovered-wallet -stdinwalletpassphrase walletpassphrase 600
+btx-cli -rpcwallet=recovered-wallet rescanblockchain 0
+```
+
+Enter the wallet passphrase at the prompt. Adjust the unlock timeout for the
+operation; follow scan errors rather than assuming an unlock completed recovery.
+Omit `stop_height`: a historical partial shielded rescan can be refused. This
+continuation uses the restored database's seed and keys, without re-importing the
+seed or editing shielded state. Keep the incomplete-history copy unloaded while
+using the recovered wallet.
+
+##### Verify the result
+
+After the scan succeeds, while the recovered wallet is unlocked:
+
+```sh
+btx-cli -rpcwallet=recovered-wallet z_verifywalletintegrity
+btx-cli -rpcwallet=recovered-wallet z_getbalance
+btx-cli -rpcwallet=recovered-wallet z_listunspent
+```
+
+Require `scan_incomplete=false`, `master_seed_available=true` and
+`integrity_ok=true`, and check warnings and known receipts against your records.
+These local checks do not prove that arbitrarily distant derived addresses have
+been searched. Do not treat an unexpected balance as final. Relock with
+`walletlock` when finished and retain a new database backup after recovery.
+
+The RPC route was exercised with disposable wallets in a two-node CPU regtest,
+including restart, recovery of the original note, confirmed spending and later
+receiving. The CLI examples were checked against source, not executed. It is not qualification of production-scale recovery, arbitrary
+address gaps, in-place redownload/reindex, GUI recovery, cross-version migration
+or abrupt interruption. It requires no movement of coins between the two wallet
+copies to discover the historical receipts.
+
 ### 1.4.2 BTX Wallet Backup Bundle RPC
 
 BTX now provides a native per-wallet RPC for consistent backup exports:
