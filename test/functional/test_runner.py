@@ -676,6 +676,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_bcp1_prepare_package.py --descriptors',
     'wallet_shielded_ring_size_policy.py',
     'wallet_bcp1_depositpool_rescan.py --descriptors',
+    'wallet_bcp1_recovery.py --descriptors',
     'wallet_shielded_chunking.py',
     'wallet_shielded_cross_wallet.py',
     'wallet_shielded_restore_gap_window.py',
