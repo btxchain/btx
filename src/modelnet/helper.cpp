@@ -5520,10 +5520,43 @@ int64_t g_seed_last_ms{0};
 // Set by RunModelDaemon so a pacing upload wakes on shutdown.
 static std::atomic<bool>* g_seed_pace_stop{nullptr};
 
+// An absent permit preserves standalone helper policy. An existing permit that
+// cannot be read must not turn a governor pause into permission for optional work.
+static bool ReadGovernorPermit(const ModelCatalog& cat, UniValue& permit)
+{
+    const fs::path path = HelperDir(cat) / "governor-permit.json";
+    errno = 0;
+    std::ifstream in(path, std::ios::binary);
+    const int open_error = errno;
+    if (!in) {
+        std::error_code ec;
+        const auto status = fs::symlink_status(path, ec);
+        // Keep the original open error: a sharing/access error must not become
+        // standalone mode merely because the pathname changes before this check.
+        if (open_error == ENOENT &&
+            (!ec || ec == std::errc::no_such_file_or_directory) &&
+            status.type() == fs::file_type::not_found) {
+            const bool parent_exists = fs::is_directory(path.parent_path(), ec);
+            if (!parent_exists || ec) return false;
+            permit = UniValue(UniValue::VOBJ);
+            return true;
+        }
+        return false;
+    }
+    std::string contents;
+    char buffer[4096];
+    while (in) {
+        in.read(buffer, sizeof(buffer));
+        contents.append(buffer, static_cast<size_t>(in.gcount()));
+    }
+    if (in.bad() || !in.eof() || !permit.read(contents) || !permit.isObject()) return false;
+    return true;
+}
+
 bool AllowModelSeedBytes(const ModelCatalog& cat, size_t n)
 {
     UniValue o;
-    ReadJsonFile(HelperDir(cat) / "governor-permit.json", o);
+    if (!ReadGovernorPermit(cat, o)) return false;
     bool seeding_allowed = true;
     if (o.exists("seeding_allowed") && o["seeding_allowed"].isBool()) {
         seeding_allowed = o["seeding_allowed"].get_bool();
@@ -5581,7 +5614,7 @@ bool AllowModelSeedBytes(const ModelCatalog& cat, size_t n)
 static bool PreservationPermitted(const ModelCatalog& cat)
 {
     UniValue o;
-    ReadJsonFile(HelperDir(cat) / "governor-permit.json", o);
+    if (!ReadGovernorPermit(cat, o)) return false;
     if (!o.exists("preservation_allowed")) return true;
     return o["preservation_allowed"].isBool() && o["preservation_allowed"].get_bool();
 }
