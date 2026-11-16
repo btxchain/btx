@@ -606,4 +606,79 @@ BOOST_AUTO_TEST_CASE(finished_hydration_releases_its_quarantine_copy)
     }
 }
 
+BOOST_AUTO_TEST_CASE(job_cleanup_failure_preserves_valid_eof_checkpoint)
+{
+    using namespace modelnet;
+    const std::vector<unsigned char> file(PIECE_SIZE, 0x35);
+    Digest48 artifact{};
+    artifact.data[0] = 0x83;
+    const fs::path jobs = Scratch(m_path_root, "job-cleanup-jobs");
+    ModelStore live(Scratch(m_path_root, "job-cleanup-live"), 64 << 20);
+    ModelStore q(Scratch(m_path_root, "job-cleanup-q"), 64 << 20);
+    std::string err;
+    FileStreamHydration first(artifact, 0, file.size(), live, q);
+    first.SetJobDir(jobs);
+    first.SetExpectedSha384(DigestOf(file));
+    BOOST_REQUIRE(first.Feed(Span<const unsigned char>{file.data(), file.size()}, err));
+    FileStreamJobRecord rec;
+    BOOST_REQUIRE(LoadFileStreamJob(jobs, artifact, 0, rec, err));
+
+    // A nonempty directory at the job path makes removal fail on every platform.
+    const fs::path job = FileStreamJobPath(jobs, artifact, 0);
+    BOOST_REQUIRE(fs::remove(job));
+    fs::create_directories(job / "blocker");
+    BOOST_CHECK(!first.Finish(err));
+    BOOST_CHECK_EQUAL(err, "failed to delete file stream job");
+    BOOST_CHECK(!first.IntegrityFailed());
+    BOOST_CHECK(live.HasPiece(artifact, 0, 0));
+    BOOST_CHECK(q.HasPiece(artifact, 0, 0));
+
+    // Reconstruct the saved EOF job after the cleanup obstruction is removed.
+    fs::remove_all(job);
+    BOOST_REQUIRE(SaveFileStreamJob(jobs, rec, err));
+    FileStreamHydration resumed(artifact, 0, file.size(), live, q);
+    resumed.SetJobDir(jobs);
+    BOOST_REQUIRE(resumed.ApplyRecord(rec, err));
+    BOOST_REQUIRE_MESSAGE(resumed.Finish(err), err);
+    BOOST_CHECK(resumed.IsAdvertisable());
+    BOOST_CHECK(!fs::exists(job));
+    BOOST_CHECK(!q.HasPiece(artifact, 0, 0));
+    std::vector<unsigned char> stored;
+    BOOST_REQUIRE(live.GetPiece(artifact, 0, 0, stored, err));
+    BOOST_CHECK(stored == file);
+}
+
+BOOST_AUTO_TEST_CASE(missing_eof_quarantine_does_not_advance_resume_cursor)
+{
+    using namespace modelnet;
+    const std::vector<unsigned char> file(PIECE_SIZE + 123, 0x35);
+    Digest48 artifact{};
+    artifact.data[0] = 0x84;
+    ModelStore live(Scratch(m_path_root, "missing-eof-live"), 64 << 20);
+    ModelStore q(Scratch(m_path_root, "missing-eof-q"), 64 << 20);
+    FileStreamJobRecord rec;
+    rec.artifact = artifact;
+    rec.file_index = 0;
+    rec.expected_size = file.size();
+    rec.next_piece = 2;
+    rec.resume_offset = 2 * PIECE_SIZE;
+    rec.have_sha = true;
+    rec.expected_sha384 = DigestOf(file);
+    std::string err;
+    // One valid quarantine piece remains; the other was removed by old cleanup.
+    FileStreamHydration partial(artifact, 0, file.size(), live, q);
+    BOOST_REQUIRE(partial.Feed(Span<const unsigned char>{file.data(), PIECE_SIZE}, err));
+    FileStreamHydration resumed(artifact, 0, file.size(), live, q);
+    BOOST_CHECK(!resumed.ApplyRecord(rec, err));
+    BOOST_CHECK_EQUAL(err, "file stream EOF checkpoint missing piece");
+    BOOST_CHECK_EQUAL(resumed.Progress().next_piece, 0U);
+    BOOST_CHECK_EQUAL(resumed.Progress().bytes_ingested, 0U);
+    BOOST_CHECK(q.HasPiece(artifact, 0, 0));
+    // A caller can start fresh without weakening the final digest check.
+    resumed.SetExpectedSha384(DigestOf(file));
+    BOOST_REQUIRE(resumed.Feed(Span<const unsigned char>{file.data(), file.size()}, err));
+    BOOST_REQUIRE_MESSAGE(resumed.Finish(err), err);
+    BOOST_CHECK(resumed.IsAdvertisable());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

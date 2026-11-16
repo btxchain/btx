@@ -398,6 +398,16 @@ bool FileStreamHydration::ApplyRecord(const FileStreamJobRecord& rec, std::strin
         err = "file stream job cursor past file";
         return false;
     }
+    // Older successful cleanup could remove quarantine before deleting the EOF
+    // job. Do not resume such a cursor: the caller must fetch the file afresh.
+    if (norm.next_piece == pieces) {
+        for (uint32_t i = 0; i < norm.next_piece; ++i) {
+            if (!m_quarantine->HasPiece(m_artifact, m_file_index, i)) {
+                err = "file stream EOF checkpoint missing piece";
+                return false;
+            }
+        }
+    }
     // A final short piece has an aligned cursor but contains only the remaining
     // file bytes. Finalization still re-reads and authenticates every piece.
     m_st.next_piece = norm.next_piece;
@@ -483,8 +493,15 @@ bool FileStreamHydration::Finish(std::string& err)
 {
     m_integrity_failed = false;
     if (!FinishLocked(err)) return false;
-    if (m_job_dir.empty()) return true;
-    return DeleteFileStreamJob(m_job_dir, m_artifact, m_file_index, err);
+    // Retain the resume data until its job is gone. A crash or job-cleanup
+    // failure must not leave an EOF cursor pointing at deleted quarantine.
+    if (!m_job_dir.empty() && !DeleteFileStreamJob(m_job_dir, m_artifact, m_file_index, err)) return false;
+
+    std::error_code ec;
+    std::filesystem::remove_all(m_quarantine->Root() / "artifacts" / m_artifact.Hex().c_str() /
+                                std::to_string(m_file_index).c_str(), ec);
+    m_quarantine->RecountUsed();
+    return true;
 }
 
 bool FileStreamHydration::FinishLocked(std::string& err)
@@ -551,14 +568,6 @@ bool FileStreamHydration::FinishLocked(std::string& err)
         }
     }
     if (!m_store->SavePieceIndex(m_artifact, m_file_index, idx, err)) return false;
-
-    // The live store now holds this file's verified pieces and index. Drop the
-    // quarantine copy: the quarantine counts its pieces against its own quota,
-    // so every kept copy brought later hydrations closer to "disk quota".
-    std::error_code ec;
-    std::filesystem::remove_all(m_quarantine->Root() / "artifacts" / m_artifact.Hex().c_str() /
-                                std::to_string(m_file_index).c_str(), ec);
-    m_quarantine->RecountUsed();
 
     m_st.complete = true;
     m_st.quarantined = false;
