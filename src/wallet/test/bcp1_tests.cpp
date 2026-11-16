@@ -1437,5 +1437,79 @@ BOOST_AUTO_TEST_CASE(reorg_observation_cache_caps_and_evicts_oldest)
     ResetDepositObservationCache();
 }
 
+// D1: FindWalletSpender must report the right spender of a deposit through the
+// spends index: the confirmed spender wins, and an abandoned or conflicted one
+// does not count, exactly as the old mapWallet walk did.
+BOOST_AUTO_TEST_CASE(deposit_spender_states)
+{
+    auto wallet = MakeWatchOnlyDescriptorWallet(*this, "bcp1-spender");
+    const auto seed = MasterSeedFromDerivation();
+    const CPQKey key = DeriveMlDsa(seed, bcp1::BRANCH_DEPOSIT, 0);
+    const auto leaf = BuildP2MRScript(PQAlgorithm::ML_DSA_44, key.GetPubKey());
+    const uint256 root = ComputeP2MRMerkleRoot({ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaf)});
+    const WitnessV2P2MR dest{root};
+    UniValue pool(UniValue::VARR);
+    UniValue item(UniValue::VOBJ);
+    item.pushKV("index", 0);
+    item.pushKV("branch", 0);
+    item.pushKV("address", EncodeDestination(dest));
+    item.pushKV("pubkey", HexStr(key.GetPubKey()));
+    item.pushKV("label", "bcp1-deposit-0");
+    pool.push_back(item);
+    bilingual_str ierr;
+    BOOST_REQUIRE_MESSAGE(ImportDepositPool(*wallet, pool, ierr), ierr.original);
+    const CScript spk = GetScriptForDestination(dest);
+
+    LOCK(wallet->cs_wallet);
+    // One funding tx with four deposit outputs.
+    CMutableTransaction fund;
+    fund.vin.emplace_back(COutPoint(Txid::FromUint256(m_rng.rand256()), 0));
+    for (int i = 0; i < 4; ++i) fund.vout.emplace_back(10'000 + i, spk);
+    const CTransactionRef fund_ref = MakeTransactionRef(fund);
+    BOOST_REQUIRE(wallet->AddToWallet(fund_ref, TxStateInactive{}));
+    const uint256 fund_txid = fund_ref->GetHash().ToUint256();
+
+    auto spend = [&](uint32_t vout) {
+        CMutableTransaction sp;
+        sp.vin.emplace_back(COutPoint(fund_ref->GetHash(), vout));
+        sp.vout.emplace_back(500, CScript() << OP_RETURN);
+        return MakeTransactionRef(sp);
+    };
+    const uint256 fake_block = uint256::ONE;
+    // vout0: confirmed spender.
+    const CTransactionRef a = spend(0);
+    BOOST_REQUIRE(wallet->AddToWallet(a, TxStateConfirmed{fake_block, 1, 0}));
+    // vout1: unconfirmed (mempool) spender.
+    const CTransactionRef b = spend(1);
+    BOOST_REQUIRE(wallet->AddToWallet(b, TxStateInMempool{}));
+    // vout2: abandoned spender only.
+    const CTransactionRef c = spend(2);
+    BOOST_REQUIRE(wallet->AddToWallet(c, TxStateInactive{/*abandoned=*/true}));
+    // vout3: a block-conflicted spender and a confirmed spender of the same output.
+    const CTransactionRef d = spend(3);
+    BOOST_REQUIRE(wallet->AddToWallet(d, TxStateBlockConflicted{fake_block, 1}));
+    CMutableTransaction e_mut;
+    e_mut.vin.emplace_back(COutPoint(fund_ref->GetHash(), 3));
+    e_mut.vout.emplace_back(400, CScript() << OP_RETURN);
+    const CTransactionRef e = MakeTransactionRef(e_mut);
+    BOOST_REQUIRE(wallet->AddToWallet(e, TxStateConfirmed{fake_block, 2, 0}));
+
+    const auto s0 = GetDepositStatus(*wallet, fund_txid, 0);
+    BOOST_CHECK(s0.status == DepositStatus::SPENT);
+    BOOST_CHECK_EQUAL(s0.spent_by, a->GetHash().ToUint256());
+
+    const auto s1 = GetDepositStatus(*wallet, fund_txid, 1);
+    BOOST_CHECK(s1.status == DepositStatus::SPENT);
+    BOOST_CHECK_EQUAL(s1.spent_by, b->GetHash().ToUint256());
+
+    const auto s2 = GetDepositStatus(*wallet, fund_txid, 2);
+    BOOST_CHECK(s2.status != DepositStatus::SPENT);
+    BOOST_CHECK(s2.spent_by.IsNull());
+
+    const auto s3 = GetDepositStatus(*wallet, fund_txid, 3);
+    BOOST_CHECK(s3.status == DepositStatus::SPENT);
+    BOOST_CHECK_EQUAL(s3.spent_by, e->GetHash().ToUint256());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet
