@@ -139,6 +139,9 @@ class BountyStore {
     BountyChainIndex m_chain;
     //! The directory whose chain facts are in m_chain (see Load()).
     fs::path m_chain_dir;
+    //! True while bounty-store.json is there but cannot be read (see Load()):
+    //! saving would replace it with the part of the store that is in memory.
+    bool m_unreadable{false};
     MandateBudget m_budget;
     std::map<std::string, std::unique_ptr<MandateBudget>> m_budgets;
 

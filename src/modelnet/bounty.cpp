@@ -1078,8 +1078,19 @@ bool BountyStore::Load(std::string& err)
     m_chain_dir = m_dir;
     // Facts of another directory must not be saved into this one.
     if (load_chain) m_chain.Clear();
+    // A missing file is an empty store. One that is there but cannot be read
+    // or is not an object may hold bounties, mandates and spent budgets: keep
+    // it, and refuse to save over it (PersistLocked) until it is repaired. A
+    // status error counts as present.
+    const fs::path path = m_dir / "bounty-store.json";
+    std::error_code ec;
+    const auto st = std::filesystem::status(path, ec);
+    const bool present = ec ? ec != std::errc::no_such_file_or_directory : fs::exists(st);
     UniValue o;
-    if (!ReadJson(m_dir / "bounty-store.json", o) || !o.isObject()) return true;
+    m_unreadable = present && (!ReadJson(path, o) || !o.isObject());
+    // Read the chain facts once the file is repaired, or the next save drops them.
+    if (m_unreadable) m_chain_dir.clear();
+    if (!present || m_unreadable) return true;
     if (o.exists("epoch")) m_epoch = o["epoch"].getInt<int64_t>();
     if (o.exists("seq")) m_seq = o["seq"].getInt<int64_t>();
     auto load_map = [&](const char* k, auto& dst) {
@@ -1148,6 +1159,10 @@ bool BountyStore::Load(std::string& err)
 
 bool BountyStore::PersistLocked(std::string& err) const
 {
+    if (m_unreadable) {
+        err = "bounty-store.json cannot be read; repair it before changing bounties";
+        return false;
+    }
     UniValue o(UniValue::VOBJ);
     o.pushKV("seq", static_cast<int64_t>(m_seq));
     o.pushKV("epoch", static_cast<int64_t>(m_epoch));
