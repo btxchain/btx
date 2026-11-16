@@ -50,7 +50,7 @@ from test_framework.util import (
     assert_greater_than,
     assert_raises_rpc_error,
 )
-from test_framework.wallet import MiniWallet
+from test_framework.wallet import MiniWallet, MiniWalletMode
 from test_framework.wallet_util import generate_keypair
 from test_framework.authproxy import JSONRPCException
 
@@ -79,7 +79,7 @@ class MempoolAcceptanceTest(BitcoinTestFramework):
         assert_equal(self.nodes[0].getmempoolinfo()['size'], self.mempool_size)  # Must not change mempool state
 
     def _miniwallet_probe(self, node):
-        probe_wallet = MiniWallet(node)
+        probe_wallet = MiniWallet(node, mode=MiniWalletMode.ADDRESS_OP_TRUE)  # BTX: these checks expect MiniWallet's non-standard P2TR output; keep it until they are ported to P2MR
         probe_tx_hex = probe_wallet.create_self_transfer()["tx"].serialize().hex()
         return {
             "tx_hex": probe_tx_hex,

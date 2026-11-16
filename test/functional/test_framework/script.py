@@ -30,6 +30,7 @@ LOCKTIME_THRESHOLD = 500000000
 ANNEX_TAG = 0x50
 
 LEAF_VERSION_TAPSCRIPT = 0xc0
+P2MR_LEAF_VERSION = 0xc2
 
 def hash160(s):
     return ripemd160(sha256(s))
@@ -817,13 +818,13 @@ def BIP341_sha_sequences(txTo):
 def BIP341_sha_outputs(txTo):
     return sha256(b"".join(o.serialize() for o in txTo.vout))
 
-def TaprootSignatureMsg(txTo, spent_utxos, hash_type, input_index=0, *, scriptpath=False, leaf_script=None, codeseparator_pos=-1, annex=None, leaf_ver=LEAF_VERSION_TAPSCRIPT):
+def TaprootSignatureMsg(txTo, spent_utxos, hash_type, input_index=0, *, scriptpath=False, leaf_script=None, codeseparator_pos=-1, annex=None, leaf_ver=LEAF_VERSION_TAPSCRIPT, epoch=0, leaf_tag="TapLeaf"):
     assert (len(txTo.vin) == len(spent_utxos))
     assert (input_index < len(txTo.vin))
     out_type = SIGHASH_ALL if hash_type == 0 else hash_type & 3
     in_type = hash_type & SIGHASH_ANYONECANPAY
     spk = spent_utxos[input_index].scriptPubKey
-    ss = bytes([0, hash_type]) # epoch, hash_type
+    ss = bytes([epoch, hash_type])
     ss += txTo.version.to_bytes(4, "little")
     ss += txTo.nLockTime.to_bytes(4, "little")
     if in_type != SIGHASH_ANYONECANPAY:
@@ -854,7 +855,7 @@ def TaprootSignatureMsg(txTo, spent_utxos, hash_type, input_index=0, *, scriptpa
         else:
             ss += bytes(0 for _ in range(32))
     if scriptpath:
-        ss += TaggedHash("TapLeaf", bytes([leaf_ver]) + ser_string(leaf_script))
+        ss += TaggedHash(leaf_tag, bytes([leaf_ver]) + ser_string(leaf_script))
         ss += bytes([0])
         ss += codeseparator_pos.to_bytes(4, "little", signed=True)
     assert len(ss) == 175 - (in_type == SIGHASH_ANYONECANPAY) * 49 - (out_type != SIGHASH_ALL and out_type != SIGHASH_SINGLE) * 32 + (annex is not None) * 32 + scriptpath * 37
@@ -862,6 +863,24 @@ def TaprootSignatureMsg(txTo, spent_utxos, hash_type, input_index=0, *, scriptpa
 
 def TaprootSignatureHash(*args, **kwargs):
     return TaggedHash("TapSighash", TaprootSignatureMsg(*args, **kwargs))
+
+def p2mr_leaf_hash(leaf_script, leaf_ver=P2MR_LEAF_VERSION):
+    return TaggedHash("P2MRLeaf", bytes([leaf_ver]) + ser_string(leaf_script))
+
+def p2mr_single_leaf(leaf_script):
+    """Return (scriptPubKey, control block) of a P2MR output with one leaf.
+
+    The Merkle root of a single-leaf tree is the leaf hash itself, and the
+    control block is the leaf version with an empty Merkle path."""
+    return CScript([OP_2, p2mr_leaf_hash(leaf_script)]), bytes([P2MR_LEAF_VERSION])
+
+def P2MRSignatureHash(txTo, spent_utxos, hash_type, input_index, *, leaf_script, codeseparator_pos=-1, annex=None):
+    """BTX P2MR script-path sighash: the BIP341 message with epoch 2 and a
+    P2MRLeaf-tagged leaf hash (SignatureHashSchnorr, SigVersion::P2MR)."""
+    msg = TaprootSignatureMsg(txTo, spent_utxos, hash_type, input_index, scriptpath=True, leaf_script=leaf_script,
+                              codeseparator_pos=codeseparator_pos, annex=annex, leaf_ver=P2MR_LEAF_VERSION,
+                              epoch=2, leaf_tag="P2MRLeaf")
+    return TaggedHash("TapSighash", msg)
 
 def taproot_tree_helper(scripts):
     if len(scripts) == 0:
