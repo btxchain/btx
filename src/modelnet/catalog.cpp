@@ -352,7 +352,8 @@ ModelCatalog::ModelCatalog(fs::path dir, uint64_t quota_bytes)
     m_policy.seed_upon_download = true;
     fs::create_directories(m_dir);
     std::string err;
-    LoadLocked(err);
+    // A catalog.json that loaded only in part is not saved over either.
+    if (!LoadLocked(err)) m_unreadable = true;
 }
 
 void ModelCatalog::DemandSeedLocked(CatalogEntry& e)
@@ -601,6 +602,10 @@ bool ModelCatalog::RemoveModel(const Digest48& model_id, Digest48& artifact_out,
 
 bool ModelCatalog::PersistLocked(std::string& err)
 {
+    if (m_unreadable) {
+        err = "catalog.json cannot be read; it is kept and not replaced";
+        return false;
+    }
     UniValue arr(UniValue::VARR);
     for (const auto& m : m_models) {
         UniValue o(UniValue::VOBJ);
@@ -666,11 +671,21 @@ bool ModelCatalog::LoadLocked(std::string& err)
 {
     m_models.clear();
     const fs::path path = m_dir / "catalog.json";
+    m_unreadable = false;
     std::ifstream in(path);
-    if (!in) return true;
+    if (!in) {
+        // A file that is there but cannot be opened is not an empty catalog:
+        // saving over it would drop every model entry and peer it holds.
+        std::error_code ec;
+        const bool regular{fs::is_regular_file(path, ec)};
+        m_unreadable = regular || (ec && ec != std::errc::no_such_file_or_directory);
+        if (m_unreadable) err = "catalog json";
+        return !m_unreadable;
+    }
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     UniValue root;
     if (!root.read(raw) || !root.isObject()) {
+        m_unreadable = true;
         err = "catalog json";
         return false;
     }

@@ -61,6 +61,9 @@ class ModelCatalog {
     mutable std::mutex m_mu;
     std::vector<CatalogEntry> m_models;
     std::vector<std::string> m_peers;
+    //! catalog.json was there but could not be opened or parsed when it was
+    //! loaded; the catalog then refuses to save over it.
+    bool m_unreadable{false};
     PreservationPolicy m_policy;
     //! Running transfers per artifact. Several catalog entries can share one
     //! artifact, so more than one transfer can protect it at a time.
