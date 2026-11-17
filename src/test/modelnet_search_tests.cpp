@@ -9,6 +9,7 @@
 #include <modelnet/provider_route.h>
 #include <modelnet/qualification.h>
 #include <modelnet/search.h>
+#include <random.h>
 #include <span.h>
 #include <test/util/setup_common.h>
 #include <util/fs.h>
@@ -257,6 +258,154 @@ BOOST_AUTO_TEST_CASE(search_dir_01_to_10)
     BOOST_CHECK(d["local"]["pinned"].get_bool());
     BOOST_CHECK_EQUAL(d["release"]["state"].get_str(), "PUBLIC");
     BOOST_CHECK(d.exists("publisher"));
+}
+
+BOOST_AUTO_TEST_CASE(search_health_walks_only_the_model_pieces)
+{
+    using namespace modelnet;
+    // Same counts as a walk over every piece and every range.
+    const auto reference = [](uint32_t total, const std::vector<ProviderObservation>& obs) {
+        std::vector<int> sources(total, 0);
+        for (const auto& o : obs) {
+            for (uint32_t i = 0; i < total; ++i) {
+                for (const auto& r : o.ranges) {
+                    if (RangeCovers(r, i)) {
+                        ++sources[i];
+                        break;
+                    }
+                }
+            }
+        }
+        SwarmHealth h;
+        h.min_piece_sources = total == 0 ? 0 : *std::min_element(sources.begin(), sources.end());
+        for (const int n : sources) {
+            if (n == 0) ++h.pieces_with_0_sources;
+            else if (n == 1) ++h.pieces_with_1_source;
+            else if (n == 2) ++h.pieces_with_2_sources;
+        }
+        return h;
+    };
+    FastRandomContext rng{/*fDeterministic=*/true};
+    for (int round = 0; round < 2000; ++round) {
+        const uint32_t total = 1 + rng.randrange(40);
+        std::vector<ProviderObservation> obs(rng.randrange(5));
+        for (size_t p = 0; p < obs.size(); ++p) {
+            obs[p].provider_id = "p" + std::to_string(p);
+            obs[p].ranges.resize(rng.randrange(6));
+            for (auto& r : obs[p].ranges) {
+                r.first = rng.randrange(50);
+                r.count = 1 + rng.randrange(60);
+            }
+        }
+        const SwarmHealth got = ComputeSwarmHealth(total, 0, obs);
+        const SwarmHealth want = reference(total, obs);
+        BOOST_REQUIRE_EQUAL(got.min_piece_sources, want.min_piece_sources);
+        BOOST_REQUIRE_EQUAL(got.pieces_with_0_sources, want.pieces_with_0_sources);
+        BOOST_REQUIRE_EQUAL(got.pieces_with_1_source, want.pieces_with_1_source);
+        BOOST_REQUIRE_EQUAL(got.pieces_with_2_sources, want.pieces_with_2_sources);
+        BOOST_REQUIRE_EQUAL(got.missing_piece_count, static_cast<uint32_t>(want.pieces_with_0_sources));
+        BOOST_REQUIRE_EQUAL(got.reconstructable, want.pieces_with_0_sources == 0);
+        BOOST_REQUIRE_EQUAL(got.reconstructable, UnionCoversAll(total, [&] {
+            std::vector<std::vector<PieceRange>> all;
+            for (const auto& o : obs) all.push_back(o.ranges);
+            return all;
+        }()));
+    }
+    // Ranges to the end of the piece index space, overlapping within one provider.
+    ProviderObservation wide;
+    wide.provider_id = "wide";
+    wide.ranges = {{0, 0xFFFFFFFFu}, {7, 0xFFFFFFFFu - 7}};
+    ProviderObservation narrow;
+    narrow.provider_id = "narrow";
+    narrow.ranges = {{3, 4}, {12, 100}};
+    const SwarmHealth spanned = ComputeSwarmHealth(10, 0, {wide, narrow});
+    const SwarmHealth spanned_want = reference(10, {wide, narrow});
+    BOOST_CHECK_EQUAL(spanned.min_piece_sources, 1);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_1_source, 6);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_2_sources, 4);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_1_source, spanned_want.pieces_with_1_source);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_2_sources, spanned_want.pieces_with_2_sources);
+    BOOST_CHECK(spanned.reconstructable);
+    // Empty and wrapping ranges cover nothing, as in RangeCovers, and a provider
+    // named twice counts once.
+    ProviderObservation odd;
+    odd.provider_id = "odd";
+    odd.ranges = {{5, 0}, {1, 0xFFFFFFFFu}, {0xFFFFFFF0u, 0x20}};
+    const SwarmHealth odd_health = ComputeSwarmHealth(10, 0, {odd, narrow, narrow});
+    const SwarmHealth odd_want = reference(10, {odd, narrow});
+    BOOST_CHECK_EQUAL(odd_health.providers_observed, 2);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_0_sources, 6);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_1_source, 4);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_0_sources, odd_want.pieces_with_0_sources);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_1_source, odd_want.pieces_with_1_source);
+    BOOST_CHECK(!odd_health.reconstructable);
+
+    // A peer's provider record may announce ranges far longer than the model.
+    // Only the model's pieces count, and the work does not follow the span.
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    };
+    const fs::path root = m_path_root / "health-span";
+    fs::create_directories(root);
+    const fs::path model = root / "span.safetensors";
+    std::string header = R"({"weight":{"dtype":"F32","shape":[256],"data_offsets":[0,1024]}})";
+    header.append((8 - header.size() % 8) % 8, ' ');
+    {
+        std::ofstream file(model, std::ios::binary);
+        const uint64_t header_size = header.size();
+        for (int i = 0; i < 8; ++i) file.put(static_cast<char>(header_size >> (8 * i)));
+        file << header << std::string(1024, '\x03');
+        BOOST_REQUIRE(file.good());
+    }
+    ModelCatalog cat{root / "models", 1 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(model), false, entry, err), err);
+    BOOST_REQUIRE(cat.Seed(entry.model_id, false, err));
+    auto rpc = [&](const std::string& method, const UniValue& params) {
+        UniValue req(UniValue::VOBJ), result;
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        std::string code;
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), code + ": " + err);
+        return result;
+    };
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    ProviderRecord record;
+    record.resource = entry.model_id;
+    record.pubkey = pk;
+    record.seq = 1;
+    record.reachability_kind = "direct";
+    record.endpoints = {"192.0.2.11:29447"};
+    record.ranges.assign(PROVIDER_MAX_RANGES, PieceRange{0, 0xFFFFFFFFu});
+    record.expiry_ms = now_ms() + 300000;
+    BOOST_REQUIRE(SignProviderRecord(record, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    NativeRequest put;
+    put.method = "POST";
+    put.path = std::string(MODEL_HTTP_ROOT) + "ext/providers/put";
+    put.body = ProviderRecordToJson(record).write();
+    put.peer_addr = "span-fixture";
+    NativeResponse response;
+    BOOST_REQUIRE(HandleNativeRequest(cat, put, response));
+    BOOST_REQUIRE_MESSAGE(response.status == 200, response.body);
+    UniValue query(UniValue::VOBJ), search_params(UniValue::VARR), id_params(UniValue::VARR);
+    query.pushKV("scope", "LOCAL");
+    search_params.push_back(query);
+    id_params.push_back(entry.model_id.Hex());
+    const auto started = std::chrono::steady_clock::now();
+    const auto search = rpc("searchmodels", search_params);
+    const auto avail = rpc("getmodelavailability", id_params);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    BOOST_REQUIRE_EQUAL(search["results"].size(), 1);
+    BOOST_CHECK_EQUAL(search["results"][0]["availability"]["providers_partial"].getInt<int>(), 1);
+    BOOST_CHECK(avail["reconstructable"].get_bool());
+    BOOST_CHECK_EQUAL(avail["min_piece_sources"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(avail["pieces_with_0_sources"].getInt<int>(), 0);
+    // Walking each announced range piece by piece took about 27 s per call here.
+    BOOST_CHECK_MESSAGE(elapsed < std::chrono::seconds{5},
+                        "health took " << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << " ms");
 }
 
 BOOST_AUTO_TEST_CASE(search_index_01_to_10)
