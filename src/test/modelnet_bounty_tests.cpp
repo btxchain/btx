@@ -1198,6 +1198,54 @@ BOOST_AUTO_TEST_CASE(bounty_lists_return_only_the_requested_records)
     BOOST_CHECK(list("listbountyevaluations", std::string(96, 'f'), "evaluations").empty());
 }
 
+// Pledges are saved with the bounty store: a bounty takes at most 64 of
+// them.
+BOOST_AUTO_TEST_CASE(bounty_pledges_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-pledges-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto pledge = [&](int atoms) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("principal_atoms", std::to_string(atoms));
+        return call("pledgebounty", p);
+    };
+    for (int i = 1; i <= 64; ++i) BOOST_REQUIRE_MESSAGE(pledge(i), err);
+    BOOST_CHECK(!pledge(65));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A pledge already there is still answered at the limit, and
+    // withdrawbountypledge makes room.
+    BOOST_REQUIRE_MESSAGE(pledge(1), err);
+    UniValue withdraw(UniValue::VOBJ);
+    withdraw.pushKV("pledge_id", result["pledge_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("withdrawbountypledge", withdraw), err);
+    BOOST_REQUIRE_MESSAGE(pledge(65), err);
+    UniValue get(UniValue::VARR);
+    get.push_back(bounty);
+    BOOST_REQUIRE(store.Dispatch("getbountyfunding", get, result, code, err));
+    BOOST_CHECK_EQUAL(result["pledges"].size(), 64U);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
 {
 #ifdef ENABLE_WALLET

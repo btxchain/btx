@@ -1821,6 +1821,17 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         p.pushKV("binding", false);
         SignedEnvelope env;
         if (!sign_payload("FundingRound", p, env)) return fail("REJECTED", err);
+        // Pledges are saved with the store, which every bounty write writes
+        // again: a bounty takes at most PLEDGES_MAX of them.
+        constexpr size_t PLEDGES_MAX{64};
+        if (!m_pledges.count(env.record_id.Hex())) {
+            size_t kept{0};
+            for (const auto& kv : m_pledges) {
+                const UniValue& payload = kv.second.body["payload"];
+                if (payload["bounty_id"].isStr() && payload["bounty_id"].get_str() == bounty_id) ++kept;
+            }
+            if (kept >= PLEDGES_MAX) return fail("REJECTED", "too many pledges for this bounty");
+        }
         m_pledges[env.record_id.Hex()] = env;
         result = EnvelopeToJson(env);
         result.pushKV("confirmed", false);
