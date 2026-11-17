@@ -546,6 +546,58 @@ BOOST_AUTO_TEST_CASE(events_cursor_continues_after_the_last_event_returned)
     BOOST_CHECK_EQUAL(page("getmodelevents", "9999", 0)["cursor"].get_str(), "250");
 }
 
+// Compaction dropped the dedupe keys of the events it removed: a record seen
+// again (the feed refresh observes every record in the index) became a new
+// event, and a watch acted on it again. getmodelevents always said gap false,
+// also when events after the caller's cursor were gone, and a tombstone was
+// journaled as a metadata update.
+BOOST_AUTO_TEST_CASE(compacted_events_stay_deduplicated_and_report_a_gap)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "events-compacted";
+    BindModelEventLayer(dir, 2);
+    std::string code, err;
+    for (int i = 0; i < 3; ++i) {
+        ObserveResult o;
+        BOOST_REQUIRE(JournalObserve(MakeSigned("gap-publisher", "gap-model-" + std::to_string(i)), o, err));
+    }
+    ObserveResult again;
+    BOOST_REQUIRE(JournalObserve(MakeSigned("gap-publisher", "gap-model-0"), again, err));
+    BOOST_CHECK(again.duplicate);
+    BOOST_CHECK_EQUAL(BoundModelEventJournal()->Cursor(), 3U);
+
+    const auto gap = [&](const std::string& cursor) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("cursor", cursor);
+        UniValue result;
+        BOOST_REQUIRE_MESSAGE(DispatchModelWatchRpc("getmodelevents", RpcParamsObj(p), result, code, err, nullptr), err);
+        return result["gap"].get_bool();
+    };
+    BOOST_CHECK(gap("0"));
+    BOOST_CHECK(!gap("1"));
+    BOOST_CHECK(!gap("3"));
+    UniValue wp(UniValue::VOBJ);
+    wp.pushKV("cursor", "0");
+    wp.pushKV("timeout_ms", 0);
+    UniValue waited;
+    BOOST_REQUIRE_MESSAGE(DispatchModelWatchRpc("waitformodelevent", RpcParamsObj(wp), waited, code, err, nullptr), err);
+    BOOST_CHECK(waited["gap"].get_bool());
+
+    BindModelEventLayer(dir, 2); // restart
+    BOOST_REQUIRE(JournalObserve(MakeSigned("gap-publisher", "gap-model-0"), again, err));
+    BOOST_CHECK(again.duplicate);
+    BOOST_CHECK_EQUAL(BoundModelEventJournal()->Cursor(), 3U);
+
+    ModelSearchRecord rec;
+    rec.model_id.data[0] = 0x61;
+    rec.metadata_sequence = 2;
+    rec.signed_ok = true;
+    ModelEvent ev;
+    BOOST_CHECK(ModelEventFromSearchRecord(rec, ev));
+    rec.tombstone = true;
+    BOOST_CHECK(!ModelEventFromSearchRecord(rec, ev));
+}
+
 BOOST_AUTO_TEST_CASE(watch_rpc_roundtrip)
 {
     using namespace modelnet;
