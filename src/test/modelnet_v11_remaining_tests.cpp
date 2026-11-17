@@ -236,6 +236,61 @@ BOOST_AUTO_TEST_CASE(comm_unsubscribe_stops_new_preservation)
     BOOST_CHECK_EQUAL(unpol_result["automatic_preservation"].get_bool(), false);
 }
 
+// community.json is read and written again whole by every circle and
+// subscription call, and read by the preservation tick: an id has a size
+// bound, and a list keeps an id once and at most 256 of them.
+BOOST_AUTO_TEST_CASE(comm_lists_are_bounded)
+{
+    const fs::path tmp = m_args.GetDataDirBase() / "v11-remaining-comm-bound";
+    modelnet::ModelCatalog cat{tmp, /*quota_bytes=*/1 << 20};
+    // A circle with a longer id, as an older version kept it.
+    const std::string old_long(300, 'o');
+    {
+        UniValue circles(UniValue::VARR);
+        circles.push_back(old_long);
+        UniValue file(UniValue::VOBJ);
+        file.pushKV("circles", circles);
+        std::ofstream out{tmp / "community.json"};
+        out << file.write();
+    }
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const std::string& id) {
+        UniValue req(UniValue::VOBJ);
+        UniValue params(UniValue::VARR);
+        params.push_back(id);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, req, result, code, err);
+    };
+    BOOST_CHECK(!call("joinmodelcircle", std::string(257, 'c')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!call("leavemodelcircle", std::string(300, 'x')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(call("leavemodelcircle", old_long), err);
+    BOOST_CHECK_EQUAL(result["circles"].size(), 0U);
+    BOOST_REQUIRE_MESSAGE(call("joinmodelcircle", "circle-0"), err);
+    BOOST_REQUIRE_MESSAGE(call("joinmodelcircle", "circle-0"), err);
+    BOOST_CHECK_EQUAL(result["circles"].size(), 1U);
+    for (int i = 1; i < 256; ++i) {
+        BOOST_REQUIRE_MESSAGE(call("joinmodelcircle", "circle-" + std::to_string(i)), err);
+    }
+    BOOST_CHECK(!call("joinmodelcircle", "circle-256"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A circle already joined is still answered at the limit.
+    BOOST_REQUIRE_MESSAGE(call("joinmodelcircle", "circle-0"), err);
+    BOOST_CHECK_EQUAL(result["circles"].size(), 256U);
+    // Leaving one makes room; subscriptions are a list of their own.
+    BOOST_REQUIRE_MESSAGE(call("leavemodelcircle", "circle-0"), err);
+    BOOST_REQUIRE_MESSAGE(call("joinmodelcircle", "circle-256"), err);
+    BOOST_CHECK_EQUAL(result["circles"].size(), 256U);
+    BOOST_REQUIRE_MESSAGE(call("subscribemodelpolicy", "policy-0"), err);
+    BOOST_CHECK_EQUAL(result["subscriptions"].size(), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(getmodel_explicit_paid_quote_no_autospend)
 {
     const fs::path tmp = m_args.GetDataDirBase() / "v11-remaining-explicit-paid";

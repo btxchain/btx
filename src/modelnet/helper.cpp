@@ -10486,6 +10486,21 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         ReadJsonFile(HelperDir(cat) / "community.json", store);
         const std::string key = (method.find("circle") != std::string::npos) ? "circles" : "subscriptions";
         UniValue arr = store.exists(key) ? store[key] : UniValue(UniValue::VARR);
+        // Each of these calls reads community.json and writes it again whole,
+        // and the preservation tick reads it: an id has a size bound, and a
+        // list keeps an id once and at most COMMUNITY_IDS_MAX of them. A longer
+        // id that an older version kept can still be left.
+        constexpr size_t COMMUNITY_ID_MAX{256};
+        constexpr size_t COMMUNITY_IDS_MAX{256};
+        if (Arg(0).isStr() && Arg(0).get_str().size() > COMMUNITY_ID_MAX) {
+            bool kept = false;
+            for (const auto& x : arr.getValues()) kept = kept || (x.isStr() && x.get_str() == Arg(0).get_str());
+            if (!kept || (method.rfind("leave", 0) != 0 && method.rfind("unsub", 0) != 0)) {
+                err_code = "INVALID_PARAMETER";
+                err = "id too long";
+                return false;
+            }
+        }
         if (method.rfind("leave", 0) == 0 || method.rfind("unsub", 0) == 0) {
             UniValue keep(UniValue::VARR);
             const std::string id = Arg(0).get_str();
@@ -10495,7 +10510,14 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             arr = keep;
             RememberStoppedPreservation(store, id);
         } else if (Arg(0).isStr()) {
-            arr.push_back(Arg(0).get_str());
+            bool have = false;
+            for (const auto& x : arr.getValues()) have = have || (x.isStr() && x.get_str() == Arg(0).get_str());
+            if (!have && arr.size() >= COMMUNITY_IDS_MAX) {
+                err_code = "REJECTED";
+                err = "too many circles or subscriptions; leave or unsubscribe one first";
+                return false;
+            }
+            if (!have) arr.push_back(Arg(0).get_str());
             uint8_t kind = RECORD_PRESERVATION_CIRCLE;
             if (method.find("collection") != std::string::npos) kind = RECORD_COLLECTION;
             else if (method.find("policy") != std::string::npos) kind = RECORD_POLICY_BUNDLE;
