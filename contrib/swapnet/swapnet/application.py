@@ -346,8 +346,9 @@ class Application:
         asset=policy.get('asset');active=[s for _,_,s in self.journal.all() if s['stage'] not in {'cancelled','refunded','complete','rejected'}]
         require(not any(asset in (s.get('agreement',{}).get('long_leg',{}).get('asset'),s.get('agreement',{}).get('short_leg',{}).get('asset')) for s in active),
                 'ASSET_BUSY','Cannot reconfigure an asset with active settlement obligations')
-        driver=self.configure_asset(policy);driver.ready();self.drivers[asset]=driver
+        driver=self.configure_asset(policy);driver.ready()
         policies=self.journal.setting('asset_policies',{});policies[asset]=policy;self.journal.set_setting('asset_policies',policies)
+        self.drivers[asset]=driver
         return {'asset':asset,'ready':True}
     def rpc_listswapassetpolicies(self,ctx):
         policies=self.journal.setting('asset_policies',{})

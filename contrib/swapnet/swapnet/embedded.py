@@ -74,7 +74,8 @@ class Host:
         if self._wallet:
             require(self._wallet in wallets,'WALLET_UNLOADED','Bound SwapNet wallet is not loaded');return self._wallet
         require(len(wallets)==1,'WALLET_SELECTION','Load exactly one wallet or set -swapnetwallet; discovery remains available')
-        self._wallet=wallets[0];self.journal.set_setting('native_wallet',self._wallet);return self._wallet
+        selected=wallets[0];self.journal.set_setting('native_wallet',selected)
+        self._wallet=selected;return selected
     def wallet(self,method,*params):return self._call(self.selected_wallet(),method,params)
     def _call(self,wallet,method,params):
         require(method in NATIVE_METHODS,'NATIVE_METHOD','Native method is outside the internal allowlist')
@@ -147,7 +148,7 @@ class Host:
                 if not self._wallet:
                     require(owner,'OWNER_REQUIRED','Only an owner may establish the native wallet binding')
                     require(wallet in self.native('listwallets'),'WALLET_UNLOADED','Requested wallet not loaded')
-                    self._wallet=wallet;self.journal.set_setting('native_wallet',wallet)
+                    self.journal.set_setting('native_wallet',wallet);self._wallet=wallet
                 require(wallet==self._wallet,'WALLET_SCOPE','RPC wallet differs from the bound SwapNet wallet')
             require(len(params_json)<=65536,'RPC_REQUEST_LIMIT','Request too large')
             params=json.loads(params_json)
