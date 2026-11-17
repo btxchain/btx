@@ -21,6 +21,30 @@ from .policy import ChainClock
 from .plans import FundingPlan
 from .psbt import add_witness_utxo
 
+def _recovery_amount_atoms(value):
+    from decimal import InvalidOperation
+    from .canonical import MAX_ATOMS
+    require(type(value) in {str,int,Decimal},'RPC_AMOUNT','Recovery amount must be exact')
+    try:amount=Decimal(value)
+    except InvalidOperation:
+        raise SwapError('RPC_AMOUNT','Invalid recovery amount') from None
+    require(amount.is_finite() and amount>=0,'RPC_AMOUNT','Invalid recovery amount')
+    # Work from decimal digits, not context-rounded multiplication: even a
+    # fractional atom beyond the default Decimal precision must be refused.
+    _,digits,exponent=amount.as_tuple()
+    text=''.join(str(d) for d in digits)
+    if not any(digits):return 0
+    shift=exponent+8
+    if shift<0:
+        places=-shift
+        require(places<len(text) and not any(c!='0' for c in text[-places:]),
+                'RPC_AMOUNT','Non-integral recovery amount')
+        text=text[:-places];shift=0
+    require(len(text)+shift<=len(str(MAX_ATOMS)),'RPC_AMOUNT','Recovery amount out of range')
+    fee=int(text)*10**shift
+    require(fee<=MAX_ATOMS,'RPC_AMOUNT','Recovery amount out of range')
+    return fee
+
 @dataclass(frozen=True)
 class Prepared:
     txid:str
@@ -250,6 +274,55 @@ class UTXODriver:
                 return {**d,**{k:w[k] for k in ('blockhash','confirmations') if k in w}}
             except SwapError:pass
         return self.rpc('getrawtransaction',txid,True)
+    def historical_funding_fee(self,terms,ref):
+        """Read an adopted transaction's full node fee; never infer missing as zero."""
+        require(terms.asset==self.asset.id,'CHAIN','Terms for a different chain')
+        self.adapter.check_chain()
+        txid=hex32(ref['txid']);vout=integer(ref['vout'],hi=0xffffffff)
+        try:tx=self.rpc('getrawtransaction',txid,2)
+        except SwapError as error:
+            if error.code!='CHAIN_RPC':raise
+            tx=None
+        # A wallet can locate a confirmed block without txindex. Its signed fee
+        # field is deliberately not used as an alternate fee authority.
+        if tx is None or (isinstance(tx,dict) and 'fee' not in tx):
+            for caller in (self.wallet,self.watch):
+                try:hint=caller('gettransaction',txid,True)
+                except SwapError as error:
+                    if error.code!='CHAIN_RPC':raise
+                    continue
+                if not isinstance(hint,dict) or hint.get('txid')!=txid or not hint.get('blockhash'):continue
+                block=hex32(hint['blockhash'])
+                require(self.rpc('getblockheader',block).get('confirmations',0)>0,
+                        'CHAIN_CONFLICT','Original funding block is not canonical')
+                try:tx=self.rpc('getrawtransaction',txid,2,block)
+                except SwapError as error:
+                    if error.code!='CHAIN_RPC':raise
+                    tx=None
+                break  # At most one explicit-block lookup; never scan history.
+        require(isinstance(tx,dict),'FUNDING_FEE_UNKNOWN','Original funding fee is unavailable')
+        require(tx.get('txid')==txid,'RECOVERY_CONFLICT','Funding transaction identity changed')
+        require(tx.get('confirmations',0)>=0,'CHAIN_CONFLICT','Original funding transaction is conflicted')
+        if tx.get('blockhash'):
+            block=hex32(tx['blockhash'])
+            require(self.rpc('getblockheader',block).get('confirmations',0)>0,
+                    'CHAIN_CONFLICT','Original funding block is not canonical')
+        outputs=tx.get('vout')
+        require(isinstance(outputs,list) and vout<len(outputs),'RECOVERY_CONFLICT','Original funding output is unavailable')
+        output=outputs[vout]
+        require(isinstance(output,dict) and output.get('n')==vout
+                and isinstance(output.get('scriptPubKey'),dict)
+                and output['scriptPubKey'].get('hex')==terms.lock_commitment
+                and _recovery_amount_atoms(output.get('value'))==atoms(terms.amount_atoms),
+                'RECOVERY_CONFLICT','Original funding output changed')
+        if tx.get('hex'):
+            decoded=self.rpc('decoderawtransaction',tx['hex'])
+            require(isinstance(decoded,dict) and decoded.get('txid')==txid,
+                    'RECOVERY_CONFLICT','Original funding bytes changed')
+        value=tx.get('fee')
+        require(value is not None,'FUNDING_FEE_UNKNOWN','Node cannot verify the original funding fee')
+        return str(_recovery_amount_atoms(value))
+
     def has_transaction(self,txid):
         # Wallet history survives eviction and reorgs; it is not broadcast proof.
         try:
