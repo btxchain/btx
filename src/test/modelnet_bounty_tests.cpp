@@ -1757,6 +1757,87 @@ BOOST_AUTO_TEST_CASE(evaluation_report_larger_than_the_pipe_buffer_completes)
 }
 #endif
 
+// Commitments and submissions are saved with the bounty store: both have a
+// size bound, a bounty takes at most 256 commitments, and a commitment is
+// revealed once, also when it is committed again.
+BOOST_AUTO_TEST_CASE(bounty_submissions_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-submissions-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto commit = [&](const std::string& digest) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        c.pushKV("digest", digest);
+        return call("commitbountysubmission", c);
+    };
+    const auto reveal = [&](const std::string& id, const std::string& note) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("commitment_id", id);
+        UniValue sub(UniValue::VOBJ);
+        sub.pushKV("note", note);
+        r.pushKV("submission", sub);
+        return call("revealbountysubmission", r);
+    };
+    // Over 64 KiB in all, with each string under the 8192 bytes a signed
+    // record takes.
+    const auto big = [](UniValue o) {
+        for (int i = 0; i < 10; ++i) o.pushKV("part" + std::to_string(i), std::string(7000, 'x'));
+        return o;
+    };
+    UniValue big_commit(UniValue::VOBJ);
+    big_commit.pushKV("bounty_id", bounty);
+    BOOST_CHECK(!call("commitbountysubmission", big(big_commit)));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(commit("digest-0"), err);
+    const std::string cid = result["commitment_id"].get_str();
+    UniValue big_reveal(UniValue::VOBJ);
+    big_reveal.pushKV("commitment_id", cid);
+    big_reveal.pushKV("submission", big(UniValue(UniValue::VOBJ)));
+    BOOST_CHECK(!call("revealbountysubmission", big_reveal));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(reveal(cid, "note-0"), err);
+    const std::string sid = result["submission_id"].get_str();
+    // The same reveal again returns it; another reveal of the commitment or
+    // of its submission is refused, also after the commitment came again.
+    BOOST_REQUIRE_MESSAGE(reveal(cid, "note-0"), err);
+    BOOST_CHECK_EQUAL(result["submission_id"].get_str(), sid);
+    BOOST_CHECK(!reveal(cid, "note-1"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(commit("digest-0"), err);
+    BOOST_CHECK_EQUAL(result["commitment_id"].get_str(), cid);
+    BOOST_CHECK(!reveal(cid, "note-1"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!reveal(sid, "note-1"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    for (int i = 1; i < 256; ++i) BOOST_REQUIRE_MESSAGE(commit("digest-" + std::to_string(i)), err);
+    BOOST_CHECK(!commit("digest-256"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A commitment already there is still answered at the limit.
+    BOOST_REQUIRE_MESSAGE(commit("digest-0"), err);
+    BOOST_CHECK_EQUAL(result["commitment_id"].get_str(), cid);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_idempotency_key_reused_for_another_request_is_refused)
 {
     modelnet::BountyStore store;
