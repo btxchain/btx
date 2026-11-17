@@ -652,6 +652,73 @@ BOOST_AUTO_TEST_CASE(fund_with_mandate_watch_drain_unsigned)
     BOOST_CHECK(saw);
 }
 
+BOOST_AUTO_TEST_CASE(cancelmodeljob_save_failure_preserves_stop_and_retries)
+{
+    const fs::path tmp = m_path_root / "cancel-save-retry";
+    fs::create_directories(tmp);
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const std::string target = "cancel-save-target";
+    const std::string other = "cancel-save-other";
+    const fs::path path = tmp / "retrieve_jobs.json";
+    const fs::path fault = tmp / "retrieve_jobs.json.tmp";
+    UniValue jobs(UniValue::VARR);
+    for (const auto& id : {target, other}) {
+        UniValue row(UniValue::VOBJ);
+        row.pushKV("job_id", id);
+        row.pushKV("model_id", std::string(96, id == target ? 'a' : 'b'));
+        row.pushKV("status", "queued");
+        row.pushKV("created_ms", 42);
+        jobs.push_back(row);
+    }
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("schema_version", 1);
+    root.pushKV("jobs", jobs);
+    { std::ofstream out{path}; out << root.write() << "\n"; BOOST_REQUIRE(out.good()); }
+    auto bytes = [&] {
+        std::ifstream in{path};
+        return std::string(std::istreambuf_iterator<char>{in}, {});
+    };
+    auto params = [](const std::string& id) { UniValue p(UniValue::VARR); p.push_back(id); return p; };
+    const std::string before = bytes();
+    const auto queued = Dispatch(cat, Rpc("getmodeljob", params(target)));
+    BOOST_REQUIRE_EQUAL(queued["jobs"].size(), 1U);
+    BOOST_REQUIRE(fs::create_directory(fault));
+    // The directory refuses the real temporary-file open on POSIX and Windows.
+    auto failed_cancel = [&](const std::string& id) {
+        UniValue result;
+        std::string code, err;
+        const bool ok = modelnet::DispatchHelperRpc(cat, Rpc("cancelmodeljob", params(id)), result, code, err);
+        BOOST_CHECK_MESSAGE(!ok, "cancelmodeljob falsely accepted an unsaved snapshot");
+        BOOST_CHECK_EQUAL(code, "IO_ERROR");
+        BOOST_CHECK_MESSAGE(err.find("retry cancelmodeljob") != std::string::npos, err);
+        BOOST_CHECK_EQUAL(bytes(), before);
+    };
+    failed_cancel(target);
+    auto live = Dispatch(cat, Rpc("getmodeljob", params(target)));
+    BOOST_REQUIRE_EQUAL(live["jobs"].size(), 1U);
+    BOOST_CHECK_EQUAL(live["jobs"][0]["status"].get_str(), "cancelled");
+    failed_cancel(target); // Same request remains a persistence retry.
+    failed_cancel("not-retained"); // An absent ID must not claim the snapshot was saved.
+    const auto listed = Dispatch(cat, Rpc("cancelmodeljob")); // Empty ID remains a read.
+    BOOST_CHECK(listed["jobs"].isArray());
+    BOOST_CHECK_EQUAL(bytes(), before);
+    BOOST_REQUIRE(fs::remove(fault));
+    const auto retried = Dispatch(cat, Rpc("cancelmodeljob", params(target)));
+    BOOST_CHECK(!retried["cancelled"].get_bool()); // No new live transition (661).
+    UniValue saved;
+    BOOST_REQUIRE(saved.read(bytes()));
+    bool saw_other = false;
+    for (const auto& row : saved["jobs"].getValues()) {
+        BOOST_CHECK(row["job_id"].get_str() != target);
+        saw_other |= row["job_id"].get_str() == other;
+    }
+    BOOST_CHECK(saw_other);
+    const auto absent = Dispatch(cat, Rpc("cancelmodeljob", params("not-retained")));
+    BOOST_CHECK(!absent["cancelled"].get_bool());
+    const auto other_cancelled = Dispatch(cat, Rpc("cancelmodeljob", params(other)));
+    BOOST_CHECK(other_cancelled["cancelled"].get_bool());
+}
+
 // cancelmodeljob answered cancelled:true for any known job, also one that had
 // already ended; only the status of a queued or running job changes.
 BOOST_AUTO_TEST_CASE(cancelmodeljob_reports_only_a_real_cancel)
