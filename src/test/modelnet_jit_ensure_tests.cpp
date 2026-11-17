@@ -873,6 +873,8 @@ BOOST_AUTO_TEST_CASE(remaining_capability_rpc_surface)
     }
 }
 
+// TMPDIR and the permission-mode checks below are POSIX-specific.
+#ifndef _WIN32
 BOOST_AUTO_TEST_CASE(ensure_staging_dir_is_private)
 {
     BOOST_TEST_MESSAGE("The fixed staging directory under the temp directory must be private to this user");
@@ -911,5 +913,6 @@ BOOST_AUTO_TEST_CASE(ensure_staging_dir_is_private)
         ::unsetenv("TMPDIR");
     }
 }
+#endif // !_WIN32
 
 BOOST_AUTO_TEST_SUITE_END()
