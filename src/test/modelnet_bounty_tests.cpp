@@ -1584,6 +1584,54 @@ BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
 #endif
 }
 
+// Agent mandates and their reservations are saved with the bounty store: a
+// mandate is at most 16 KiB of JSON, a reservation's idempotency_key at most
+// 256 bytes and its refund_key at most 4096.
+BOOST_AUTO_TEST_CASE(agent_mandate_fields_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "agent-mandate-fields";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    const auto mandate = [&](const std::string& note) {
+        UniValue m(UniValue::VOBJ);
+        m.pushKV("total_atoms", "100");
+        m.pushKV("per_action_atoms", "40");
+        m.pushKV("owner_approval_ref", "user-1");
+        m.pushKV("note", note);
+        return call("createagentmandate", m);
+    };
+    BOOST_CHECK(!mandate(std::string(16384, 'n')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(mandate("note"), err);
+    const std::string mid = result["mandate_id"].get_str();
+    const auto reserve = [&](const std::string& key, const std::string& refund) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("mandate_id", mid);
+        r.pushKV("idempotency_key", key);
+        r.pushKV("amount_atoms", 1);
+        r.pushKV("refund_key", refund);
+        return call("reservemandate", r);
+    };
+    BOOST_CHECK(!reserve(std::string(257, 'k'), "refund"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!reserve("key-1", std::string(4097, 'r')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(reserve(std::string(256, 'k'), std::string(4096, 'r')), err);
+    BOOST_CHECK_EQUAL(result["used"].getInt<int64_t>(), 1);
+}
+
 BOOST_AUTO_TEST_CASE(agent_mandate_budget_survives_a_store_restart)
 {
     const fs::path dir = m_path_root / "bounty-mandate-restart";
@@ -2241,6 +2289,69 @@ BOOST_AUTO_TEST_CASE(bounty_observe_amount_atoms_fail_closed)
     BOOST_REQUIRE(observe("ok:0", UniValue("100")));
     BOOST_CHECK(!FactsHaveOutpoint(result, "impbad:0"));
     AssertSpendZeroIfPresent(result);
+}
+
+// Chain facts are saved with the bounty store and held in its undo history:
+// the outpoint, bounty_id and lot_id of a fact are at most 256 bytes, for an
+// observed fact and for one from a recovery manifest.
+BOOST_AUTO_TEST_CASE(bounty_chain_fact_fields_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-chain-fact-fields";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    const auto observe = [&](const std::string& outpoint, const std::string& bounty_id, const std::string& lot_id) {
+        UniValue f(UniValue::VOBJ);
+        f.pushKV("outpoint", outpoint);
+        f.pushKV("bounty_id", bounty_id);
+        f.pushKV("lot_id", lot_id);
+        f.pushKV("amount_atoms", "1000");
+        return call("observebountychain", f);
+    };
+    const std::string outpoint = std::string(64, 'a') + ":0";
+    const std::string bounty(256, 'b');
+    BOOST_REQUIRE_MESSAGE(observe(outpoint, bounty, std::string(256, 'l')), err);
+    BOOST_CHECK(!observe(std::string(257, 'o'), bounty, "lot"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!observe(std::string(64, 'c') + ":0", std::string(257, 'b'), "lot"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!observe(std::string(64, 'd') + ":0", bounty, std::string(257, 'l')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+
+    const auto import = [&](const std::string& outpoint, const std::string& lot_id) {
+        UniValue lot(UniValue::VOBJ);
+        lot.pushKV("outpoint", outpoint);
+        lot.pushKV("lot_id", lot_id);
+        lot.pushKV("amount_atoms", "1");
+        UniValue lots(UniValue::VARR);
+        lots.push_back(lot);
+        UniValue manifest(UniValue::VOBJ);
+        manifest.pushKV("bounty_id", bounty);
+        manifest.pushKV("lots", lots);
+        return call("importbountyrecovery", manifest);
+    };
+    BOOST_CHECK(!import(std::string(257, 'o'), "lot"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!import(std::string(64, 'e') + ":0", std::string(257, 'l')));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(import(std::string(64, 'f') + ":0", "lot"), err);
+
+    // Only the two facts within the bounds are kept.
+    UniValue id(UniValue::VARR);
+    id.push_back(bounty);
+    BOOST_REQUIRE(store.Dispatch("getbountyfunding", id, result, code, err));
+    BOOST_CHECK_EQUAL(result["facts"].size(), 2U);
 }
 
 BOOST_AUTO_TEST_CASE(bounty_observe_height_not_wrapped)

@@ -1100,6 +1100,19 @@ void BountyChainIndex::Clear()
     ++m_epoch;
 }
 
+//! Facts are saved with the store and held in the undo history: the strings
+//! a caller gives a fact have a size bound.
+static bool ChainFactFieldsOk(const BountyChainFact& f, std::string& err)
+{
+    constexpr size_t CHAIN_FACT_FIELD_MAX{256};
+    if (f.outpoint.size() > CHAIN_FACT_FIELD_MAX || f.bounty_id.size() > CHAIN_FACT_FIELD_MAX ||
+        f.lot_id.size() > CHAIN_FACT_FIELD_MAX) {
+        err = "outpoint, bounty_id or lot_id too long";
+        return false;
+    }
+    return true;
+}
+
 bool BountyChainIndex::ImportManifest(const UniValue& manifest, std::string& err)
 {
     if (!manifest.isObject() || !manifest.exists("lots") || !manifest["lots"].isArray()) {
@@ -1118,6 +1131,7 @@ bool BountyChainIndex::ImportManifest(const UniValue& manifest, std::string& err
         f.outpoint = lot["outpoint"].get_str();
         f.lot_id = lot.exists("lot_id") ? lot["lot_id"].get_str() : "";
         f.bounty_id = manifest.exists("bounty_id") ? manifest["bounty_id"].get_str() : "";
+        if (!ChainFactFieldsOk(f, err)) return false;
         if (lot.exists("amount_atoms")) {
             if (!CanonicalAtomsField(lot["amount_atoms"], f.amount_atoms, err)) return false;
         }
@@ -2544,6 +2558,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (!a.exists("owner_approval_ref") && !(a.exists("mandate") && a["mandate"].exists("owner_approval_ref")))
             return fail("REJECTED", "owner approval required");
         UniValue m = a.exists("mandate") ? a["mandate"] : a;
+        // A mandate is kept as the caller sends it and saved with the store,
+        // which every bounty write writes again: it has a size bound.
+        constexpr size_t AGENT_MANDATE_BYTES_MAX{16384};
+        if (m.write().size() > AGENT_MANDATE_BYTES_MAX) return fail("INVALID_PARAMETER", "mandate too large");
         if (!m.exists("total_atoms") || !m.exists("per_action_atoms")) return fail("INVALID_PARAMETER", "finite budget required");
         int64_t total = 0, per = 0;
         if (!CanonicalAtoms(m["total_atoms"].isStr() ? m["total_atoms"].get_str() : std::to_string(m["total_atoms"].getInt<int64_t>()),
@@ -2618,6 +2636,15 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (mit->second.exists("revoked") && mit->second["revoked"].get_bool()) return fail("REJECTED", "revoked");
         auto bit = m_budgets.find(mid);
         if (bit == m_budgets.end()) return fail("NOT_FOUND", "mandate");
+        // The budget keeps each reservation's key and refund key, saved with
+        // the store: they have a size bound.
+        // A refund key is an ML-DSA-44 public key in hex (2624 characters).
+        constexpr size_t AGENT_RESERVATION_KEY_MAX{256};
+        constexpr size_t AGENT_REFUND_KEY_MAX{4096};
+        if ((a["idempotency_key"].isStr() && a["idempotency_key"].get_str().size() > AGENT_RESERVATION_KEY_MAX) ||
+            (a["refund_key"].isStr() && a["refund_key"].get_str().size() > AGENT_REFUND_KEY_MAX)) {
+            return fail("INVALID_PARAMETER", "idempotency_key or refund_key too long");
+        }
         if (!bit->second->Reserve(a["idempotency_key"].get_str(), amount,
                                   a.exists("refund_key") ? a["refund_key"].get_str() : "", err))
             return fail("REJECTED", err);
@@ -2638,6 +2665,7 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         f.outpoint = a["outpoint"].get_str();
         f.bounty_id = a.exists("bounty_id") ? a["bounty_id"].get_str() : "";
         f.lot_id = a.exists("lot_id") ? a["lot_id"].get_str() : "";
+        if (!ChainFactFieldsOk(f, err)) return fail("INVALID_PARAMETER", err);
         if (a.exists("amount_atoms")) {
             if (!CanonicalAtomsField(a["amount_atoms"], f.amount_atoms, err))
                 return fail("INVALID_PARAMETER", err.empty() ? "amount_atoms" : err);

@@ -19,6 +19,41 @@
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_helper_store_race_tests, BasicTestingSetup)
 
+// setmodelmirror keeps its selectors in mirror.json, which every call reads
+// and writes again whole: a selector field over 4096 bytes is refused before
+// the file is written.
+BOOST_AUTO_TEST_CASE(mirror_selector_fields_are_bounded)
+{
+    const fs::path dir = m_path_root / "mirror-selector-bound";
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto mirror = [&](const std::string& field, const std::string& value) {
+        UniValue sel(UniValue::VOBJ);
+        sel.pushKV(field, value);
+        sel.pushKV("idempotency_key", "mirror-" + field + "-" + std::to_string(value.size()));
+        UniValue params(UniValue::VARR);
+        params.push_back(sel);
+        return call("setmodelmirror", params);
+    };
+    BOOST_REQUIRE_MESSAGE(mirror("query", std::string(4096, 'q')), err);
+    for (const std::string field : {"publisher_id", "collection_id", "query"}) {
+        BOOST_CHECK(!mirror(field, std::string(4097, 'x')));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    BOOST_REQUIRE_MESSAGE(call("getmodelmirror", UniValue(UniValue::VARR)), err);
+    BOOST_CHECK_EQUAL(result["selectors"].size(), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(concurrent_store_rpcs_keep_every_change)
 {
     // createmodelidentity, setmodelmirror and setmodelrule read
