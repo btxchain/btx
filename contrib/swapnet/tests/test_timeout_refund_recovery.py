@@ -71,6 +71,9 @@ def test_original_refund_automatically_recovers_through_timeout_and_restart(tmp_
         assert p.state('alice')['stage']=='refund_broadcast'
         p.restart('alice');c=wire(p,client);c.tick()
         assert p.state('alice')['stage']=='refund_broadcast'
+        # The failed chain call waits until its recorded second. The pair clock is not the wall clock.
+        retry=c._retry.get(p.sid)
+        if retry:p.time.n=max(p.time.n,retry[1])
         p.a.mine(2);c.tick();assert p.state('alice')['stage']=='refunded'
         p.restart('alice');c=wire(p,client);c.tick()
         assert p.state('alice')['stage']=='refunded'

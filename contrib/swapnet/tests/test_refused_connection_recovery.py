@@ -92,6 +92,10 @@ def test_mature_original_refund_recovers_across_reopen(tmp_path, missing_cookie)
         p.restart('alice'); c = wire(p, client)
         c.tick()  # already-known original refund: do not create another
         assert p.state('alice')['stage'] == 'refund_broadcast'
+        # The refused call waits until its recorded second. The pair clock is not the wall clock.
+        retry = c._retry.get(p.sid)
+        if retry:
+            p.time.n = max(p.time.n, retry[1])
         p.a.mine(2); c.tick()
         assert p.state('alice')['stage'] == 'refunded'
         p.restart('alice'); c = wire(p, client); c.tick()
