@@ -736,6 +736,47 @@ BOOST_AUTO_TEST_CASE(expired_job_cannot_be_settled)
     BOOST_CHECK_EQUAL(bal["credited_p1e_microunits"].getInt<uint64_t>(), 10U);
 }
 
+// importcomputereceipt settles a job as acceptcomputejobresult and
+// issuecomputereceipt do: not after it expired, when a later job may have
+// taken its credit room.
+BOOST_AUTO_TEST_CASE(imported_receipt_cannot_settle_an_expired_job)
+{
+    std::vector<unsigned char> pk, sk;
+    const fs::path dir = NewDir(m_path_root, "r-import-expired", pk, sk);
+    const std::string me = HexStr(pk);
+    std::vector<unsigned char> kpk, ksk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(kpk, ksk, err));
+    const std::string offer = CreateOffer(dir, Offer(me, Keys({me}), Keys({me, HexStr(kpk)}), "PREPAID", 10, "imp-exp"));
+    const std::string aid = Call(dir, "issuecomputeagreement", AgreementReq(offer, me, 1000, 9'000'000, "imp"))["agreement_id"].get_str();
+
+    // J1 expires at 3000; J2 then takes its room and is settled.
+    const UniValue j1 = Call(dir, "createcomputejob", JobReq(aid, me, 10, "j1", 2000, 3000));
+    UniValue j2_receipt;
+    BOOST_REQUIRE(TrySettleByJob(dir, aid, me, 10, "j2", 3500, j2_receipt));
+
+    // Another listed issuer signs a receipt for the expired J1.
+    UniValue rp(UniValue::VOBJ);
+    rp.pushKV("record_type", "compute_receipt_v1");
+    rp.pushKV("schema_version", 1);
+    rp.pushKV("agreement_id", aid);
+    rp.pushKV("job_id", j1["job_id"]);
+    rp.pushKV("subject_pubkey", me);
+    rp.pushKV("profile_id", pwc::ProfileIdHex(pwc::ToyProfile()));
+    rp.pushKV("credited_p1e_microunits", 10);
+    rp.pushKV("verification_method", "ISSUER_ACCEPTANCE");
+    rp.pushKV("evidence_commitment", "out-j1");
+    rp.pushKV("accepted_at_ms", 4000);
+    rp.pushKV("nonce", std::string(32, '5'));
+    BOOST_CHECK(Refused(dir, "importcomputereceipt", Envelope(SignEnvelope("ComputeReceipt", kpk, ksk, rp), 4000),
+                        "COMPUTE_JOB_EXPIRED"));
+
+    UniValue b(UniValue::VOBJ);
+    b.pushKV("agreement_id", aid);
+    b.pushKV("now_ms", 4000);
+    BOOST_CHECK_EQUAL(Call(dir, "getcomputebalance", b)["credited_p1e_microunits"].getInt<uint64_t>(), 10U);
+}
+
 #ifndef WIN32
 // ComputeStore::WriteEnvelope wrote a record through an unchecked stream and
 // renamed it over the target. A write cut short (a full disk) left a record
