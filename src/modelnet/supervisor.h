@@ -6,6 +6,7 @@
 #define BITCOIN_MODELNET_SUPERVISOR_H
 
 #include <modelnet/profile.h>
+#include <optional>
 #include <univalue.h>
 #include <util/fs.h>
 
@@ -37,6 +38,9 @@ struct HelperLaunchConfig {
     fs::path helper_exe;
     fs::path modeldir;
     fs::path rpc_socket;
+    /** Explicit node options retain precedence when a saved profile is reloaded. */
+    ProfileOverrides profile_overrides;
+    std::optional<OperatorProfile> explicit_profile;
     std::string storage_arg{"auto"};
     std::string seed{"auto"};
     bool preserve_rare{false};
