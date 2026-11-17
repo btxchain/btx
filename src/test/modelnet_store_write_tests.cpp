@@ -218,4 +218,34 @@ BOOST_AUTO_TEST_CASE(feed_and_search_index_cut_short_keep_the_old_file)
 }
 #endif // WIN32
 
+// createmodelidentity adds an identity to identities.json, which every new
+// identity writes again whole and listmodelidentities returns: a label is at
+// most 256 bytes.
+BOOST_AUTO_TEST_CASE(model_identity_label_is_bounded)
+{
+    const fs::path dir = m_path_root / "identity-label-bound";
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto create = [&](const std::string& label) {
+        UniValue params(UniValue::VARR);
+        params.push_back(label);
+        return call("createmodelidentity", params);
+    };
+    BOOST_REQUIRE_MESSAGE(create(std::string(256, 'l')), err);
+    BOOST_CHECK(!create(std::string(257, 'l')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(call("listmodelidentities", UniValue(UniValue::VARR)), err);
+    BOOST_CHECK_EQUAL(result["identities"].size(), 1U);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

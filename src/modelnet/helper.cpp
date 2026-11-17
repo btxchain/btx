@@ -6531,6 +6531,15 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
         const std::string publisher = StrField("publisher_id");
         const std::string collection = StrField("collection_id");
         const std::string query = StrField("query");
+        // Every setmodelmirror call reads mirror.json and writes it again
+        // whole: a selector field has a size bound, checked before the save.
+        constexpr size_t MIRROR_SELECTOR_FIELD_MAX{4096};
+        if (publisher.size() > MIRROR_SELECTOR_FIELD_MAX || collection.size() > MIRROR_SELECTOR_FIELD_MAX ||
+            query.size() > MIRROR_SELECTOR_FIELD_MAX) {
+            err_code = "INVALID_PARAMETER";
+            err = "publisher_id, collection_id or query too long";
+            return false;
+        }
         int keep_latest = 0;
         if (o.exists("keep_latest") && !o["keep_latest"].isNull()) {
             if (o["keep_latest"].isNum()) keep_latest = o["keep_latest"].getInt<int>();
@@ -10311,6 +10320,14 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         ReadJsonFile(HelperDir(cat) / "identities.json", store);
         UniValue arr = store.exists("identities") ? store["identities"] : UniValue(UniValue::VARR);
         if (method == "createmodelidentity") {
+            // identities.json is written again whole with each new identity and
+            // returned by listmodelidentities: a label has a size bound.
+            constexpr size_t MODEL_IDENTITY_LABEL_MAX{256};
+            if (Arg(0).isStr() && Arg(0).get_str().size() > MODEL_IDENTITY_LABEL_MAX) {
+                err_code = "INVALID_PARAMETER";
+                err = "label too long";
+                return false;
+            }
             std::vector<unsigned char> pk, sk;
             if (!GenerateMlDsa44(pk, sk, err)) {
                 err_code = "CRYPTO";
