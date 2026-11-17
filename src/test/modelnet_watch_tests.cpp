@@ -893,6 +893,73 @@ BOOST_AUTO_TEST_CASE(drain_actions_drops_fund_when_mandate_revoked_or_missing)
     GlobalSubscriptionStore().Reset();
 }
 
+// Every model event is matched against every watch, and watches.json holds
+// them all: the same watch again keeps its id, the ids a watch names have a
+// length bound, and the number of watches is bounded.
+BOOST_AUTO_TEST_CASE(model_watches_are_bounded)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "model-watches-bound";
+    fs::create_directories(dir);
+    ModelWatchStore store(dir);
+    std::string err;
+    const auto put = [&](ModelWatchStore& s, const std::string& model_id, ActionPolicy action) {
+        ModelWatch w;
+        w.kind = WatchKind::MODEL;
+        w.model_id = model_id;
+        w.action = action;
+        err.clear();
+        const bool ok = s.PutWatch(w, err);
+        return std::make_pair(ok, w.watch_id);
+    };
+    const auto first = put(store, "watched-0", ActionPolicy::NOTIFY);
+    BOOST_REQUIRE_MESSAGE(first.first, err);
+    BOOST_CHECK_EQUAL(put(store, "watched-0", ActionPolicy::NOTIFY).second, first.second);
+    BOOST_CHECK_EQUAL(store.List().size(), 1U);
+    // Another action on the same model is another watch.
+    const auto other_action = put(store, "watched-0", ActionPolicy::FREE_DOWNLOAD);
+    BOOST_REQUIRE_MESSAGE(other_action.first, err);
+    BOOST_CHECK(other_action.second != first.second);
+
+    BOOST_CHECK(!put(store, std::string(MODEL_WATCH_ID_MAX + 1, 'x'), ActionPolicy::NOTIFY).first);
+    BOOST_CHECK(err.find("too long") != std::string::npos);
+    BOOST_REQUIRE_MESSAGE(put(store, std::string(MODEL_WATCH_ID_MAX, 'y'), ActionPolicy::NOTIFY).first, err);
+
+    for (size_t i = 3; i < MODEL_WATCHES_MAX; ++i) {
+        BOOST_REQUIRE_MESSAGE(put(store, "watched-" + std::to_string(i), ActionPolicy::NOTIFY).first, err);
+    }
+    BOOST_CHECK_EQUAL(store.List().size(), MODEL_WATCHES_MAX);
+    BOOST_CHECK(!put(store, "one-too-many", ActionPolicy::NOTIFY).first);
+    BOOST_CHECK(err.find("too many") != std::string::npos);
+    // A watch already there is still returned at the limit.
+    BOOST_CHECK_EQUAL(put(store, "watched-0", ActionPolicy::NOTIFY).second, first.second);
+    // A caller that names its own id is held to the limit too, and may still
+    // replace the watch it named.
+    ModelWatch named;
+    named.watch_id = "mirror-0123456789abcdef";
+    named.kind = WatchKind::PUBLISHER;
+    named.publisher_id = "mirror-publisher";
+    BOOST_CHECK(!store.PutWatch(named, err));
+    BOOST_CHECK(err.find("too many") != std::string::npos);
+    ModelWatch replaced;
+    replaced.watch_id = first.second;
+    replaced.kind = WatchKind::MODEL;
+    replaced.model_id = "watched-0";
+    replaced.action = ActionPolicy::FREE_DOWNLOAD;
+    BOOST_REQUIRE_MESSAGE(store.PutWatch(replaced, err), err);
+    replaced.action = ActionPolicy::NOTIFY;
+    BOOST_REQUIRE_MESSAGE(store.PutWatch(replaced, err), err);
+    // Removing one makes room for another.
+    std::string remove_err;
+    BOOST_REQUIRE(store.RemoveWatch(first.second, remove_err));
+    BOOST_REQUIRE_MESSAGE(put(store, "one-too-many", ActionPolicy::NOTIFY).first, err);
+
+    // The saved watches load again, and the limit holds there too.
+    ModelWatchStore reloaded(dir);
+    BOOST_CHECK_EQUAL(reloaded.List().size(), MODEL_WATCHES_MAX);
+    BOOST_CHECK(!put(reloaded, "another", ActionPolicy::NOTIFY).first);
+}
+
 BOOST_AUTO_TEST_CASE(remaining_watch_collection_query_get_unwatch_helper)
 {
     using namespace modelnet;

@@ -47,6 +47,11 @@ enum class ActionPolicy {
     FUND_WITH_MANDATE,
 };
 
+//! Model watches a store keeps (and saves) at most, and the longest id or query
+//! text a watch names.
+constexpr size_t MODEL_WATCHES_MAX{1024};
+constexpr size_t MODEL_WATCH_ID_MAX{4096};
+
 struct ModelWatch {
     std::string watch_id;
     WatchKind kind{WatchKind::PUBLISHER};
