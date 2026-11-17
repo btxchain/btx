@@ -322,6 +322,72 @@ BOOST_AUTO_TEST_CASE(JIT_API_06)
     BOOST_CHECK_EQUAL(reconnect["automatic_spend_atoms"].getInt<int>(), 0);
 }
 
+// Any caller adds an event with each planbtxcapabilityupdate, and the log was
+// trimmed only up to the cursor a reader passes. The newest events are kept
+// within a bound; a reader behind them gets a gap.
+BOOST_AUTO_TEST_CASE(capability_events_are_bounded)
+{
+    UniValue drain;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(std::numeric_limits<int64_t>::max() / 4, drain));
+    const auto append = [](size_t i, size_t pad) {
+        UniValue e(UniValue::VOBJ);
+        e.pushKV("kind", "plan");
+        e.pushKV("old_lock", "lock-" + std::to_string(i) + std::string(pad, 'x'));
+        BOOST_REQUIRE(modelnet::AppendCapabilityEvent(e));
+    };
+    // The cursor of a reader that has seen everything so far.
+    UniValue mark(UniValue::VOBJ);
+    mark.pushKV("kind", "mark");
+    BOOST_REQUIRE(modelnet::AppendCapabilityEvent(mark));
+    UniValue seen;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(0, seen));
+    const int64_t cursor = seen["next_cursor"].getInt<int64_t>();
+
+    // 4097 small events: the first is gone, the newest 4096 are there.
+    for (size_t i = 0; i <= 4096; ++i) append(i, 0);
+    UniValue got;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(cursor, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 4096U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str(), "lock-1");
+    BOOST_CHECK(got["gap"].get_bool());
+    BOOST_CHECK_EQUAL(got["gap_begin"].getInt<int64_t>(), cursor + 1);
+    BOOST_CHECK_EQUAL(got["gap_end"].getInt<int64_t>(), cursor + 1);
+    const int64_t after_small = got["next_cursor"].getInt<int64_t>();
+
+    // Events of 300 KiB each: the newest 13 fit in 4 MiB, the one before does not.
+    for (size_t i = 0; i < 20; ++i) append(1000 + i, 300 << 10);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(after_small, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 13U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str().substr(0, 9), "lock-1007");
+    BOOST_CHECK(got["gap"].get_bool());
+    BOOST_CHECK_EQUAL(got["gap_end"].getInt<int64_t>(), after_small + 7);
+
+    // A reader that takes them all frees their room for 13 new ones.
+    const int64_t after_large = got["next_cursor"].getInt<int64_t>();
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(after_large, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 0U);
+    for (size_t i = 0; i < 13; ++i) append(3000 + i, 300 << 10);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(after_large, got));
+    BOOST_CHECK_EQUAL(got["events"].size(), 13U);
+    BOOST_CHECK(!got["gap"].get_bool());
+
+    // One event larger than the bound is kept until the next one comes.
+    const int64_t before_big = got["next_cursor"].getInt<int64_t>();
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(before_big, got));
+    append(4000, 5 << 20);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(before_big, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 1U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str().size(), 9U + (5U << 20));
+    append(4001, 0);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(before_big, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 1U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str(), "lock-4001");
+    BOOST_CHECK(got["gap"].get_bool());
+
+    // Leave the log empty for later cases.
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(got["next_cursor"].getInt<int64_t>(), got));
+}
+
 BOOST_AUTO_TEST_CASE(JIT_UPDATE_01)
 {
     BOOST_TEST_MESSAGE("JIT-UPDATE-01 Prepare alongside active");
