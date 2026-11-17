@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:invite-connect-v1",
+  "type": "object",
+  "properties": {
+    "uri": {
+      "type": "string",
+      "pattern": "^btx://swapnet/v1/[A-Za-z0-9_-]+$",
+      "maxLength": 32768
+    },
+    "endpoint": {
+      "type": "string",
+      "maxLength": 320
+    },
+    "allow_private": {
+      "type": "boolean"
+    },
+    "allow_dns": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "uri",
+    "endpoint"
+  ],
+  "additionalProperties": false
+}

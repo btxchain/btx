@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-verifyswapreceipt",
+  "type": "object",
+  "properties": {
+    "receipt": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "receipt"
+  ],
+  "additionalProperties": false
+}

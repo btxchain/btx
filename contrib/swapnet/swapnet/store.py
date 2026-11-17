@@ -118,11 +118,14 @@ class Store:
             require(mandate.principal == principal and quote.sell_asset == mandate.asset,"MANDATE_SCOPE","Mandate does not authorize this principal/asset")
             require(atoms(quote.sell_atoms) <= atoms(mandate.max_trade_atoms) and fee <= atoms(mandate.max_fee_atoms),"BUDGET_LIMIT","Trade or fee exceeds cap")
             held,used=atoms(row[1]),atoms(row[2])
-            require(held+used+cost <= atoms(mandate.max_total_atoms),"BUDGET_LIMIT","Cumulative cap exceeded")
+            from .public_market import reserved_budget,transfer_to_reservation
+            public_held=reserved_budget(db,mandate_id,quote,now)
+            require(held+used+cost+public_held <= atoms(mandate.max_total_atoms),"BUDGET_LIMIT","Cumulative cap exceeded")
             if check_only:
                 return rid
             db.execute("INSERT INTO reservations VALUES(?,?,?,?,?,'held',?)",(rid,quote.id,mandate_id,principal,str(cost),dumps(asdict(quote))))
             db.execute("UPDATE mandates SET held=? WHERE id=?",(str(held+cost),mandate_id))
+            transfer_to_reservation(db,mandate_id,quote,rid,now)
             self._audit(db,{"type":"reserved","id":rid,"quote_id":quote.id,"cost_atoms":str(cost)})
         return rid
 

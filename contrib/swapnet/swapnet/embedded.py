@@ -13,7 +13,11 @@ from decimal import Decimal
 from urllib.parse import quote
 from .errors import SwapError,require
 from .assets import Asset
-from .application import Application,NativeIdentity
+from .application import NativeIdentity
+from .market_application import Application as MarketApplication
+from .market_setup import configure_bitcoin
+from .deployment_attestation import verify_deployment
+from .private_storage import protect_private_directory
 from .authorization import Principal
 from .journal import Journal
 from .store import Store
@@ -27,7 +31,7 @@ NATIVE_METHODS=frozenset({'getblockchaininfo','getblockhash','getblockcount','ge
  'getrawtransaction','gettxout','scantxoutset','getmempoolentry','gettxspendingprevout','getdescriptorinfo','deriveaddresses','validateaddress',
  'decodescript','decodepsbt','decoderawtransaction','createpsbt','finalizepsbt','sendrawtransaction','testmempoolaccept',
  'listwallets','getwalletinfo','getnewaddress','getaddressinfo','listunspent','lockunspent','gettransaction','listtransactions',
- 'exportpqkey','walletcreatefundedpsbt','walletprocesspsbt','importdescriptors','signmessage','verifymessage','_swapnet_import_htlc'})
+ 'exportpqkey','walletcreatefundedpsbt','walletprocesspsbt','importdescriptors','signmessage','verifymessage','_swapnet_import_htlc','_swapnet_connect_peer','_shared_p2p'})
 
 class Host:
     def __init__(self,config_json,core_call,send):
@@ -35,6 +39,7 @@ class Host:
         self.network=self.config['network'];self.directory=Path(self.config['datadir'])/'swapnet'
         require(not self.directory.is_symlink(),'DATABASE_PATH','SwapNet directory cannot be a symlink')
         self.directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+        protect_private_directory(self.directory)
         self.store=Store(self.directory/'state.sqlite');self.journal=Journal(self.store)
         require(self.store.db.execute('SELECT count(*) FROM sessions').fetchone()[0]==0,'LEGACY_STATE','Legacy observer sessions require offline review; preserve their database and native wallet')
         self._wallet=self.config.get('wallet','') or self.journal.setting('native_wallet','')
@@ -61,10 +66,14 @@ class Host:
         if not any(asset.startswith('btc:') for asset in policies):
             try:self.auto_bitcoin()
             except SwapError as e:self.startup_errors['bitcoin_auto']=e.code
-        self.app=Application(self.store,self.network,self.identity,self.vault,self.drivers,self.send,
+        self.app=MarketApplication(self.store,self.network,self.identity,self.vault,self.drivers,self.send,
                              configure_asset=self.configure_asset,wallet_info=self.wallet_info,
                              export_recovery=lambda passphrase:export_bundle(self.journal,self.directory,passphrase,self.network),
-                             client_version=self.config.get('client_version'))
+                             client_version=self.config.get('client_version'),
+                             startup_mode=self.config.get('market_startup_mode') or None,
+                             connect_peer=lambda endpoint:self.native('_swapnet_connect_peer',endpoint),
+                             setup_bitcoin=lambda policy:configure_bitcoin(self,policy),
+                             shared_core=lambda op,body:self.native('_shared_p2p',op,body))
         # btxd refuses native RPC until this host is built (RPC warmup), so
         # reserved funding inputs are locked again from the first ticks.
         self._relock_pending=set(self.drivers)
@@ -126,14 +135,19 @@ class Host:
             if driver.asset.id not in self.drivers:self.drivers[driver.asset.id]=driver
     def configure_asset(self,policy):
         require(type(policy) is dict,'ASSET_POLICY','Asset policy must be an object')
-        allowed={'asset','rpc_url','cookie_path','wallet','watch_wallet','fee_rate','confirmations','contract','runtime_hash'}
+        allowed={'asset','rpc_url','cookie_path','wallet','watch_wallet','fee_rate','confirmations','contract','runtime_hash','deployment'}
         require(set(policy)<=allowed and {'asset','rpc_url'}<=set(policy),'ASSET_POLICY','Unsupported or missing asset policy fields')
         asset=Asset.parse(policy['asset']);require(asset.family in {'btc','evm'},'ASSET_POLICY','Native BTX binding is immutable')
         rpc=LocalRPC(policy['rpc_url'],cookie_path=policy.get('cookie_path'))
         if asset.family=='btc':return self._bitcoin(rpc,policy)
         require('watch_wallet' not in policy,'ASSET_POLICY','Watch wallet is Bitcoin-only')
         require({'contract','runtime_hash'}<=set(policy),'ASSET_POLICY','EVM requires the deployed address and exact runtime code hash')
-        return EVMDriver(asset.id,rpc,self.journal,self.vault,policy['contract'],policy['runtime_hash'])
+        driver=EVMDriver(asset.id,rpc,self.journal,self.vault,policy['contract'],policy['runtime_hash'])
+        if 'deployment' in policy:
+            manifest=policy['deployment']
+            contract=policy['contract']
+            driver.new_trade_ready=lambda:verify_deployment(rpc,contract,manifest)
+        return driver
     def wallet_info(self):
         loaded=False;warning=None
         try:

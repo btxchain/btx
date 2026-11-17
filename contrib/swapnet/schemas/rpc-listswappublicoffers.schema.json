@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-listswappublicoffers",
+  "type": "object",
+  "properties": {
+    "after": {
+      "type": "integer",
+      "default": ""
+    },
+    "limit": {
+      "type": "integer",
+      "default": 32
+    },
+    "sell_asset": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "buy_asset": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}

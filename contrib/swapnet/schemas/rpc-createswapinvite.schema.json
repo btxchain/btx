@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-createswapinvite",
+  "type": "object",
+  "properties": {
+    "endpoints": {
+      "type": "array"
+    },
+    "ttl": {
+      "type": "integer",
+      "default": 86400
+    },
+    "allow_private": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "endpoints"
+  ],
+  "additionalProperties": false
+}

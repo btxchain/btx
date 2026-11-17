@@ -109,6 +109,7 @@ EXTENDED_SCRIPTS = [
 BASE_SCRIPTS = [
     # SWAPNET-FUNCTIONAL-TEST
     "feature_swapnet.py",
+    "feature_swapnet_market.py --descriptors",
     "rpc_swapnet_principal.py --descriptors",
     "p2p_swapnet_frames.py",
     "wallet_swapnet_relock.py --descriptors",

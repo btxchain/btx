@@ -1,10 +1,11 @@
 import {el,button,heading,note,metric,jsonView} from '../components/ui.js';
 import {presentObservation} from '../core/observe.js';
 import {operationDialog} from './operations.js';
+import {swapnetWorkspace} from './swapnet-workspace.js';
 
-const STATUS=['getswapnetworkinfo','getswapbootstrapinfo','getswapvalidationinfo','getswaphealth','listswapassets','getswapcapabilities'];
-const LOOKUP=['listswaps','listswapproviders','searchswaps','listswapmarkets','getswaprouteinfo','getswapevents','listswapmandates','getswaprecoveryinfo'];
-const REVIEW=['requestswapquote','acceptswapquote','cancelswap','refundswap','resumeswap','bumpswapfee','createswapmandate','revokeswapmandate','publishswapprovider','withdrawswapprovider','setswapmarket','setswapassetpolicy','getswapwalletinfo','exportswaprecovery'];
+const STATUS=['getswapnetworkinfo','getswapbootstrapinfo','getswapvalidationinfo','getswaphealth','listswapassets','getswapcapabilities','getswapmode','getswapreadiness','getsharedp2pinfo'];
+const LOOKUP=['listswaps','listswapproviders','searchswaps','listswapmarkets','getswaprouteinfo','getswapevents','listswapmandates','getswaprecoveryinfo','listswappublicoffers','getswapauthinfo','inspectswapinvite'];
+const REVIEW=['requestswapquote','acceptswapquote','cancelswap','refundswap','resumeswap','bumpswapfee','createswapmandate','revokeswapmandate','publishswapprovider','withdrawswapprovider','setswapmarket','setswapassetpolicy','getswapwalletinfo','exportswaprecovery','setswapmode','publishswapoffer','withdrawswapoffer','requestpublicswapquote','previewswap','confirmswap','createswapinvite','connectswapinvite','exportswapreceipt','verifyswapreceipt','setswapexecutionpolicy','getswapexecutionpolicy','setupswapbitcoin','setswapmarkets','getswapmakercapacity'];
 
 export function swapnetView(app){
  const root=el('div',{class:'page'},heading('SwapNet','Route, bootstrap, and health from this node. A quote, accept, refund, fee bump, mandate, or recovery export opens native review. Atlas does not spend.'));
@@ -34,5 +35,6 @@ export function swapnetView(app){
  }
  root.append(el('div',{class:'row'},refresh),host,el('h2',{},'Look up'),el('div',{class:'actions'},...LOOKUP.map(method=>button(method,()=>operationDialog(app,method)))),el('h2',{},'Native review'),note('These change a route, a mandate, or funds. The form is prepared for review. It is not sent from this page.'),el('div',{class:'actions'},...REVIEW.map(method=>button(method,()=>operationDialog(app,method)))));
  load();
+ root.append(swapnetWorkspace(app));
  return root;
 }

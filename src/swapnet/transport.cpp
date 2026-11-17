@@ -7,15 +7,27 @@ Transport::Transport(std::string network, bool enabled): m_network(std::move(net
         throw std::invalid_argument("SwapNet requires an exact genesis hash");
 }
 bool Transport::KnownCommand(const std::string& c) {
-    return c=="swhello"||c=="swget"||c=="swprov"||c=="swrfq"||c=="swquote"||c=="swterms"||c=="swreceipt";
+    return c=="swhello"||c=="swget"||c=="swprov"||c=="swrfq"||c=="swquote"||c=="swterms"||c=="swreceipt"||c=="swcap"||c=="swoget"||c=="swopage"||c=="swoffer"||c=="sworeq";
 }
 void Transport::SetEnabled(bool enabled) {
     std::lock_guard<std::mutex> lock(m_mutex);m_enabled=enabled;
-    if (!enabled) {m_peers.clear();m_in.clear();m_out.clear();}
+    if (!enabled) {
+        for (const auto& [id, session] : m_shared_sessions) {
+            (void)id;
+            btx::p2p::AuthoritativeCore().Close(btx::p2p::Service::SwapNet, session);
+        }
+        m_shared_sessions.clear();
+        m_peers.clear();m_in.clear();m_out.clear();
+    }
 }
 void Transport::PeerReady(PeerId id,std::int64_t now) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_enabled||m_peers.count(id)||m_peers.size()>=MAX_PEERS||m_out.size()>=MAX_QUEUE)return;
+    if (btx::p2p::AuthoritativeCore().Running()) {
+        auto session=btx::p2p::AuthoritativeCore().Admit(btx::p2p::Service::SwapNet,std::to_string(id),std::to_string(id),"BTX_VERSION_HANDSHAKE");
+        if (session.empty()) return;
+        m_shared_sessions[id]=std::move(session);
+    }
     m_peers.emplace(id,Peer{false,16,now,now,0});
     m_out.push_back({id,"swhello","2:"+m_network});
 }
@@ -29,7 +41,13 @@ void Transport::RetryHellos(std::int64_t now) {
     }
 }
 void Transport::PeerClosed(PeerId id) {
-    std::lock_guard<std::mutex> lock(m_mutex);m_peers.erase(id);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto shared=m_shared_sessions.find(id);
+    if (shared!=m_shared_sessions.end()) {
+        btx::p2p::AuthoritativeCore().Close(btx::p2p::Service::SwapNet, shared->second);
+        m_shared_sessions.erase(shared);
+    }
+    m_peers.erase(id);
     auto clean=[id](auto& q){q.erase(std::remove_if(q.begin(),q.end(),[id](const Frame& f){return f.peer==id;}),q.end());};
     clean(m_in);clean(m_out);
 }
@@ -38,6 +56,10 @@ bool Transport::Receive(PeerId id,const std::string& command,const std::string& 
     auto fail=[this](){++m_rejected;return false;};
     auto it=m_peers.find(id);
     if (!m_enabled||it==m_peers.end()||!KnownCommand(command)||payload.empty()||payload.size()>MAX_FRAME)return fail();
+    if (btx::p2p::AuthoritativeCore().Running()) {
+        auto shared=m_shared_sessions.find(id);
+        if (shared==m_shared_sessions.end() || !btx::p2p::AuthoritativeCore().Charge(btx::p2p::Service::SwapNet,shared->second,payload.size(),false)) return fail();
+    }
     auto& p=it->second;
     // Clock rollback earns no credit. Charge before parsing or allocating a queue slot.
     const auto elapsed=std::max<std::int64_t>(0,now-p.last_ms);
@@ -60,6 +82,10 @@ bool Transport::Receive(PeerId id,const std::string& command,const std::string& 
 bool Transport::Send(PeerId id,const std::string& command,const std::string& payload) {
     std::lock_guard<std::mutex> lock(m_mutex);auto it=m_peers.find(id);
     if (!m_enabled||it==m_peers.end()||!it->second.admitted||command=="swhello"||!KnownCommand(command)||payload.empty()||payload.size()>MAX_FRAME||m_out.size()>=MAX_QUEUE)return false;
+    if (btx::p2p::AuthoritativeCore().Running()) {
+        auto shared=m_shared_sessions.find(id);
+        if (shared==m_shared_sessions.end() || !btx::p2p::AuthoritativeCore().Charge(btx::p2p::Service::SwapNet,shared->second,payload.size(),true)) return false;
+    }
     // The application relays only end-to-end authenticated bounded envelopes.
     if(std::count_if(m_out.begin(),m_out.end(),[id](const Frame& f){return f.peer==id;})>=32)return false;
     m_out.push_back({id,command,payload});return true;

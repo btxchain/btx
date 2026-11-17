@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <shared_p2p/core.h>
 namespace swapnet {
 using PeerId = std::int64_t;
 struct Frame { PeerId peer; std::string command; std::string payload; };
@@ -40,6 +41,7 @@ private:
     bool m_enabled;
     mutable std::mutex m_mutex;
     std::map<PeerId,Peer> m_peers;
+    std::map<PeerId,std::string> m_shared_sessions;
     std::deque<Frame> m_in,m_out;
     std::uint64_t m_rejected{0};
 };

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-exportswapreceipt",
+  "type": "object",
+  "properties": {
+    "swap_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "swap_id"
+  ],
+  "additionalProperties": false
+}

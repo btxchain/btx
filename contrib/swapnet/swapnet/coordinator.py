@@ -33,6 +33,9 @@ class Coordinator:
         limit=self.policy.max_evm_finality_lag_seconds
         for asset in assets:
             driver=self.drivers.get(asset)
+            if driver is not None:
+                guard=getattr(driver,'new_trade_ready',None)
+                if guard is not None:guard()
             if driver is not None and driver.family=='evm':
                 lag=driver.finality_lag()
                 require(lag<=limit,'FINALITY_LAG','EVM finality is %d s behind the tip; the limit is %d s'%(lag,limit))

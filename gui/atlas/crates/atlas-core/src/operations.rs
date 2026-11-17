@@ -126,6 +126,12 @@ const READ_METHODS: &[&str] = &[
     "getswaprouteinfo",
     "getswapevents",
     "getswapvalidationinfo",
+    "getswapmode",
+    "getswapreadiness",
+    "getswapauthinfo",
+    "listswappublicoffers",
+    "inspectswapinvite",
+    "getsharedp2pinfo",
 ];
 const AGENT_READS: &[&str] = &[
     "getblockchaininfo",

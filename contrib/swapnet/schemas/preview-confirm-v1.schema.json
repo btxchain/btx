@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:preview-confirm-v1",
+  "type": "object",
+  "properties": {
+    "preview_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "preview_id"
+  ],
+  "additionalProperties": false
+}
