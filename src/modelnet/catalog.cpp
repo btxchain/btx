@@ -1765,11 +1765,31 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
     }
     for (auto& existing : m_models) {
         if (existing.model_id == e.model_id) {
-            const bool pinned = existing.pinned;
-            const int64_t imported = existing.imported_at;
+            // A download of a model the catalog already lists (a repair, or the
+            // end of a partial fetch) replaces its files, not what this node
+            // recorded about it: the pin, the operator's label, and for the same
+            // artifact its source and its transfer counts (the give-back ratio
+            // reads them).
+            e.pinned = existing.pinned;
+            e.imported_at = existing.imported_at ? existing.imported_at : GetTime();
+            e.last_access_at = existing.last_access_at;
+            if (!existing.label.empty()) e.label = existing.label;
+            if (existing.artifact_id == e.artifact_id) {
+                e.source_path = existing.source_path;
+                e.observed_sources = existing.observed_sources;
+                e.last_served_at = existing.last_served_at;
+                e.useful_bytes_served = existing.useful_bytes_served;
+                e.useful_bytes_received = existing.useful_bytes_received;
+                if (existing.seeding_started_at) e.seeding_started_at = existing.seeding_started_at;
+            }
+            if (e.pinned) {
+                if (complete) e.admission = AdmissionLevel::PINNED;
+                std::string pin_err;
+                m_store.Pin(e.model_id, pin_err);
+                m_store.Pin(e.artifact_id, pin_err);
+                if (existing.artifact_id != e.artifact_id) m_store.Unpin(existing.artifact_id);
+            }
             existing = e;
-            existing.pinned = pinned;
-            existing.imported_at = imported ? imported : GetTime();
             return PersistLocked(err);
         }
     }
