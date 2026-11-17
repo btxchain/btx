@@ -654,6 +654,7 @@ BASE_SCRIPTS = [
 # P2MR-only chain. Use --extended (or BTX_RUN_UPSTREAM_BASE_SUITE=1) to run the
 # broad upstream-style matrix.
 BTX_BASE_SCRIPTS = [
+    'wallet_send_psbt_preview.py --descriptors',
     'wallet_encrypted_backup_recovery.py --descriptors',
     'feature_bcp1.py --descriptors',
     'wallet_bcp1_object_form.py --descriptors',
