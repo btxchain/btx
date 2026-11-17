@@ -982,8 +982,14 @@ bool ModelCatalog::Seed(const Digest48& model_id, bool on, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
     for (auto& m : m_models) {
-        if (m.model_id == model_id) {
+        // As PinModel and RemoveModel: a model is found by its artifact id too.
+        if (m.model_id == model_id || m.artifact_id == model_id) {
             if (on) {
+                // An incomplete replica is not seeded, as in DemandSeedLocked.
+                if (m.incomplete) {
+                    err = "incomplete replica";
+                    return false;
+                }
                 std::string admission;
                 if (!CatalogRouteAllows(m, false, admission)) {
                     AssignRouteErr(admission, err);
