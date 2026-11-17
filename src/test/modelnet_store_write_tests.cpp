@@ -213,6 +213,30 @@ BOOST_AUTO_TEST_CASE(unreadable_helper_stores_are_kept)
     BOOST_CHECK_MESSAGE(call("joinmodelcircle", one(UniValue("circle-3"))), err);
     BOOST_CHECK_EQUAL(ReadAll(dir / "records.json"), garbage);
 
+    // catalog.json is kept as well: the catalog refuses to save over it.
+    {
+        const fs::path cdir = m_path_root / "catalog-unreadable";
+        fs::create_directories(cdir);
+        {
+            std::ofstream out(cdir / "catalog.json", std::ios::binary | std::ios::trunc);
+            out << garbage;
+        }
+        modelnet::ModelCatalog unreadable{cdir, 1 << 20};
+        unreadable.AddPeer("192.0.2.10:29447");
+        BOOST_CHECK_EQUAL(ReadAll(cdir / "catalog.json"), garbage);
+        // A catalog.json with one entry it cannot load is kept too.
+        const fs::path bdir = m_path_root / "catalog-bad-entry";
+        fs::create_directories(bdir);
+        const std::string bad = "{\"models\":[{\"model_id\":\"zz\"}],\"peers\":[]}";
+        {
+            std::ofstream out(bdir / "catalog.json", std::ios::binary | std::ios::trunc);
+            out << bad;
+        }
+        modelnet::ModelCatalog partial{bdir, 1 << 20};
+        partial.AddPeer("192.0.2.11:29447");
+        BOOST_CHECK_EQUAL(ReadAll(bdir / "catalog.json"), bad);
+    }
+
     // A peer's ServiceReceipt goes to receipts.json; an unreadable one is kept.
     std::vector<unsigned char> pk, sk;
     BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
