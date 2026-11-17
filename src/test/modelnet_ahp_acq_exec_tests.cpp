@@ -232,6 +232,70 @@ BOOST_AUTO_TEST_CASE(ahp_acq_07_stale_cache_reverify)
     BOOST_CHECK(denied.ready_state != "MODEL_READY");
 }
 
+// A file already at the destination that does not match was removed before
+// the source was read and checked, and a matching file too large to hash was
+// removed as if it did not match. Either way the file was lost even when no
+// verified replacement followed.
+BOOST_AUTO_TEST_CASE(ahp_acq_07b_existing_file_kept_until_verified_bytes_replace_it)
+{
+    const fs::path dest = m_path_root / "acq-07b-exec";
+    fs::create_directories(dest);
+    const fs::path file = dest / "weights.gguf";
+    const std::string good = "verified-bytes";
+    const std::string other = "operator-bytes";
+    const auto read_back = [&] {
+        std::ifstream in(fs::PathToString(file), std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto run = [&](const std::string& source_path, const std::string& stored, std::string& code) {
+        modelnet::ExecuteAcquisitionRequest req;
+        req.plan = PlanTo(dest);
+        modelnet::VerifiedLocalFile f;
+        f.relative_path = "weights.gguf";
+        f.sha384_hex = stored;
+        f.source_path = source_path;
+        req.files.push_back(f);
+        RememberDigest(req, "weights.gguf", stored);
+        modelnet::AcquisitionReceipt rec;
+        uint64_t reserved = 0;
+        std::string err;
+        return modelnet::ExecuteBtxAcquisition(req, rec, reserved, code, err);
+    };
+    std::string code;
+
+    // No source to replace it with.
+    { std::ofstream{fs::PathToString(file)} << other; }
+    BOOST_CHECK(!run("", Sha384Of(good), code));
+    BOOST_CHECK_EQUAL(read_back(), other);
+
+    // A source whose bytes do not match the stored digest.
+    const fs::path wrong = m_path_root / "src-07b-wrong.bin";
+    { std::ofstream{fs::PathToString(wrong)} << "something-else"; }
+    BOOST_CHECK(!run(fs::PathToString(wrong), Sha384Of(good), code));
+    BOOST_CHECK_EQUAL(code, "MODEL_BYTES_UNVERIFIED");
+    BOOST_CHECK_EQUAL(read_back(), other);
+
+    // A file larger than the per-file limit cannot be hashed here, even when
+    // it is the right one.
+    const std::string big(modelnet::ACQ_EXECUTE_MAX_FILE_BYTES + 1, 'w');
+    { std::ofstream{fs::PathToString(file), std::ios::binary | std::ios::trunc} << big; }
+    BOOST_CHECK(!run("", Sha384Of(big), code));
+    BOOST_CHECK(fs::exists(file));
+    BOOST_CHECK_EQUAL(fs::file_size(file), big.size());
+
+    // A file exactly at the limit is still read whole and used as it is.
+    const std::string at_limit(modelnet::ACQ_EXECUTE_MAX_FILE_BYTES, 'v');
+    { std::ofstream{fs::PathToString(file), std::ios::binary | std::ios::trunc} << at_limit; }
+    BOOST_CHECK_MESSAGE(run("", Sha384Of(at_limit), code), code);
+    BOOST_CHECK_EQUAL(fs::file_size(file), at_limit.size());
+
+    // Verified bytes still replace a file that is not the right one.
+    const fs::path right = m_path_root / "src-07b-right.bin";
+    { std::ofstream{fs::PathToString(right)} << good; }
+    BOOST_CHECK_MESSAGE(run(fs::PathToString(right), Sha384Of(good), code), code);
+    BOOST_CHECK_EQUAL(read_back(), good);
+}
+
 BOOST_AUTO_TEST_CASE(ahp_acq_08_multi_file_path_and_symlink)
 {
     const fs::path dest = m_path_root / "acq-08-exec";
