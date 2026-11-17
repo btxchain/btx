@@ -173,6 +173,7 @@ class Application:
                 if (market.sell_asset,market.buy_asset)!=(p['rfq']['sell_asset'],p['rfq']['buy_asset']) or market.expires_at<=self.now():continue
                 try:
                     driver=self.coordinator._driver(market.buy_asset)
+                    self.coordinator.check_finality(market.sell_asset,market.buy_asset)
                     maker=self._maker();maker.set_verified_inventory(market.buy_asset,str(driver.inventory()),self.now())
                     quote=maker.quote(p['rfq'],market,self.now())
                     self._quote_within_mandate(policy,quote.quote,sender)

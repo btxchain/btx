@@ -27,6 +27,15 @@ class Coordinator:
     def _driver(self,asset):
         require(asset in self.drivers,'ASSET_UNAVAILABLE','No qualified local chain driver for this asset')
         return self.drivers[asset]
+    def check_finality(self,*assets):
+        # Claims and refunds on an EVM leg are seen at the finalized tag. A lag
+        # near the settlement margin lets a deadline pass before they are seen.
+        limit=self.policy.max_evm_finality_lag_seconds
+        for asset in assets:
+            driver=self.drivers.get(asset)
+            if driver is not None and driver.family=='evm':
+                lag=driver.finality_lag()
+                require(lag<=limit,'FINALITY_LAG','EVM finality is %d s behind the tip; the limit is %d s'%(lag,limit))
     def _save(self,sid,s,rev):return self.journal.save(sid,s,rev)
     def _save_new(self,sid,body,ctx,budget_quote,mandate_id,maxfee):
         # Driver and vault setup has finished. Keep the debit, quote claim and
@@ -89,7 +98,7 @@ class Coordinator:
             return self._safe_view(sid,existing)
         self.journal.ensure_capacity()
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset)
-        a.ready();b.ready()
+        a.ready();b.ready();self.check_finality(q.sell_asset,q.buy_asset)
         self.authority.reserve(ctx,q,mandate_id,max_local_fee_atoms,check_only=True)
         long,short=self._deadlines(a,b)
         ak=a.new_key('refund');bk=b.new_key('claim')
@@ -191,6 +200,7 @@ class Coordinator:
                       q.buy_asset,q.sell_asset,str(atoms(q.buy_atoms)-atoms(q.maker_fee_atoms)),q.sell_atoms,'0','0',q.issued_at,q.expires_at)
         self.authority.reserve(ctx,reverse,market['mandate_id'],maxfee,check_only=True)
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset);a.ready();b.ready()
+        self.check_finality(q.sell_asset,q.buy_asset)
         long,short=Deadline(**p['long_deadline']),Deadline(**p['short_deadline'])
         # ready() and clock() are RPCs. Their observed_at is after the now
         # captured for the quote, so the deadline check has to read the clock again.
