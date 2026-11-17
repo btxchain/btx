@@ -701,6 +701,96 @@ BOOST_AUTO_TEST_CASE(JIT_JOURNEY_12)
     BOOST_CHECK_EQUAL(got["automatic_spend_atoms"].getInt<int>(), 0);
 }
 
+// Any caller makes a new plan with each planbtxcapability and a new lock with
+// each importbtxlock of a lock that differs, and each one was kept for the
+// life of the helper. The newest are kept within a bound, oldest out first.
+BOOST_AUTO_TEST_CASE(capability_plans_and_locks_are_bounded)
+{
+    modelnet::ModelCatalog cat{m_path_root / "cap-bounded", 1 << 20};
+    std::string code, err;
+    auto rpc = [](const std::string& method, const UniValue& params) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        return req;
+    };
+    const auto lock = [](size_t i, size_t pad) {
+        UniValue l(UniValue::VOBJ);
+        l.pushKV("recipe_id", std::string(96, 'a'));
+        l.pushKV("note", "lock-" + std::to_string(i) + std::string(pad, 'x'));
+        return l;
+    };
+    const auto import = [&](const UniValue& l) {
+        UniValue imported;
+        BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc("importbtxlock", l), imported, code, err), err);
+        BOOST_REQUIRE(imported["imported"].get_bool());
+        return imported["lock_id"].get_str();
+    };
+    modelnet::CapabilityLock kept;
+
+    // 1025 small locks: the first one is pushed out, the newest 1024 stay.
+    std::vector<std::string> ids;
+    for (size_t i = 0; i <= 1024; ++i) ids.push_back(import(lock(i, 0)));
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(ids.front(), kept));
+    BOOST_CHECK(modelnet::LookupCapabilityLock(ids[1], kept));
+    BOOST_REQUIRE(modelnet::LookupCapabilityLock(ids.back(), kept));
+    BOOST_CHECK_EQUAL(kept.json["note"].get_str(), "lock-1024");
+
+    // Locks of 200 KiB each: the newest 20 fit in 4 MiB, the one before does not.
+    ids.clear();
+    for (size_t i = 0; i < 25; ++i) ids.push_back(import(lock(2000 + i, 200 << 10)));
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(ids[4], kept));
+    for (size_t i = 5; i < ids.size(); ++i) {
+        BOOST_CHECK_MESSAGE(modelnet::LookupCapabilityLock(ids[i], kept), "lock " << i);
+    }
+
+    // map_id is not part of the lock_id: 30 small locks imported again, each
+    // with a large map_id under the same id, count as the newest locks and
+    // still fit the bound.
+    ids.clear();
+    for (size_t i = 0; i < 30; ++i) ids.push_back(import(lock(3000 + i, 0)));
+    for (size_t i = 0; i < 30; ++i) {
+        UniValue again = lock(3000 + i, 0);
+        again.pushKV("map_id", std::string(200 << 10, 'm'));
+        BOOST_REQUIRE_EQUAL(import(again), ids[i]);
+    }
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(ids[9], kept));
+    BOOST_REQUIRE(modelnet::LookupCapabilityLock(ids[10], kept));
+    BOOST_CHECK_EQUAL(kept.json["map_id"].get_str().size(), 200U << 10);
+    BOOST_CHECK(modelnet::LookupCapabilityLock(ids.back(), kept));
+
+    // One lock larger than the bound is kept until the next one comes.
+    const std::string big = import(lock(4000, 5 << 20));
+    BOOST_CHECK(modelnet::LookupCapabilityLock(big, kept));
+    const std::string after = import(lock(4001, 0));
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(big, kept));
+    BOOST_CHECK(modelnet::LookupCapabilityLock(after, kept));
+
+    // 4097 plans: the first one is pushed out and can no longer be ensured.
+    UniValue plan_in(UniValue::VOBJ);
+    plan_in.pushKV("recipe", RecipeJson());
+    plan_in.pushKV("grant", GrantJson());
+    std::vector<std::string> plans;
+    for (size_t i = 0; i <= 4096; ++i) {
+        UniValue planned;
+        BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc("planbtxcapability", plan_in), planned, code, err), err);
+        plans.push_back(planned["plan_id"].get_str());
+    }
+    modelnet::CapabilityPlan plan;
+    BOOST_CHECK(!modelnet::LookupCapabilityPlan(plans.front(), plan));
+    BOOST_CHECK(modelnet::LookupCapabilityPlan(plans[1], plan));
+    BOOST_CHECK(modelnet::LookupCapabilityPlan(plans.back(), plan));
+    UniValue ensure_in(UniValue::VOBJ);
+    ensure_in.pushKV("plan_id", plans.front());
+    ensure_in.pushKV("grant", GrantJson());
+    UniValue ensured;
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc("ensurebtxcapability", ensure_in), ensured, code, err));
+    BOOST_CHECK_EQUAL(err, "unknown plan_id");
+    ensure_in.pushKV("plan_id", plans.back());
+    ensured = UniValue(UniValue::VOBJ);
+    BOOST_CHECK_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc("ensurebtxcapability", ensure_in), ensured, code, err), err);
+}
+
 BOOST_AUTO_TEST_CASE(remaining_capability_rpc_surface)
 {
     modelnet::ModelCatalog cat{m_path_root / "cap-rpc-surface", 1 << 20};
