@@ -1863,7 +1863,8 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             int64_t p = 0;
             if (!lot.exists("principal_atoms") || !CanonicalAtoms(lot["principal_atoms"].get_str(), p, err2))
                 return fail("INVALID_PARAMETER", "principal");
-            frozen += p;
+            // Each lot is in MoneyRange; the round's total must be too.
+            if (!AddMoneyAtoms(frozen, p, err2)) return fail("INVALID_PARAMETER", "frozen total MoneyRange");
             UniValue L = lot;
             const std::string rid_placeholder = "pending";
             (void)rid_placeholder;

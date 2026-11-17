@@ -317,6 +317,49 @@ BOOST_AUTO_TEST_CASE(bounty_publish_checks_expected_terms_id)
     BOOST_CHECK(result.exists("bounty_id"));
 }
 
+// A funding round signs frozen_total_atoms, the sum of its lots. Each lot is
+// in MoneyRange, and so must the total be.
+BOOST_AUTO_TEST_CASE(bounty_funding_round_total_is_in_money_range)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-round-total";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    UniValue pub_params(UniValue::VARR);
+    pub_params.push_back(pub);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("publishbounty", pub_params, result, code, err), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto freeze = [&](const std::vector<std::string>& principals) {
+        UniValue lots(UniValue::VARR);
+        for (const auto& principal : principals) {
+            UniValue lot(UniValue::VOBJ);
+            lot.pushKV("principal_atoms", principal);
+            lots.push_back(lot);
+        }
+        UniValue round(UniValue::VOBJ);
+        round.pushKV("bounty_id", bounty);
+        round.pushKV("lots", lots);
+        UniValue params(UniValue::VARR);
+        params.push_back(round);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        return store.Dispatch("freezebountyfundinground", params, result, code, err);
+    };
+    const std::string max = std::to_string(MAX_MONEY_ATOMS);
+    BOOST_CHECK(!freeze({max, "1"}));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(freeze({std::to_string(MAX_MONEY_ATOMS - 1), "1"}), err);
+    BOOST_CHECK_EQUAL(result["frozen_total_atoms"].get_str(), max);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_auth_001_to_030)
 {
     using namespace modelnet;
