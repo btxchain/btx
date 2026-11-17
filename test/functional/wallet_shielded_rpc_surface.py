@@ -145,6 +145,8 @@ class WalletShieldedRpcSurfaceTest(BitcoinTestFramework):
         zero_conf_dest = wallet.z_getnewaddress()
         zero_conf_send = wallet.z_sendmany([{"address": zero_conf_dest, "amount": Decimal("0.33")}])
         assert zero_conf_send["txid"] in node.getrawmempool()
+        # The wallet credits its own mempool outputs on the scheduler thread; wait for it.
+        node.syncwithvalidationinterfacequeue()
         sender_zero_conf = wallet.z_getbalance(0)
         assert_greater_than_or_equal(Decimal(sender_zero_conf["balance"]), Decimal("0"))
         assert_equal(Decimal(sender_zero_conf["balance"]), Decimal(seeded["balance"]) - zero_conf_send["fee"])
