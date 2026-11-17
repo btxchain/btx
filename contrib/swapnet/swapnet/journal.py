@@ -227,6 +227,34 @@ class Journal:
         with self.store.lock:r=self.store.db.execute('SELECT revision,body FROM sn_negotiations WHERE id=?',(sid,)).fetchone()
         require(r is not None,'NOT_FOUND','Swap not found')
         return r[0],local_load(r[1])
+    def scheduled(self, *, terminal, after='', limit=4):
+        """Bounded keyset rotation over eligible rows, not a display/history page."""
+        integer(limit,lo=1,hi=4)
+        stages = "stage IN ('complete','refunded')" if terminal else "stage NOT IN ('complete','refunded','cancelled','rejected')"
+        with self.store.lock:
+            rows=self.store.db.execute('SELECT id,revision,body FROM sn_negotiations WHERE '+stages+' AND id>? ORDER BY id LIMIT ?', (after,limit)).fetchall()
+            if after and len(rows)<limit:
+                rows+=self.store.db.execute('SELECT id,revision,body FROM sn_negotiations WHERE '+stages+' AND id<=? ORDER BY id LIMIT ?', (after,limit-len(rows))).fetchall()
+        return [(r[0],r[1],local_load(r[2])) for r in rows]
+    def active_asset_in_use(self, asset):
+        # Reorgs can reopen terminal rows beyond the new-session active cap.
+        # Stream all active agreements; do not apply a display/session limit.
+        with self.store.lock:
+            rows=self.store.db.execute("SELECT body FROM sn_negotiations WHERE stage NOT IN ('complete','refunded','cancelled','rejected')")
+            while True:
+                batch=rows.fetchmany(64)
+                if not batch:return False
+                for (raw,) in batch:
+                    agreement=local_load(raw).get('agreement',{})
+                    if asset in (agreement.get('long_leg',{}).get('asset'),agreement.get('short_leg',{}).get('asset')):return True
+    def owned_session_ids(self, principal, ids):
+        # Callers supply only IDs referenced by one bounded audit page.
+        ids=tuple({sid for sid in ids if type(sid) is str})
+        require(len(ids)<=500,'EVENT_LIMIT','Too many event session references')
+        if not ids:return set()
+        with self.store.lock:
+            rows=self.store.db.execute('SELECT id FROM sn_negotiations WHERE principal=? AND id IN ('+','.join('?' for _ in ids)+')',(principal,*ids)).fetchall()
+        return {r[0] for r in rows}
     def all(self,principal=None,limit=512):
         integer(limit,lo=1,hi=4096)
         with self.store.lock:
