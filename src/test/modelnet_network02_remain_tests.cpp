@@ -598,6 +598,143 @@ BOOST_AUTO_TEST_CASE(n02_costly_write_idempotency_caller_scoped)
     BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
 }
 
+// Every new key kept its request body and its reply for the life of the
+// helper, and the caller picks the keys. Each method keeps the replies of its
+// newest keys within a budget; a key whose reply is gone still refuses another
+// body and does not run its write again.
+BOOST_AUTO_TEST_CASE(n02_idempotency_keeps_replies_within_a_budget)
+{
+    const fs::path tmp = m_path_root / "n02-idem-budget";
+    modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+    UniValue result;
+    std::string code, err;
+
+    // One source that holds every piece: the healer lists all 2^20 pieces,
+    // about 7 MB of JSON. Its reply is not kept; a replay computes it again.
+    UniValue file(UniValue::VOBJ);
+    file.pushKV("file_index", 0);
+    UniValue files(UniValue::VARR);
+    files.push_back(file);
+    UniValue model(UniValue::VOBJ);
+    model.pushKV("files", files);
+    UniValue models(UniValue::VARR);
+    models.push_back(model);
+    UniValue availability(UniValue::VOBJ);
+    availability.pushKV("models", models);
+    const auto healer = [&](const std::string& key, bool other) {
+        UniValue b(UniValue::VOBJ);
+        b.pushKV("piece_count", 1 << 20);
+        b.pushKV("availability", availability);
+        if (other) b.pushKV("note", "another body");
+        b.pushKV("idempotency_key", key);
+        return b;
+    };
+    BOOST_REQUIRE_MESSAGE(CallN02(cat, "setmodelswarmhealer", healer("n02-budget-heal", false), result, code, err), err);
+    BOOST_REQUIRE_EQUAL(result["endangered"].size(), 1U << 20);
+    BOOST_REQUIRE_MESSAGE(CallN02(cat, "setmodelswarmhealer", healer("n02-budget-heal", false), result, code, err), code);
+    BOOST_CHECK_EQUAL(result["endangered"].size(), 1U << 20);
+    BOOST_CHECK(!CallN02(cat, "setmodelswarmhealer", healer("n02-budget-heal", true), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // Package replies of about 1.4 MB: two do not fit the budget of one method.
+    const auto package = [&](const std::string& key, char fill, size_t bytes) {
+        UniValue b = TinyBundleBody();
+        b.pushKV("note", std::string(bytes, fill));
+        b.pushKV("idempotency_key", key);
+        return b;
+    };
+    // A write that failed is answered as it was, also after its reply is gone.
+    UniValue refused(UniValue::VOBJ);
+    UniValue core(UniValue::VOBJ);
+    core.pushKV("version", 3);
+    core.pushKV("network", "MAINNET");
+    refused.pushKV("core", core);
+    refused.pushKV("idempotency_key", "n02-budget-refused");
+    BOOST_REQUIRE(!CallN02(cat, "createbtxpackage", refused, result, code, err));
+    BOOST_REQUIRE_EQUAL(code, "NETWORK_FORBIDDEN");
+
+    UniValue first, second;
+    BOOST_REQUIRE_MESSAGE(CallN02(cat, "createbtxpackage", package("n02-budget-pkg-1", 'a', 700 << 10), first, code, err), err);
+    BOOST_REQUIRE_GT(first["hex"].get_str().size(), 1U << 20);
+    BOOST_REQUIRE_MESSAGE(CallN02(cat, "createbtxpackage", package("n02-budget-pkg-2", 'b', 700 << 10), second, code, err), err);
+    // The newest reply is kept and given back as it was.
+    BOOST_REQUIRE_MESSAGE(CallN02(cat, "createbtxpackage", package("n02-budget-pkg-2", 'b', 700 << 10), result, code, err), code);
+    BOOST_CHECK_EQUAL(result.write(), second.write());
+    // The older one is no longer kept: the same body is not run again, and
+    // another body is still refused.
+    BOOST_CHECK(!CallN02(cat, "createbtxpackage", package("n02-budget-pkg-1", 'a', 700 << 10), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_REPLAY_UNAVAILABLE");
+    BOOST_CHECK(err.find("was done") != std::string::npos);
+    BOOST_CHECK(result["idempotent_replay"].isTrue());
+    BOOST_CHECK(!result.exists("hex"));
+    BOOST_CHECK(!CallN02(cat, "createbtxpackage", package("n02-budget-pkg-1", 'c', 700 << 10), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_CHECK(!CallN02(cat, "createbtxpackage", refused, result, code, err));
+    BOOST_CHECK_EQUAL(code, "NETWORK_FORBIDDEN");
+
+    // A reply larger than the budget is not kept, but its key still is.
+    BOOST_REQUIRE_MESSAGE(CallN02(cat, "createbtxpackage", package("n02-budget-pkg-big", 'd', 1200 << 10), result, code, err), err);
+    BOOST_CHECK(!CallN02(cat, "createbtxpackage", package("n02-budget-pkg-big", 'd', 1200 << 10), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_REPLAY_UNAVAILABLE");
+    BOOST_CHECK(!CallN02(cat, "createbtxpackage", package("n02-budget-pkg-big", 'e', 1200 << 10), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    // ... and it did not push out the reply that is kept.
+    BOOST_REQUIRE(CallN02(cat, "createbtxpackage", package("n02-budget-pkg-2", 'b', 700 << 10), result, code, err));
+    BOOST_CHECK_EQUAL(result.write(), second.write());
+}
+
+// The keys of one method are pushed out only by newer keys of the same method,
+// so the calls of another method do not reopen them.
+BOOST_AUTO_TEST_CASE(n02_idempotency_keys_are_pushed_out_per_method)
+{
+    const fs::path tmp = m_path_root / "n02-idem-per-method";
+    modelnet::ModelCatalog cat{tmp / "cat", 1 << 20};
+    UniValue result;
+    std::string code, err;
+    const auto discovery = [](const std::string& key, bool other) {
+        UniValue b(UniValue::VOBJ);
+        if (other) b.pushKV("note", "another body");
+        b.pushKV("idempotency_key", key);
+        return b;
+    };
+
+    UniValue acq(UniValue::VOBJ);
+    acq.pushKV("plan_id", std::string(96, 'e'));
+    acq.pushKV("idempotency_key", "n02-per-method-acq");
+    BOOST_REQUIRE(!CallN02(cat, "executebtxacquisition", acq, result, code, err));
+    BOOST_REQUIRE_EQUAL(err, "unknown plan_id");
+    UniValue upload(UniValue::VOBJ);
+    upload.pushKV("max_slots", 5);
+    upload.pushKV("idempotency_key", "n02-per-method-upload");
+    BOOST_REQUIRE_MESSAGE(CallN02(cat, "setmodeluploadpolicy", upload, result, code, err), err);
+
+    const size_t keys{4096};
+    BOOST_REQUIRE(CallN02(cat, "setmodeldiscoverypolicy", discovery("n02-per-method-0", false), result, code, err));
+    for (size_t i = 1; i < keys; ++i) {
+        BOOST_REQUIRE(CallN02(cat, "setmodeldiscoverypolicy", discovery("n02-per-method-" + std::to_string(i), false), result, code, err));
+    }
+    // 4096 keys of one method are kept.
+    BOOST_CHECK(!CallN02(cat, "setmodeldiscoverypolicy", discovery("n02-per-method-0", true), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_REQUIRE(CallN02(cat, "setmodeldiscoverypolicy", discovery("n02-per-method-" + std::to_string(keys), false), result, code, err));
+    // One more pushes out the oldest of that method only.
+    BOOST_CHECK(!CallN02(cat, "setmodeldiscoverypolicy", discovery("n02-per-method-1", true), result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_CHECK_MESSAGE(CallN02(cat, "setmodeldiscoverypolicy", discovery("n02-per-method-0", true), result, code, err), code);
+
+    UniValue acq_other = acq;
+    acq_other.pushKV("verified_local_files", UniValue(UniValue::VARR));
+    BOOST_CHECK(!CallN02(cat, "executebtxacquisition", acq_other, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    UniValue upload_other(UniValue::VOBJ);
+    upload_other.pushKV("max_slots", 7);
+    upload_other.pushKV("idempotency_key", "n02-per-method-upload");
+    BOOST_CHECK(!CallN02(cat, "setmodeluploadpolicy", upload_other, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_REQUIRE(CallN02(cat, "setmodeluploadpolicy", upload, result, code, err));
+    BOOST_CHECK_EQUAL(result["max_slots"].getInt<int>(), 5);
+}
+
 BOOST_AUTO_TEST_CASE(n02_read_rpcs_do_not_require_idempotency_key)
 {
     const fs::path tmp = m_path_root / "n02-idem-reads";

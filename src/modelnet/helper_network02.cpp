@@ -45,6 +45,7 @@
 #include <modelnet/upload_scheduler_drr.h>
 #include <modelnet/verified_manifest.h>
 #include <crypto/hex_base.h>
+#include <crypto/sha256.h>
 #include <span.h>
 #include <util/fs.h>
 #include <util/readwritefile.h>
@@ -53,6 +54,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -115,15 +117,135 @@ struct StorageMigrationJournal {
 StorageMigrationJournal g_migrate;
 
 struct Network02IdemEntry {
-    std::string body_fp;
-    UniValue result;
+    std::string body_fp; //!< SHA-256 of the body without the key fields
+    std::string result;  //!< the reply as JSON text, empty when it is not kept
     std::string err_code;
     std::string err;
     bool ok{true};
 };
+
+//! What the costly writes of one method answered, by caller and key. The
+//! caller picks the keys, and each new one kept the whole request body and
+//! the reply for the life of the helper. Keep the outcome of the newest keys
+//! under hashes of the scope and the body, and their replies as JSON text
+//! within a byte budget, oldest out first. A key whose reply is gone still
+//! refuses another body, and is not run again with the same one. There is one
+//! store per method, so the keys of a method are pushed out only by calls of
+//! that method.
+class Network02IdemStore
+{
+public:
+    static constexpr size_t MAX_KEYS{4096};
+    static constexpr size_t REPLY_BUDGET_BYTES{2 << 20};
+    static constexpr size_t MAX_ERR_BYTES{256};
+
+    const Network02IdemEntry* Find(const std::string& scope) const
+    {
+        const auto it = m_entries.find(Sha256Of(scope));
+        return it == m_entries.end() ? nullptr : &it->second;
+    }
+
+    void Put(const std::string& scope, Network02IdemEntry entry, bool keep_reply)
+    {
+        const std::string key = Sha256Of(scope);
+        if (m_entries.count(key)) return;
+        CutUtf8(entry.err, MAX_ERR_BYTES);
+        entry.result.shrink_to_fit();
+        if (!keep_reply || entry.result.capacity() > REPLY_BUDGET_BYTES) std::string{}.swap(entry.result);
+        const size_t reply_bytes = entry.result.empty() ? 0 : entry.result.capacity();
+        // Make room first; this only frees memory.
+        while (m_entries.size() >= MAX_KEYS && !m_keys.empty()) {
+            const auto it = m_entries.find(m_keys.front());
+            // m_replies holds the keys with a reply in the same order.
+            if (!it->second.result.empty()) {
+                m_reply_bytes -= it->second.result.capacity();
+                m_replies.pop_front();
+            }
+            m_entries.erase(it);
+            m_keys.pop_front();
+        }
+        while (reply_bytes > 0 && m_reply_bytes + reply_bytes > REPLY_BUDGET_BYTES && !m_replies.empty()) {
+            auto& older = m_entries.at(m_replies.front()).result;
+            m_reply_bytes -= older.capacity();
+            std::string{}.swap(older);
+            m_replies.pop_front();
+        }
+        // Then add the key, and take it out again if the order lists cannot
+        // hold it.
+        const auto it = m_entries.emplace(key, std::move(entry)).first;
+        try {
+            m_keys.push_back(key);
+            if (reply_bytes > 0) m_replies.push_back(key);
+        } catch (...) {
+            if (!m_keys.empty() && m_keys.back() == key) m_keys.pop_back();
+            m_entries.erase(it);
+            throw;
+        }
+        m_reply_bytes += reply_bytes;
+    }
+
+private:
+    static std::string Sha256Of(const std::string& text)
+    {
+        unsigned char digest[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(reinterpret_cast<const unsigned char*>(text.data()), text.size()).Finalize(digest);
+        return std::string(reinterpret_cast<const char*>(digest), sizeof(digest));
+    }
+
+    //! Shortens `text` to at most `max` bytes, not inside a UTF-8 sequence.
+    static void CutUtf8(std::string& text, size_t max)
+    {
+        if (text.size() <= max) return;
+        size_t n = max;
+        while (n > 0 && (static_cast<unsigned char>(text[n]) & 0xC0) == 0x80) --n;
+        text = text.substr(0, n);
+    }
+
+    std::map<std::string, Network02IdemEntry> m_entries;
+    std::deque<std::string> m_keys;    //!< all keys, oldest first
+    std::deque<std::string> m_replies; //!< keys whose reply is kept, oldest first
+    size_t m_reply_bytes{0};           //!< capacity of the kept reply texts
+};
+
 std::mutex g_n02_idem_mu;
-std::map<std::string, Network02IdemEntry> g_n02_idem;
-std::map<std::string, Network02IdemEntry> g_acq_exec_idem;
+//! By write method: the costly writes and executebtxacquisition.
+std::map<std::string, Network02IdemStore> g_n02_idem;
+
+//! setmodelswarmhealer only computes its reply from the request, and the
+//! reply lists up to every piece (about 7 MB of JSON for 2^20 pieces). Its
+//! replies are not kept; a replay with the same body computes it again, as of
+//! the replay (a source whose own timestamp has grown old counts as gone).
+bool Network02ReplyIsRecomputed(const std::string& method)
+{
+    return method == "setmodelswarmhealer";
+}
+
+bool ReplayNetwork02Idem(const Network02IdemEntry& entry, UniValue& result, std::string& err_code, std::string& err)
+{
+    if (!entry.result.empty()) {
+        UniValue kept;
+        if (kept.read(entry.result)) {
+            result = std::move(kept);
+            err_code = entry.err_code;
+            err = entry.err;
+            return entry.ok;
+        }
+    }
+    // The reply is no longer kept. The write was answered once; it is not run
+    // again for the same key and body.
+    result = UniValue(UniValue::VOBJ);
+    result.pushKV("schema_version", 1);
+    result.pushKV("automatic_spend_atoms", 0);
+    result.pushKV("idempotent_replay", true);
+    if (!entry.ok) {
+        err_code = entry.err_code;
+        err = entry.err;
+        return false;
+    }
+    err_code = "IDEMPOTENCY_REPLAY_UNAVAILABLE";
+    err = "the write under this idempotency_key was done; its reply is no longer kept";
+    return false;
+}
 
 std::string CanonicalNetwork02WriteMethod(const std::string& method)
 {
@@ -179,7 +301,11 @@ std::string Network02BodyFingerprint(const UniValue& o)
             stripped.pushKV(k, o[k]);
         }
     }
-    return stripped.write();
+    // Keep a hash, not the body: a body may be as large as an RPC request.
+    const std::string body = stripped.write();
+    unsigned char digest[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(body.data()), body.size()).Finalize(digest);
+    return HexStr(digest);
 }
 
 void Network02IdemFail(UniValue& result, std::string& err_code, std::string& err, const std::string& code,
@@ -201,6 +327,60 @@ std::string ExecuteAcqPlanFingerprint(const UniValue& o)
     return stripped.write();
 }
 
+//! Answers a kept key: another body is refused, and the same body gets what
+//! the first call answered. When the first call succeeded but its reply is not
+//! kept and `own` is set, `run` is set instead: the caller answers with a reply
+//! of its own.
+bool AnswerKeptNetwork02Idem(const Network02IdemEntry& kept, const std::string& fp, bool own, bool& run,
+                             UniValue& result, std::string& err_code, std::string& err)
+{
+    run = false;
+    if (kept.body_fp != fp) {
+        Network02IdemFail(result, err_code, err, "IDEMPOTENCY_CONFLICT", "idempotency conflict");
+        return false;
+    }
+    if (own && kept.ok && kept.result.empty()) {
+        run = true;
+        return true;
+    }
+    return ReplayNetwork02Idem(kept, result, err_code, err);
+}
+
+//! Runs `once` for a new key of `method` and keeps its outcome.
+bool RunNetwork02Idempotent(const std::string& method, const std::string& scope, const std::string& fp,
+                            UniValue& result, std::string& err_code, std::string& err,
+                            const std::function<bool()>& once)
+{
+    const bool recompute = Network02ReplyIsRecomputed(method);
+    {
+        std::lock_guard<std::mutex> lock(g_n02_idem_mu);
+        if (const auto* kept = g_n02_idem[method].Find(scope)) {
+            bool run = false;
+            const bool answer = AnswerKeptNetwork02Idem(*kept, fp, recompute, run, result, err_code, err);
+            if (!run) return answer;
+        }
+    }
+    const bool ok = once();
+    std::lock_guard<std::mutex> lock(g_n02_idem_mu);
+    auto& store = g_n02_idem[method];
+    if (const auto* kept = store.Find(scope)) {
+        // Another call with this key finished first. When that one succeeded
+        // and its reply is not kept, this call gives its own reply if it
+        // succeeded too, or if the reply is computed again anyway.
+        bool run = false;
+        const bool answer = AnswerKeptNetwork02Idem(*kept, fp, /*own=*/ok || recompute, run, result, err_code, err);
+        return run ? ok : answer;
+    }
+    Network02IdemEntry entry;
+    entry.body_fp = fp;
+    if (!recompute) entry.result = result.write();
+    entry.err_code = err_code;
+    entry.err = err;
+    entry.ok = ok;
+    store.Put(scope, std::move(entry), /*keep_reply=*/!recompute);
+    return ok;
+}
+
 /** Caller-scoped executebtxacquisition store. Missing key keeps existing
  *  unkeyed execute behavior (other NETWORK-02 costly writes still require a
  *  key). Lookup runs before plan_id MODEL_READY so a conflicting files set
@@ -211,42 +391,8 @@ bool WithExecuteAcquisitionIdempotency(const UniValue& o, UniValue& result, std:
     const std::string key = Network02IdempotencyKey(o);
     if (key.empty()) return once();
     const std::string scope = Network02IdemScope(Network02IdemCaller(o), "executebtxacquisition", key);
-    const std::string fp = Network02BodyFingerprint(o);
-    {
-        std::lock_guard<std::mutex> lock(g_n02_idem_mu);
-        auto it = g_acq_exec_idem.find(scope);
-        if (it != g_acq_exec_idem.end()) {
-            if (it->second.body_fp != fp) {
-                Network02IdemFail(result, err_code, err, "IDEMPOTENCY_CONFLICT", "idempotency conflict");
-                return false;
-            }
-            result = it->second.result;
-            err_code = it->second.err_code;
-            err = it->second.err;
-            return it->second.ok;
-        }
-    }
-    const bool ok = once();
-    std::lock_guard<std::mutex> lock(g_n02_idem_mu);
-    auto it = g_acq_exec_idem.find(scope);
-    if (it != g_acq_exec_idem.end()) {
-        if (it->second.body_fp != fp) {
-            Network02IdemFail(result, err_code, err, "IDEMPOTENCY_CONFLICT", "idempotency conflict");
-            return false;
-        }
-        result = it->second.result;
-        err_code = it->second.err_code;
-        err = it->second.err;
-        return it->second.ok;
-    }
-    Network02IdemEntry entry;
-    entry.body_fp = fp;
-    entry.result = result;
-    entry.err_code = err_code;
-    entry.err = err;
-    entry.ok = ok;
-    g_acq_exec_idem.emplace(scope, std::move(entry));
-    return ok;
+    return RunNetwork02Idempotent("executebtxacquisition", scope, Network02BodyFingerprint(o), result, err_code, err,
+                                  once);
 }
 
 fs::path HelperRoot(const ModelCatalog& cat)
@@ -1757,42 +1903,7 @@ bool WithNetwork02Idempotency(const std::string& method, const UniValue& params,
         return false;
     }
     const std::string scope = Network02IdemScope(Network02IdemCaller(o), write_method, key);
-    const std::string fp = Network02BodyFingerprint(o);
-    {
-        std::lock_guard<std::mutex> lock(g_n02_idem_mu);
-        auto it = g_n02_idem.find(scope);
-        if (it != g_n02_idem.end()) {
-            if (it->second.body_fp != fp) {
-                Network02IdemFail(result, err_code, err, "IDEMPOTENCY_CONFLICT", "idempotency conflict");
-                return false;
-            }
-            result = it->second.result;
-            err_code = it->second.err_code;
-            err = it->second.err;
-            return it->second.ok;
-        }
-    }
-    const bool ok = once();
-    std::lock_guard<std::mutex> lock(g_n02_idem_mu);
-    auto it = g_n02_idem.find(scope);
-    if (it != g_n02_idem.end()) {
-        if (it->second.body_fp != fp) {
-            Network02IdemFail(result, err_code, err, "IDEMPOTENCY_CONFLICT", "idempotency conflict");
-            return false;
-        }
-        result = it->second.result;
-        err_code = it->second.err_code;
-        err = it->second.err;
-        return it->second.ok;
-    }
-    Network02IdemEntry entry;
-    entry.body_fp = fp;
-    entry.result = result;
-    entry.err_code = err_code;
-    entry.err = err;
-    entry.ok = ok;
-    g_n02_idem.emplace(scope, std::move(entry));
-    return ok;
+    return RunNetwork02Idempotent(write_method, scope, Network02BodyFingerprint(o), result, err_code, err, once);
 }
 
 bool DispatchNetwork02Rpc(ModelCatalog& cat, const std::string& method, const UniValue& params, UniValue& result,
