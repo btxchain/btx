@@ -2401,6 +2401,9 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "reorgbountychain") {
         const std::string bounty_id = StrArg(params, 0, "bounty_id");
+        if (m_chain.UndoSteps() == 0) {
+            return fail("UNDO_UNAVAILABLE", "No observed tip to undo; re-observe verified chain facts or import a known-correct recovery manifest");
+        }
         m_chain.DisconnectTip();
         result = m_chain.Snapshot(bounty_id);
         UniValue payload(UniValue::VOBJ);
