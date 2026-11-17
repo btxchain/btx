@@ -72,7 +72,7 @@ class Journal:
             db.execute('INSERT INTO sn_sequences VALUES(?,1) ON CONFLICT(identity) DO UPDATE SET n=n+1',(identity,))
             return db.execute('SELECT n FROM sn_sequences WHERE identity=?',(identity,)).fetchone()[0]
     def seen(self,mid,expires,now):
-        """Return True only for an already processed message; bounded disk admission."""
+        """Return True for prior admission, not necessarily completed handling."""
         hex32(mid)
         with self.store.transaction() as db:
             db.execute('DELETE FROM sn_inbox WHERE expires<?',(now,))
@@ -84,7 +84,7 @@ class Journal:
         # A message whose processing raised before commit may be retried safely.
         with self.store.transaction() as db:db.execute('DELETE FROM sn_inbox WHERE id=?',(mid,))
     def commit_completed(self,mid):
-        """Admission, including a legacy inbox row, is not commit completion."""
+        """Negotiation completion; retain the historical commit-named API/table."""
         hex32(mid)
         with self.store.lock:
             return self.store.db.execute('SELECT 1 FROM sn_commit_receipts WHERE id=?',(mid,)).fetchone() is not None
@@ -93,7 +93,7 @@ class Journal:
         hex32(mid)
         with self.store.transaction() as db:
             require(db.execute('SELECT 1 FROM sn_inbox WHERE id=?',(mid,)).fetchone() is not None,
-                    'INBOX_MISSING','Commit completion requires inbox admission')
+                    'INBOX_MISSING','Negotiation completion requires inbox admission')
             db.execute('INSERT OR IGNORE INTO sn_commit_receipts VALUES(?)',(mid,))
     def enqueue(self,recipient,command,packet,now):
         mid=digest('BTX/SWAPNET/PACKET/2',packet)
