@@ -10395,8 +10395,26 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 err = "rule object required";
                 return false;
             }
+            // Every rule call reads acl.json and writes it again whole, and
+            // returns all of it: the same rule is kept once, and the rules are
+            // bounded in number and size.
+            constexpr size_t MODEL_RULES_MAX{256};
+            constexpr size_t MODEL_RULE_BYTES_MAX{16384};
+            const std::string rule_text = Arg(0).write();
+            if (rule_text.size() > MODEL_RULE_BYTES_MAX) {
+                err_code = "INVALID_PARAMETER";
+                err = "rule too large";
+                return false;
+            }
             UniValue arr = rules.exists("rules") ? rules["rules"] : UniValue(UniValue::VARR);
-            arr.push_back(Arg(0));
+            bool have = false;
+            for (const auto& r : arr.getValues()) have = have || r.write() == rule_text;
+            if (!have && arr.size() >= MODEL_RULES_MAX) {
+                err_code = "REJECTED";
+                err = "too many rules; remove one with removemodelrule";
+                return false;
+            }
+            if (!have) arr.push_back(Arg(0));
             rules.pushKV("rules", arr);
             if (!WriteJsonFile(HelperDir(cat) / "acl.json", rules, err)) {
                 err_code = "IO";
