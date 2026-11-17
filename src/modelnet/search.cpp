@@ -1756,6 +1756,7 @@ bool SearchRuntime::Cancel(const std::string& query_id)
 {
     auto it = m_jobs.find(query_id);
     if (it == m_jobs.end()) return false;
+    if (it->second.state == SearchJobState::RUNNING) m_cancelled_running.insert(query_id);
     if (it->second.state == SearchJobState::RUNNING && m_running > 0) --m_running;
     it->second.state = SearchJobState::CANCELLED;
     return true;
@@ -1794,10 +1795,23 @@ void SearchRuntime::Keep(const SearchJob& job)
 
 void SearchRuntime::Finish(SearchJob& job)
 {
-    if (job.state == SearchJobState::RUNNING) job.state = SearchJobState::COMPLETE;
+    // Start already counted a LOCAL search as complete, and Cancel already took
+    // a cancelled one off the running count: count each search once, and keep
+    // a cancellation that came while the search ran.
+    const auto it = m_jobs.find(job.query_id);
+    const bool cancelled = (it != m_jobs.end() && it->second.state == SearchJobState::CANCELLED) ||
+                           m_cancelled_running.erase(job.query_id) > 0;
+    const bool was_running = job.state == SearchJobState::RUNNING;
+    if (cancelled) {
+        job.state = SearchJobState::CANCELLED;
+    } else if (was_running) {
+        job.state = SearchJobState::COMPLETE;
+    }
     Keep(job);
-    if (m_running > 0) --m_running;
-    ++m_completed;
+    if (was_running && !cancelled) {
+        if (m_running > 0) --m_running;
+        ++m_completed;
+    }
 }
 
 bool UnsignedCannotOverrideSigned()

@@ -349,6 +349,8 @@ class SearchRuntime {
     std::map<std::string, SearchJob> m_jobs;
     //! Query ids of m_jobs, oldest first.
     std::deque<std::string> m_order;
+    //! Searches cancelled while they ran, until Finish; Keep may drop the job.
+    std::set<std::string> m_cancelled_running;
     SearchIndex* m_idx{nullptr};
     int m_running{0};
     int m_completed{0};

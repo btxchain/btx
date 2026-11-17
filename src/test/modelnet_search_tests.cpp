@@ -798,6 +798,55 @@ BOOST_AUTO_TEST_CASE(search_rpc_more_methods)
     BOOST_CHECK_EQUAL(nresp.status, 200);
 }
 
+// Finish counts each search once: a LOCAL search that Start counted as
+// complete is not counted again (and does not lower the running count), and
+// a search cancelled while it ran stays cancelled.
+BOOST_AUTO_TEST_CASE(search_finish_counts_each_search_once)
+{
+    using namespace modelnet;
+    SearchIndex local, peer;
+    SearchRuntime rt;
+    rt.Bind(&local);
+    SearchQuery net;
+    net.text = "qwen";
+    net.scope = SearchScope::NETWORK;
+    SearchQuery loc = net;
+    loc.scope = SearchScope::LOCAL;
+
+    auto running = rt.Start(net, {&peer}, 1);
+    BOOST_CHECK_EQUAL(rt.Running(), 1);
+    auto local_job = rt.Start(loc, {}, 1);
+    BOOST_CHECK_EQUAL(rt.Completed(), 1);
+    rt.Finish(local_job);
+    BOOST_CHECK_EQUAL(rt.Completed(), 1);
+    BOOST_CHECK_EQUAL(rt.Running(), 1);
+
+    BOOST_REQUIRE(rt.Cancel(running.query_id));
+    BOOST_CHECK_EQUAL(rt.Running(), 0);
+    rt.Finish(running);
+    BOOST_CHECK_EQUAL(rt.Running(), 0);
+    BOOST_CHECK_EQUAL(rt.Completed(), 1);
+    SearchJob st;
+    BOOST_REQUIRE(rt.Status(running.query_id, st));
+    BOOST_CHECK_EQUAL(static_cast<int>(st.state), static_cast<int>(SearchJobState::CANCELLED));
+
+    auto other = rt.Start(net, {&peer}, 1);
+    rt.Finish(other);
+    BOOST_CHECK_EQUAL(rt.Running(), 0);
+    BOOST_CHECK_EQUAL(rt.Completed(), 2);
+
+    // A search cancelled while it ran whose job was dropped (all kept jobs
+    // run) is still counted once.
+    auto dropped = rt.Start(net, {&peer}, 1);
+    BOOST_REQUIRE(rt.Cancel(dropped.query_id));
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT; ++i) (void)rt.Start(net, {&peer}, 1);
+    BOOST_CHECK(!rt.Status(dropped.query_id, st));
+    BOOST_CHECK_EQUAL(rt.Running(), static_cast<int>(SEARCH_JOBS_KEPT));
+    rt.Finish(dropped);
+    BOOST_CHECK_EQUAL(rt.Running(), static_cast<int>(SEARCH_JOBS_KEPT));
+    BOOST_CHECK_EQUAL(rt.Completed(), 2);
+}
+
 BOOST_AUTO_TEST_CASE(search_rpc_directory_entry)
 {
     using namespace modelnet;
