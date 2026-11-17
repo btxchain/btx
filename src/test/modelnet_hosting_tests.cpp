@@ -1138,6 +1138,40 @@ BOOST_AUTO_TEST_CASE(exportmodelpath_returns_usable_runtime_root_from_pieces)
     }
 }
 
+// The end of a download replaced the whole catalog entry: the bytes it had
+// received (the give-back ratio reads them) went back to 0 and a pinned model
+// lost the PINNED admission.
+BOOST_AUTO_TEST_CASE(finished_download_keeps_the_pin_and_the_received_bytes)
+{
+    const fs::path tmp = m_path_root / "reinstall-keeps";
+    modelnet::ModelCatalog cat_a{tmp / "a", 8 << 20};
+    const auto imported = ImportTiny(cat_a, tmp / "src", 0x92, false);
+    std::string err;
+    UniValue man;
+    BOOST_REQUIRE_MESSAGE(cat_a.GetManifest(imported.model_id, man, err), err);
+    std::vector<unsigned char> bytes;
+    std::vector<modelnet::Digest48> proof;
+    uint64_t file_size = 0;
+    BOOST_REQUIRE_MESSAGE(cat_a.GetVerifiedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size, err), err);
+
+    modelnet::ModelCatalog cat_b{tmp / "b", 8 << 20};
+    BOOST_REQUIRE_MESSAGE(cat_b.InstallFromManifest(man, err, /*complete=*/false), err);
+    BOOST_REQUIRE_MESSAGE(cat_b.PutFetchedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size,
+                                                imported.core.files[0].pieces_root, err), err);
+    BOOST_REQUIRE_MESSAGE(cat_b.PinModel(imported.model_id, true, err), err);
+    modelnet::CatalogEntry before;
+    BOOST_REQUIRE(cat_b.Find(imported.model_id, before));
+    BOOST_REQUIRE_GT(before.useful_bytes_received, 0);
+
+    BOOST_REQUIRE_MESSAGE(cat_b.InstallFromManifest(man, err, /*complete=*/true), err);
+    modelnet::CatalogEntry after;
+    BOOST_REQUIRE(cat_b.Find(imported.model_id, after));
+    BOOST_CHECK(!after.incomplete);
+    BOOST_CHECK(after.pinned);
+    BOOST_CHECK(after.admission == modelnet::AdmissionLevel::PINNED);
+    BOOST_CHECK_EQUAL(after.useful_bytes_received, before.useful_bytes_received);
+}
+
 BOOST_AUTO_TEST_CASE(loadmodel_incomplete_replica_is_rejected)
 {
     const fs::path tmp = m_path_root / "load-incomplete";
