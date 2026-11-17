@@ -4647,8 +4647,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 #ifdef SWAPNET_WITH_WALLET
     swapnet::InstallWalletBridge();
 #endif
-    // SwapNet is off unless -swapnet is set. An explicit enable that fails to
-    // start stops the node; StartNode has already logged the reason.
+    // SwapNet starts unless -swapnet=0. A start that fails stops the node;
+    // StartNode has already logged the reason. Startup authorizes no spend.
     if (!swapnet::StartNode(node)) return false;
     SetRPCWarmupFinished();
     return true;

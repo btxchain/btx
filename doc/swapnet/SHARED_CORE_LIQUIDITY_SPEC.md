@@ -32,7 +32,7 @@ Catalog requests use legacy-compatible signed provider frames with bounded, resu
 
 ## 4. Modes and spending authority
 
-A new installation starts in `observe`. Discovery alone has no spending mandate. A returning installation may retain a mode deliberately chosen by its owner. Explicit startup overrides are local operator authority, never a network field.
+A new installation starts in `taker` so discovery and quote requests are dogfooded. Taker mode has no spending mandate. A returning installation retains a mode deliberately chosen by its owner. Explicit startup overrides are local operator authority, never a network field.
 
 Modes:
 
@@ -43,7 +43,7 @@ Modes:
 | maker | Yes, separately authorized | Yes, separately authorized | Yes |
 | recovery | No | No | Yes |
 
-Changing mode commits the setting before reporting success. A rejected settings write must not change live admission. A mode is not a mandate. A legacy explicit `-swapnet=1` retains owner-configured maker compatibility; `-swapnet=0` now means recovery-only rather than stopping the recovery worker. Document and test this behavior change clearly.
+Changing mode commits the setting before reporting success. A rejected settings write must not change live admission. A mode is not a mandate. `-swapnet` defaults on. `-swapnet=0` stops the engine. `-swapnetmode=recovery` keeps the recovery worker and refuses a switch to maker or taker until restart.
 
 Accepted existing sessions retain original authority and exact terms. Revocation and cancellation retain the existing coordinator's distinctions among uncommitted, prepared, funded and secret-exposed positions. Do not silently turn a mode transition into a refund request or create a new signature for a different agreement.
 

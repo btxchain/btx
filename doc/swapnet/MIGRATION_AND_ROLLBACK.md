@@ -12,7 +12,7 @@ Preview confirmation recovers from a missing completion acknowledgement by the o
 
 ## Behavior changes
 
-New installations start as observers. Persisted owner-selected modes can resume. Legacy `-swapnet=1` remains an explicit operator choice; `-swapnet=0` is recovery-only, not a recovery-kill switch. Update help, scripts and native functional tests accordingly. A mode change alone cannot create a mandate.
+New installations start as takers. Persisted owner-selected modes can resume. `-swapnet` defaults on. `-swapnet=0` stops the engine, including its recovery worker, and does not cancel a funded contract. A mode change alone cannot create a mandate.
 
 BTC autodiscovery no longer treats a signing wallet as its own descriptor watch wallet. Use `setupswapbitcoin` with owner consent, or a pre-existing separately loaded watch wallet. Ambiguity is refused, not resolved by picking the first loaded wallet.
 

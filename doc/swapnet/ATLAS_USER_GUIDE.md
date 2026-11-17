@@ -2,7 +2,7 @@
 
 ## What is and is not automatic
 
-On an integrated node, SwapNet starts in **observe** mode by default. It discovers signed provider advertisements and public offers through existing BTX peer connections. It does not install a spending mandate, create a funded position, download a foreign-chain binary, select a remotely advertised RPC server, or create market liquidity. An empty market is reported as empty. Existing explicitly authorized obligations continue to be monitored and recovered.
+On an integrated node, SwapNet starts with the node in **taker** mode on a new journal. It discovers signed provider advertisements and public offers through existing BTX peer connections and can request a quote. It does not install a spending mandate, create a funded position, download a foreign-chain binary, select a remotely advertised RPC server, or create market liquidity. Publishing a market is `-swapnetmode=maker` or `setswapmode`. An empty market is reported as empty. Existing explicitly authorized obligations continue to be monitored and recovered.
 
 Atlas is a native client of the node. A browser preview cannot connect to RPC or execute a trade. Native actions use Atlas's prepare/review/execute path. A valid signature establishes who authored terms, not that the price is attractive or that the provider's entire business is solvent.
 
@@ -53,7 +53,7 @@ A native connection request returns “requested,” not “established.” Insp
 
 ## Pause, recover and back up
 
-`observe` permits discovery but no new local taker/maker commitments. `recovery` pauses new market activity while maintaining already authorized settlement recovery. Explicit `-swapnet=0` means recovery-only in this extension, not deletion of the journal or a complete stop of its worker. A startup recovery restriction cannot be overridden by a remote RPC; restart deliberately to change it.
+A new journal starts as `taker` so quote requests are available without a separate enable step. `observe` permits discovery but no new local taker or maker commitments. `maker` publishes markets. `recovery` pauses new market activity while maintaining already authorized settlement recovery. `-swapnet=0` does not start the engine. `-swapnetmode=recovery` cannot be overridden by a remote RPC; restart deliberately to change it. Taker mode does not spend.
 
 The worker preserves fixed-beneficiary claim/refund authority and continues watching completed records for deep reorgs. A pause does not erase existing signatures or invalidate on-chain contracts. A wallet may need to be loaded/unlocked normally; recovery cannot bypass consensus timelocks or invent missing keys.
 

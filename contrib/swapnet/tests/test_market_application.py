@@ -45,7 +45,7 @@ class ApplicationTest(unittest.TestCase):
         r=self.apps[0].rpc(self.owner,'publishswapoffer',{'sell_asset':BTX,'buy_asset':BTC,'sizes':['100'],'kind':'firm','slots':1,'ttl':120});self.pump();return r['offer']
     def test_default_observation_discovers_real_signed_offers(self):
         offer=self.offer();result=self.apps[1].rpc(self.owner,'listswappublicoffers',{})
-        self.assertEqual(result['offers'],[offer]);self.assertEqual(self.apps[1].rpc(self.owner,'getswapmode',{})['mode'],'observe')
+        self.assertEqual(result['offers'],[offer]);self.assertEqual(self.apps[1].rpc(self.owner,'getswapmode',{})['mode'],'taker')
         self.assertEqual(self.apps[1].store.db.execute('SELECT count(*) FROM reservations').fetchone()[0],0)
     def test_public_offer_becomes_one_requester_bound_quote(self):
         offer=self.offer()['body'];taker=self.apps[1]
@@ -59,6 +59,7 @@ class ApplicationTest(unittest.TestCase):
         quote=taker.rpc(self.owner,'getswapquotes',{'request_id':r['request_id']})['quotes'][0]
         preview=taker.rpc(self.owner,'previewswap',{'quote_id':quote['id'],'max_local_fee_atoms':'10'})
         self.assertFalse(preview['funds_reserved']);self.assertEqual(taker.store.db.execute('SELECT count(*) FROM mandates').fetchone()[0],0)
+        taker.rpc(self.owner,'setswapmode',{'mode':'observe'})
         with self.assertRaisesRegex(SwapError,'MODE_DISABLED'):taker.rpc(self.owner,'confirmswap',{'preview_id':preview['preview_id']})
         self.assertEqual(taker.store.db.execute('SELECT count(*) FROM reservations').fetchone()[0],0)
     def test_peer_cannot_invoke_owner_surface(self):

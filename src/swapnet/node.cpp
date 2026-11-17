@@ -176,8 +176,8 @@ std::string CoreCall(node::NodeContext& node,const std::string& wallet,const std
 }
 void SetWalletBridge(WalletBridge bridge) { std::lock_guard<std::mutex> lock(g_mutex);g_wallet_bridge=std::move(bridge); }
 void SetupArgs(ArgsManager& args) {
-    args.AddArg("-swapnet", "Enable native SwapNet discovery and recovery (default: 0). Spending requires an explicit mandate.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    args.AddArg("-swapnetmode=<observe|taker|maker|recovery>", "Participation when -swapnet is enabled (default: observe). observe is read-only. maker and taker still require an owner mandate. recovery keeps existing obligations and starts no new trades.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    args.AddArg("-swapnet", "Run native SwapNet so peers dogfood discovery and taker participation (default: 1). Set -swapnet=0 to leave it stopped. Spending requires an explicit mandate.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    args.AddArg("-swapnetmode=<observe|taker|maker|recovery>", "Participation override (default: taker when unset, and a saved owner choice is kept). taker can request quotes. maker publishes markets. observe is read-only. recovery keeps existing obligations and starts no new trades. Maker and taker still require an owner mandate.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     args.AddArg("-swapnetwallet=<name>", "Bind SwapNet to this already-loaded native wallet; otherwise require exactly one loaded wallet.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     args.AddArg("-swapnetowner=<rpcuser>", "Grant this authenticated RPC username owner-level SwapNet policy authority; repeatable. Cookie and local Qt console are owners.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
 }
@@ -187,16 +187,20 @@ bool StartNode(node::NodeContext& node) {
         return false;
     }
     auto& args=*node.args;
-    if (!args.GetBoolArg("-swapnet", false)) return true;
+    if (!args.GetBoolArg("-swapnet", true)) return true;
     try {
         UniValue config(UniValue::VOBJ); const auto genesis=Params().GenesisBlock().GetHash().GetHex();
         config.pushKV("network",genesis);
-        const std::string mode = args.GetArg("-swapnetmode", "observe");
-        if (mode!="observe" && mode!="taker" && mode!="maker" && mode!="recovery") {
-            LogPrintf("SwapNet: startup failed (unknown -swapnetmode). No funds were authorized by startup.\n");
-            return false;
+        // An unset mode leaves the saved owner choice, or taker on a new journal.
+        // Passing a default here would wipe a maker or observe choice on every restart.
+        if (args.IsArgSet("-swapnetmode")) {
+            const std::string mode = args.GetArg("-swapnetmode", "taker");
+            if (mode!="observe" && mode!="taker" && mode!="maker" && mode!="recovery") {
+                LogPrintf("SwapNet: startup failed (unknown -swapnetmode). No funds were authorized by startup.\n");
+                return false;
+            }
+            config.pushKV("market_startup_mode", mode);
         }
-        config.pushKV("market_startup_mode", mode);
         // Chain class comes from local parameters. Startup must not call RPC:
         // the RPC server is still in warmup until this function returns.
         config.pushKV("chain",ChainTypeToString(args.GetChainType()));

@@ -8,7 +8,7 @@ class Participation:
     def __init__(self,journal,startup_mode=None):
         self.journal=journal
         require(startup_mode is None or startup_mode in MODES,'MODE','Unknown startup mode')
-        saved=journal.setting('market.participation','observe')
+        saved=journal.setting('market.participation','taker')
         require(saved in MODES,'MODE','Invalid persisted participation mode')
         self.override=startup_mode
         self.mode=startup_mode if startup_mode is not None else saved

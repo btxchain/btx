@@ -2,7 +2,7 @@
 
 ## First launch
 
-Install the qualified binary with its matched Python runtime/standard library and `cryptography`. The Linux release archive carries them in `lib/`: the `libpython3.*.so.1.0` that btxd links, its `python3.*/` standard library and the build host's `cryptography`. Start it through `bin/btxd` or `bin/btx-qt`. Launch BTX normally. `-swapnet` stays off unless it is set. With `-swapnet=1`, existing peer connections discover compatible nodes; no new port, seed list, domain name, hosted service, or external identity registration is required. If that explicit start fails, the node does not finish starting.
+Install the qualified binary with its matched Python runtime/standard library and `cryptography`. The Linux release archive carries them in `lib/`: the `libpython3.*.so.1.0` that btxd links, its `python3.*/` standard library and the build host's `cryptography`. Start it through `bin/btxd` or `bin/btx-qt`. Launch BTX normally. SwapNet starts with the node, in taker mode on a new journal, so discovery and quote requests are exercised by everyone running the build. A saved maker or observe choice is kept. `-swapnetmode=maker` publishes a market. `-swapnet=0` leaves the engine stopped. Existing peer connections discover compatible nodes; no new port, seed list, domain name, hosted service, or external identity registration is required. If that start fails, the node does not finish starting. Taker mode does not spend.
 
 Run `getswapnetworkinfo`, `getswapbootstrapinfo` and `listswapassets`. `getswapwalletinfo` is owner scope. An empty provider list or `awaiting_compatible_peer` is an accurate state, not an error to hide. Discovery alone never spends.
 

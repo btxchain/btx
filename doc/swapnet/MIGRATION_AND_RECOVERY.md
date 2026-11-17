@@ -4,7 +4,7 @@ The extension adds public-offer, finite-slot, request, refusal and preview recor
 
 Before upgrade, stop the node cleanly, export encrypted SwapNet recovery and a separate native-wallet backup, and preserve the old application binaries. Backups and chain data are not replaced by the shared catalog. Source rollback cannot undo contracts or authorize a second payment.
 
-Default startup is observe. A saved explicit taker/maker policy persists unless a startup restriction selects recovery. An explicit `-swapnet=0` selects recovery-only in this candidate. The node is still running the worker because previously authorized funds may be on-chain. `setswapmode` cannot bypass that startup restriction. Native functional tests must test the new compatibility contract, not retain the historical “RPC disabled” assertion.
+A new journal starts as taker so the build dogfoods SwapNet. A saved maker or observe choice persists unless `-swapnetmode=recovery` is set. `-swapnet=0` does not start the engine. `setswapmode` cannot clear a startup recovery lock. An explicit `-swapnet=0` still makes the SwapNet RPCs report disabled.
 
 Mode changes prevent new quotes/commitments but do not reinterpret immutable funded terms. Saved previously authorized sessions retain the maintained coordinator's claim/refund/rebroadcast behavior, fee caps and finality rules. New EVM deployment-attestation and readiness rules are applied only at entry to new obligations, not as an extra gate in recovery of existing ones.
 

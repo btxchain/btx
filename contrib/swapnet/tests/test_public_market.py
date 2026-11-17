@@ -104,9 +104,11 @@ class MarketTest(unittest.TestCase):
         page2=self.book.page(NOW,after=page1['next_cursor'],limit=32);self.assertEqual(len(page2['offers']),8)
         self.assertIsNone(page2['next_cursor'])
     def test_default_mode_has_no_spending_authority(self):
-        p=Participation(self.journal);self.assertEqual(p.info()['mode'],'observe');self.assertEqual(p.info()['automatic_spend_atoms'],'0')
+        p=Participation(self.journal);self.assertEqual(p.info()['mode'],'taker');self.assertEqual(p.info()['automatic_spend_atoms'],'0')
+        self.assertFalse(p.may_make());p.require_trade()
+        p.set('observe')
         with self.assertRaises(SwapError):p.require_trade()
-        p.set('maker');self.assertTrue(p.may_make());p.set('observe');self.assertTrue(p.info()['existing_obligations_recovery_enabled'])
+        p.set('maker');self.assertTrue(p.may_make());self.assertTrue(p.info()['existing_obligations_recovery_enabled'])
     def test_startup_recovery_lock_cannot_be_cleared_by_rpc(self):
         p=Participation(self.journal,'recovery')
         with self.assertRaisesRegex(SwapError,'MODE_LOCKED'):p.set('maker')

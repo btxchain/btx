@@ -9,14 +9,15 @@ class SwapNetMarketTest(BitcoinTestFramework):
     def add_options(self,parser):self.add_wallet_options(parser,legacy=False)
     def set_test_params(self):
         self.num_nodes=2;self.setup_clean_chain=True;self.wallet_names=[]
-        self.extra_args=[['-modelbind=off','-swapnet=1'],['-modelbind=off','-swapnet=1']]
+        self.extra_args=[['-modelbind=off'],['-modelbind=off']]
     def skip_test_if_missing_module(self):self.skip_if_no_wallet()
     def run_test(self):
         a,b=self.nodes
         a.createwallet(wallet_name='maker',load_on_startup=True,descriptors=True)
         b.createwallet(wallet_name='taker',load_on_startup=True,descriptors=True)
         self.wait_until(lambda:a.getswapbootstrapinfo()['admitted_peers']>0 and b.getswapbootstrapinfo()['admitted_peers']>0)
-        assert_equal(a.getswapmode()['mode'],'observe');assert_equal(a.getswapnetworkinfo()['automatic_spend_atoms'],'0')
+        assert_equal(a.getswapmode()['mode'],'taker');assert_equal(a.getswapmode()['making_enabled'],False)
+        assert_equal(a.getswapnetworkinfo()['automatic_spend_atoms'],'0')
         assert_equal(a.listswappublicoffers()['offers'],[])
         before=len(b.getpeerinfo())
         invite=a.createswapinvite({'endpoints':['93.184.216.34:29447'],'ttl':60})
