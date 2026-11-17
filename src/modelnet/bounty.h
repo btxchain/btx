@@ -213,6 +213,10 @@ public:
     bool Save(std::string& err) const;
 };
 
+//! Bounty drafts the store keeps (and saves) at most, and their JSON in all.
+constexpr size_t BOUNTY_DRAFTS_MAX{256};
+constexpr size_t BOUNTY_DRAFT_BYTES_MAX{16 << 20};
+
 bool IsBountyHelperMethod(const std::string& method);
 bool DispatchBountyHelperRpc(ModelCatalog& cat, const std::string& method, const UniValue& params,
                              UniValue& result, std::string& err_code, std::string& err);

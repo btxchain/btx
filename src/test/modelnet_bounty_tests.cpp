@@ -3171,6 +3171,75 @@ BOOST_AUTO_TEST_CASE(bounty_award_proposal_and_decision_are_checked)
     BOOST_CHECK(!result["transaction_signature"].get_bool());
 }
 
+// Bounty drafts are saved with the store, which every bounty write writes
+// again: their number and their size in all are bounded.
+BOOST_AUTO_TEST_CASE(bounty_drafts_are_bounded)
+{
+    using namespace modelnet;
+    UniValue result;
+    std::string code, err;
+    const auto create = [&](BountyStore& store, const std::string& title, const std::string& notes) {
+        UniValue terms(UniValue::VOBJ);
+        terms.pushKV("title", title);
+        if (!notes.empty()) terms.pushKV("notes", notes);
+        UniValue params(UniValue::VARR);
+        params.push_back(terms);
+        code.clear();
+        err.clear();
+        return store.Dispatch("createbountydraft", params, result, code, err);
+    };
+    const auto call = [&](BountyStore& store, const std::string& method, const std::string& draft_id,
+                          const std::string& field, const std::string& value) {
+        UniValue patch(UniValue::VOBJ);
+        patch.pushKV("draft_id", draft_id);
+        if (!field.empty()) patch.pushKV(field, value);
+        UniValue params(UniValue::VARR);
+        params.push_back(patch);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+
+    // At most BOUNTY_DRAFTS_MAX drafts; deleting one makes room.
+    const fs::path many_dir = m_path_root / "bounty-drafts-many";
+    fs::create_directories(many_dir);
+    BountyStore many;
+    many.Bind(many_dir, ZeroNet());
+    std::string first;
+    for (size_t i = 0; i < BOUNTY_DRAFTS_MAX; ++i) {
+        BOOST_REQUIRE_MESSAGE(create(many, "draft " + std::to_string(i), ""), err);
+        if (i == 0) first = result["draft_id"].get_str();
+    }
+    BOOST_CHECK(!create(many, "one too many", ""));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(call(many, "deletebountydraft", first, "", ""), err);
+    BOOST_REQUIRE_MESSAGE(create(many, "one too many", ""), err);
+
+    // At most BOUNTY_DRAFT_BYTES_MAX of drafts in all, for a new draft and
+    // for an update that makes a draft larger.
+    const fs::path big_dir = m_path_root / "bounty-drafts-big";
+    fs::create_directories(big_dir);
+    BountyStore big;
+    big.Bind(big_dir, ZeroNet());
+    BOOST_REQUIRE_MESSAGE(create(big, "large", ""), err);
+    const std::string large = result["draft_id"].get_str();
+    const std::string fifteen(15 << 20, 'f');
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", fifteen), err);
+    BOOST_CHECK(!create(big, "too large", std::string(2 << 20, 't')));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!call(big, "updatebountydraft", large, "notes", std::string(17 << 20, 'g')));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(call(big, "getbountydraft", large, "", ""), err);
+    BOOST_CHECK_EQUAL(result["terms"]["notes"].get_str().size(), fifteen.size());
+    // An update is weighed without the draft it replaces: 10 MiB grows to
+    // 10 MiB and 1 KiB within the 16 MiB.
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", std::string(10 << 20, 'h')), err);
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", std::string((10 << 20) + 1024, 'i')), err);
+    // A smaller update and a small new draft still fit.
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", "short"), err);
+    BOOST_REQUIRE_MESSAGE(create(big, "fits again", std::string(2 << 20, 't')), err);
+}
+
 BOOST_AUTO_TEST_CASE(helper_observebountychain_reorg_recovery_unsigned)
 {
     using namespace modelnet;
