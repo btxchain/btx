@@ -583,6 +583,10 @@ bool SearchRecordMatchesWatch(const ModelWatch& watch, const ModelSearchRecord& 
 bool ModelWatchStore::PersistWatchesLocked(std::string& err) const
 {
     if (m_watch_path.empty()) return true;
+    if (m_watches_unreadable) {
+        err = "watches.json cannot be read; it is kept and not replaced";
+        return false;
+    }
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", 1);
     UniValue arr(UniValue::VARR);
@@ -594,6 +598,10 @@ bool ModelWatchStore::PersistWatchesLocked(std::string& err) const
 bool ModelWatchStore::PersistChannelsLocked(std::string& err) const
 {
     if (m_channel_path.empty()) return true;
+    if (m_channels_unreadable) {
+        err = "channels.json cannot be read; it is kept and not replaced";
+        return false;
+    }
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", 1);
     UniValue arr(UniValue::VARR);
@@ -611,9 +619,16 @@ bool ModelWatchStore::LoadLocked(std::string& err)
 {
     m_watches.clear();
     m_channels.clear();
+    m_watches_unreadable = false;
+    m_channels_unreadable = false;
+    // A file that is there but cannot be opened or parsed is kept: saving the
+    // empty store over it would drop every watch or channel (and the channel
+    // sequences that refuse a rollback).
     if (!m_watch_path.empty() && fs::exists(m_watch_path)) {
         UniValue o;
-        if (ReadJson(m_watch_path, o) && o.isObject() && o.exists("watches") && o["watches"].isArray()) {
+        const bool readable = ReadJson(m_watch_path, o) && o.isObject();
+        m_watches_unreadable = !readable;
+        if (readable && o.exists("watches") && o["watches"].isArray()) {
             for (const auto& wj : o["watches"].getValues()) {
                 if (!wj.isObject()) continue;
                 ModelWatch w;
@@ -642,7 +657,9 @@ bool ModelWatchStore::LoadLocked(std::string& err)
     }
     if (!m_channel_path.empty() && fs::exists(m_channel_path)) {
         UniValue o;
-        if (ReadJson(m_channel_path, o) && o.isObject() && o.exists("channels") && o["channels"].isArray()) {
+        const bool readable = ReadJson(m_channel_path, o) && o.isObject();
+        m_channels_unreadable = !readable;
+        if (readable && o.exists("channels") && o["channels"].isArray()) {
             for (const auto& cj : o["channels"].getValues()) {
                 if (!cj.isObject()) continue;
                 SignedChannel ch;

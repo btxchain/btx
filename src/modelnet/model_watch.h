@@ -116,6 +116,10 @@ class ModelWatchStore
     fs::path m_dir;
     fs::path m_watch_path;
     fs::path m_channel_path;
+    //! watches.json or channels.json was there but could not be read; the
+    //! store then refuses to save over it.
+    bool m_watches_unreadable{false};
+    bool m_channels_unreadable{false};
     std::map<std::string, ModelWatch> m_watches;
     std::map<std::string, SignedChannel> m_channels;
     //! Oldest first. Bounded by m_action_cap: nothing drains it unless getmodelwatchactions is called.

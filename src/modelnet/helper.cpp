@@ -1074,6 +1074,11 @@ bool WriteJsonFile(const fs::path& path, const UniValue& obj, std::string& err)
     return true;
 }
 
+//! Helper dirs whose records.json was there but could not be read when it was
+//! loaded; PersistRecords keeps such a file instead of saving over it.
+std::mutex g_records_unreadable_mu;
+std::set<std::string> g_records_unreadable;
+
 RouterCache& RecordsFor(const ModelCatalog& cat)
 {
     static std::mutex mu;
@@ -1085,7 +1090,10 @@ RouterCache& RecordsFor(const ModelCatalog& cat)
     if (!loaded[key]) {
         loaded[key] = true;
         UniValue arr;
-        ReadJsonFile(HelperDir(cat) / "records.json", arr);
+        if (JsonStoreUnreadable(HelperDir(cat) / "records.json", arr)) {
+            std::lock_guard<std::mutex> unreadable_lock(g_records_unreadable_mu);
+            g_records_unreadable.insert(key);
+        }
         if (arr.isArray()) {
             const int64_t now = static_cast<int64_t>(std::time(nullptr));
             for (const auto& rec : arr.getValues()) {
@@ -1116,6 +1124,10 @@ RouterCache& RecordsFor(const ModelCatalog& cat)
 
 bool PersistRecords(const ModelCatalog& cat, RouterCache& cache)
 {
+    {
+        std::lock_guard<std::mutex> unreadable_lock(g_records_unreadable_mu);
+        if (g_records_unreadable.count(fs::PathToString(HelperDir(cat)))) return false;
+    }
     UniValue arr(UniValue::VARR);
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
     for (const auto& h : cache.All(now)) {

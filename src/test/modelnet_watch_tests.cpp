@@ -429,6 +429,49 @@ BOOST_AUTO_TEST_CASE(watch_persist_restart)
     BOOST_CHECK_EQUAL(ActionPolicyName(got.action), std::string("KEEP"));
 }
 
+// watches.json and channels.json that are there but cannot be read are kept:
+// the store refuses to save over them instead of writing an empty store.
+BOOST_AUTO_TEST_CASE(unreadable_watch_files_are_kept)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "watch-unreadable";
+    fs::create_directories(dir);
+    const std::string garbage = "{\"watches\":[";
+    const auto plant = [&](const char* name) {
+        std::ofstream out(dir / name, std::ios::binary | std::ios::trunc);
+        out << garbage;
+    };
+    const auto read_all = [&](const char* name) {
+        std::ifstream in(dir / name, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    plant("watches.json");
+    plant("channels.json");
+    ModelWatchStore store(dir);
+    std::string err;
+    ModelWatch w;
+    w.kind = WatchKind::PUBLISHER;
+    w.publisher_id = "pub-u";
+    BOOST_CHECK(!store.PutWatch(w, err));
+    BOOST_CHECK_EQUAL(read_all("watches.json"), garbage);
+
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    Digest48 mid{};
+    mid.data[0] = 0x33;
+    std::string uri;
+    BOOST_REQUIRE(EncodeResource(ResourceKind::MODEL, mid, uri, err));
+    SignedChannel ch;
+    ch.pubkey = pk;
+    ch.name = "coder";
+    ch.channel = "stable";
+    ch.target_uri = uri;
+    ch.sequence = 1;
+    BOOST_REQUIRE(SignSignedChannel(ch, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    BOOST_CHECK(!store.ApplySignedChannel(ch, err));
+    BOOST_CHECK_EQUAL(read_all("channels.json"), garbage);
+}
+
 BOOST_AUTO_TEST_CASE(watch_longpoll_timeout)
 {
     using namespace modelnet;
