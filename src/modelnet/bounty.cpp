@@ -2459,6 +2459,19 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "watchbounty") {
         const std::string id = StrArg(params, 0, "bounty_id");
+        if (id.empty() || id.size() > BOUNTY_WATCH_ID_MAX) return fail("INVALID_PARAMETER", "bounty_id");
+        // Watches are saved with the store and written again with each bounty
+        // write: a bounty already watched keeps its one watch, and the number
+        // of watches is bounded.
+        for (const auto& [watch_id, watch] : m_watches) {
+            if (watch.exists("bounty_id") && watch["bounty_id"].isStr() && watch["bounty_id"].get_str() == id) {
+                result = watch;
+                return ok();
+            }
+        }
+        if (m_watches.size() >= BOUNTY_WATCHES_MAX) {
+            return fail("REJECTED", "too many bounty watches; remove one with unwatchbounty");
+        }
         const std::string wid = RandHex(8);
         UniValue w(UniValue::VOBJ);
         w.pushKV("watch_id", wid);

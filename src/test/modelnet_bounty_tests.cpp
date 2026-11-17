@@ -2863,6 +2863,66 @@ BOOST_AUTO_TEST_CASE(wrapped_terms_read_like_direct_terms)
     BOOST_CHECK_EQUAL(updated.result["terms"]["title"].get_str(), terms["title"].get_str());
 }
 
+// watchbounty saves each watch with the store, which every bounty write
+// writes again. A bounty keeps one watch, its id has a length bound, and the
+// number of watches is bounded.
+BOOST_AUTO_TEST_CASE(bounty_watches_are_bounded)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "bounty-watches-bound";
+    fs::create_directories(dir);
+    BountyStore store;
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto watch = [&](BountyStore& s, const std::string& bounty_id) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("bounty_id", bounty_id);
+        UniValue params(UniValue::VARR);
+        params.push_back(o);
+        code.clear();
+        err.clear();
+        return s.Dispatch("watchbounty", params, result, code, err);
+    };
+    const auto unwatch = [&](const std::string& watch_id) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("watch_id", watch_id);
+        UniValue params(UniValue::VARR);
+        params.push_back(o);
+        return store.Dispatch("unwatchbounty", params, result, code, err);
+    };
+
+    BOOST_REQUIRE_MESSAGE(watch(store, "watched-0"), err);
+    const std::string first = result["watch_id"].get_str();
+    BOOST_REQUIRE_MESSAGE(watch(store, "watched-0"), err);
+    BOOST_CHECK_EQUAL(result["watch_id"].get_str(), first);
+
+    BOOST_CHECK(!watch(store, std::string(BOUNTY_WATCH_ID_MAX + 1, 'x')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!watch(store, ""));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(watch(store, std::string(BOUNTY_WATCH_ID_MAX, 'y')), err);
+
+    for (size_t i = 2; i < BOUNTY_WATCHES_MAX; ++i) {
+        BOOST_REQUIRE_MESSAGE(watch(store, "watched-" + std::to_string(i)), err);
+    }
+    BOOST_CHECK(!watch(store, "one-too-many"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A bounty already watched still gets its watch at the limit.
+    BOOST_REQUIRE_MESSAGE(watch(store, "watched-0"), err);
+    BOOST_CHECK_EQUAL(result["watch_id"].get_str(), first);
+    // Removing one makes room for another.
+    BOOST_REQUIRE_MESSAGE(unwatch(first), err);
+    BOOST_REQUIRE_MESSAGE(watch(store, "one-too-many"), err);
+
+    // The saved store loads with the same watches, and the limit holds there too.
+    BountyStore reloaded;
+    reloaded.Bind(dir, ZeroNet());
+    BOOST_CHECK(!watch(reloaded, "watched-0"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(watch(reloaded, "one-too-many"), err);
+}
+
 BOOST_AUTO_TEST_CASE(incomplete_bounty_draft_cannot_publish)
 {
     using namespace modelnet;
