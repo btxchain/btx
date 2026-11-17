@@ -1920,8 +1920,28 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         }
         UniValue p = a.exists("commitment") ? a["commitment"] : a;
         p.pushKV("bounty_id", a["bounty_id"]);
+        // Commitments are saved with the store, which every bounty write
+        // writes again: a commitment has a size bound, a bounty takes at most
+        // COMMITMENTS_MAX of them, and the same commitment again returns the
+        // one there instead of making it unrevealed.
+        constexpr size_t COMMITMENTS_MAX{256};
+        constexpr size_t COMMITMENT_BYTES_MAX{65536};
+        if (p.write().size() > COMMITMENT_BYTES_MAX) return fail("INVALID_PARAMETER", "commitment too large");
         SignedEnvelope env;
         if (!sign_payload("SubmissionCommitment", p, env)) return fail("REJECTED", err);
+        if (m_submissions.count(env.record_id.Hex())) {
+            result = EnvelopeToJson(env);
+            result.pushKV("commitment_id", env.record_id.Hex());
+            return ok();
+        }
+        size_t commitments{0};
+        for (const auto& [id, kept] : m_submissions) {
+            if (kept["commitment_id"].isStr() && kept["commitment_id"].get_str() == id && kept["bounty_id"].isStr() &&
+                kept["bounty_id"].get_str() == a["bounty_id"].get_str()) {
+                ++commitments;
+            }
+        }
+        if (commitments >= COMMITMENTS_MAX) return fail("REJECTED", "too many commitments for this bounty");
         UniValue s(UniValue::VOBJ);
         s.pushKV("commitment_id", env.record_id.Hex());
         s.pushKV("bounty_id", a["bounty_id"]);
@@ -1941,8 +1961,21 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (it == m_submissions.end()) return fail("NOT_FOUND", "commitment");
         UniValue sub = a.exists("submission") ? a["submission"] : a;
         if (sub.exists("secret") || sub.exists("preimage")) return fail("REJECTED", "public secret forbidden");
+        // Saved with the store like the commitment: a submission has a size
+        // bound, and a commitment is revealed once; the same reveal again
+        // returns it.
+        constexpr size_t SUBMISSION_BYTES_MAX{65536};
+        if (sub.write().size() > SUBMISSION_BYTES_MAX) return fail("INVALID_PARAMETER", "submission too large");
         SignedEnvelope env;
         if (!sign_payload("Submission", sub, env)) return fail("REJECTED", err);
+        if (it->second["revealed"].isTrue()) {
+            if (!it->second["submission_id"].isStr() || it->second["submission_id"].get_str() != env.record_id.Hex()) {
+                return fail("REJECTED", "commitment already revealed");
+            }
+            result = EnvelopeToJson(env);
+            result.pushKV("submission_id", env.record_id.Hex());
+            return ok();
+        }
         it->second.pushKV("revealed", true);
         it->second.pushKV("submission_id", env.record_id.Hex());
         it->second.pushKV("submission", sub);
