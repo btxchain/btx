@@ -152,7 +152,21 @@ class BountyStore {
     std::map<std::string, UniValue> m_watches;
     std::map<std::string, UniValue> m_mandates;
     std::vector<UniValue> m_events;
-    std::map<std::string, UniValue> m_idem;
+    //! What an idempotency key keeps: a hash of the request it answered and the
+    //! reply as JSON text, which goes first when the reply budget is used up.
+    struct KeptIdem {
+        std::string request;
+        std::string reply;
+    };
+    //! Idempotency keys the store keeps, and the reply text they keep in all.
+    static constexpr size_t IDEM_KEYS_MAX{4096};
+    static constexpr size_t IDEM_REPLY_BYTES_MAX{4 << 20};
+    //! By hash of method and key; the keys in m_idem_order oldest first, and
+    //! the keys whose reply is still kept in m_idem_replies, oldest first.
+    std::map<std::string, KeptIdem> m_idem;
+    std::deque<std::string> m_idem_order;
+    std::deque<std::string> m_idem_replies;
+    size_t m_idem_reply_bytes{0};
     std::map<std::string, UniValue> m_activity;
     std::set<std::string> m_revoked_delegations;
     uint64_t m_seq{0};
@@ -168,8 +182,8 @@ class BountyStore {
     std::map<std::string, std::unique_ptr<MandateBudget>> m_budgets;
 
     UniValue Event(const std::string& kind, const std::string& bounty_id, const UniValue& payload);
-    bool Idem(const std::string& method, const std::string& key, UniValue& out) const;
-    void Remember(const std::string& method, const std::string& key, const UniValue& result);
+    const KeptIdem* FindIdemLocked(const std::string& method, const std::string& key) const;
+    void Remember(const std::string& method, const std::string& key, const std::string& request, const UniValue& result);
     bool LoadIdentity(std::vector<unsigned char>& pk, std::vector<unsigned char>& sk, Digest48& id, std::string& err);
     bool PersistLocked(std::string& err) const;
     UniValue BountyEntryLocked(const std::string& bounty_id) const;
