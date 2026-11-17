@@ -203,6 +203,16 @@ BOOST_AUTO_TEST_CASE(unreadable_helper_stores_are_kept)
         BOOST_CHECK_EQUAL(ReadAll(dir / "community.json"), kept);
     }
 
+    // records.json, the signed record cache, is kept too: a join issues a
+    // signed record, which then stays in memory only.
+    {
+        std::ofstream out(dir / "community.json", std::ios::binary | std::ios::trunc);
+        out << "{}";
+    }
+    plant("records.json");
+    BOOST_CHECK_MESSAGE(call("joinmodelcircle", one(UniValue("circle-3"))), err);
+    BOOST_CHECK_EQUAL(ReadAll(dir / "records.json"), garbage);
+
     // A peer's ServiceReceipt goes to receipts.json; an unreadable one is kept.
     std::vector<unsigned char> pk, sk;
     BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
