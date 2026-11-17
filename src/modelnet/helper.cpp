@@ -6364,6 +6364,11 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
         const fs::path cloud_path = HelperDir(cat) / "cloud.json";
         std::error_code rec;
         fs::remove(cloud_path, rec);
+        if (rec) {
+            err_code = "IO_ERROR";
+            err = "could not remove cloud configuration: " + rec.message();
+            return false;
+        }
         std::lock_guard<std::mutex> lock(g_cloud_mu);
         g_cloud.reset();
         g_cloud_cfg = CloudStoreConfig{};
