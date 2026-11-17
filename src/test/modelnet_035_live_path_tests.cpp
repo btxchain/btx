@@ -116,4 +116,56 @@ BOOST_AUTO_TEST_CASE(host_and_export_refuse_quarantine_and_research_only)
     BOOST_CHECK_EQUAL(code, "BTX035_ADMISSION");
 }
 
+// seedmodel finds a model by its artifact id too, while the admission records
+// are kept by model id: seeding by the artifact id checks the model id, and an
+// incomplete replica is refused with its own code.
+BOOST_AUTO_TEST_CASE(seed_by_artifact_id_checks_the_model_admission)
+{
+    struct Guard {
+        ~Guard() { modelnet::ClearAdmissionMemory(); }
+    } guard;
+    const fs::path root = m_path_root / "live-path-seed";
+    modelnet::ModelCatalog cat{root / "cat", 8 << 20};
+    UniValue hosted;
+    std::string code;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(CallHost(cat, WriteTinyModel(root / "src", 0x23), false, hosted, code, err), err);
+    const std::string model_id = hosted["model_id"].get_str();
+    modelnet::Digest48 id;
+    BOOST_REQUIRE_MESSAGE(modelnet::Digest48::FromHex(model_id, id, err), err);
+    modelnet::CatalogEntry e;
+    BOOST_REQUIRE(cat.Find(id, e));
+    BOOST_REQUIRE(e.artifact_id != e.model_id);
+    const std::string artifact_id = e.artifact_id.Hex();
+
+    const auto seed = [&](const std::string& method, const std::string& which) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        UniValue params(UniValue::VARR);
+        params.push_back(which);
+        rpc.pushKV("params", params);
+        UniValue result;
+        code.clear();
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    BOOST_REQUIRE_MESSAGE(seed("seedmodel", artifact_id), err);
+    BOOST_REQUIRE(cat.Find(id, e));
+    BOOST_CHECK(e.seeded);
+    BOOST_REQUIRE_MESSAGE(seed("unseedmodel", artifact_id), err);
+
+    modelnet::RevokeModel(model_id);
+    BOOST_CHECK(!seed("seedmodel", artifact_id));
+    BOOST_CHECK_EQUAL(code, "BTX035_QUARANTINE");
+    BOOST_CHECK(!seed("seedmodel", model_id));
+    BOOST_CHECK_EQUAL(code, "BTX035_QUARANTINE");
+    BOOST_REQUIRE(cat.Find(id, e));
+    BOOST_CHECK(!e.seeded);
+
+    modelnet::ClearAdmissionMemory();
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(id, true, err), err);
+    BOOST_CHECK(!seed("seedmodel", model_id));
+    BOOST_CHECK_EQUAL(code, "INCOMPLETE");
+    BOOST_CHECK_MESSAGE(seed("unseedmodel", model_id), err);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
