@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
+#include <deque>
 #include <fcntl.h>
 #include <map>
 #include <mutex>
@@ -62,12 +63,20 @@ struct UpdateIdem {
 struct CapEvent {
     int64_t seq{0};
     UniValue body;
+    size_t bytes{0}; //!< size of the body as JSON text
 };
 
 std::map<std::string, TtcTrace> g_ttc;
 std::map<std::string, IdempotentEnsure> g_ensure_idem;
 std::map<std::string, UpdateIdem> g_update_idem;
-std::vector<CapEvent> g_events;
+//! Any caller adds an event with each planbtxcapabilityupdate, and the log was
+//! trimmed only up to the cursor a reader passes to getbtxcapabilityevents.
+//! Keep the newest events within a bound, oldest out first; a reader behind
+//! them gets a gap, as after a compaction.
+constexpr size_t CAPABILITY_EVENTS_MAX{4096};
+constexpr size_t CAPABILITY_EVENT_BYTES_MAX{4 << 20};
+std::deque<CapEvent> g_events;
+size_t g_event_bytes{0};
 int64_t g_next_seq{1};
 int64_t g_compacted_upto{0};
 
@@ -392,7 +401,14 @@ bool AppendCapabilityEvent(const UniValue& event)
     CapEvent e;
     e.seq = g_next_seq++;
     e.body = EventCopy(event, e.seq);
+    e.bytes = e.body.write().size();
     g_events.push_back(std::move(e));
+    g_event_bytes += g_events.back().bytes;
+    while ((g_events.size() > CAPABILITY_EVENTS_MAX || g_event_bytes > CAPABILITY_EVENT_BYTES_MAX) &&
+           g_events.size() > 1) {
+        g_event_bytes -= g_events.front().bytes;
+        g_events.pop_front();
+    }
     return true;
 }
 
@@ -401,16 +417,12 @@ bool CompactCapabilityEvents(int64_t cursor, UniValue& out)
     out = UniValue(UniValue::VOBJ);
     std::lock_guard<std::mutex> lock(g_ensure_mu);
     int64_t dropped = 0;
-    std::vector<CapEvent> kept;
-    kept.reserve(g_events.size());
-    for (auto& e : g_events) {
-        if (e.seq <= cursor) {
-            ++dropped;
-            continue;
-        }
-        kept.push_back(std::move(e));
+    // The log is in seq order.
+    while (!g_events.empty() && g_events.front().seq <= cursor) {
+        g_event_bytes -= g_events.front().bytes;
+        g_events.pop_front();
+        ++dropped;
     }
-    g_events.swap(kept);
     if (cursor > g_compacted_upto) g_compacted_upto = cursor;
     int64_t first = 0;
     int64_t last = cursor;
