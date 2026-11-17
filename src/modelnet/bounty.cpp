@@ -2162,14 +2162,35 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (!mode.isStr() || (mode.get_str() != "PUBLIC_PAYOUT" && mode.get_str() != "STAGED_RELEASE")) {
             return fail("INVALID_PARAMETER", "mode must be PUBLIC_PAYOUT or STAGED_RELEASE");
         }
+        // Awards are saved with the store, which every bounty write writes
+        // again: lot_ids has a size bound, and a bounty takes at most
+        // AWARDS_MAX awards.
+        constexpr size_t AWARDS_MAX{64};
+        constexpr size_t AWARD_LOT_IDS_MAX{16384};
+        const UniValue lot_ids = a.exists("lot_ids") ? a["lot_ids"] : UniValue(UniValue::VARR);
+        if (lot_ids.write().size() > AWARD_LOT_IDS_MAX) return fail("INVALID_PARAMETER", "lot_ids too large");
         UniValue p(UniValue::VOBJ);
         p.pushKV("bounty_id", bounty_id);
         p.pushKV("submission_id", submission_id);
-        p.pushKV("lot_ids", a.exists("lot_ids") ? a["lot_ids"] : UniValue(UniValue::VARR));
+        p.pushKV("lot_ids", lot_ids);
         p.pushKV("mode", mode);
         p.pushKV("paid", false);
         SignedEnvelope env;
         if (!sign_payload("AwardProposal", p, env)) return fail("REJECTED", err);
+        // The same proposal again has the same id: answer the award there, and
+        // keep its approval or its rejection.
+        if (m_awards.count(env.record_id.Hex())) {
+            result = EnvelopeToJson(env);
+            result.pushKV("award_id", env.record_id.Hex());
+            result.pushKV("paid", false);
+            return ok();
+        }
+        size_t awards{0};
+        for (const auto& [id, kept] : m_awards) {
+            const UniValue& kp = kept["proposal"];
+            if (kp["bounty_id"].isStr() && kp["bounty_id"].get_str() == bounty_id) ++awards;
+        }
+        if (awards >= AWARDS_MAX) return fail("REJECTED", "too many awards for this bounty");
         UniValue aw(UniValue::VOBJ);
         aw.pushKV("award_id", env.record_id.Hex());
         aw.pushKV("proposal", p);
@@ -2204,13 +2225,20 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             result.pushKV("transaction_signature", false);
             return ok();
         }
+        UniValue apps = it->second.exists("policy_approvals") ? it->second["policy_approvals"] : UniValue(UniValue::VARR);
+        // The store signs every approval with its one research key: an award
+        // keeps one approval, and approving it again returns that one.
+        if (!apps.empty() && apps[0].isObject()) {
+            result = apps[0];
+            result.pushKV("transaction_signature", false);
+            return ok();
+        }
         SignedEnvelope env;
         UniValue p(UniValue::VOBJ);
         p.pushKV("award_id", award_id);
         p.pushKV("decision", "APPROVE");
         p.pushKV("transaction_signature", false);
         if (!sign_payload("AwardPolicyApproval", p, env)) return fail("REJECTED", err);
-        UniValue apps = it->second.exists("policy_approvals") ? it->second["policy_approvals"] : UniValue(UniValue::VARR);
         apps.push_back(EnvelopeToJson(env));
         it->second.pushKV("policy_approvals", apps);
         result = EnvelopeToJson(env);

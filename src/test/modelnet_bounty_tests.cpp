@@ -1921,6 +1921,98 @@ BOOST_AUTO_TEST_CASE(bounty_observe_height_not_wrapped)
     BOOST_CHECK(!FactsHaveOutpoint(result, "neg:0"));
 }
 
+// Awards are saved with the bounty store: a bounty takes at most 64 award
+// proposals, lot_ids has a size bound, the same proposal again keeps the
+// award there, and an award keeps the one approval this store signs.
+BOOST_AUTO_TEST_CASE(bounty_awards_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-awards-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    UniValue commit(UniValue::VOBJ);
+    commit.pushKV("bounty_id", bounty);
+    commit.pushKV("digest", "digest-0");
+    BOOST_REQUIRE_MESSAGE(call("commitbountysubmission", commit), err);
+    UniValue reveal(UniValue::VOBJ);
+    reveal.pushKV("commitment_id", result["commitment_id"].get_str());
+    UniValue sub(UniValue::VOBJ);
+    sub.pushKV("note", "digest-0");
+    reveal.pushKV("submission", sub);
+    BOOST_REQUIRE_MESSAGE(call("revealbountysubmission", reveal), err);
+    const std::string submission = result["submission_id"].get_str();
+
+    const auto propose = [&](const std::string& lot) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("submission_id", submission);
+        UniValue lots(UniValue::VARR);
+        lots.push_back(lot);
+        p.pushKV("lot_ids", lots);
+        return call("proposebountyaward", p);
+    };
+    {
+        // Over 16 KiB of lot_ids, each id under the 8192 bytes a signed string takes.
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("submission_id", submission);
+        UniValue lots(UniValue::VARR);
+        for (int i = 0; i < 3; ++i) lots.push_back(std::string(6000, 'l'));
+        p.pushKV("lot_ids", lots);
+        BOOST_CHECK(!call("proposebountyaward", p));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    std::string award, second;
+    for (int i = 0; i < 64; ++i) {
+        BOOST_REQUIRE_MESSAGE(propose("lot-" + std::to_string(i)), err);
+        if (i == 0) award = result["award_id"].get_str();
+        if (i == 1) second = result["award_id"].get_str();
+    }
+    BOOST_CHECK(!propose("lot-64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // An award already there is still answered at the limit, and proposing it
+    // again keeps its decision: a rejected award stays rejected.
+    UniValue reject(UniValue::VOBJ);
+    reject.pushKV("award_id", second);
+    reject.pushKV("decision", "REJECT");
+    BOOST_REQUIRE_MESSAGE(call("approvebountyaward", reject), err);
+    BOOST_REQUIRE_MESSAGE(propose("lot-1"), err);
+    BOOST_CHECK_EQUAL(result["award_id"].get_str(), second);
+    UniValue approve_second(UniValue::VOBJ);
+    approve_second.pushKV("award_id", second);
+    BOOST_CHECK(!call("approvebountyaward", approve_second));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    UniValue approve(UniValue::VOBJ);
+    approve.pushKV("award_id", award);
+    BOOST_REQUIRE_MESSAGE(call("approvebountyaward", approve), err);
+    const std::string first = result.write();
+    BOOST_REQUIRE_MESSAGE(call("approvebountyaward", approve), err);
+    BOOST_CHECK_EQUAL(result.write(), first);
+    UniValue get(UniValue::VARR);
+    get.push_back(award);
+    BOOST_REQUIRE(store.Dispatch("getbountyaward", get, result, code, err));
+    BOOST_CHECK_EQUAL(result["policy_approvals"].size(), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
 {
     using namespace modelnet;
