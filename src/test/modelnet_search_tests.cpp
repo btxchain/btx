@@ -4,6 +4,7 @@
 
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 #include <modelnet/helper.h>
+#include <modelnet/crypto.h>
 #include <modelnet/identity.h>
 #include <modelnet/protocol.h>
 #include <modelnet/provider_route.h>
@@ -920,8 +921,9 @@ BOOST_AUTO_TEST_CASE(search_quota_charges_the_signer)
     const auto own = MakeRec("Own", own_pk, own_sk, 1);
     BOOST_REQUIRE_MESSAGE(idx.Put(own, 1, err), err);
 
-    // Another key signs records that name this publisher as theirs, as a peer's
-    // search or feed reply can carry them.
+    // Another key signs records, as a peer's search or feed reply can carry
+    // them. (A record cannot name this publisher: VerifySearchRecord refuses
+    // a publisher identity that is not the signer.)
     auto claim = [&](int i) {
         ModelSearchRecord r;
         r.model_id.data[0] = 2;
@@ -929,7 +931,6 @@ BOOST_AUTO_TEST_CASE(search_quota_charges_the_signer)
         r.canonical_name = "claim" + std::to_string(i);
         r.display_name = r.canonical_name;
         r.pubkey = other_pk;
-        r.publisher_identity = own.publisher_identity;
         r.expires_at = 1'000'000;
         BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{other_sk.data(), other_sk.size()}, err));
         return r;
@@ -944,6 +945,71 @@ BOOST_AUTO_TEST_CASE(search_quota_charges_the_signer)
     BOOST_CHECK_MESSAGE(idx.Put(claim(64), 1, err, "203.0.113.7:29447"), err);
     BOOST_CHECK(!idx.Put(claim(65), 1, err, "203.0.113.7:29447"));
     BOOST_CHECK_EQUAL(err, "publisher spam");
+}
+
+// publisher_identity was not bound to the key that signed the record: any key
+// could sign a record that named another publisher, and a watch on that
+// publisher, its mute and its publisher page took the record as theirs.
+BOOST_AUTO_TEST_CASE(search_record_publisher_is_its_signer)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> own_pk, own_sk, other_pk, other_sk;
+    BOOST_REQUIRE(GenerateMlDsa44(own_pk, own_sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(other_pk, other_sk, err));
+    const auto own = MakeRec("Own", own_pk, own_sk, 1);
+    ModelSearchRecord claim;
+    claim.model_id.data[0] = 0x41;
+    claim.canonical_name = "claim";
+    claim.display_name = claim.canonical_name;
+    claim.pubkey = other_pk;
+    claim.publisher_identity = own.publisher_identity;
+    claim.expires_at = 1'000'000;
+    BOOST_REQUIRE(SignSearchRecord(claim, Span<const unsigned char>{other_sk.data(), other_sk.size()}, err));
+    BOOST_CHECK(!VerifySearchRecord(claim, 1, err));
+    BOOST_CHECK_EQUAL(err, "publisher identity is not the signer");
+    SearchIndex idx;
+    BOOST_CHECK(!idx.Put(claim, 1, err));
+
+    // Signed without a publisher identity, the record names its signer.
+    ModelSearchRecord plain = claim;
+    plain.publisher_identity = Digest48{};
+    BOOST_REQUIRE(SignSearchRecord(plain, Span<const unsigned char>{other_sk.data(), other_sk.size()}, err));
+    BOOST_CHECK(plain.publisher_identity == plain.signer_id);
+    BOOST_CHECK_MESSAGE(idx.Put(plain, 1, err), err);
+    BOOST_CHECK_MESSAGE(idx.Put(own, 1, err), err);
+
+    // A v1 signature does not cover publisher_identity: the index keeps the
+    // signer as the publisher of such a record.
+    ModelSearchRecord v1;
+    v1.model_id.data[0] = 0x42;
+    v1.canonical_name = "old";
+    v1.display_name = v1.canonical_name;
+    v1.pubkey = other_pk;
+    v1.record_version = 1;
+    v1.expires_at = 1'000'000;
+    v1.signer_id = ResearchIdentityId(Span<const unsigned char>{other_pk.data(), other_pk.size()});
+    v1.publisher_identity = own.publisher_identity;
+    const auto pre = SearchRecordPreimageV1(v1);
+    const Digest48 h = DomainHash("BTX/ModelSearchRecord/v1", Span<const unsigned char>{pre.data(), pre.size()});
+    BOOST_REQUIRE(SignMlDsa44(Span<const unsigned char>{other_sk.data(), other_sk.size()},
+                              Span<const unsigned char>{h.data.data(), h.data.size()}, v1.sig, err));
+    BOOST_REQUIRE_MESSAGE(idx.Put(v1, 1, err), err);
+    BOOST_REQUIRE(idx.Get(v1.model_id) != nullptr);
+    BOOST_CHECK(idx.Get(v1.model_id)->publisher_identity == v1.signer_id);
+    BOOST_CHECK_MESSAGE(idx.Put(v1, 1, err), err); // the same record again
+
+    // A v2 record that names no publisher is refused too.
+    ModelSearchRecord none = plain;
+    none.model_id.data[0] = 0x43;
+    none.btx_uri.clear();
+    none.publisher_identity = Digest48{};
+    const auto pre2 = SearchRecordPreimageV2(none);
+    const Digest48 h2 = DomainHash("BTX/ModelSearchRecord/v2", Span<const unsigned char>{pre2.data(), pre2.size()});
+    BOOST_REQUIRE(SignMlDsa44(Span<const unsigned char>{other_sk.data(), other_sk.size()},
+                              Span<const unsigned char>{h2.data.data(), h2.data.size()}, none.sig, err));
+    BOOST_CHECK(!VerifySearchRecord(none, 1, err));
+    BOOST_CHECK_EQUAL(err, "publisher identity is not the signer");
 }
 
 // The quota limits how many records one key keeps in the index. Records that
