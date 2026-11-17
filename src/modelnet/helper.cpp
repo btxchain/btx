@@ -2601,7 +2601,7 @@ static fs::path g_cloud_dir;
 static std::string g_cloud_init_error;
 static std::mutex g_cloud_mu;
 
-void PublishCatalogToCloud(const CatalogEntry& e, UniValue& result);
+void PublishCatalogToCloud(ModelCatalog& cat, const CatalogEntry& e, UniValue& result);
 bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, std::string& err);
 void EnsureCloudLoaded(ModelCatalog& cat);
 void LiveObserveCampaign(const ReleaseCampaign& c, FeedEventType t);
@@ -5471,7 +5471,7 @@ bool ImportAndPublish(ModelCatalog& cat, const std::string& path, bool pin, bool
         "getmodeltransfers",
     }));
     result.pushKV("automatic_spend_atoms", 0);
-    PublishCatalogToCloud(e, result);
+    PublishCatalogToCloud(cat, e, result);
     return true;
 }
 
@@ -6114,7 +6114,7 @@ void EnsureCloudLoaded(ModelCatalog& cat)
     ApplyCloudCapsLocked();
 }
 
-void PublishCatalogToCloud(const CatalogEntry& e, UniValue& result)
+void PublishCatalogToCloud(ModelCatalog& cat, const CatalogEntry& e, UniValue& result)
 {
     std::string admission_code;
     if (!LivePathAllowed(e.model_id.Hex(), false, admission_code)) {
@@ -6122,6 +6122,13 @@ void PublishCatalogToCloud(const CatalogEntry& e, UniValue& result)
         result.pushKV("cloud_error", admission_code);
         return;
     }
+    struct ActiveUpload {
+        ModelCatalog& catalog;
+        Digest48 artifact;
+        ~ActiveUpload() { catalog.EndTransfer(artifact); }
+    };
+    cat.BeginTransfer(e.artifact_id);
+    const ActiveUpload active{cat, e.artifact_id};
     std::lock_guard<std::mutex> lock(g_cloud_mu);
     if (!g_cloud || !g_cloud->IsReady()) {
         result.pushKV("cloud_uploaded", false);
@@ -6130,11 +6137,8 @@ void PublishCatalogToCloud(const CatalogEntry& e, UniValue& result)
     UniValue files(UniValue::VARR);
     bool all_ok = true;
     const bool piece_layout = g_cloud->Layout() == CloudObjectLayout::PIECE_OBJECTS;
-    const fs::path root = fs::PathFromString(e.source_path);
     for (uint32_t i = 0; i < e.core.files.size(); ++i) {
-        fs::path src = root;
-        std::error_code ec;
-        if (fs::is_directory(root, ec)) src = root / fs::PathFromString(e.core.files[i].path);
+        CatalogFileStream source(cat, e.artifact_id, i, e.core.files[i]);
         const uint64_t n = e.core.files[i].size == 0 ? 1 : ((e.core.files[i].size + PIECE_SIZE - 1) / PIECE_SIZE);
         std::string cerr;
         UniValue f(UniValue::VOBJ);
@@ -6144,9 +6148,10 @@ void PublishCatalogToCloud(const CatalogEntry& e, UniValue& result)
         f.pushKV("logical_pieces", n);
         f.pushKV("object_key", piece_layout ? g_cloud->PieceFileKey(e.artifact_id, i, 0) :
                                                g_cloud->SourceFileKey(e.artifact_id, i));
-        const bool put_ok = piece_layout
-                                 ? g_cloud->PutPieceObjects(e.artifact_id, i, src, e.core.files[i].size, cerr)
-                                 : g_cloud->PutSourceFile(e.artifact_id, i, src, e.core.files[i].size, n, cerr);
+        const bool put_ok = source.Error().empty() && (piece_layout
+                                 ? g_cloud->PutPieceObjects(e.artifact_id, i, source, e.core.files[i].size, cerr)
+                                 : g_cloud->PutSourceFile(e.artifact_id, i, source, e.core.files[i].size, n, cerr));
+        if (!source.Error().empty()) cerr = source.Error();
         if (!put_ok) {
             f.pushKV("ok", false);
             f.pushKV("error", cerr);

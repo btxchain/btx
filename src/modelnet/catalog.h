@@ -15,7 +15,11 @@
 #include <univalue.h>
 #include <util/fs.h>
 
+#include <crypto/sha384.h>
+
 #include <atomic>
+#include <istream>
+#include <streambuf>
 #include <map>
 #include <mutex>
 #include <set>
@@ -137,6 +141,41 @@ public:
     std::vector<std::string> Peers() const;
     uint64_t QuotaBytes() const { return m_store.QuotaBytes(); }
     uint64_t UsedBytes() const { return m_store.UsedBytes(); }
+};
+
+/** Sequential upload source bound to an imported file, never its external path.
+ * Retains one PIECE_SIZE piece; proof verification uses bounded piece scratch.
+ * A failed final digest
+ * withholds the final piece, so an exact-length uploader cannot commit it.
+ * The caller protects the artifact with BeginTransfer/EndTransfer.
+ */
+class CatalogFileStream final : public std::istream {
+    class Buffer final : public std::streambuf {
+        const ModelCatalog& m_catalog;
+        Digest48 m_artifact;
+        uint32_t m_file_index;
+        CoreFile m_file;
+        uint64_t m_read{0};
+        uint32_t m_next_piece{0};
+        CSHA384 m_hash;
+        std::vector<unsigned char> m_bytes;
+        std::string m_error;
+        size_t m_max_buffer{0};
+
+        int_type underflow() override;
+
+    public:
+        Buffer(const ModelCatalog& catalog, const Digest48& artifact,
+               uint32_t file_index, const CoreFile& file);
+        const std::string& Error() const { return m_error; }
+        size_t MaxBufferBytes() const { return m_max_buffer; }
+    } m_buffer;
+
+public:
+    CatalogFileStream(const ModelCatalog& catalog, const Digest48& artifact,
+                      uint32_t file_index, const CoreFile& file);
+    const std::string& Error() const { return m_buffer.Error(); }
+    size_t MaxBufferBytes() const { return m_buffer.MaxBufferBytes(); }
 };
 
 bool GuessFileRole(const std::string& relpath, FileRole& role);
