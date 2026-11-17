@@ -461,6 +461,85 @@ BOOST_AUTO_TEST_CASE(search_net_01_to_13)
     BOOST_CHECK_GE(jmerge.hits.size(), 1);
 }
 
+// The participation tick stores the records of a peer's ext/search reply. The
+// peer decides how often that reply holds a change, and each save writes the
+// whole index, so the tick saves at most once per interval.
+BOOST_AUTO_TEST_CASE(search_gossip_saves_the_index_at_most_once_per_interval)
+{
+    using namespace modelnet;
+    const fs::path root = m_path_root / "gossip-save";
+    fs::create_directories(root);
+    ModelCatalog cat{root / "models", 1 << 20};
+    const fs::path index = cat.Store().Root().parent_path() / "search-index.json";
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    Digest48 first;
+    // The same 16 models each time, signed again with a higher sequence.
+    const auto reply_at = [&](uint64_t sequence) {
+        UniValue records(UniValue::VARR);
+        for (int i = 0; i < 16; ++i) {
+            ModelSearchRecord r;
+            r.model_id.data[0] = 0x67;
+            r.model_id.data[1] = static_cast<unsigned char>(i + 1);
+            r.artifact_id = r.model_id;
+            r.canonical_name = "gossip-" + std::to_string(i);
+            r.display_name = r.canonical_name;
+            r.pubkey = pk;
+            r.published_at = 1;
+            r.metadata_sequence = sequence;
+            BOOST_REQUIRE_MESSAGE(SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+            if (i == 0) first = r.model_id;
+            records.push_back(SearchRecordToJson(r));
+        }
+        UniValue reply(UniValue::VOBJ);
+        reply.pushKV("records", records);
+        return reply;
+    };
+    // The sequence of the first model as search-index.json holds it.
+    const auto saved_sequence = [&]() -> int64_t {
+        std::ifstream in(index, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue snap;
+        if (!snap.read(text) || !snap.exists("records")) return -1;
+        for (const auto& rec : snap["records"].getValues()) {
+            if (rec["model_id"].get_str() == first.Hex()) return rec["metadata_sequence"].getInt<int64_t>();
+        }
+        return -1;
+    };
+    // Ten minutes ahead, so a save by another case in this process is over an interval ago.
+    const int64_t t0 = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count() + 10 * 60 * 1000;
+    BOOST_CHECK(StoreGossipSearchReply(cat, reply_at(1), "gossip-fixture", t0));
+    BOOST_CHECK_EQUAL(saved_sequence(), 1);
+    // A pull every 5 s that always brings changed records saves no more than once a minute.
+    for (int k = 1; k < 12; ++k) {
+        BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(1 + k), "gossip-fixture", t0 + k * 5000));
+    }
+    BOOST_CHECK_EQUAL(saved_sequence(), 1);
+    // The first pull after the interval saves what came before, also when it brings nothing new.
+    BOOST_CHECK(StoreGossipSearchReply(cat, reply_at(12), "gossip-fixture", t0 + SEARCH_GOSSIP_SAVE_INTERVAL_MS));
+    BOOST_CHECK_EQUAL(saved_sequence(), 12);
+    // Nothing new and nothing left to save: no save.
+    BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(12), "gossip-fixture", t0 + 3 * SEARCH_GOSSIP_SAVE_INTERVAL_MS));
+    // A clock that went back saves a change at once.
+    BOOST_CHECK(StoreGossipSearchReply(cat, reply_at(13), "gossip-fixture", t0 + 1000));
+    BOOST_CHECK_EQUAL(saved_sequence(), 13);
+    // Without another pull, the helper's loop saves once the interval is over.
+    const int64_t t1 = t0 + 1000;
+    BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(14), "gossip-fixture", t1 + 1000));
+    BOOST_CHECK(!FlushGossipSearchIndex(cat, t1 + 30000, /*force=*/false));
+    BOOST_CHECK_EQUAL(saved_sequence(), 13);
+    BOOST_CHECK(FlushGossipSearchIndex(cat, t1 + SEARCH_GOSSIP_SAVE_INTERVAL_MS, /*force=*/false));
+    BOOST_CHECK_EQUAL(saved_sequence(), 14);
+    // A stop saves what is left at once, and then nothing is left.
+    const int64_t t2 = t1 + SEARCH_GOSSIP_SAVE_INTERVAL_MS;
+    BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(15), "gossip-fixture", t2 + 5000));
+    BOOST_CHECK(FlushGossipSearchIndex(cat, t2 + 6000, /*force=*/true));
+    BOOST_CHECK_EQUAL(saved_sequence(), 15);
+    BOOST_CHECK(!FlushGossipSearchIndex(cat, t2 + 7000, /*force=*/true));
+}
+
 BOOST_AUTO_TEST_CASE(search_scale_unsigned_2k)
 {
     using namespace modelnet;

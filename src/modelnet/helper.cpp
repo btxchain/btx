@@ -12971,13 +12971,66 @@ static void GossipPexOnSession(Pq1Session& sess, ModelCatalog& cat, const std::s
     }
 }
 
+// Search records the participation tick stored but has not saved yet, and when
+// it last saved them. Both under g_search_mu.
+static bool g_search_gossip_unsaved{false};
+static int64_t g_search_gossip_saved_ms{0};
+
+// g_search_mu must be held. Each save writes the whole index, and a peer
+// decides how often its reply holds a new record: save what the tick stored at
+// most once per interval, or at once with `force`. A clock that went back
+// saves at once.
+static bool SaveGossipSearchIndexLocked(ModelCatalog& cat, int64_t now_ms, bool force)
+{
+    if (!g_search_gossip_unsaved) return false;
+    if (!force && g_search_gossip_saved_ms != 0 && now_ms >= g_search_gossip_saved_ms &&
+        now_ms - g_search_gossip_saved_ms < SEARCH_GOSSIP_SAVE_INTERVAL_MS) {
+        return false;
+    }
+    g_search_gossip_saved_ms = now_ms;
+    std::string save_err;
+    if (!g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err)) return false;
+    g_search_gossip_unsaved = false;
+    return true;
+}
+
+bool FlushGossipSearchIndex(ModelCatalog& cat, int64_t now_ms, bool force)
+{
+    std::lock_guard<std::mutex> lock(g_search_mu);
+    return SaveGossipSearchIndexLocked(cat, now_ms, force);
+}
+
+bool StoreGossipSearchReply(ModelCatalog& cat, const UniValue& reply, const std::string& endpoint, int64_t now_ms)
+{
+    EnsureEconomy(cat);
+    if (!reply.isObject() || !reply.exists("records") || !reply["records"].isArray()) return false;
+    std::lock_guard<std::mutex> lock(g_search_mu);
+    int taken = 0;
+    for (const auto& recj : reply["records"].getValues()) {
+        if (taken >= 16) break;
+        if (!recj.isObject()) continue;
+        ModelSearchRecord rec;
+        std::string ierr;
+        if (!SearchRecordFromJson(recj, rec, ierr) || !VerifySearchRecord(rec, now_ms, ierr)) continue;
+        const ModelSearchRecord* existing = g_search_idx.Get(rec.model_id);
+        if (existing && existing->signed_ok && existing->signer_id == rec.signer_id &&
+            existing->metadata_sequence == rec.metadata_sequence) {
+            continue;
+        }
+        if (!g_search_idx.Put(rec, now_ms, ierr, endpoint)) continue;
+        AfterIndexPut(rec, now_ms);
+        g_search_gossip_unsaved = true;
+        ++taken;
+    }
+    return SaveGossipSearchIndexLocked(cat, now_ms, /*force=*/false);
+}
+
 // The participation tick already holds a verified PQ1 session. Pull that
 // peer's local search index with the same ext/search the RPCs use. An empty
 // query_id skips the peer's duplicate-query cache, and the offset walks a
 // long index across ticks. Records still have to verify before they are stored.
 static void GossipSearchOnSession(Pq1Session& sess, ModelCatalog& cat, const std::string& endpoint)
 {
-    EnsureEconomy(cat);
     static std::mutex offset_mu;
     static std::map<std::string, int> offsets;
     int offset = 0;
@@ -13001,31 +13054,7 @@ static void GossipSearchOnSession(Pq1Session& sess, ModelCatalog& cat, const std
     if (!sess.Request(req, resp, err) || resp.status != 200 || resp.body.size() > MAX_RPC_BODY) return;
     UniValue reply;
     if (!reply.read(resp.body) || !reply.isObject() || !reply.exists("records") || !reply["records"].isArray()) return;
-    bool changed = false;
-    int taken = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_search_mu);
-        for (const auto& recj : reply["records"].getValues()) {
-            if (taken >= 16) break;
-            if (!recj.isObject()) continue;
-            ModelSearchRecord rec;
-            std::string ierr;
-            if (!SearchRecordFromJson(recj, rec, ierr) || !VerifySearchRecord(rec, ConnNowMs(), ierr)) continue;
-            const ModelSearchRecord* existing = g_search_idx.Get(rec.model_id);
-            if (existing && existing->signed_ok && existing->signer_id == rec.signer_id &&
-                existing->metadata_sequence == rec.metadata_sequence) {
-                continue;
-            }
-            if (!g_search_idx.Put(rec, ConnNowMs(), ierr, endpoint)) continue;
-            AfterIndexPut(rec, ConnNowMs());
-            changed = true;
-            ++taken;
-        }
-        if (changed) {
-            std::string save_err;
-            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
-        }
-    }
+    (void)StoreGossipSearchReply(cat, reply, endpoint, ConnNowMs());
     const bool more = reply.exists("truncated") && reply["truncated"].isBool() && reply["truncated"].get_bool();
     std::lock_guard<std::mutex> lock(offset_mu);
     // A full page of records this node already stored is still a full page.
@@ -13593,6 +13622,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
         }
         if (std::chrono::steady_clock::now() - last_records_save >= std::chrono::seconds(RECORDS_SAVE_INTERVAL_S)) {
             FlushRecords(cat);
+            (void)FlushGossipSearchIndex(cat, ConnNowMs(), /*force=*/false);
             last_records_save = std::chrono::steady_clock::now();
         }
         if (pr <= 0) continue;
@@ -13651,6 +13681,7 @@ int RunModelDaemon(HelperConfig cfg, std::atomic<bool>* stop)
     if (preserve_thr.joinable()) preserve_thr.join();
     for (auto& w : workers) w.join();
     FlushRecords(cat);
+    (void)FlushGossipSearchIndex(cat, ConnNowMs(), /*force=*/true);
     g_native_lan.Close();
     g_native_lan_enabled.store(false);
     JoinRetrieveJobs();
