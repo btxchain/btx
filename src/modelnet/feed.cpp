@@ -112,8 +112,49 @@ void FeedStore::Reset()
     m_cap = FEED_CAP_DEFAULT;
     m_ttl_ms = FEED_TTL_DEFAULT_MS;
     m_last_refresh = 0;
-    m_publisher_models.clear();
+    m_publisher_seen.clear();
+    m_publisher_order.clear();
+    m_publisher_clock = 0;
+    m_publisher_cap = FEED_PUBLISHERS_MAX;
     m_path.clear();
+}
+
+bool FeedStore::TouchPublisherLocked(const std::string& publisher)
+{
+    const uint64_t order = ++m_publisher_clock;
+    const auto known = m_publisher_seen.find(publisher);
+    if (known != m_publisher_seen.end()) {
+        m_publisher_order.emplace(order, publisher);
+        m_publisher_order.erase(known->second);
+        known->second = order;
+        return false;
+    }
+    const auto placed = m_publisher_order.emplace(order, publisher).first;
+    try {
+        m_publisher_seen.emplace(publisher, order);
+    } catch (...) {
+        m_publisher_order.erase(placed);
+        throw;
+    }
+    TrimPublishersLocked();
+    return true;
+}
+
+void FeedStore::TrimPublishersLocked()
+{
+    // Drop the publishers noted least recently; one counts as new if it comes again.
+    while (m_publisher_seen.size() > std::max<size_t>(m_publisher_cap, 1)) {
+        const auto oldest = m_publisher_order.begin();
+        m_publisher_seen.erase(oldest->second);
+        m_publisher_order.erase(oldest);
+    }
+}
+
+void FeedStore::SetPublisherCap(size_t cap)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_publisher_cap = cap;
+    TrimPublishersLocked();
 }
 
 bool FeedStore::Note(FeedEvent ev, int64_t now_ms)
@@ -192,9 +233,7 @@ bool FeedStore::NoteSearchRecord(const ModelSearchRecord& r, int64_t now_ms)
 
     const std::string pub = r.publisher_identity.Hex();
     if (!pub.empty() && !r.publisher_identity.IsNull()) {
-        const int before = m_publisher_models[pub];
-        m_publisher_models[pub] += 1;
-        if (before == 0) {
+        if (TouchPublisherLocked(pub)) {
             FeedEvent p;
             p.event_type = FeedEventType::PUBLISHER_FIRST_OBSERVED;
             p.model_id = r.model_id;
@@ -435,9 +474,10 @@ bool FeedStore::Save(std::string& err) const
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", FEED_SCHEMA_VERSION);
     o.pushKV("sequence", static_cast<int64_t>(m_seq));
-    // Only membership matters: a publisher remains known after its feed events expire.
+    // A publisher remains known after its feed events expire. Oldest first, so
+    // a reload keeps the order in which they were last seen.
     UniValue publishers(UniValue::VARR);
-    for (const auto& [publisher, count] : m_publisher_models) publishers.push_back(publisher);
+    for (const auto& [order, publisher] : m_publisher_order) publishers.push_back(publisher);
     o.pushKV("seen_publishers", publishers);
     UniValue arr(UniValue::VARR);
     for (const auto& kv : m_by_id) {
@@ -588,7 +628,8 @@ bool FeedStore::Load(int64_t now_ms, std::string& err)
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (m_path.empty() || !fs::exists(m_path)) return true;
     m_by_id.clear();
-    m_publisher_models.clear();
+    m_publisher_seen.clear();
+    m_publisher_order.clear();
     m_seq = 0;
     try {
         std::ifstream in(m_path);
@@ -619,10 +660,12 @@ bool FeedStore::Load(int64_t now_ms, std::string& err)
                 Digest48 id;
                 std::string perr;
                 if (publisher.isStr() && Digest48::FromHex(publisher.get_str(), id, perr) && !id.IsNull()) {
-                    m_publisher_models[id.Hex()] = 1;
+                    (void)TouchPublisherLocked(id.Hex());
                 }
             }
         }
+        // Publishers of a legacy file, by the sequence of the event that names them.
+        std::vector<std::pair<uint64_t, std::string>> legacy_publishers;
         for (const auto& ej : o["events"].getValues()) {
             FeedEvent ev;
             std::string eerr;
@@ -645,11 +688,14 @@ bool FeedStore::Load(int64_t now_ms, std::string& err)
                                            ev.event_type == FeedEventType::RELEASE_CAMPAIGN_CREATED ||
                                            ev.event_type == FeedEventType::PUBLISHER_FIRST_OBSERVED;
             if (!has_publisher_history && records_publisher && !ev.rec.publisher_identity.IsNull()) {
-                m_publisher_models[ev.rec.publisher_identity.Hex()] = 1;
+                legacy_publishers.emplace_back(ev.sequence, ev.rec.publisher_identity.Hex());
             }
             if (ev.sequence > m_seq) m_seq = ev.sequence;
             m_by_id[ev.event_id] = std::move(ev);
         }
+        // Oldest first, so the publishers noted last are the ones kept.
+        std::sort(legacy_publishers.begin(), legacy_publishers.end());
+        for (const auto& [sequence, publisher] : legacy_publishers) (void)TouchPublisherLocked(publisher);
         Expire(now_ms);
         return true;
     } catch (const std::exception& ex) {
