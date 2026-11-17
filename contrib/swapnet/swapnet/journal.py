@@ -16,6 +16,8 @@ from .errors import require, SwapError
 MIGRATION = '''
 CREATE TABLE IF NOT EXISTS sn_settings(k TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sn_inbox(id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sn_commit_receipts(
+ id TEXT PRIMARY KEY REFERENCES sn_inbox(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS sn_outbox(id TEXT PRIMARY KEY, recipient TEXT NOT NULL,
  command TEXT NOT NULL, body BLOB NOT NULL, next_try INTEGER NOT NULL,
  attempts INTEGER NOT NULL DEFAULT 0, acknowledged INTEGER NOT NULL DEFAULT 0);
@@ -81,6 +83,18 @@ class Journal:
     def forget_message(self,mid):
         # A message whose processing raised before commit may be retried safely.
         with self.store.transaction() as db:db.execute('DELETE FROM sn_inbox WHERE id=?',(mid,))
+    def commit_completed(self,mid):
+        """Admission, including a legacy inbox row, is not commit completion."""
+        hex32(mid)
+        with self.store.lock:
+            return self.store.db.execute('SELECT 1 FROM sn_commit_receipts WHERE id=?',(mid,)).fetchone() is not None
+    def complete_commit(self,mid):
+        """Persist successful handling before ACK, bounded by the admitted inbox."""
+        hex32(mid)
+        with self.store.transaction() as db:
+            require(db.execute('SELECT 1 FROM sn_inbox WHERE id=?',(mid,)).fetchone() is not None,
+                    'INBOX_MISSING','Commit completion requires inbox admission')
+            db.execute('INSERT OR IGNORE INTO sn_commit_receipts VALUES(?)',(mid,))
     def enqueue(self,recipient,command,packet,now):
         mid=digest('BTX/SWAPNET/PACKET/2',packet)
         with self.store.transaction() as db:
