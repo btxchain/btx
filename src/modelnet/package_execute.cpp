@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <iterator>
 #include <set>
@@ -168,6 +169,47 @@ bool ExclusiveNofollowWrite(const fs::path& root, const std::string& dest_path, 
     }
     return true;
 }
+
+
+namespace {
+// Keep the old destination until a complete, verified sibling can replace it.
+bool ReplaceStaleVerified(const fs::path& root, const fs::path& dest, const std::string& relative_path,
+                          const std::string& bytes, const std::string& expected,
+                          std::string& err_code, std::string& err)
+{
+    static std::atomic<uint64_t> sequence{0};
+    fs::path staged;
+    bool created{false};
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        staged = dest.parent_path() / fs::PathFromString(".btx-acq-" + NowMsString() + "-" + std::to_string(sequence++));
+        if (ExclusiveNofollowWrite(root, fs::PathToString(staged), bytes, err_code, err)) {
+            created = true;
+            break;
+        }
+        if (err_code != "OVERWRITE_REFUSED") return false;
+    }
+    if (!created) return Fail(err_code, err, "IO_ERROR", "staging name unavailable");
+    const auto discard = [&] { std::error_code ignored; std::filesystem::remove(staged, ignored); };
+    std::string digest, read_err;
+    if (!Sha384Path(fs::PathToString(staged), digest, read_err) || digest != expected) {
+        discard();
+        return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "staged hash");
+    }
+    if (HasSymlinkBelow(root, relative_path)) {
+        discard();
+        return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
+    }
+    std::error_code ec;
+    std::filesystem::rename(staged, dest, ec);
+    if (ec) {
+        discard();
+        return Fail(err_code, err, "IO_ERROR", "staged replacement failed");
+    }
+    err_code.clear();
+    err.clear();
+    return true;
+}
+} // namespace
 
 CreditBroker& GlobalAcquisitionCredits()
 {
@@ -327,18 +369,12 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
             return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "source hash mismatch");
         }
         if (stale) {
-            // Checked again: the source was read since the check above, and
-            // remove() follows a symlinked directory on the way.
-            if (HasSymlinkBelow(dest_root, f.relative_path)) {
+            if (!ReplaceStaleVerified(dest_root, dest, f.relative_path, bytes, expect, err_code, err)) {
                 release_on_fail();
-                return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
+                return false;
             }
-            std::error_code ec;
-            std::filesystem::remove(dest, ec);
-            if (ec || std::filesystem::is_symlink(dest) || fs::exists(dest)) {
-                release_on_fail();
-                return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "stale cache not replaced");
-            }
+            paths.push_back(dest_s);
+            continue;
         }
         if (!ExclusiveNofollowWrite(dest_root, dest_s, bytes, err_code, err)) {
             release_on_fail();
