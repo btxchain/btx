@@ -674,8 +674,28 @@ ModelWatchStore::ModelWatchStore(fs::path modeldir, size_t action_cap) : m_actio
     }
 }
 
+namespace {
+//! A watch as saved, without its id and creation time.
+std::string WatchSelector(const ModelWatch& w)
+{
+    const UniValue o = ModelWatchToJson(w);
+    UniValue rest(UniValue::VOBJ);
+    for (const std::string& k : o.getKeys()) {
+        if (k != "watch_id" && k != "created_at") rest.pushKV(k, o[k]);
+    }
+    return rest.write();
+}
+} // namespace
+
 bool ModelWatchStore::PutWatch(ModelWatch& w, std::string& err)
 {
+    const bool random_id = w.watch_id.empty();
+    for (const std::string* id : {&w.publisher_id, &w.collection_id, &w.model_id, &w.mandate_id, &w.query_text}) {
+        if (id->size() > MODEL_WATCH_ID_MAX) {
+            err = "watch target too long";
+            return false;
+        }
+    }
     if (w.watch_id.empty()) w.watch_id = RandHex(8);
     if (w.created_at <= 0) w.created_at = NowMs();
     if (w.kind == WatchKind::PUBLISHER && w.publisher_id.empty()) {
@@ -699,6 +719,24 @@ bool ModelWatchStore::PutWatch(ModelWatch& w, std::string& err)
         return false;
     }
     std::lock_guard<std::mutex> lock(m_mu);
+    // Every model event is matched against every watch, and the watches are
+    // saved together: the same watch again keeps the one there is, and the
+    // number of watches is bounded, also for a caller that names its own id
+    // (setmodelmirror). A mirror's watch is not handed to another caller.
+    if (random_id) {
+        const std::string selector = WatchSelector(w);
+        for (const auto& [id, kept] : m_watches) {
+            if (id.rfind("mirror-", 0) == 0) continue;
+            if (WatchSelector(kept) == selector) {
+                w = kept;
+                return true;
+            }
+        }
+    }
+    if (!m_watches.count(w.watch_id) && m_watches.size() >= MODEL_WATCHES_MAX) {
+        err = "too many model watches; remove one with unwatchmodel";
+        return false;
+    }
     auto previous = m_watches.extract(w.watch_id);
     m_watches.emplace(w.watch_id, w);
     if (PersistWatchesLocked(err)) return true;
