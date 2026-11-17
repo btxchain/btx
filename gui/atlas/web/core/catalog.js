@@ -1211,7 +1211,7 @@ export const OPERATIONS = [
         "required": true
       }
     ],
-    "notes": "Broadcasts the given transaction as is. Wallet → Send checks (address, fee display, fee cap) do not apply. Use Wallet → Send for a normal payment.",
+    "notes": "Broadcasts the given transaction as is. Wallet \u2192 Send checks (address, fee display, fee cap) do not apply. Use Wallet \u2192 Send for a normal payment.",
     "wallet": false
   },
   {
@@ -1311,7 +1311,7 @@ export const OPERATIONS = [
         "default": "0.00000000"
       }
     ],
-    "notes": "Bypasses Wallet → Send: no address check, no fee display and no fee cap. Use Wallet → Send for a normal payment.",
+    "notes": "Bypasses Wallet \u2192 Send: no address check, no fee display and no fee cap. Use Wallet \u2192 Send for a normal payment.",
     "wallet": true
   },
   {
@@ -1333,7 +1333,7 @@ export const OPERATIONS = [
         "default": {}
       }
     ],
-    "notes": "Bypasses Wallet → Send: no address check, no fee display and no fee cap. Use Wallet → Send for a normal payment.",
+    "notes": "Bypasses Wallet \u2192 Send: no address check, no fee display and no fee cap. Use Wallet \u2192 Send for a normal payment.",
     "wallet": true
   },
   {
@@ -4111,14 +4111,15 @@ export const OPERATIONS = [
     "risk": "write",
     "args": [
       {
-        "name": "request",
-        "kind": "json",
+        "name": "passphrase",
+        "kind": "secret",
         "required": true,
-        "default": {}
+        "confirm": true
       }
     ],
     "notes": "Requires passphrase. Prepared for native review. The approval dialog redacts passphrase. This template does not store one. automatic_spend_atoms stays 0.",
-    "wallet": false
+    "wallet": false,
+    "request_object": true
   },
   {
     "group": "SwapNet",

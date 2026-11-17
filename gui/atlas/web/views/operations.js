@@ -47,7 +47,7 @@ export function operationDialog(app,method,prefill=[],walletContext){
  const run=button(definition.risk==='read'?'Read observation':'Prepare for native review',async()=>{
   run.disabled=true;let prepared;
   try{
-   let params;if(useRaw.checked)params=parseJsonExact(raw.value);else{params=controls.map(c=>c.value());while(params.length&&params.at(-1)===undefined)params.pop();params=params.map(x=>x===undefined?null:x);}
+   let params;if(useRaw.checked)params=parseJsonExact(raw.value);else if(definition.request_object){const request={};for(let i=0;i<controls.length;i++){const value=controls[i].value();if(value!==undefined)request[definition.args[i].name]=value;}params=[request];}else{params=controls.map(c=>c.value());while(params.length&&params.at(-1)===undefined)params.pop();params=params.map(x=>x===undefined?null:x);}
    const json=encodeJson(params),context=wallet.value||null;
    if(definition.risk==='read'){try{const r=await app.bridge.read(method,json,context);result.replaceChildren(jsonView(r,{open:true}));return;}catch(e){if(e.code!=='READ_DENIED')throw e;}}
    prepared=await app.bridge.prepare(method,json,context);
