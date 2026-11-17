@@ -136,6 +136,8 @@ To improve the build process performance, one might add the Bitcoin repository d
 
 `contrib/devtools/build-btx-windows.ps1` is the Windows configure-and-build entry. SwapNet is part of the node, so the script installs Python 3.11 and the pin in `contrib/swapnet/requirements-tested-runtime.txt` when `-InstallDependencies` is set. That pin is `cryptography==46.0.4`.
 
+The node links that Python. SwapNet's embedded interpreter does not read `PYTHONPATH` or the user site directory. It does load `cryptography` from the configure-time prefix's site-packages, so write access to that Python install is write access to the node. The Linux release archive is different: it points Python at the interpreter shipped under `lib/`.
+
 ModelNet calls `find_package(OpenSSL)` and requires OpenSSL 3.5 or newer. The vcpkg baseline pinned by `vcpkg.json` does not ship that version. Pass `-OpenSSLRoot` to an OpenSSL 3.5 install you built or obtained yourself. The script forwards it as `-DOPENSSL_ROOT_DIR`. A ModelNet build without that prefix fails at configure. `-DWITH_MODELNET=OFF` skips the check.
 
 This document does not record a Windows qualification. A Linux host cannot rerun the MSVC compile.

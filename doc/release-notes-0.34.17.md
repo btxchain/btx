@@ -18,4 +18,8 @@ An incomplete admitted catalog entry can be filled by ordinary `getmodel` from c
 
 The Linux archives carry libevent, libsqlite3, libzmq, libgomp, and the libraries those need. A base image does not have to install them. libc and libstdc++ stay on the host. The NVIDIA driver library is not in the archive. Every bundled library is within GLIBC 2.38.
 
+The published v0.34.16 CUDA archive was replaced after its first upload so it carries those same host libraries. The current asset on the v0.34.16 release is `btx-0.34.16-x86_64-linux-gnu-cuda13.tar.gz`, 455,173,097 bytes, SHA256 `a29202a919039c50547c90a19bb48ddc9e434c9365793131d7bda3155b3822dd`. That is the line in the release `SHA256SUMS`. An earlier brief named `18c860c02e3a3f79851dc7caabcdc5dfc756fd062b4d077180c45776dc0472a7`. That digest is the previous upload, not the file on the release now. `SHA256SUMS` is unsigned. This note does not say the archive was run.
+
+SwapNet starts its embedded Python with an isolated configuration. It does not read `PYTHONPATH` or the user site directory. A Linux release archive points that interpreter at the Python shipped under `lib/`. A Windows build uses the Python prefix selected at configure time, and `cryptography` is loaded from that prefix's site-packages. That install is part of the node.
+
 The external-sign, bounty, and model-plane documents now say what this build returns. Reachability stays `UNKNOWN`. Availability from `getmodelavailability` stays `UNKNOWN` because that call passes no piece total. A search record may still name a publisher that did not sign it. A pending deposit that leaves the mempool still becomes `UNKNOWN` without a new event.
