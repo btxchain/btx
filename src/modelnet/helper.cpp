@@ -1010,6 +1010,38 @@ bool ReadJsonFile(const fs::path& path, UniValue& out)
     return true;
 }
 
+//! True when a JSON store is there but cannot be opened or parsed, so a save
+//! would replace what it holds; the safety files and bounty-store.json keep
+//! such a file too. A missing file, or anything other than a regular file,
+//! reads as an empty object.
+bool JsonStoreUnreadable(const fs::path& path, UniValue& out)
+{
+    std::error_code ec;
+    const bool regular{fs::is_regular_file(path, ec)};
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        out = UniValue(UniValue::VOBJ);
+        return true;
+    }
+    if (!regular) {
+        out = UniValue(UniValue::VOBJ);
+        return false;
+    }
+    std::ifstream in{path};
+    if (!in) {
+        out = UniValue(UniValue::VOBJ);
+        return true;
+    }
+    // ReadJsonFile reads JSON that is not an object or array (null, 42) as an
+    // empty object too; such a file is not an empty store either.
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    if (!out.read(ss.str()) || (!out.isObject() && !out.isArray())) {
+        out = UniValue(UniValue::VOBJ);
+        return true;
+    }
+    return false;
+}
+
 bool WriteJsonFile(const fs::path& path, const UniValue& obj, std::string& err)
 {
     // Write a temp file, check it after close and rename it over path. Writing
@@ -1239,9 +1271,12 @@ bool WritePublisherIdentityFiles(const fs::path& dir, const std::vector<unsigned
                                   Digest48& publisher_id, std::string& err)
 {
     publisher_id = PublisherId(pk);
-    if (!WritePublisherSecret(PublisherSecretPath(dir, publisher_id.Hex()), sk, err)) return false;
     UniValue store;
-    ReadJsonFile(dir / "identities.json", store);
+    if (JsonStoreUnreadable(dir / "identities.json", store)) {
+        err = "identities.json cannot be read; it is kept and not replaced";
+        return false;
+    }
+    if (!WritePublisherSecret(PublisherSecretPath(dir, publisher_id.Hex()), sk, err)) return false;
     UniValue arr = store.exists("identities") ? store["identities"] : UniValue(UniValue::VARR);
     // EnsureDefaultPublisherIdentity also gets here to write a missing or
     // unusable key file again; the identity is then listed already.
@@ -1273,7 +1308,10 @@ bool EnsureDefaultPublisherIdentity(const fs::path& dir, std::vector<unsigned ch
 {
     std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
     UniValue store;
-    ReadJsonFile(dir / "identities.json", store);
+    if (JsonStoreUnreadable(dir / "identities.json", store)) {
+        err = "identities.json cannot be read; it is kept and not replaced";
+        return false;
+    }
     if (store.exists("identities") && store["identities"].isArray() && !store["identities"].getValues().empty()) {
         const UniValue& idj = store["identities"].getValues().front();
         if (idj.exists("pubkey_hex") && idj.exists("id")) {
@@ -4431,7 +4469,11 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         }
         UniValue store;
         std::lock_guard<std::mutex> rlock(g_receipts_mu);
-        ReadJsonFile(HelperDir(cat) / "receipts.json", store);
+        if (JsonStoreUnreadable(HelperDir(cat) / "receipts.json", store)) {
+            resp.status = 500;
+            resp.body = JsonError("IO", "receipts.json cannot be read; it is kept and not replaced");
+            return true;
+        }
         UniValue arr = store.exists("receipts") ? store["receipts"] : UniValue(UniValue::VARR);
         if (arr.size() >= 256) {
             resp.status = 429;
@@ -6537,7 +6579,7 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
     const fs::path path = HelperDir(cat) / "mirror.json";
     std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
     UniValue stored;
-    (void)ReadJsonFile(path, stored);
+    const bool unreadable = JsonStoreUnreadable(path, stored);
     if (!stored.isObject()) stored.setObject();
 
     if (method == "getmodelmirror") {
@@ -6545,6 +6587,11 @@ bool DispatchMirrorRpc(ModelCatalog& cat, const std::string& method, const UniVa
         return true;
     }
     if (method == "setmodelmirror") {
+        if (unreadable) {
+            err_code = "IO_ERROR";
+            err = "mirror.json cannot be read; it is kept and not replaced";
+            return false;
+        }
         UniValue o = Arg0();
         if (o.isArray() && o.size() > 0 && o[0].isObject()) {
             UniValue first = o[0]; // copy out before o is overwritten
@@ -10393,7 +10440,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "listmodelidentities" || method == "createmodelidentity") {
         std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
         UniValue store;
-        ReadJsonFile(HelperDir(cat) / "identities.json", store);
+        if (JsonStoreUnreadable(HelperDir(cat) / "identities.json", store) && method == "createmodelidentity") {
+            err_code = "IO";
+            err = "identities.json cannot be read; it is kept and not replaced";
+            return false;
+        }
         UniValue arr = store.exists("identities") ? store["identities"] : UniValue(UniValue::VARR);
         if (method == "createmodelidentity") {
             // identities.json is written again whole with each new identity and
@@ -10480,7 +10531,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "listmodelrules" || method == "setmodelrule" || method == "removemodelrule") {
         std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
         UniValue rules;
-        ReadJsonFile(HelperDir(cat) / "acl.json", rules);
+        if (JsonStoreUnreadable(HelperDir(cat) / "acl.json", rules) && method != "listmodelrules") {
+            err_code = "IO";
+            err = "acl.json cannot be read; it is kept and not replaced";
+            return false;
+        }
         if (!rules.isObject()) rules = UniValue(UniValue::VOBJ);
         if (method == "setmodelrule") {
             if (!Arg(0).isObject()) {
@@ -10537,7 +10592,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         method == "subscribemodelpolicy" || method == "unsubscribemodelcollection" || method == "unsubscribemodelpolicy") {
         std::lock_guard<std::mutex> store_lock(g_helper_store_mu);
         UniValue store;
-        ReadJsonFile(HelperDir(cat) / "community.json", store);
+        if (JsonStoreUnreadable(HelperDir(cat) / "community.json", store)) {
+            err_code = "IO";
+            err = "community.json cannot be read; it is kept and not replaced";
+            return false;
+        }
         const std::string key = (method.find("circle") != std::string::npos) ? "circles" : "subscriptions";
         UniValue arr = store.exists(key) ? store[key] : UniValue(UniValue::VARR);
         // Each of these calls reads community.json and writes it again whole,
