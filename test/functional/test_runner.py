@@ -721,6 +721,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_p2mr_multiparty_psbt.py --descriptors',
     'wallet_p2mr_external_parent.py --descriptors',
     'wallet_sendall_pq.py',
+    'wallet_sendall.py --descriptors',
     'wallet_bcp1_pool_slot_unique.py --descriptors',
     'wallet_pq_sigop_fee.py',
     'wallet_p2mr_locked_key_lookup.py --descriptors',
