@@ -1707,7 +1707,7 @@ SearchJob SearchRuntime::Start(const SearchQuery& q, const std::vector<SearchInd
     job.state = (q.scope == SearchScope::LOCAL && extras.empty()) ? SearchJobState::COMPLETE : SearchJobState::RUNNING;
     job.elapsed_ms = 0;
     job.coverage.complete = false;
-    m_jobs[job.query_id] = job;
+    Keep(job);
     if (job.state == SearchJobState::COMPLETE) ++m_completed;
     else ++m_running;
     (void)seen;
@@ -1736,10 +1736,35 @@ bool SearchRuntime::IsCancelled(const std::string& query_id) const
     return it != m_jobs.end() && it->second.state == SearchJobState::CANCELLED;
 }
 
+void SearchRuntime::Keep(const SearchJob& job)
+{
+    // Every search keeps its job with up to SEARCH_PAGE_MAX hits for
+    // getsearchstatus and cancelmodelsearch; SEARCH_JOBS_KEPT jobs are kept.
+    // Past that the oldest other job that is neither running nor cancelled
+    // goes, so a running search can still be cancelled and a cancelled one
+    // still stops; the oldest other one when there is no such job.
+    if (m_jobs.insert_or_assign(job.query_id, job).second) m_order.push_back(job.query_id);
+    while (m_jobs.size() > SEARCH_JOBS_KEPT) {
+        auto drop = m_order.end();
+        for (auto it = m_order.begin(); it != m_order.end(); ++it) {
+            if (*it == job.query_id) continue;
+            if (drop == m_order.end()) drop = it;
+            const SearchJobState state = m_jobs.at(*it).state;
+            if (state != SearchJobState::RUNNING && state != SearchJobState::CANCELLED) {
+                drop = it;
+                break;
+            }
+        }
+        if (drop == m_order.end()) break;
+        m_jobs.erase(*drop);
+        m_order.erase(drop);
+    }
+}
+
 void SearchRuntime::Finish(SearchJob& job)
 {
     if (job.state == SearchJobState::RUNNING) job.state = SearchJobState::COMPLETE;
-    m_jobs[job.query_id] = job;
+    Keep(job);
     if (m_running > 0) --m_running;
     ++m_completed;
 }

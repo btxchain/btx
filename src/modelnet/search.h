@@ -13,6 +13,7 @@
 #include <util/fs.h>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <set>
 #include <string>
@@ -36,6 +37,8 @@ constexpr int SEARCH_FANOUT_MAX = 8;
 constexpr int SEARCH_PEER_TIMEOUT_MS = 1500;
 constexpr int SEARCH_TERMS_MAX = 16;
 constexpr size_t SEARCH_QUERY_BYTES_MAX = 4096;
+//! Search jobs a SearchRuntime keeps for getsearchstatus and cancelmodelsearch.
+constexpr size_t SEARCH_JOBS_KEPT = 64;
 
 enum class SearchScope { LOCAL = 0, PEERS = 1, NETWORK = 2, ALL = 3 };
 enum class SearchSort {
@@ -342,9 +345,12 @@ bool SearchHitFromCard(const UniValue& card, SearchHit& out, std::string& err);
 
 class SearchRuntime {
     std::map<std::string, SearchJob> m_jobs;
+    //! Query ids of m_jobs, oldest first.
+    std::deque<std::string> m_order;
     SearchIndex* m_idx{nullptr};
     int m_running{0};
     int m_completed{0};
+    void Keep(const SearchJob& job);
 
 public:
     void Bind(SearchIndex* idx) { m_idx = idx; }
