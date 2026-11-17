@@ -1,6 +1,6 @@
 const KINDS=new Set(['stack','text','metric','table','sparkline','button']);
 const ACTIONS=new Set(['navigate','focus','compare']);
-const VIEWS=new Set(['atlas','models','swarms','work','research','economy','compute','mining','wallet','activity','tools','settings']);
+const VIEWS=new Set(['atlas','models','swapnet','swarms','work','research','economy','compute','mining','wallet','activity','tools','settings']);
 const FORBIDDEN=new Set(['__proto__','prototype','constructor']);
 const SOURCE_ALLOW=new Set(['getblockchaininfo','getnetworkinfo','getmodelnetworkinfo','getmodelhostprofile','getmininginfo','getsetupstatus','listmodels','getmodeltransfers']);
 export function resolveRef(root,path){

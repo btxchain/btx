@@ -11,12 +11,21 @@ export const READ_QUERIES = [
   'getsetupstatus',
   'listmodels',
   'getmininginfo',
+  'getswapnetworkinfo',
+  'getswapbootstrapinfo',
+  'getswapvalidationinfo',
+  'getswaphealth',
+  'getnetworkmodelstats',
+  'getmodellandiscovery',
+  'getmodelfeedstatus',
+  'getsearchpeers',
 ];
 
 export const VIEWS = [
   'network',
   'atlas',
   'models',
+  'swapnet',
   'swarms',
   'work',
   'research',

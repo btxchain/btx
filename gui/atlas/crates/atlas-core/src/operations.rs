@@ -91,6 +91,41 @@ const READ_METHODS: &[&str] = &[
     "listmodelwatches",
     "searchcollections",
     "searchpublishers",
+    "getmodelsearchrecord",
+    "listmodelsearchrecords",
+    "getmodeldirectory",
+    "getmodelproviders",
+    "getmodelavailability",
+    "getmodelpeercount",
+    "getnetworkmodelstats",
+    "browsemodels",
+    "gettrendingmodels",
+    "getsimilarmodels",
+    "getnewmodels",
+    "getmodellandiscovery",
+    "getmodelfeedstatus",
+    "getsearchpeers",
+    "getpublisher",
+    "getcollection",
+    "getswapnetworkinfo",
+    "listswapassets",
+    "listswapproviders",
+    "searchswaps",
+    "getswapquotes",
+    "listswaps",
+    "getswap",
+    "getswaptranscript",
+    "listswapmandates",
+    "getswapcapabilities",
+    "listswapoperations",
+    "getswaphealth",
+    "getswapbootstrapinfo",
+    "getswaprecoveryinfo",
+    "listswapmarkets",
+    "listswapassetpolicies",
+    "getswaprouteinfo",
+    "getswapevents",
+    "getswapvalidationinfo",
 ];
 const AGENT_READS: &[&str] = &[
     "getblockchaininfo",
@@ -100,6 +135,11 @@ const AGENT_READS: &[&str] = &[
     "getmininginfo",
     "listmodels",
     "getmodeltransfers",
+    "getswapnetworkinfo",
+    "getswapbootstrapinfo",
+    "getswapvalidationinfo",
+    "getnetworkmodelstats",
+    "getmodellandiscovery",
 ];
 const SECRET_METHODS: &[&str] = &[
     "walletpassphrase",
@@ -265,11 +305,39 @@ pub fn read_allowed(method: &str, params: &Value) -> bool {
     }
     if matches!(
         method,
-        "searchmodels" | "searchbounties" | "searchcollections" | "searchpublishers"
+        "searchmodels"
+            | "searchbounties"
+            | "searchcollections"
+            | "searchpublishers"
+            | "getnewmodels"
     ) {
         return search_stays_local(params);
     }
+    // These handlers default an omitted scope to the current network view.
+    // A silent read has to name LOCAL. Network scope stays on the approval path.
+    if matches!(
+        method,
+        "browsemodels" | "gettrendingmodels" | "getsimilarmodels" | "getmodeldirectory"
+    ) {
+        return explicit_local_scope(params);
+    }
     true
+}
+fn explicit_local_scope(params: &Value) -> bool {
+    let query = if params.is_array() {
+        match params.get(0) {
+            Some(v) => v,
+            None => return false,
+        }
+    } else if params.is_object() {
+        params.get("query").unwrap_or(params)
+    } else {
+        return false;
+    };
+    match query {
+        Value::Object(o) => matches!(o.get("scope"), Some(Value::String(s)) if s.eq_ignore_ascii_case("local")),
+        _ => false,
+    }
 }
 fn search_stays_local(params: &Value) -> bool {
     let query = if params.is_array() {
@@ -673,6 +741,32 @@ mod tests {
             assert!(!read_allowed(method, &json!([{"scope":"ALL"}])));
             assert!(!read_allowed(method, &json!([{"scope":""}])));
         }
+    }
+    #[test]
+    fn directory_and_swap_reads() {
+        for method in [
+            "browsemodels",
+            "gettrendingmodels",
+            "getsimilarmodels",
+            "getmodeldirectory",
+        ] {
+            assert!(!read_allowed(method, &json!([])));
+            assert!(!read_allowed(method, &json!([{"scope":"NETWORK"}])));
+            assert!(read_allowed(method, &json!([{"scope":"LOCAL","limit":50}])));
+        }
+        assert!(read_allowed("getnewmodels", &json!([])));
+        assert!(!read_allowed("getnewmodels", &json!([{"scope":"NETWORK"}])));
+        assert!(read_allowed("getmodelavailability", &json!(["abc"])));
+        assert!(read_allowed("getnetworkmodelstats", &json!([])));
+        assert!(read_allowed("getmodellandiscovery", &json!([])));
+        assert!(read_allowed("getswapnetworkinfo", &json!([])));
+        assert!(read_allowed("getswapvalidationinfo", &json!([])));
+        assert!(!read_allowed("acceptswapquote", &json!([{}])));
+        assert!(!read_allowed("requestswapquote", &json!([])));
+        assert!(!read_allowed("refundswap", &json!([])));
+        assert!(!read_allowed("exportswaprecovery", &json!([])));
+        assert!(agent_read_allowed("getswapnetworkinfo"));
+        assert!(!agent_read_allowed("acceptswapquote"));
     }
     #[test]
     fn path_reads_need_approval() {

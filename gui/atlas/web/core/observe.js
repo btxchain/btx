@@ -17,6 +17,15 @@ const TITLES = Object.assign(Object.create(null), {
   getfundablemodels: 'Fundable models',
   getrecentreleases: 'Recent releases',
   searchbounties: 'Bounties',
+  getswapnetworkinfo: 'SwapNet',
+  getswapbootstrapinfo: 'SwapNet bootstrap',
+  getswapvalidationinfo: 'SwapNet validation',
+  getswaphealth: 'SwapNet health',
+  getnetworkmodelstats: 'Model plane',
+  getmodellandiscovery: 'LAN discovery',
+  getmodelfeedstatus: 'Feed status',
+  getsearchpeers: 'Search peers',
+  listmodelsearchrecords: 'Search index',
 });
 
 const ROW_CAP = 200;
