@@ -1791,6 +1791,102 @@ BOOST_AUTO_TEST_CASE(bounty_idempotency_key_reused_for_another_request_is_refuse
     BOOST_CHECK_EQUAL(list["drafts"].size(), 2U);
 }
 
+// An award names a revealed submission that is still there: a commitment
+// that was never revealed gets none, and an award whose submission (or the
+// commitment it revealed) was withdrawn after the proposal is not approved.
+BOOST_AUTO_TEST_CASE(bounty_award_needs_a_revealed_submission)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-award-revealed";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto commit = [&](const std::string& digest) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        c.pushKV("digest", digest);
+        BOOST_REQUIRE_MESSAGE(call("commitbountysubmission", c), err);
+        return result["commitment_id"].get_str();
+    };
+    const auto reveal = [&](const std::string& cid, const std::string& note) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("commitment_id", cid);
+        UniValue sub(UniValue::VOBJ);
+        sub.pushKV("note", note);
+        r.pushKV("submission", sub);
+        BOOST_REQUIRE_MESSAGE(call("revealbountysubmission", r), err);
+        return result["submission_id"].get_str();
+    };
+    const auto propose = [&](const std::string& submission_id) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("submission_id", submission_id);
+        return call("proposebountyaward", p);
+    };
+    const auto approve = [&](const std::string& award_id) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("award_id", award_id);
+        return call("approvebountyaward", a);
+    };
+    const auto withdraw = [&](const std::string& id) {
+        UniValue w(UniValue::VOBJ);
+        w.pushKV("submission_id", id);
+        BOOST_REQUIRE_MESSAGE(call("withdrawbountysubmission", w), err);
+    };
+
+    const std::string unrevealed = commit("digest-unrevealed");
+    BOOST_CHECK(!propose(unrevealed));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const std::string sid = reveal(commit("digest-0"), "note-0");
+    BOOST_REQUIRE_MESSAGE(propose(sid), err);
+    const std::string award = result["award_id"].get_str();
+    withdraw(sid);
+    BOOST_CHECK(!approve(award));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const std::string cid2 = commit("digest-2");
+    const std::string sid2 = reveal(cid2, "note-2");
+    BOOST_REQUIRE_MESSAGE(propose(sid2), err);
+    const std::string award2 = result["award_id"].get_str();
+    withdraw(cid2);
+    BOOST_CHECK(!approve(award2));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    // An award named by the commitment id is not approved once its revealed
+    // submission is withdrawn, and no new one is proposed for it.
+    const std::string cid4 = commit("digest-4");
+    const std::string sid4 = reveal(cid4, "note-4");
+    BOOST_REQUIRE_MESSAGE(propose(cid4), err);
+    const std::string award4 = result["award_id"].get_str();
+    withdraw(sid4);
+    BOOST_CHECK(!approve(award4));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!propose(cid4));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const std::string sid3 = reveal(commit("digest-3"), "note-3");
+    BOOST_REQUIRE_MESSAGE(propose(sid3), err);
+    BOOST_CHECK_MESSAGE(approve(result["award_id"].get_str()), err);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_observe_amount_atoms_fail_closed)
 {
     using namespace modelnet;
