@@ -440,6 +440,67 @@ BOOST_AUTO_TEST_CASE(JIT_ENSURE_IDEMPOTENCY_KEY_PAYLOAD)
     BOOST_CHECK(a["job_id"].get_str() != b["job_id"].get_str());
 }
 
+// planbtxcapabilityupdate keeps, per idempotency key, a hash of the request and
+// the reply, for the newest keys and within a byte budget.
+BOOST_AUTO_TEST_CASE(capability_idempotency_keeps_the_newest_keys)
+{
+    std::string code, err;
+    const auto plan_update = [&](const std::string& key, const std::string& old_lock, UniValue& out) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("lock_id", old_lock);
+        req.pushKV("digest", "digest-bound");
+        req.pushKV("idempotency_key", key);
+        req.pushKV("smoke_passed", true);
+        return modelnet::PlanCapabilityUpdate(req, out, code, err);
+    };
+    UniValue first, replay, conflict;
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-0", "old-0", first), err);
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-0", "old-0", replay), err);
+    BOOST_CHECK(replay["idempotent"].get_bool());
+    BOOST_CHECK_EQUAL(replay["proposed_lock"].get_str(), first["proposed_lock"].get_str());
+    BOOST_CHECK_EQUAL(replay["automatic_spend_atoms"].getInt<int>(), 0);
+    BOOST_CHECK(!plan_update("bound-0", "old-other", conflict));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // 4096 newer keys push the first out: under it, another request now runs.
+    for (int i = 1; i <= 4096; ++i) {
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(plan_update("bound-" + std::to_string(i), "old-" + std::to_string(i), out), err);
+    }
+    UniValue again;
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-0", "old-other", again), err);
+    BOOST_CHECK(!again.exists("idempotent"));
+    // That pushed out bound-1, and running bound-1 again pushes out bound-2;
+    // bound-3, now the oldest key left, still holds.
+    UniValue gone, held;
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-1", "old-other", gone), err);
+    BOOST_CHECK(!gone.exists("idempotent"));
+    BOOST_CHECK(!plan_update("bound-3", "old-other", held));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // A reply holds the old lock three times. With 200 KiB old locks, about 6
+    // replies fit in 4 MiB: of 20 keys the newest are kept and the oldest go.
+    const std::string big(200 << 10, 'b');
+    for (int i = 0; i < 20; ++i) {
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(plan_update("big-" + std::to_string(i), big + std::to_string(i), out), err);
+    }
+    // Six replies of about 600 KiB fit: big-14 is the oldest kept, big-13 is gone.
+    UniValue newest, last_kept, first_gone, oldest;
+    BOOST_REQUIRE_MESSAGE(plan_update("big-19", big + "19", newest), err);
+    BOOST_CHECK(newest["idempotent"].get_bool());
+    BOOST_REQUIRE_MESSAGE(plan_update("big-14", big + "14", last_kept), err);
+    BOOST_CHECK(last_kept["idempotent"].get_bool());
+    BOOST_REQUIRE_MESSAGE(plan_update("big-13", big + "other", first_gone), err);
+    BOOST_CHECK(!first_gone.exists("idempotent"));
+    BOOST_REQUIRE_MESSAGE(plan_update("big-0", big + "other", oldest), err);
+    BOOST_CHECK(!oldest.exists("idempotent"));
+
+    // Leave the capability event log as the next cases expect it.
+    UniValue drain;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(std::numeric_limits<int64_t>::max() / 4, drain));
+}
+
 BOOST_AUTO_TEST_CASE(hello_capability_objects_name_min_max)
 {
     const UniValue caps = modelnet::HelloCapabilityArray();
