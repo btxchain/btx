@@ -1328,9 +1328,27 @@ void BountyStore::Remember(const std::string& method, const std::string& key, co
 UniValue BountyStore::Event(const std::string& kind, const std::string& bounty_id, const UniValue& payload)
 {
     UniValue e = MakeBountyEvent(kind, bounty_id, payload, m_seq, m_epoch);
-    m_events.push_back(e);
+    AppendEventLocked(e);
     PublishBountyEvent(e);
     return e;
+}
+
+void BountyStore::AppendEventLocked(const UniValue& event)
+{
+    const size_t bytes = event.write().size();
+    m_events.push_back(event);
+    m_event_bytes += bytes;
+    TrimEventsLocked();
+}
+
+void BountyStore::TrimEventsLocked()
+{
+    // Oldest out first; a reader whose cursor is behind the oldest event kept
+    // gets a gap (getbountyevents).
+    while ((m_events.size() > BOUNTY_EVENTS_MAX || m_event_bytes > BOUNTY_EVENT_BYTES_MAX) && m_events.size() > 1) {
+        m_event_bytes -= std::min(m_event_bytes, m_events.front().write().size());
+        m_events.erase(m_events.begin());
+    }
 }
 
 UniValue BountyStore::BountyEntryLocked(const std::string& bounty_id) const
@@ -2325,6 +2343,11 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         int limit = a.exists("limit") ? a["limit"].getInt<int>() : 50;
         if (limit < 1) return fail("INVALID_PARAMETER", "limit");
         if (limit > BOUNTY_PAGE_MAX) limit = BOUNTY_PAGE_MAX;
+        // The log keeps only the newest events, and none across a restart: a
+        // cursor behind the oldest event kept missed the events in between.
+        const uint64_t oldest = m_events.empty() ? m_seq + 1
+                                                 : static_cast<uint64_t>(m_events.front()["seq"].getInt<int64_t>());
+        const uint64_t gap_end = oldest > 0 && since < oldest - 1 ? oldest - 1 : 0;
         UniValue arr(UniValue::VARR);
         // A full page continues after its last event; m_seq would skip the
         // events between the page and the newest one.
@@ -2343,7 +2366,11 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         result.pushKV("events", arr);
         result.pushKV("epoch", static_cast<int64_t>(m_epoch));
         result.pushKV("cursor", std::to_string(next));
-        result.pushKV("gap", false);
+        result.pushKV("gap", gap_end != 0);
+        if (gap_end != 0) {
+            result.pushKV("gap_begin", std::to_string(since + 1));
+            result.pushKV("gap_end", std::to_string(gap_end));
+        }
         return true;
     }
 
@@ -2507,13 +2534,15 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         BountyChainIndex previous_chain = m_chain;
         const uint64_t previous_seq = m_seq;
         const size_t previous_events = m_events.size();
+        const size_t previous_event_bytes = m_event_bytes;
         bool rollback_needed{true};
         const auto rollback = [&] {
             if (!rollback_needed) return;
             rollback_needed = false;
             m_chain = std::move(previous_chain);
             m_seq = previous_seq;
-            m_events.resize(previous_events);
+            while (m_events.size() > previous_events) m_events.pop_back();
+            m_event_bytes = previous_event_bytes;
             result.setNull();
         };
         try {
@@ -2524,6 +2553,7 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             payload.pushKV("silent_delete", false);
             const UniValue event = MakeBountyEvent("REORG", bounty_id, payload, m_seq, m_epoch);
             m_events.push_back(event);
+            m_event_bytes += event.write().size();
             result.pushKV("reorg", true);
             result.pushKV("event", event);
             if (!PersistLocked(err)) {
@@ -2533,6 +2563,7 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             rollback_needed = false;
             Remember(method, idem, result);
             PublishBountyEvent(event);
+            TrimEventsLocked();
             return true;
         } catch (...) {
             rollback();

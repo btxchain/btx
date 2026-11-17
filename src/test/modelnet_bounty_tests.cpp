@@ -2602,6 +2602,122 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     BOOST_CHECK(!IsBountyHelperMethod("preparebountyrefund"));
 }
 
+// Every bounty write adds an event, and getbountyevents reads them from
+// memory. The log keeps the newest events within a count and a byte bound; a
+// reader whose cursor is behind the oldest event kept gets a gap.
+BOOST_AUTO_TEST_CASE(bounty_event_log_is_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-events-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    UniValue terms(UniValue::VOBJ);
+    terms.pushKV("title", "event log");
+    UniValue create(UniValue::VARR);
+    create.push_back(terms);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", create, result, code, err), err);
+    const std::string draft_id = result["draft_id"].get_str();
+    const auto update = [&](const std::string& field, const std::string& value) {
+        UniValue patch(UniValue::VOBJ);
+        patch.pushKV("draft_id", draft_id);
+        patch.pushKV(field, value);
+        UniValue params(UniValue::VARR);
+        params.push_back(patch);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("updatebountydraft", params, result, code, err), err);
+    };
+    const auto page = [&](const std::string& cursor) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("cursor", cursor);
+        a.pushKV("limit", 100);
+        UniValue params(UniValue::VARR);
+        params.push_back(a);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("getbountyevents", params, out, code, err), err);
+        return out;
+    };
+    // Every event after `cursor`, and the size of their JSON.
+    const auto walk = [&](std::string cursor, size_t& bytes) {
+        std::vector<UniValue> events;
+        bytes = 0;
+        for (;;) {
+            const UniValue out = page(cursor);
+            for (const auto& e : out["events"].getValues()) {
+                events.push_back(e);
+                bytes += e.write().size();
+            }
+            if (out["events"].size() < 100) break;
+            cursor = out["cursor"].get_str();
+        }
+        return events;
+    };
+    const auto seq_of = [](const UniValue& e) { return e["seq"].getInt<int64_t>(); };
+    size_t bytes = 0;
+    const std::string start = page("0")["cursor"].get_str();
+    const int64_t start_seq = std::stoll(start);
+    BOOST_CHECK(!page(start)["gap"].get_bool());
+
+    // 4100 small writes: the newest 4096 events are kept, the reader that had
+    // seen all before gets a gap of four events.
+    for (int i = 0; i < 4100; ++i) update("title", "t" + std::to_string(i));
+    const UniValue behind = page(start);
+    BOOST_CHECK(behind["gap"].get_bool());
+    BOOST_CHECK_EQUAL(behind["gap_begin"].get_str(), std::to_string(start_seq + 1));
+    BOOST_CHECK_EQUAL(behind["gap_end"].get_str(), std::to_string(start_seq + 4));
+    std::vector<UniValue> kept = walk(start, bytes);
+    BOOST_REQUIRE_EQUAL(kept.size(), BOUNTY_EVENTS_MAX);
+    BOOST_CHECK_EQUAL(seq_of(kept.front()), start_seq + 5);
+    BOOST_CHECK_EQUAL(kept.back()["payload"]["title"].get_str(), "t4099");
+    const std::string after_small = std::to_string(seq_of(kept.back()));
+    BOOST_CHECK(!page(after_small)["gap"].get_bool());
+
+    // 20 writes of about 300 KiB each: only as many as fit in 4 MiB are kept,
+    // the newest among them.
+    const std::string note(300 << 10, 'n');
+    for (int i = 0; i < 20; ++i) update("notes", note + std::to_string(i));
+    kept = walk("0", bytes);
+    BOOST_CHECK_LE(bytes, BOUNTY_EVENT_BYTES_MAX);
+    BOOST_CHECK_LT(kept.size(), 20U);
+    BOOST_CHECK_EQUAL(kept.back()["payload"]["notes"].get_str(), note + "19");
+    BOOST_CHECK(page(after_small)["gap"].get_bool());
+
+    // One event larger than the budget is kept until the next one.
+    const std::string huge(5 << 20, 'h');
+    update("notes", huge);
+    kept = walk("0", bytes);
+    BOOST_REQUIRE_EQUAL(kept.size(), 1U);
+    BOOST_CHECK_EQUAL(kept.front()["payload"]["notes"].get_str().size(), huge.size());
+    const std::string at_huge = std::to_string(seq_of(kept.front()) - 1);
+    update("notes", "small again");
+    const UniValue after_huge = page(at_huge);
+    BOOST_CHECK(after_huge["gap"].get_bool());
+    BOOST_REQUIRE_EQUAL(after_huge["events"].size(), 1U);
+    BOOST_CHECK_EQUAL(after_huge["events"][0]["payload"]["notes"].get_str(), "small again");
+
+    // The log is not saved: after a restart the same reader gets a gap, also
+    // before the next event, and a cursor at the newest event gets none.
+    const std::string newest = after_huge["cursor"].get_str();
+    BountyStore restarted;
+    restarted.Bind(dir, ZeroNet());
+    const auto restarted_page = [&](const std::string& cursor) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("cursor", cursor);
+        UniValue params(UniValue::VARR);
+        params.push_back(a);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(restarted.Dispatch("getbountyevents", params, out, code, err), err);
+        return out;
+    };
+    const UniValue lost = restarted_page(at_huge);
+    BOOST_CHECK(lost["gap"].get_bool());
+    BOOST_CHECK_EQUAL(lost["gap_end"].get_str(), newest);
+    BOOST_CHECK(!restarted_page(newest)["gap"].get_bool());
+    // A cursor at the end of its range does not wrap into a gap.
+    BOOST_CHECK(!restarted_page("18446744073709551615")["gap"].get_bool());
+}
+
 BOOST_AUTO_TEST_CASE(wrapped_terms_read_like_direct_terms)
 {
     // {"terms": {...}} is accepted as a wrapper. It must give the same

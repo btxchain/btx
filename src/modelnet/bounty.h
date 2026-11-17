@@ -133,6 +133,11 @@ public:
     void Clear();
 };
 
+//! Bounty events kept in memory for getbountyevents: the newest ones, within
+//! both bounds; the newest event is always kept.
+constexpr size_t BOUNTY_EVENTS_MAX{4096};
+constexpr size_t BOUNTY_EVENT_BYTES_MAX{4 << 20};
+
 class BountyStore {
     NetworkId m_network{};
     fs::path m_dir;
@@ -157,6 +162,8 @@ class BountyStore {
     std::set<std::string> m_revoked_delegations;
     uint64_t m_seq{0};
     uint64_t m_epoch{1};
+    //! Size of the events in m_events as JSON text.
+    size_t m_event_bytes{0};
     mutable std::mutex m_mu;
     BountyChainIndex m_chain;
     //! The directory whose chain facts are in m_chain (see Load()).
@@ -173,6 +180,8 @@ class BountyStore {
     bool LoadIdentity(std::vector<unsigned char>& pk, std::vector<unsigned char>& sk, Digest48& id, std::string& err);
     bool PersistLocked(std::string& err) const;
     UniValue BountyEntryLocked(const std::string& bounty_id) const;
+    void AppendEventLocked(const UniValue& event);
+    void TrimEventsLocked();
 
 public:
     void Bind(const fs::path& dir, const NetworkId& network);
