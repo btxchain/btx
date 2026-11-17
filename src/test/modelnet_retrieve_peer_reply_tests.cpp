@@ -13,6 +13,7 @@
 #include <modelnet/protocol.h>
 #include <modelnet/transport_pq.h>
 #include <test/util/setup_common.h>
+#include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
 
@@ -304,6 +305,108 @@ BOOST_AUTO_TEST_CASE(swarm_availability_with_wrong_types_does_not_fail_the_retri
         BOOST_CHECK_GE(asked.load(), 1);
         BOOST_CHECK_MESSAGE(status == "done", "reply " + replies[k] + " left the job " + status);
     }
+}
+
+// getmodel starts a retrieve job, with its own worker thread, for every model
+// it is asked for. The jobs are saved and started again with the helper. Both
+// the jobs one helper runs and the saved jobs it starts are bounded.
+BOOST_AUTO_TEST_CASE(retrieve_jobs_are_bounded)
+{
+    const fs::path root = m_path_root / "retrieve-bound";
+    modelnet::HelperConfig cfg;
+    cfg.modeldir = root / "node";
+    fs::create_directories(cfg.modeldir);
+    cfg.storage_mode = modelnet::StorageMode::FIXED;
+    cfg.quota_bytes = 32 << 20;
+    cfg.lan_discovery = false;
+    cfg.natpmp = false;
+    cfg.pwc_chain = "regtest";
+    // Nothing listens there, so every job keeps retrying its only contact.
+    cfg.peers = {"127.0.0.1:1"};
+    char sock_dir[] = "/tmp/btx-sock-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(sock_dir) != nullptr);
+    cfg.rpc_socket = fs::PathFromString(sock_dir) / "modeld.sock";
+    const auto with_daemon = [&](const std::function<void()>& body) {
+        std::atomic<bool> stop{false};
+        std::thread daemon([&] { modelnet::RunModelDaemon(cfg, &stop); });
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!fs::exists(cfg.rpc_socket) && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        try {
+            BOOST_REQUIRE(fs::exists(cfg.rpc_socket));
+            body();
+        } catch (...) {
+            stop.store(true);
+            daemon.join();
+            throw;
+        }
+        stop.store(true);
+        daemon.join();
+        ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
+    };
+    const auto getmodel = [&](int i, std::string& err) {
+        UniValue params(UniValue::VARR);
+        params.push_back(strprintf("%096x", i + 1));
+        UniValue res;
+        err.clear();
+        return modelnet::CallUnixRpc(cfg.rpc_socket, "getmodel", params, res, err) &&
+               res.exists("job_id") && res["job_id"].isStr() && !res["job_id"].get_str().empty();
+    };
+    const auto job_count = [&] {
+        UniValue res;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(modelnet::CallUnixRpc(cfg.rpc_socket, "getmodeljob", UniValue(UniValue::VARR), res, err), err);
+        return res["job_count"].getInt<int>();
+    };
+
+    constexpr int LIMIT{16};
+    with_daemon([&] {
+        std::string err;
+        for (int i = 0; i < LIMIT; ++i) BOOST_REQUIRE_MESSAGE(getmodel(i, err), "job " + std::to_string(i) + ": " + err);
+        BOOST_CHECK(!getmodel(LIMIT, err));
+        BOOST_CHECK_MESSAGE(err.find("HELPER_BUSY") != std::string::npos, err);
+        BOOST_CHECK_EQUAL(job_count(), LIMIT);
+    });
+
+    // A saved list longer than the limit, as an older helper could leave it.
+    fs::path saved;
+    for (const auto& e : fs::recursive_directory_iterator(cfg.modeldir)) {
+        if (e.path().filename() == "retrieve_jobs.json") saved = e.path();
+    }
+    BOOST_REQUIRE(!saved.empty());
+    UniValue jobs(UniValue::VARR);
+    for (int i = 0; i < LIMIT + 8; ++i) {
+        UniValue j(UniValue::VOBJ);
+        j.pushKV("job_id", strprintf("%032x", 0x1000 + i));
+        j.pushKV("model_id", strprintf("%096x", 0x1000 + i));
+        j.pushKV("automatic", false);
+        j.pushKV("status", "queued");
+        jobs.push_back(j);
+    }
+    UniValue file(UniValue::VOBJ);
+    file.pushKV("schema_version", 1);
+    file.pushKV("jobs", jobs);
+    {
+        std::ofstream out(saved, std::ios::binary | std::ios::trunc);
+        out << file.write();
+    }
+    with_daemon([&] {
+        BOOST_CHECK_EQUAL(job_count(), LIMIT);
+        // The jobs beyond the limit are dropped from the file at once, so a
+        // later RPC cannot load one of them, without a worker, when a place frees.
+        {
+            std::ifstream in(saved, std::ios::binary);
+            const std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            UniValue left;
+            BOOST_REQUIRE(left.read(raw));
+            BOOST_CHECK_EQUAL(left["jobs"].size(), static_cast<size_t>(LIMIT));
+        }
+        std::string err;
+        BOOST_CHECK(!getmodel(LIMIT + 100, err));
+        BOOST_CHECK_MESSAGE(err.find("HELPER_BUSY") != std::string::npos, err);
+    });
+    ::rmdir(sock_dir);
 }
 
 BOOST_AUTO_TEST_CASE(early_return_waits_for_swarm_threads_before_their_state_goes)

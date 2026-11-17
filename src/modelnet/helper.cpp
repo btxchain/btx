@@ -4411,6 +4411,9 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
 namespace {
 
 constexpr size_t kKeepTerminalRetrieveJobs = 8;
+/** Queued or running retrieve jobs at once. Each holds a worker thread, a PQ1
+ *  context and sockets, and is saved and started again with the helper. */
+constexpr size_t kMaxActiveRetrieveJobs = 16;
 
 struct RetrieveJob {
     std::string id;
@@ -4461,6 +4464,18 @@ fs::path RetrieveJobsPath()
     return g_retrieve_jobs_dir / "retrieve_jobs.json";
 }
 
+/** Queued or running jobs of one helper directory. Caller holds g_retrieve_mu. */
+size_t ActiveRetrieveJobsLocked(const fs::path& modeldir)
+{
+    size_t active{0};
+    for (const auto& kv : g_retrieve_jobs) {
+        if (kv.second->modeldir != modeldir) continue;
+        std::lock_guard<std::mutex> lock(kv.second->mu);
+        if (kv.second->status == "queued" || kv.second->status == "running") ++active;
+    }
+    return active;
+}
+
 void PersistRetrieveJobsLocked()
 {
     if (g_retrieve_jobs_dir.empty()) return;
@@ -4508,10 +4523,17 @@ void LoadRetrieveJobs(ModelCatalog& cat)
     if (!ReadJsonFile(RetrieveJobsPath(), root) || !root.isObject()) return;
     if (!root.exists("jobs") || !root["jobs"].isArray()) return;
     std::lock_guard<std::mutex> lock(g_retrieve_mu);
+    bool skipped{false};
     for (const auto& j : root["jobs"].getValues()) {
         if (!j.isObject() || !j.exists("job_id") || !j["job_id"].isStr()) continue;
         const std::string id = j["job_id"].get_str();
         if (id.empty() || g_retrieve_jobs.count(id)) continue;
+        // A saved list longer than the cap (an older helper had none) starts
+        // only up to it; the rest is dropped from the file at the next save.
+        if (ActiveRetrieveJobsLocked(HelperDir(cat)) >= kMaxActiveRetrieveJobs) {
+            skipped = true;
+            continue;
+        }
         if (!j.exists("model_id") || !j["model_id"].isStr()) continue;
         Digest48 mid;
         std::string herr;
@@ -4547,6 +4569,9 @@ void LoadRetrieveJobs(ModelCatalog& cat)
         }
         g_retrieve_jobs[id] = job;
     }
+    // This runs before every helper RPC; jobs left in the file would load later,
+    // when a place frees up, without a worker. Drop them now.
+    if (skipped) PersistRetrieveJobsLocked();
 }
 
 void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog& cat);
@@ -4656,6 +4681,9 @@ std::string EnqueueRetrieve(ModelCatalog& cat, const Digest48& model_id, std::at
                 (active->model_id == model_id && active->status == "failed" &&
                  NowEpochMs() - active->created_ms < 30000))) return {};
         }
+        // Manual jobs had no bound: every getmodel for another model added a
+        // thread, and all of them were saved and started again with the helper.
+        if (ActiveRetrieveJobsLocked(job->modeldir) >= kMaxActiveRetrieveJobs) return {};
         g_retrieve_jobs[job->id] = job;
         PruneRetrieveJobsLocked();
         PersistRetrieveJobsLocked();
@@ -4670,7 +4698,7 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
     const Digest48 model_id = job->model_id;
     // DISC-05: re-read catalog peers after a contact dies. Committed pieces
     // stay on disk; RetrieveFreeFromPeer skips them via GetPiece.
-    job->worker = std::thread([job, &cat, model_id]() {
+    auto work = [job, &cat, model_id]() {
         std::optional<Digest48> active_artifact;
         auto end_transfer = [&] {
             if (active_artifact) cat.EndTransfer(*active_artifact);
@@ -4874,7 +4902,19 @@ void LaunchRetrieveWorker(const std::shared_ptr<RetrieveJob>& job, ModelCatalog&
             failed_peers.insert(peer);
             transient_streak = 0;
         }
-    });
+    };
+    try {
+        job->worker = std::thread(std::move(work));
+    } catch (const std::system_error& e) {
+        // The process could not start another thread. Fail this job instead
+        // of letting the exception end the helper, here or at start-up.
+        {
+            std::lock_guard<std::mutex> lock(job->mu);
+            job->status = "failed";
+            job->err = std::string("cannot start a retrieve worker: ") + e.what();
+        }
+        PersistRetrieveJobs();
+    }
 }
 
 void StartRetrieveWorkers(ModelCatalog& cat)
@@ -9034,6 +9074,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         }
         if (stop) {
             const std::string job_id = EnqueueRetrieve(cat, r.digest, stop);
+            if (job_id.empty()) {
+                err_code = "HELPER_BUSY";
+                err = "too many retrieve jobs; wait for one to end or cancel one";
+                return false;
+            }
             result.pushKV("plan", "WAIT_FREE");
             result.pushKV("status", "running");
             result.pushKV("async", true);
@@ -10851,6 +10896,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
             lock.unlock();
             const std::string job_id = EnqueueRetrieve(cat, cid, stop);
+            if (job_id.empty()) {
+                err_code = "HELPER_BUSY";
+                err = "too many retrieve jobs; wait for one to end or cancel one";
+                return false;
+            }
             result.pushKV("status", "running");
             result.pushKV("job_id", job_id);
             result.pushKV("note", "poll getmodeljob; ciphertext retrieve does not reveal plaintext");
