@@ -9,6 +9,7 @@
 #include <modelnet/event_journal.h>
 #include <modelnet/identity.h>
 #include <modelnet/search.h>
+#include <crypto/sha256.h>
 #include <crypto/sha384.h>
 #include <random.h>
 #include <util/fs_helpers.h>
@@ -201,14 +202,11 @@ std::string IdemFingerprint(const UniValue& params)
     return out.write();
 }
 
-//! Whether `key` already answered some request to `method`. Remembered results
-//! are stored under method|key<US>fingerprint.
-bool IdemKeyUsed(const std::map<std::string, UniValue>& idem, const std::string& method, const std::string& key)
+std::string IdemHash(const std::string& text)
 {
-    if (key.empty()) return false;
-    const std::string prefix = method + "|" + key + '\x1f';
-    const auto it = idem.lower_bound(prefix);
-    return it != idem.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+    unsigned char hash[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(text.data()), text.size()).Finalize(hash);
+    return HexStr(hash);
 }
 
 std::string IdemKey(const UniValue& params)
@@ -1311,18 +1309,59 @@ bool BountyStore::LoadIdentity(std::vector<unsigned char>& pk, std::vector<unsig
     return WriteJson(path, store, err);
 }
 
-bool BountyStore::Idem(const std::string& method, const std::string& key, UniValue& out) const
+const BountyStore::KeptIdem* BountyStore::FindIdemLocked(const std::string& method, const std::string& key) const
 {
-    if (key.empty()) return false;
-    auto it = m_idem.find(method + "|" + key);
-    if (it == m_idem.end()) return false;
-    out = it->second;
-    return true;
+    if (key.empty()) return nullptr;
+    const auto it = m_idem.find(IdemHash(method + "|" + key));
+    return it == m_idem.end() ? nullptr : &it->second;
 }
 
-void BountyStore::Remember(const std::string& method, const std::string& key, const UniValue& result)
+void BountyStore::Remember(const std::string& method, const std::string& key, const std::string& request,
+                           const UniValue& result)
 {
-    if (!key.empty()) m_idem[method + "|" + key] = result;
+    if (key.empty()) return;
+    const std::string id = IdemHash(method + "|" + key);
+    if (m_idem.count(id)) return;
+    KeptIdem kept;
+    kept.request = IdemHash(request);
+    kept.reply = result.write();
+    kept.reply.shrink_to_fit();
+    // A reply larger than the whole budget is not kept; its key still is.
+    if (kept.reply.capacity() > IDEM_REPLY_BYTES_MAX) std::string{}.swap(kept.reply);
+    const size_t bytes = kept.reply.empty() ? 0 : kept.reply.capacity();
+    // Make room first: the oldest keys go beyond IDEM_KEYS_MAX (a request
+    // under such a key runs again, as after a restart), and the oldest replies
+    // go beyond the budget (their key stays and answers that the write was done).
+    while (m_idem.size() >= IDEM_KEYS_MAX && !m_idem_order.empty()) {
+        const auto it = m_idem.find(m_idem_order.front());
+        if (it != m_idem.end()) {
+            // The oldest key with a reply is the first one in m_idem_replies.
+            if (!it->second.reply.empty() && !m_idem_replies.empty() && m_idem_replies.front() == it->first) {
+                m_idem_reply_bytes -= it->second.reply.capacity();
+                m_idem_replies.pop_front();
+            }
+            m_idem.erase(it);
+        }
+        m_idem_order.pop_front();
+    }
+    while (bytes > 0 && m_idem_reply_bytes + bytes > IDEM_REPLY_BYTES_MAX && !m_idem_replies.empty()) {
+        const auto it = m_idem.find(m_idem_replies.front());
+        if (it != m_idem.end() && !it->second.reply.empty()) {
+            m_idem_reply_bytes -= it->second.reply.capacity();
+            std::string{}.swap(it->second.reply);
+        }
+        m_idem_replies.pop_front();
+    }
+    const auto it = m_idem.emplace(id, std::move(kept)).first;
+    try {
+        m_idem_order.push_back(id);
+        if (bytes > 0) m_idem_replies.push_back(id);
+    } catch (...) {
+        if (!m_idem_order.empty() && m_idem_order.back() == id) m_idem_order.pop_back();
+        m_idem.erase(it);
+        throw;
+    }
+    m_idem_reply_bytes += bytes;
 }
 
 UniValue BountyStore::Event(const std::string& kind, const std::string& bounty_id, const UniValue& payload)
@@ -1435,13 +1474,21 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
     // same request again is a replay; another request under a used key is a
     // conflict, as for NETWORK-02 writes and mandate reservations.
     const std::string idem_key = IdemKey(params);
-    const std::string idem = idem_key.empty() ? std::string{} : idem_key + '\x1f' + IdemFingerprint(params);
+    const std::string idem_request = idem_key.empty() ? std::string{} : IdemFingerprint(params);
     const bool skip_idem = (method == "reservemandate");
-    if (!skip_idem && Idem(method, idem, result)) return true;
-    if (!skip_idem && IdemKeyUsed(m_idem, method, idem_key)) {
-        err_code = "IDEMPOTENCY_CONFLICT";
-        err = "idempotency conflict";
-        return false;
+    if (!skip_idem) {
+        if (const KeptIdem* kept = FindIdemLocked(method, idem_key)) {
+            if (kept->request != IdemHash(idem_request)) {
+                err_code = "IDEMPOTENCY_CONFLICT";
+                err = "idempotency conflict";
+                return false;
+            }
+            if (!kept->reply.empty() && result.read(kept->reply)) return true;
+            result.setNull();
+            err_code = "IDEMPOTENCY_REPLAY_UNAVAILABLE";
+            err = "the write under this idempotency_key was done; its reply is no longer kept";
+            return false;
+        }
     }
 
     auto fail = [&](const char* code, const std::string& e) {
@@ -1453,7 +1500,7 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         // Report a failed save. Remember the result only once it is saved, so
         // a retry with the same request saves again.
         if (!PersistLocked(err)) return fail("IO", err);
-        Remember(method, idem, result);
+        if (!skip_idem) Remember(method, idem_key, idem_request, result);
         return true;
     };
 
@@ -2561,7 +2608,7 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
                 return fail("IO", err);
             }
             rollback_needed = false;
-            Remember(method, idem, result);
+            Remember(method, idem_key, idem_request, result);
             PublishBountyEvent(event);
             TrimEventsLocked();
             return true;

@@ -2814,6 +2814,99 @@ BOOST_AUTO_TEST_CASE(incomplete_bounty_draft_cannot_publish)
     BOOST_CHECK_EQUAL(result["next_actions"][0].get_str().empty(), false);
 }
 
+// The bounty store keeps, per idempotency key, a hash of the request and the
+// reply: the newest keys, and replies within a byte budget. A key whose reply
+// went still refuses another request and answers that the write was done.
+BOOST_AUTO_TEST_CASE(bounty_idempotency_keys_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-idem-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    UniValue terms(UniValue::VOBJ);
+    terms.pushKV("title", "idempotency");
+    UniValue create(UniValue::VARR);
+    create.push_back(terms);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", create, result, code, err), err);
+    std::string draft_id = result["draft_id"].get_str();
+    // updatebountydraft with the key next to the draft id and the patch apart.
+    const auto update = [&](const std::string& key, const std::string& field, const std::string& value) {
+        UniValue head(UniValue::VOBJ);
+        head.pushKV("draft_id", draft_id);
+        head.pushKV("idempotency_key", key);
+        UniValue patch(UniValue::VOBJ);
+        patch.pushKV(field, value);
+        UniValue params(UniValue::VARR);
+        params.push_back(head);
+        params.push_back(patch);
+        code.clear();
+        err.clear();
+        return store.Dispatch("updatebountydraft", params, result, code, err);
+    };
+    const auto notes_now = [&]() {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("draft_id", draft_id);
+        UniValue params(UniValue::VARR);
+        params.push_back(o);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("getbountydraft", params, out, code, err), err);
+        return out["terms"]["notes"].get_str();
+    };
+
+    BOOST_REQUIRE_MESSAGE(update("first", "title", "a"), err);
+    BOOST_REQUIRE_MESSAGE(update("first", "title", "a"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "a");
+    BOOST_CHECK(!update("first", "title", "b"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // 20 replies of about 300 KiB: the oldest replies go, their keys stay.
+    const std::string note(300 << 10, 'n');
+    for (int i = 0; i < 20; ++i) {
+        BOOST_REQUIRE_MESSAGE(update("big-" + std::to_string(i), "notes", note + std::to_string(i)), err);
+    }
+    BOOST_REQUIRE_MESSAGE(update("big-19", "notes", note + "19"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["notes"].get_str(), note + "19");
+    BOOST_CHECK(!update("big-0", "notes", note + "0"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_REPLAY_UNAVAILABLE");
+    BOOST_CHECK(err.find("was done") != std::string::npos);
+    BOOST_CHECK_EQUAL(notes_now(), note + "19");
+    BOOST_CHECK(!update("big-0", "notes", "other"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_CHECK(!update("first", "title", "b"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // 4096 newer keys with small replies, on a small draft of their own, push
+    // out the oldest keys: under "first" another request now runs, as after a
+    // restart, which pushes out small-0 and its reply; small-1, now the oldest
+    // key left, still replays and refuses another request.
+    UniValue small_terms(UniValue::VOBJ);
+    small_terms.pushKV("title", "small");
+    UniValue small_create(UniValue::VARR);
+    small_create.push_back(small_terms);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", small_create, result, code, err), err);
+    const std::string large_draft = draft_id;
+    const std::string small_draft = result["draft_id"].get_str();
+    draft_id = small_draft;
+    for (int i = 0; i < 4096; ++i) {
+        BOOST_REQUIRE_MESSAGE(update("small-" + std::to_string(i), "title", "s" + std::to_string(i)), err);
+    }
+    draft_id = large_draft;
+    BOOST_REQUIRE_MESSAGE(update("first", "title", "b"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "b");
+    draft_id = small_draft;
+    // The newest reply is kept; the oldest key left refuses another request,
+    // whether or not its reply still fits; small-0 went and runs again.
+    BOOST_REQUIRE_MESSAGE(update("small-4095", "title", "s4095"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "s4095");
+    BOOST_CHECK(!update("small-1", "title", "other"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_REQUIRE_MESSAGE(update("small-0", "title", "s0"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "s0");
+}
+
 BOOST_AUTO_TEST_CASE(bounty_award_proposal_and_decision_are_checked)
 {
     using namespace modelnet;
