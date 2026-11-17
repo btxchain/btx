@@ -25,8 +25,14 @@ def bump(coordinator,ctx,swap_id,kind,new_fee_atoms):
     if kind=='refund':
         now=report.clock.height if leg.lock_domain=='height' else report.clock.timestamp
         require(now>=leg.lock_value,'REFUND_EARLY','Refund is not mature')
-        funding=coordinator.journal.operation(s['fund_op'])
-        require(new+atoms(funding['metadata']['fee_atoms'])<=atoms(s['max_local_fee_atoms']),
+        funding=coordinator.journal.operation(s['fund_op']) if s.get('fund_op') else None
+        if funding is not None and not funding['metadata'].get('adopted_output'):
+            funding_fee=atoms(funding['metadata']['fee_atoms'])
+        else:
+            # Adoption's zero is a placeholder, not proof of a free transaction.
+            require(driver.family in {'btc','btx'},'FUNDING_FEE_UNKNOWN','Original funding fee is unavailable')
+            funding_fee=atoms(driver.historical_funding_fee(leg,s['refs'][name]))
+        require(new+funding_fee<=atoms(s['max_local_fee_atoms']),
                 'FEE_CAP','Funding plus replacement refund exceeds local authorization')
     else:
         require(s['secret_exposed'],'SECRET_NOT_EXPOSED','Do not disclose a secret through a fee replacement')
