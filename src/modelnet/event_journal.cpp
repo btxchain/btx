@@ -265,6 +265,9 @@ bool ModelEventFromFeed(const FeedEvent& fe, ModelEvent& out)
 bool ModelEventFromSearchRecord(const ModelSearchRecord& r, ModelEvent& out)
 {
     out = {};
+    // A tombstone removes the record; it is not a publication or an update a
+    // watch should act on.
+    if (r.tombstone) return false;
     out.event_type = r.metadata_sequence > 1 ? ModelEventType::MODEL_METADATA_UPDATED : ModelEventType::MODEL_PUBLISHED;
     if (!r.release_id.empty() && r.metadata_sequence <= 1) out.event_type = ModelEventType::RELEASE_CREATED;
     if (ToUpper(r.object_kind) == "BOUNTY") out.event_type = ModelEventType::BOUNTY_CREATED;
@@ -550,10 +553,49 @@ bool ModelEventJournal::RewriteJournalLocked(std::string& err) const
     return true;
 }
 
+void ModelEventJournal::RememberCompactedLocked(const std::string& dedupe_key)
+{
+    if (dedupe_key.empty() || !m_compacted_keys.insert(dedupe_key).second) return;
+    m_compacted.push_back(dedupe_key);
+    // Not below the default cap: a smaller cap set later must not forget the
+    // keys of events dropped before.
+    while (m_compacted.size() > std::max(m_cap, MODEL_EVENT_CAP_DEFAULT)) {
+        m_compacted_keys.erase(m_compacted.front());
+        m_compacted.pop_front();
+    }
+}
+
+bool ModelEventJournal::WriteCompactedLocked(std::string& err) const
+{
+    if (m_compacted_path.empty()) return true;
+    const fs::path tmp = m_compacted_path + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        for (const auto& key : m_compacted) out << key << "\n";
+        out.flush();
+        if (!out) {
+            err = "journal compacted keys";
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::rename(tmp, m_compacted_path, ec);
+    if (ec) {
+        err = "journal compacted keys";
+        return false;
+    }
+    return true;
+}
+
 bool ModelEventJournal::CompactLocked(std::string& err)
 {
     if (m_cap == 0 || m_events.size() <= m_cap) return true;
     const size_t drop = m_events.size() - m_cap;
+    // The dropped events' dedupe keys are written first: a record the feed
+    // refresh observes again must not become a new event (and a new watch
+    // action) because its event left the journal.
+    for (size_t i = 0; i < drop; ++i) RememberCompactedLocked(m_events[i].dedupe_key);
+    if (!WriteCompactedLocked(err)) return false;
     m_events.erase(m_events.begin(), m_events.begin() + static_cast<std::ptrdiff_t>(drop));
     RebuildIndexLocked();
     return RewriteJournalLocked(err);
@@ -574,7 +616,14 @@ std::vector<ModelEvent> ModelEventJournal::ReplayAfterLocked(uint64_t cursor, si
 bool ModelEventJournal::LoadLocked(std::string& err)
 {
     m_events.clear();
+    m_compacted.clear();
+    m_compacted_keys.clear();
     m_seq = 0;
+    if (!m_compacted_path.empty() && fs::exists(m_compacted_path)) {
+        std::ifstream in(m_compacted_path);
+        std::string key;
+        while (std::getline(in, key)) RememberCompactedLocked(key);
+    }
     if (!m_seq_path.empty() && fs::exists(m_seq_path)) {
         std::ifstream in(m_seq_path);
         std::string raw;
@@ -617,6 +666,7 @@ ModelEventJournal::ModelEventJournal(fs::path modeldir, size_t cap) : m_cap(cap 
         m_dir = modeldir / "events";
         m_journal_path = m_dir / "journal.jsonl";
         m_seq_path = m_dir / "seq";
+        m_compacted_path = m_dir / "compacted_keys";
         fs::create_directories(m_dir);
         std::string err;
         (void)LoadLocked(err);
@@ -641,6 +691,12 @@ uint64_t ModelEventJournal::Cursor() const
 {
     std::lock_guard<std::mutex> lock(m_mu);
     return m_seq;
+}
+
+uint64_t ModelEventJournal::FirstSequence() const
+{
+    std::lock_guard<std::mutex> lock(m_mu);
+    return m_events.empty() ? m_seq + 1 : m_events.front().local_sequence;
 }
 
 size_t ModelEventJournal::Size() const
@@ -678,6 +734,11 @@ bool ModelEventJournal::Observe(ModelEvent ev, ObserveResult& out, std::string& 
         auto dit = m_by_dedupe.find(ev.dedupe_key);
         if (dit != m_by_dedupe.end() && dit->second < m_events.size()) {
             stored = m_events[dit->second];
+            duplicate = true;
+        } else if (m_compacted_keys.count(ev.dedupe_key)) {
+            // Seen before; its event was compacted away.
+            stored = ev;
+            stored.local_sequence = 0;
             duplicate = true;
         } else {
             // Write the line before the event enters the live journal. A failed

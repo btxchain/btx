@@ -12,8 +12,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -146,12 +148,20 @@ class ModelEventJournal
     std::vector<ModelEvent> m_events;
     std::map<std::string, size_t> m_by_id;
     std::map<std::string, size_t> m_by_dedupe;
+    //! Dedupe keys of the events compaction dropped, oldest first, at most
+    //! m_cap, kept in events/compacted_keys. Observing the same object,
+    //! sequence and transition again stays a duplicate.
+    fs::path m_compacted_path;
+    std::deque<std::string> m_compacted;
+    std::set<std::string> m_compacted_keys;
     mutable std::mutex m_mu;
 
     void RebuildIndexLocked();
     bool AppendLineLocked(const ModelEvent& ev, std::string& err);
     bool WriteSeqLocked(std::string& err) const;
     bool CompactLocked(std::string& err);
+    void RememberCompactedLocked(const std::string& dedupe_key);
+    bool WriteCompactedLocked(std::string& err) const;
     bool RewriteJournalLocked(std::string& err) const;
     std::vector<ModelEvent> ReplayAfterLocked(uint64_t cursor, size_t limit) const;
     bool LoadLocked(std::string& err);
@@ -161,6 +171,9 @@ public:
     void SetCap(size_t cap);
     size_t Cap() const;
     uint64_t Cursor() const;
+    //! local_sequence of the oldest event still in the journal (Cursor() + 1
+    //! when it is empty). Events before it were dropped by compaction.
+    uint64_t FirstSequence() const;
     size_t Size() const;
     fs::path EventsDir() const { return m_dir; }
 

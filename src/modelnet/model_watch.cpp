@@ -976,6 +976,14 @@ bool IsModelWatchHelperMethod(const std::string& method)
     return k.count(method) > 0;
 }
 
+//! Events after cursor that compaction dropped: the first event returned (or,
+//! with none, the oldest one kept) is not the one right after cursor.
+static bool EventsLostAfter(const ModelEventJournal& journal, uint64_t cursor, const std::vector<ModelEvent>& items)
+{
+    const uint64_t next = items.empty() ? journal.FirstSequence() : items.front().local_sequence;
+    return cursor + 1 < next && cursor < journal.Cursor();
+}
+
 bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, UniValue& result, std::string& err_code,
                            std::string& err, std::atomic<bool>* stop)
 {
@@ -1110,7 +1118,8 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         for (const auto& ev : items) arr.push_back(ModelEventToJson(ev));
         result.pushKV("events", arr);
         result.pushKV("cursor", std::to_string(NextEventCursor(journal, cursor, items)));
-        result.pushKV("gap", false);
+        // Compaction dropped events after the caller's cursor.
+        result.pushKV("gap", EventsLostAfter(journal, cursor, items));
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }
@@ -1137,6 +1146,7 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         result.pushKV("cursor", std::to_string(NextEventCursor(journal, cursor, items)));
         result.pushKV("interrupted", interrupted);
         result.pushKV("timeout", items.empty() && !interrupted);
+        result.pushKV("gap", EventsLostAfter(journal, cursor, items));
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }
