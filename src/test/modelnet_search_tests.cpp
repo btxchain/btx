@@ -716,6 +716,55 @@ BOOST_AUTO_TEST_CASE(search_scale_unsigned_2k)
     BOOST_CHECK_LE(hits.size(), 25);
 }
 
+// Every search keeps its job (with its hits) for getsearchstatus; a runtime
+// keeps the newest SEARCH_JOBS_KEPT of them.
+BOOST_AUTO_TEST_CASE(search_jobs_are_bounded)
+{
+    using namespace modelnet;
+    SearchIndex local, peer;
+    SearchRuntime rt;
+    rt.Bind(&local);
+    SearchQuery q;
+    q.text = "qwen";
+    q.scope = SearchScope::NETWORK;
+    SearchJob st;
+    std::vector<std::string> ids;
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT + 8; ++i) {
+        auto job = rt.Start(q, {&peer}, 1);
+        ids.push_back(job.query_id);
+        rt.Finish(job);
+    }
+    for (size_t i = 0; i < 8; ++i) BOOST_CHECK(!rt.Status(ids[i], st));
+    for (size_t i = 8; i < ids.size(); ++i) BOOST_CHECK(rt.Status(ids[i], st));
+
+    // A running search stays while finished ones can go, so it can still be
+    // cancelled.
+    auto running = rt.Start(q, {&peer}, 1);
+    BOOST_CHECK_EQUAL(static_cast<int>(running.state), static_cast<int>(SearchJobState::RUNNING));
+    BOOST_CHECK(!rt.Status(ids[8], st));
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT; ++i) {
+        auto job = rt.Start(q, {&peer}, 1);
+        ids.push_back(job.query_id);
+        rt.Finish(job);
+    }
+    BOOST_CHECK(rt.Status(running.query_id, st));
+    BOOST_CHECK(!rt.Status(ids[ids.size() - SEARCH_JOBS_KEPT], st));
+    BOOST_CHECK(rt.Status(ids[ids.size() - SEARCH_JOBS_KEPT + 1], st));
+
+    // When all kept jobs run, the oldest goes; it is kept again, as the
+    // newest, when it finishes, and the oldest other one goes.
+    std::vector<SearchJob> runs;
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT; ++i) runs.push_back(rt.Start(q, {&peer}, 1));
+    BOOST_CHECK(!rt.Status(running.query_id, st));
+    BOOST_CHECK(rt.Status(runs.front().query_id, st));
+    rt.Finish(running);
+    BOOST_CHECK(rt.Status(running.query_id, st));
+    BOOST_CHECK_EQUAL(static_cast<int>(st.state), static_cast<int>(SearchJobState::COMPLETE));
+    BOOST_CHECK(!rt.Status(runs.front().query_id, st));
+    BOOST_CHECK(rt.Status(runs.back().query_id, st));
+    BOOST_CHECK(rt.Cancel(runs.back().query_id));
+}
+
 BOOST_AUTO_TEST_CASE(search_rpc_more_methods)
 {
     using namespace modelnet;
