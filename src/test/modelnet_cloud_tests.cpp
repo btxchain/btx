@@ -636,6 +636,113 @@ BOOST_AUTO_TEST_CASE(cloud_12_budget_refuse_when_exhausted)
     BOOST_CHECK(err.find("budget") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(cloud_12f_calendar_rollback_preserves_exhausted_allowance)
+{
+    const ScopedCloudCredentials credentials;
+    const fs::path creds = m_path_root / "cloud_12f_calendar_rollback_preserves_exhausted_allowance-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    // 2026-03-01 01:00 UTC; the preceding day is in the preceding month.
+    constexpr int64_t day = 1772326800;
+    constexpr int64_t next_month = 1775005200;
+    for (int quota = 0; quota < 4; ++quota) {
+        BOOST_TEST_CONTEXT("quota=" << quota) {
+            auto cfg = credentials.Config(creds);
+            const auto suffix = fs::PathFromString("cloud_12f_calendar_rollback_preserves_exhausted_allowance-" + std::to_string(quota));
+            cfg.budget_state_path = m_path_root / suffix / "budget.json";
+            cfg.s3.fake_store_dir = m_path_root / suffix / "origin";
+            if (quota == 0) cfg.budget_gets_per_day = 1;
+            if (quota == 1) cfg.budget_bytes_per_day = 6;
+            if (quota == 2) cfg.budget_gets_per_month = 1;
+            if (quota == 3) cfg.budget_bytes_per_month = 6;
+            auto attempt = [&](int64_t clock, bool expected, bool seed = false) {
+                // Reopen both the actual saved budget and the persistent fake origin.
+                modelnet::S3PieceStore store{cfg};
+                store.SetClockForTests(clock);
+                std::string err;
+                BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+                if (seed) {
+                    std::istringstream input{"daycap"};
+                    BOOST_REQUIRE_MESSAGE(store.PutObject("calendar", input, 6, err), err);
+                }
+                uint64_t size{0};
+                BOOST_REQUIRE_MESSAGE(store.HeadObject("calendar", size, err), err);
+                BOOST_REQUIRE_EQUAL(size, 6);
+                const auto before = store.FakeForTests()->GetCount();
+                std::vector<unsigned char> got;
+                const bool allowed = store.GetObject("calendar", 0, 0, got, err);
+                BOOST_CHECK_EQUAL(allowed, expected);
+                BOOST_CHECK_EQUAL(store.FakeForTests()->GetCount() - before, expected ? 1 : 0);
+                if (allowed) {
+                    BOOST_CHECK_EQUAL(std::string(got.begin(), got.end()), "daycap");
+                } else {
+                    BOOST_CHECK(err.find("budget") != std::string::npos);
+                }
+            };
+            attempt(day, true, true);
+            attempt(day, false);
+            attempt(day - 86400, false);
+            attempt(day, false);
+            attempt(day, false);
+            attempt(quota < 2 ? day + 86400 : next_month, true);
+            attempt(quota < 2 ? day + 86400 : next_month, false);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_12g_calendar_rollback_preserves_remaining_allowance)
+{
+    const ScopedCloudCredentials credentials;
+    const fs::path creds = m_path_root / "cloud_12g_calendar_rollback_preserves_remaining_allowance-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    // 2026-03-01 01:00 UTC; the preceding day is in the preceding month.
+    constexpr int64_t day = 1772326800;
+    constexpr int64_t next_month = 1775005200;
+    for (int quota = 0; quota < 4; ++quota) {
+        BOOST_TEST_CONTEXT("quota=" << quota) {
+            auto cfg = credentials.Config(creds);
+            const auto suffix = fs::PathFromString("cloud_12g_calendar_rollback_preserves_remaining_allowance-" + std::to_string(quota));
+            cfg.budget_state_path = m_path_root / suffix / "budget.json";
+            cfg.s3.fake_store_dir = m_path_root / suffix / "origin";
+            if (quota == 0) cfg.budget_gets_per_day = 2;
+            if (quota == 1) cfg.budget_bytes_per_day = 12;
+            if (quota == 2) cfg.budget_gets_per_month = 2;
+            if (quota == 3) cfg.budget_bytes_per_month = 12;
+            auto attempt = [&](int64_t clock, bool expected, bool seed = false) {
+                // Reopen both the actual saved budget and the persistent fake origin.
+                modelnet::S3PieceStore store{cfg};
+                store.SetClockForTests(clock);
+                std::string err;
+                BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+                if (seed) {
+                    std::istringstream input{"daycap"};
+                    BOOST_REQUIRE_MESSAGE(store.PutObject("calendar", input, 6, err), err);
+                }
+                uint64_t size{0};
+                BOOST_REQUIRE_MESSAGE(store.HeadObject("calendar", size, err), err);
+                BOOST_REQUIRE_EQUAL(size, 6);
+                const auto before = store.FakeForTests()->GetCount();
+                std::vector<unsigned char> got;
+                const bool allowed = store.GetObject("calendar", 0, 0, got, err);
+                BOOST_CHECK_EQUAL(allowed, expected);
+                BOOST_CHECK_EQUAL(store.FakeForTests()->GetCount() - before, expected ? 1 : 0);
+                if (allowed) {
+                    BOOST_CHECK_EQUAL(std::string(got.begin(), got.end()), "daycap");
+                } else {
+                    BOOST_CHECK(err.find("budget") != std::string::npos);
+                }
+            };
+            attempt(day, true, true);
+            attempt(day - 86400, true); // The remaining allowance stays usable.
+            attempt(day - 86400, false);
+            attempt(day, false);
+            const auto forward = quota < 2 ? day + 86400 : next_month;
+            attempt(forward, true);
+            attempt(forward, true);
+            attempt(forward, false);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
 {
     const ScopedCloudCredentials credentials;

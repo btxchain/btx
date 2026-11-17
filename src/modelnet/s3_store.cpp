@@ -75,12 +75,14 @@ void S3PieceStore::RollWindowsLocked(int64_t now_s)
     const time_t t = static_cast<time_t>(now_s);
     gmtime_r(&t, &utc);
     const int64_t month = static_cast<int64_t>(utc.tm_year) * 12 + utc.tm_mon;
-    if (day != m_day_utc) {
+    // Keep the latest observed window: a backward clock correction must not
+    // renew an allowance already consumed in that window.
+    if (day > m_day_utc) {
         m_day_utc = day;
         m_day_gets = 0;
         m_day_bytes = 0;
     }
-    if (month != m_month_utc) {
+    if (month > m_month_utc) {
         m_month_utc = month;
         m_month_gets = 0;
         m_month_bytes = 0;
