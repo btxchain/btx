@@ -2937,6 +2937,19 @@ UniValue EconomyCard(const SearchHit& h)
     return EconomySearchCard(EconomyForHit(h));
 }
 
+//! g_search_mu must be held. The feed shows what searchmodels shows: no model the
+//! operator hid and no publisher the operator muted (SearchIndex::Search skips
+//! both). rec is the record the feed holds; the index copy may be newer.
+bool FeedHidesModel(const Digest48& model_id, const ModelSearchRecord& rec)
+{
+    const Digest48& id = rec.model_id.IsNull() ? model_id : rec.model_id;
+    if (id.IsNull()) return false;
+    if (g_search_idx.Hidden(id)) return true;
+    if (!rec.publisher_identity.IsNull() && g_search_idx.Muted(rec.publisher_identity.Hex())) return true;
+    const ModelSearchRecord* cur = g_search_idx.Get(id);
+    return cur && !cur->publisher_identity.IsNull() && g_search_idx.Muted(cur->publisher_identity.Hex());
+}
+
 //! new_observation is false when the helper re-reads its own index: the feed then
 //! notes only records it does not hold yet.
 void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms, bool new_observation = true)
@@ -4072,6 +4085,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         for (auto& ev : g_feed.Query(fq, ConnNowMs(), next)) {
             if (ev.event_type == FeedEventType::RELEASE_FUNDING_CHANGED ||
                 ev.event_type == FeedEventType::RELEASE_FUNDED) continue;
+            if (FeedHidesModel(ev.model_id, ev.rec)) continue;
             items.push_back(std::move(ev));
         }
         std::vector<ModelEconomyEntry> entries;
@@ -11345,6 +11359,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         lock.lock();
         std::string next;
         auto items = g_feed.Query(fq, ConnNowMs(), next);
+        items.erase(std::remove_if(items.begin(), items.end(), [](const FeedEvent& ev) {
+                        return FeedHidesModel(ev.model_id, ev.rec);
+                    }),
+                    items.end());
         if (!include_wallet_observation) {
             // Funding events come only from local pledges and from btxd's join
             // against the local wallets, as the ext/feed peer route notes. A
@@ -11374,6 +11392,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.release_target_atoms = c.target_atoms;
                     h.rec.key_hash = c.key_hash;
                 }
+                if (FeedHidesModel(c.model_id, h.rec)) continue;
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat, include_wallet_observation));
                 if (fq.mode == FeedMode::NEARLY_FUNDED && !e.fundable_now) continue;
                 if (fq.mode == FeedMode::FUNDED_AWAITING_RELEASE &&

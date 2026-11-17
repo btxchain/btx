@@ -779,6 +779,66 @@ BOOST_AUTO_TEST_CASE(peer_and_restricted_feeds_omit_local_wallet_observation)
     }
 }
 
+// searchmodels leaves out a model the operator hid and every model of a
+// publisher the operator muted. The feed, local and on the ext/feed peer route,
+// listed both.
+BOOST_AUTO_TEST_CASE(feed_leaves_out_hidden_models_and_muted_publishers)
+{
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "feed-hide-mute";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+    const std::string uri = hosted["uri"].get_str();
+    const std::string model_id = hosted["model_id"].get_str();
+    UniValue rec_params(UniValue::VARR);
+    rec_params.push_back(model_id);
+    const std::string publisher = HelperDispatch(cat, "getmodelsearchrecord", rec_params)["publisher_identity"].get_str();
+    BOOST_REQUIRE(!publisher.empty());
+
+    UniValue feed_query(UniValue::VOBJ);
+    feed_query.pushKV("scope", "LOCAL");
+    feed_query.pushKV("limit", 50);
+    UniValue feed_args(UniValue::VARR);
+    feed_args.push_back(feed_query);
+    const auto lists_model = [&] {
+        const bool local = HelperDispatch(cat, "getmodelfeed", feed_args).write().find(model_id) != std::string::npos;
+        NativeRequest req;
+        req.method = "POST";
+        req.path = "/btx-model/2/ext/feed";
+        req.body = R"({"limit":50})";
+        NativeResponse resp;
+        BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+        BOOST_REQUIRE_EQUAL(resp.status, 200);
+        const bool peer = resp.body.find(model_id) != std::string::npos;
+        BOOST_CHECK_EQUAL(local, peer);
+        return local && peer;
+    };
+    BOOST_REQUIRE(lists_model());
+
+    UniValue hide(UniValue::VARR);
+    hide.push_back(uri);
+    HelperDispatch(cat, "hidesearchmodel", hide);
+    BOOST_CHECK_MESSAGE(!lists_model(), "the feed lists a hidden model");
+    HelperDispatch(cat, "unhidesearchmodel", hide);
+    BOOST_CHECK(lists_model());
+
+    UniValue mute(UniValue::VARR);
+    mute.push_back(publisher);
+    HelperDispatch(cat, "mutesearchpublisher", mute);
+    BOOST_CHECK_MESSAGE(!lists_model(), "the feed lists a muted publisher's model");
+    HelperDispatch(cat, "unmutesearchpublisher", mute);
+    BOOST_CHECK(lists_model());
+}
+
 BOOST_AUTO_TEST_CASE(recent_releases_local_scope_applies_query)
 {
     // The NETWORK scope passes limit and filters to getmodelfeed; the LOCAL
