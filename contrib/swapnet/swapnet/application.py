@@ -149,8 +149,14 @@ class Application:
         if b['kind']=='ack':
             exact_fields(b['payload'],{'message_id'});self.journal.ack(b['payload']['message_id'],b['sender']);return
         seen=self.journal.seen(mid,b['expires_at'],self.now())
+        # Old inbox rows can survive a crash before receive_commit. Only a
+        # completion receipt permits skipping that handler; its own guards
+        # make a post-handler/pre-receipt replay safe without new funding.
+        if b['kind']=='commit':seen=self.journal.commit_completed(mid)
         if not seen:
-            try:self._process(b)
+            try:
+                self._process(b)
+                if b['kind']=='commit':self.journal.complete_commit(mid)
             except Exception:
                 self.journal.forget_message(mid);raise
         if b['recipient']!='*':self.emit(b['sender'],'ack',b['swap_id'],{'message_id':mid})
