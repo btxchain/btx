@@ -6944,8 +6944,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     for (const auto& p : cat.Peers()) add_ep(p);
                 }
                 {
-                    std::lock_guard<std::mutex> plock(g_swarm.pex_mu);
-                    for (const auto& h : g_swarm.pex.Recent(ConnNowMs())) add_ep(h.endpoint);
+                    std::vector<std::string> gossip;
+                    AppendPexGossipEndpoints(gossip, g_swarm.bind);
+                    for (const auto& ep : gossip) add_ep(ep);
                 }
                 SearchQuery sq;
                 std::string perr;
@@ -8004,8 +8005,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         std::vector<SearchHit> remote_hits;
         if (q.scope != SearchScope::LOCAL) {
             {
-                std::lock_guard<std::mutex> plock(g_swarm.pex_mu);
-                for (const auto& h : g_swarm.pex.Recent(ConnNowMs())) add_ep(h.endpoint);
+                std::vector<std::string> gossip;
+                AppendPexGossipEndpoints(gossip, g_swarm.bind);
+                for (const auto& ep : gossip) add_ep(ep);
             }
             Pq1Context pq;
             std::string tls_err;
@@ -11080,8 +11082,9 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 for (const auto& p : cat.Peers()) add_ep(p);
             }
             {
-                std::lock_guard<std::mutex> plock(g_swarm.pex_mu);
-                for (const auto& h : g_swarm.pex.Recent(ConnNowMs())) add_ep(h.endpoint);
+                std::vector<std::string> gossip;
+                AppendPexGossipEndpoints(gossip, /*self=*/{});
+                for (const auto& ep : gossip) add_ep(ep);
             }
             Pq1Context pq;
             std::string tls_err;
@@ -12963,6 +12966,69 @@ static void GossipPexOnSession(Pq1Session& sess, ModelCatalog& cat, const std::s
     }
 }
 
+// The participation tick already holds a verified PQ1 session. Pull that
+// peer's local search index with the same ext/search the RPCs use. An empty
+// query_id skips the peer's duplicate-query cache, and the offset walks a
+// long index across ticks. Records still have to verify before they are stored.
+static void GossipSearchOnSession(Pq1Session& sess, ModelCatalog& cat, const std::string& endpoint)
+{
+    EnsureEconomy(cat);
+    static std::mutex offset_mu;
+    static std::map<std::string, int> offsets;
+    int offset = 0;
+    {
+        std::lock_guard<std::mutex> lock(offset_mu);
+        const auto it = offsets.find(endpoint);
+        if (it != offsets.end()) offset = it->second;
+    }
+    NativeRequest req;
+    NativeResponse resp;
+    req.method = "POST";
+    req.path = std::string(MODEL_HTTP_ROOT) + "ext/search";
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("text", "");
+    body.pushKV("limit", 16);
+    body.pushKV("offset", offset);
+    body.pushKV("ttl", 1);
+    body.pushKV("scope", "LOCAL");
+    req.body = body.write();
+    std::string err;
+    if (!sess.Request(req, resp, err) || resp.status != 200 || resp.body.size() > MAX_RPC_BODY) return;
+    UniValue reply;
+    if (!reply.read(resp.body) || !reply.isObject() || !reply.exists("records") || !reply["records"].isArray()) return;
+    bool changed = false;
+    int taken = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_search_mu);
+        for (const auto& recj : reply["records"].getValues()) {
+            if (taken >= 16) break;
+            if (!recj.isObject()) continue;
+            ModelSearchRecord rec;
+            std::string ierr;
+            if (!SearchRecordFromJson(recj, rec, ierr) || !VerifySearchRecord(rec, ConnNowMs(), ierr)) continue;
+            const ModelSearchRecord* existing = g_search_idx.Get(rec.model_id);
+            if (existing && existing->signed_ok && existing->signer_id == rec.signer_id &&
+                existing->metadata_sequence == rec.metadata_sequence) {
+                continue;
+            }
+            if (!g_search_idx.Put(rec, ConnNowMs(), ierr, endpoint)) continue;
+            AfterIndexPut(rec, ConnNowMs());
+            changed = true;
+            ++taken;
+        }
+        if (changed) {
+            std::string save_err;
+            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
+        }
+    }
+    const bool more = reply.exists("truncated") && reply["truncated"].isBool() && reply["truncated"].get_bool();
+    std::lock_guard<std::mutex> lock(offset_mu);
+    // A full page of records this node already stored is still a full page.
+    // Advance, or the rest of that peer's index is never requested.
+    if (!more) offsets[endpoint] = 0;
+    else offsets[endpoint] = offset > 10000 - 16 ? 0 : offset + 16;
+}
+
 static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::path& pinfile, std::atomic<bool>* stop)
 {
     const auto pol = cat.Policy();
@@ -13037,6 +13103,7 @@ static void TryPreserveRareTick(ModelCatalog& cat, Pq1Context& pq, const fs::pat
         sess.network_verified = sess.ssl != nullptr;
         GossipPexOnSession(sess, cat, endpoint);
         GossipSecurityOnSession(sess, cat);
+        GossipSearchOnSession(sess, cat, endpoint);
         const UniValue models = (body.exists("local") && body["local"].exists("models")) ? body["local"]["models"] : UniValue(UniValue::VARR);
         if (!models.isArray() || models.size() > 4096) continue;
         NativePeerObservation observation;

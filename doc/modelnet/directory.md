@@ -9,7 +9,7 @@ completeness.
 
 Implementation reference: `EconomySearchCard` in `src/modelnet/economy.cpp`; RPC handlers in `DispatchHelperRpc`.
 
-**This build.** `getmodeldirectory` and `getmodeldirectoryentry` return schema 3 economy cards (`availability`, `local`, `release`, `search`). They do not return `DirectoryEntryJson`, and they do not add `metadata` or `swarm`. `getmodelavailability` calls `ComputeSwarmHealth` with `pieces_total` 0, so the class is `UNKNOWN`.
+**This build.** `getmodeldirectory` and `getmodeldirectoryentry` return schema 3 economy cards (`availability`, `local`, `release`, `search`). They do not return `DirectoryEntryJson`, and they do not add `metadata` or `swarm`. `getmodelavailability` uses the catalog piece count when this node has the file list. With no file list, no observation is `UNKNOWN` and an observation is `HIGH`.
 
 ## Directory entry
 
