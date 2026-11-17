@@ -1196,6 +1196,37 @@ BOOST_AUTO_TEST_CASE(finished_download_keeps_the_pin_and_the_received_bytes)
     BOOST_CHECK_EQUAL(after.useful_bytes_received, before.useful_bytes_received);
 }
 
+// FETCHING is the admission of a partial copy. PINNED, and the levels LoadLocked
+// gave every entry after a restart, count as verified bytes for the serve route,
+// so pinning a partial copy or restarting the helper made it look complete.
+BOOST_AUTO_TEST_CASE(partial_copy_stays_unverified_after_pin_and_restart)
+{
+    const fs::path tmp = m_path_root / "partial-pin-restart";
+    modelnet::Digest48 id;
+    std::string err;
+    {
+        modelnet::ModelCatalog cat{tmp, 8 << 20};
+        id = ImportTiny(cat, tmp / "src", 0x91, false).model_id;
+        BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(id, true, err), err);
+        modelnet::CatalogEntry e;
+        for (const bool on : {true, false, true}) {
+            BOOST_REQUIRE_MESSAGE(cat.PinModel(id, on, err), err);
+            BOOST_REQUIRE(cat.Find(id, e));
+            BOOST_CHECK_EQUAL(e.pinned, on);
+            BOOST_CHECK(e.admission == modelnet::AdmissionLevel::FETCHING);
+            BOOST_CHECK(!e.bytes_verified);
+        }
+    }
+    modelnet::ModelCatalog resumed{tmp, 8 << 20};
+    modelnet::CatalogEntry found;
+    BOOST_REQUIRE(resumed.Find(id, found));
+    BOOST_CHECK(found.incomplete);
+    BOOST_CHECK(found.pinned);
+    BOOST_CHECK(found.admission == modelnet::AdmissionLevel::FETCHING);
+    BOOST_CHECK(!found.bytes_verified);
+    BOOST_CHECK(!found.seeded);
+}
+
 // importmodel of the files of a model that a fetch left incomplete added a
 // second entry with the same model id when no piece had arrived, and answered
 // with the partial entry, unchanged, when some had.
