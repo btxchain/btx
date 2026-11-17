@@ -447,50 +447,6 @@ bool VerifyHostedFreeGrant(const fs::path& helper_dir,
     return WriteObj(helper_dir / "grant_redeems.json", store, err);
 }
 
-bool ReleaseHostedFreeGrantUse(const fs::path& helper_dir, const std::string& nonce_hex, const std::string& use_key,
-                               uint64_t redeem_bytes, std::string& err)
-{
-    std::lock_guard<std::mutex> lock(g_grant_store_mu);
-    UniValue store;
-    if (!ReadOrQuarantine(helper_dir / "grant_redeems.json", store)) {
-        err = "grant redeem store";
-        return false;
-    }
-    UniValue used = store.exists("uses") && store["uses"].isObject() ? store["uses"] : UniValue(UniValue::VOBJ);
-    if (!used.exists(nonce_hex) || !used[nonce_hex].isArray()) return true;
-    UniValue kept(UniValue::VARR);
-    bool removed = false;
-    for (const auto& u : used[nonce_hex].getValues()) {
-        if (!removed && u.isStr() && u.get_str() == use_key) {
-            removed = true;
-            continue;
-        }
-        kept.push_back(u);
-    }
-    if (!removed) return true;
-    // A grant gets at most FREE_GRANT_MAX_RELEASES uses back: failed requests
-    // must not make one grant an unbounded amount of work. Counts of grants
-    // whose uses are gone are dropped.
-    constexpr int64_t FREE_GRANT_MAX_RELEASES{4};
-    const UniValue released = store.exists("released") && store["released"].isObject() ? store["released"] : UniValue(UniValue::VOBJ);
-    UniValue counts(UniValue::VOBJ);
-    for (const std::string& k : released.getKeys()) {
-        if (used.exists(k) && released[k].isNum()) counts.pushKV(k, released[k]);
-    }
-    const int64_t count = counts.exists(nonce_hex) ? counts[nonce_hex].getInt<int64_t>() : 0;
-    if (count >= FREE_GRANT_MAX_RELEASES) return true;
-    counts.pushKV(nonce_hex, count + 1);
-    store.pushKV("released", counts);
-    used.pushKV(nonce_hex, kept);
-    store.pushKV("uses", used);
-    const uint64_t already = RedeemedBytes(store, nonce_hex);
-    UniValue bytes = store.exists("redeemed_bytes") && store["redeemed_bytes"].isObject() ? store["redeemed_bytes"]
-                                                                                          : UniValue(UniValue::VOBJ);
-    bytes.pushKV(nonce_hex, already > redeem_bytes ? already - redeem_bytes : 0);
-    store.pushKV("redeemed_bytes", bytes);
-    return WriteObj(helper_dir / "grant_redeems.json", store, err);
-}
-
 bool ConsumeGrantNonce(const fs::path& helper_dir, const std::string& nonce_hex, uint64_t& sequence, std::string& err)
 {
     if (nonce_hex.size() != 64) {

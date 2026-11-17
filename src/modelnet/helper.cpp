@@ -3189,36 +3189,6 @@ bool CheckFreeGrantEntitlement(const ModelCatalog& cat, const NativeRequest& req
     return true;
 }
 
-//! CheckFreeGrantEntitlement records the grant use before the bytes are read.
-//! A request that then fails (a missing piece, a 429 throttle, a bad subpiece)
-//! must not spend the grant: unless the response is a 200, take the use back.
-class FreeGrantUseGuard
-{
-    const ModelCatalog& m_cat;
-    const NativeResponse& m_resp;
-    std::string m_nonce;
-    std::string m_use_key;
-    uint64_t m_charge{0};
-
-public:
-    FreeGrantUseGuard(const ModelCatalog& cat, const UniValue& gbody, const CatalogEntry& entry, uint32_t file_index,
-                      uint32_t piece_index, bool whole_file, const NativeResponse& resp)
-        : m_cat{cat}, m_resp{resp}
-    {
-        if (!gbody.isObject() || !gbody.exists("grant_nonce") || !gbody["grant_nonce"].isStr()) return;
-        m_nonce = gbody["grant_nonce"].get_str();
-        m_use_key = whole_file ? ("f" + std::to_string(file_index) + ":all")
-                               : ("f" + std::to_string(file_index) + ":p" + std::to_string(piece_index));
-        m_charge = FreeGrantChargeBytes(entry, file_index, piece_index, whole_file);
-    }
-    ~FreeGrantUseGuard()
-    {
-        if (m_nonce.empty() || m_resp.status == 200) return;
-        std::string err;
-        (void)ReleaseHostedFreeGrantUse(HelperDir(m_cat), m_nonce, m_use_key, m_charge, err);
-    }
-};
-
 void UnseedSafetyTarget(ModelCatalog& cat, const std::string& hex)
 {
     Digest48 id;
@@ -3450,7 +3420,6 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         if (!CheckFreeGrantEntitlement(cat, req, entry, file_index, piece_index, /*whole_file=*/false, 0, gbody, resp)) {
             return true;
         }
-        const FreeGrantUseGuard grant_use{cat, gbody, entry, file_index, piece_index, /*whole_file=*/false, resp};
         std::vector<unsigned char> bytes;
         std::vector<Digest48> proof;
         uint64_t file_size = 0;
@@ -3590,7 +3559,6 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         if (!CheckFreeGrantEntitlement(cat, req, entry, file_index, 0, /*whole_file=*/true, n_pieces, gbody, resp)) {
             return true;
         }
-        const FreeGrantUseGuard grant_use{cat, gbody, entry, file_index, 0, /*whole_file=*/true, resp};
         if (file_size == 0) {
             resp.status = 200;
             resp.binary = true;

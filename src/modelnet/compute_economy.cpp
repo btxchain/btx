@@ -532,9 +532,9 @@ bool ComputeStore::BalanceOf(const std::string& agreement_id, int64_t now_ms, Un
     if (m_cancelled.count(agreement_id)) status = "CANCELLED";
     else if (now_ms > end) status = "EXPIRED";
     else if (credited >= required) status = "SATISFIED";
-    // due is 0 before the period starts, and at its first millisecond; that is
-    // not standing, or a 24h pro-rata grant would cover time nothing paid for.
-    else if (schedule == "PRO_RATA" && now_ms >= start && credited > 0 && credited >= due) status = "IN_GOOD_STANDING";
+    // due is 0 before the period starts; that is not standing, or repeated
+    // 24h pro-rata grants would cover the time before the agreement begins.
+    else if (schedule == "PRO_RATA" && now_ms >= start && credited >= due) status = "IN_GOOD_STANDING";
     UniValue o(UniValue::VOBJ);
     o.pushKV("agreement_id", agreement_id);
     o.pushKV("required_p1e_microunits", required);
@@ -1242,13 +1242,6 @@ bool ComputeStore::Dispatch(const std::string& method, const UniValue& params, U
             if (jp["credit_p1e_microunits"].getInt<uint64_t>() != rp["credited_p1e_microunits"].getInt<uint64_t>()) {
                 return Fail(err_code, err, "COMPUTE_RECEIPT_CREDIT_MISMATCH", "credit");
             }
-            // As in acceptcomputejobresult and issuecomputereceipt: a job does not
-            // settle once it expired, because it then no longer reserves its
-            // credit (BalanceOf) and a later job may have taken that room. An
-            // import is historical, so the receipt's own acceptance time counts.
-            int64_t accepted_at = 0;
-            if (!I64Field(rp, "accepted_at_ms", accepted_at, err)) return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "accepted_at");
-            if (accepted_at >= jp["expires_at_ms"].getInt<int64_t>()) return Fail(err_code, err, "COMPUTE_JOB_EXPIRED", "job");
             if (!ContainsKey(ap["settlement"]["allowed_settlement_modes"], "USEFUL_JOB_RECEIPTS")) {
                 return Fail(err_code, err, "COMPUTE_RECORD_INVALID", "mode");
             }

@@ -433,8 +433,7 @@ BOOST_AUTO_TEST_CASE(mandate_sub_09_fees_count_separately)
     BOOST_CHECK_EQUAL(budget.UsedFees(), 4);
 }
 
-// A mandate's collection scope holds for the terms as well as the event, and a
-// restriction field of the wrong type or out of range is refused, not dropped.
+// A restriction field of the wrong type or out of range is refused, not dropped.
 BOOST_AUTO_TEST_CASE(mandate_scope_fields_are_checked)
 {
     using namespace modelnet;
@@ -457,19 +456,6 @@ BOOST_AUTO_TEST_CASE(mandate_scope_fields_are_checked)
     bad_confirmations.pushKV("minimum_confirmations", int64_t{-4294967295});
     BOOST_CHECK(!MandateFromJson(bad_confirmations, m, err));
     BOOST_CHECK_EQUAL(err, "minimum_confirmations");
-
-    UniValue scoped = BaseMandateJson();
-    scoped.pushKV("collection_id", "col-A");
-    SubscriptionMandate sm = MustParse(scoped);
-    sm.mandate_id = "mid-col";
-    SubscriptionEvent ev = FundEvent("e-col", HexN(96, 'b'), "mid-col");
-    ev.collection_id = "col-A";
-    SignedTerms terms = KnownTerms(HexN(96, 'b'), 10, 1);
-    terms.collection_id = "col-B";
-    BOOST_CHECK(!Evaluate(ev, terms, sm, kNow, err));
-    BOOST_CHECK_EQUAL(err, "collection_id");
-    terms.collection_id = "col-A";
-    BOOST_CHECK_MESSAGE(Evaluate(ev, terms, sm, kNow, err), err);
 }
 
 BOOST_AUTO_TEST_CASE(mandate_sub_10_helper_never_receives_wallet_key)

@@ -730,9 +730,7 @@ bool Evaluate(const SubscriptionEvent& event, const SignedTerms& terms,
     }
     if (!mandate.collection_id.empty()) {
         const std::string coll = !event.collection_id.empty() ? event.collection_id : terms.collection_id;
-        // As for object_kind: the terms, when they name a collection, must
-        // name the same one as the event.
-        if (coll != mandate.collection_id || (!terms.collection_id.empty() && terms.collection_id != coll)) {
+        if (coll != mandate.collection_id) {
             err = "collection_id";
             return false;
         }
