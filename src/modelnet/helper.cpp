@@ -4549,9 +4549,20 @@ size_t ActiveRetrieveJobsLocked(const fs::path& modeldir)
     return active;
 }
 
-void PersistRetrieveJobsLocked()
+bool PersistRetrieveJobsLocked(std::string* save_error = nullptr)
 {
-    if (g_retrieve_jobs_dir.empty()) return;
+    if (save_error) save_error->clear();
+    auto failed = [&](const std::string& message) {
+        if (save_error) *save_error = message;
+        std::cerr << "btx-modeld: could not save retrieve jobs; stopped work may resume after restart: "
+                  << message << "\n";
+        return false;
+    };
+    // Workers finishing after teardown retain the existing no-op. An explicit
+    // cancellation must not report durable success without a persistence path.
+    if (g_retrieve_jobs_dir.empty()) {
+        return save_error ? failed("retrieve job persistence is unavailable") : true;
+    }
     UniValue arr(UniValue::VARR);
     for (auto& kv : g_retrieve_jobs) {
         std::string st, id;
@@ -4580,7 +4591,12 @@ void PersistRetrieveJobsLocked()
     root.pushKV("schema_version", 1);
     root.pushKV("jobs", arr);
     std::string err;
-    (void)WriteJsonFile(RetrieveJobsPath(), root, err);
+    try {
+        if (WriteJsonFile(RetrieveJobsPath(), root, err)) return true;
+    } catch (const fs::filesystem_error& e) {
+        err = e.what();
+    }
+    return failed(err);
 }
 
 void PersistRetrieveJobs()
@@ -9373,15 +9389,21 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                             cancelled = true;
                         }
                     }
-                    if (cancelled) {
-                        it->second->cancel.store(true);
-                        PersistRetrieveJobsLocked();
-                    }
+                    if (cancelled) it->second->cancel.store(true);
                     result.pushKV("cancelled", cancelled);
                     result.pushKV("job_id", want);
                 } else {
                     result.pushKV("cancelled", false);
                     result.pushKV("job_id", want);
+                }
+                // Retry persistence even for terminal or absent IDs. A worker
+                // can finish after cancellation, and terminal history is bounded.
+                std::string save_error;
+                if (!PersistRetrieveJobsLocked(&save_error)) {
+                    err_code = "IO_ERROR";
+                    err = "Cancellation state could not be saved; any live stop remains effective. "
+                          "After storage recovers, retry cancelmodeljob with this job ID before restarting: " + save_error;
+                    return false;
                 }
             }
             PruneRetrieveJobsLocked();
