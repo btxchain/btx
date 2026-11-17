@@ -404,6 +404,91 @@ BOOST_AUTO_TEST_CASE(publisher_observation_matches_after_reopen)
     std::string next; BOOST_CHECK_EQUAL(continuous.Query(q, 130, next).size(), 2);
 }
 
+// A search record names its publisher itself: one signing key can name a new
+// publisher with each new version of a record. The feed keeps the publishers
+// seen most recently, also across a reload.
+BOOST_AUTO_TEST_CASE(publisher_history_keeps_the_newest_publishers)
+{
+    modelnet::FeedStore feed, reopened;
+    const auto path = m_args.GetDataDirBase() / "feed-publisher-cap.json";
+    feed.SetPath(path); reopened.SetPath(path);
+    constexpr size_t cap = 8;
+    feed.SetPublisherCap(cap); reopened.SetPublisherCap(cap);
+    // Publisher ids whose hex order differs from the order they are seen in.
+    const auto publisher = [](unsigned i) {
+        modelnet::Digest48 id;
+        id.data[0] = static_cast<unsigned char>(0xf0 - i);
+        id.data[1] = 0x5c;
+        return id;
+    };
+    const auto record = [&](unsigned i, uint64_t sequence) {
+        modelnet::ModelSearchRecord r = TestRecord(1);
+        r.publisher_identity = publisher(i);
+        r.metadata_sequence = sequence;
+        return r;
+    };
+    uint64_t sequence = 1;
+    int64_t now = 1000;
+    // The same model, a new publisher with each version: 0, then 1..7.
+    for (unsigned i = 0; i < cap; ++i) BOOST_REQUIRE(feed.NoteSearchRecord(record(i, sequence++), now++));
+    BOOST_CHECK_EQUAL(feed.KnownPublishers(), cap);
+    // Publisher 0 is seen again and becomes the newest.
+    BOOST_REQUIRE(feed.NoteSearchRecord(record(0, sequence++), now++));
+    // Three more new publishers push out the three seen least recently: 1, 2, 3.
+    for (unsigned i = cap; i < cap + 3; ++i) BOOST_REQUIRE(feed.NoteSearchRecord(record(i, sequence++), now++));
+    BOOST_CHECK_EQUAL(feed.KnownPublishers(), cap);
+    BOOST_CHECK(feed.KnowsPublisher(publisher(0)));
+    for (unsigned i = 1; i <= 3; ++i) BOOST_CHECK(!feed.KnowsPublisher(publisher(i)));
+    for (unsigned i = 4; i < cap + 3; ++i) BOOST_CHECK(feed.KnowsPublisher(publisher(i)));
+
+    // A reload keeps the same publishers in the same order: the next new one
+    // pushes out publisher 4, the oldest left.
+    std::string err;
+    BOOST_REQUIRE(feed.Save(err));
+    BOOST_REQUIRE(reopened.Load(now, err));
+    BOOST_CHECK_EQUAL(reopened.KnownPublishers(), cap);
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(0)));
+    BOOST_CHECK(!reopened.KnowsPublisher(publisher(3)));
+    BOOST_REQUIRE(reopened.NoteSearchRecord(record(cap + 3, sequence++), now++));
+    BOOST_CHECK(!reopened.KnowsPublisher(publisher(4)));
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(5)));
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(0)));
+    BOOST_CHECK_EQUAL(reopened.KnownPublishers(), cap);
+
+    // A lower limit drops the oldest at once.
+    reopened.SetPublisherCap(2);
+    BOOST_CHECK_EQUAL(reopened.KnownPublishers(), 2U);
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(cap + 3)));
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(cap + 2)));
+
+    // A legacy file without the list: publishers in the order of their events.
+    {
+        modelnet::FeedStore legacy_writer, legacy_reader;
+        const auto legacy_path = m_args.GetDataDirBase() / "feed-publisher-cap-legacy.json";
+        legacy_writer.SetPath(legacy_path); legacy_reader.SetPath(legacy_path);
+        for (unsigned i = 0; i < 6; ++i) BOOST_REQUIRE(legacy_writer.NoteSearchRecord(record(20 + i, i + 1), 5000 + i));
+        BOOST_REQUIRE(legacy_writer.Save(err));
+        UniValue saved;
+        { std::ifstream in(legacy_path); std::string raw((std::istreambuf_iterator<char>(in)), {}); BOOST_REQUIRE(saved.read(raw)); }
+        UniValue legacy(UniValue::VOBJ);
+        for (const auto& key : saved.getKeys()) {
+            if (key != "seen_publishers") legacy.pushKV(key, saved[key]);
+        }
+        { std::ofstream out(legacy_path, std::ios::trunc); out << legacy.write(); }
+        legacy_reader.SetPublisherCap(3);
+        BOOST_REQUIRE(legacy_reader.Load(5100, err));
+        BOOST_CHECK_EQUAL(legacy_reader.KnownPublishers(), 3U);
+        for (unsigned i = 0; i < 3; ++i) BOOST_CHECK(!legacy_reader.KnowsPublisher(publisher(20 + i)));
+        for (unsigned i = 3; i < 6; ++i) BOOST_CHECK(legacy_reader.KnowsPublisher(publisher(20 + i)));
+    }
+
+    // The default keeps far more than a test needs, and a fresh store uses it.
+    modelnet::FeedStore fresh;
+    for (unsigned i = 0; i < 64; ++i) BOOST_REQUIRE(fresh.NoteSearchRecord(record(i, i + 1), 1000 + i));
+    BOOST_CHECK_EQUAL(fresh.KnownPublishers(), 64U);
+    static_assert(modelnet::FEED_PUBLISHERS_MAX >= 1024);
+}
+
 BOOST_AUTO_TEST_CASE(publisher_history_survives_expired_events_and_legacy_load)
 {
     modelnet::FeedStore continuous, restored;

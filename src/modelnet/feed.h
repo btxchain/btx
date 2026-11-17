@@ -24,6 +24,9 @@ constexpr int FEED_PAGE_DEFAULT = 50;
 constexpr int FEED_PAGE_MAX = 100;
 constexpr int64_t FEED_TTL_DEFAULT_MS = 14LL * 86400 * 1000;
 constexpr size_t FEED_CAP_DEFAULT = 100000;
+/** Publishers the feed remembers as seen. A search record names its
+ *  publisher itself, so a peer can name any number; the newest are kept. */
+constexpr size_t FEED_PUBLISHERS_MAX = 16384;
 
 enum class FeedMode {
     NEWEST = 0,
@@ -107,13 +110,29 @@ class FeedStore {
     size_t m_cap{FEED_CAP_DEFAULT};
     int64_t m_ttl_ms{FEED_TTL_DEFAULT_MS};
     int64_t m_last_refresh{0};
-    std::map<std::string, int> m_publisher_models;
+    //! Publisher -> order of its latest observation, and the reverse, oldest first.
+    std::map<std::string, uint64_t> m_publisher_seen;
+    std::map<uint64_t, std::string> m_publisher_order;
+    uint64_t m_publisher_clock{0};
+    size_t m_publisher_cap{FEED_PUBLISHERS_MAX};
     fs::path m_path;
+
+    //! Note an observation of `publisher`; true when it was not known.
+    bool TouchPublisherLocked(const std::string& publisher);
+    void TrimPublishersLocked();
 
 public:
     void SetPath(const fs::path& p) { std::lock_guard<std::recursive_mutex> lock(m_mutex); m_path = p; }
     void SetCap(size_t cap) { std::lock_guard<std::recursive_mutex> lock(m_mutex); m_cap = cap; }
     void SetTtlMs(int64_t ttl) { std::lock_guard<std::recursive_mutex> lock(m_mutex); m_ttl_ms = ttl; }
+    //! Keep at most `cap` publishers (at least 1); a lower cap drops the oldest at once.
+    void SetPublisherCap(size_t cap);
+    size_t KnownPublishers() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_publisher_seen.size(); }
+    bool KnowsPublisher(const Digest48& publisher) const
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        return m_publisher_seen.count(publisher.Hex()) != 0;
+    }
     uint64_t Sequence() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_seq; }
     size_t Size() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_by_id.size(); }
     int64_t LastRefresh() const { std::lock_guard<std::recursive_mutex> lock(m_mutex); return m_last_refresh; }
