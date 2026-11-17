@@ -30,6 +30,9 @@ constexpr int64_t BOUNTY_MAX_HEIGHT = 499999999;
 constexpr int BOUNTY_PAGE_MAX = 100;
 constexpr int BOUNTY_COUNCIL_MAX = 8;
 constexpr int BOUNTY_LOTS_MAX = 16;
+//! Bounty watches kept (and saved) at most, and the longest bounty_id a watch takes.
+constexpr size_t BOUNTY_WATCHES_MAX{1024};
+constexpr size_t BOUNTY_WATCH_ID_MAX{128};
 constexpr const char* BOUNTY_TRUST_LABEL = "COUNCIL_CUSTODIAL_AUTHORITY_WITH_INDIVIDUAL_REFUND_PATHS";
 
 struct SignedEnvelope {
