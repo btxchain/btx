@@ -1770,6 +1770,27 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const UniValue a = ObjArg(params, 0);
         const std::string bounty_id = a["bounty_id"].get_str();
         if (!m_bounties.count(bounty_id)) return fail("NOT_FOUND", "bounty");
+        // A nomination is a signed record saved with the store, which every
+        // bounty write writes again: the same nominee keeps its nomination,
+        // the nominee fields are bounded, and so is the number per bounty.
+        constexpr size_t NOMINATIONS_MAX{64};
+        constexpr size_t NOMINEE_FIELD_MAX{4096};
+        const std::string nominee_identity = a["nominee_identity"].write();
+        const std::string nominee_key = a["nominee_key"].write();
+        if (nominee_identity.size() > NOMINEE_FIELD_MAX || nominee_key.size() > NOMINEE_FIELD_MAX) {
+            return fail("INVALID_PARAMETER", "nominee_identity or nominee_key too long");
+        }
+        auto& nominations = m_noms[bounty_id];
+        for (const auto& kept : nominations) {
+            if (!kept.body.exists("payload")) continue;
+            const UniValue& kp = kept.body["payload"];
+            if (kp["nominee_identity"].write() == nominee_identity && kp["nominee_key"].write() == nominee_key) {
+                result = EnvelopeToJson(kept);
+                result.pushKV("nomination_only", true);
+                return ok();
+            }
+        }
+        if (nominations.size() >= NOMINATIONS_MAX) return fail("REJECTED", "too many nominations for this bounty");
         UniValue p(UniValue::VOBJ);
         p.pushKV("bounty_id", bounty_id);
         p.pushKV("nominee_identity", a["nominee_identity"]);
@@ -1790,6 +1811,15 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         // As nominatebountyevaluator: only for terms this store published.
         const std::string terms_id = a.exists("terms_id") && a["terms_id"].isStr() ? a["terms_id"].get_str() : "";
         if (!m_terms.count(terms_id)) return fail("NOT_FOUND", "terms");
+        // Saved with the store like the nominations, and bounded the same way.
+        constexpr size_t APPOINTMENTS_MAX{64};
+        constexpr size_t APPOINTMENT_BYTES_MAX{16384};
+        if (const auto it = m_appointments.find(terms_id); it != m_appointments.end() && it->second.size() >= APPOINTMENTS_MAX) {
+            return fail("REJECTED", "too many appointments for these terms");
+        }
+        if ((a.exists("appointment") ? a["appointment"] : a).write().size() > APPOINTMENT_BYTES_MAX) {
+            return fail("INVALID_PARAMETER", "appointment too large");
+        }
         SignedEnvelope env;
         if (!sign_payload("CouncilAppointment", a.exists("appointment") ? a["appointment"] : a, env))
             return fail("REJECTED", err);
@@ -1802,8 +1832,14 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
     if (method == "listbountyevaluators") {
         const std::string bounty_id = StrArg(params, 0, "bounty_id");
         UniValue arr(UniValue::VARR);
-        for (const auto& e : m_noms[bounty_id]) arr.push_back(EnvelopeToJson(e));
-        for (const auto& e : m_appointments[bounty_id]) arr.push_back(EnvelopeToJson(e));
+        // Look up without adding: an unknown id must not leave an empty entry
+        // behind that the next save keeps.
+        if (const auto it = m_noms.find(bounty_id); it != m_noms.end()) {
+            for (const auto& e : it->second) arr.push_back(EnvelopeToJson(e));
+        }
+        if (const auto it = m_appointments.find(bounty_id); it != m_appointments.end()) {
+            for (const auto& e : it->second) arr.push_back(EnvelopeToJson(e));
+        }
         result.setObject();
         result.pushKV("evaluators", arr);
         return true;

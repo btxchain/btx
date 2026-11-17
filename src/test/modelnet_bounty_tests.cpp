@@ -202,6 +202,98 @@ BOOST_AUTO_TEST_CASE(bounty_codec_golden_vectors)
     }
 }
 
+// Nominations and appointments are signed records saved with the bounty
+// store: the same nominee keeps one nomination, the nominee fields and an
+// appointment have a size bound, and a bounty takes at most 64 of each.
+BOOST_AUTO_TEST_CASE(bounty_council_records_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-council-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+
+    const auto nominate = [&](const std::string& identity, const std::string& key) {
+        UniValue n(UniValue::VOBJ);
+        n.pushKV("bounty_id", bounty);
+        n.pushKV("nominee_identity", identity);
+        n.pushKV("nominee_key", key);
+        return call("nominatebountyevaluator", n);
+    };
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    const std::string first = result.write();
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    BOOST_CHECK_EQUAL(result.write(), first);
+    BOOST_CHECK(!nominate(std::string(4097, 'x'), "key"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    for (int i = 1; i < 64; ++i) {
+        BOOST_REQUIRE_MESSAGE(nominate("nominee-" + std::to_string(i), "key-" + std::to_string(i)), err);
+    }
+    BOOST_CHECK(!nominate("nominee-64", "key-64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A nominee already there is still answered at the limit; the same
+    // identity with another key is another nomination.
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    BOOST_CHECK_EQUAL(result.write(), first);
+    BOOST_CHECK(!nominate("nominee-0", "key-other"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const auto appoint = [&](const std::string& note) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("terms_id", bounty);
+        UniValue appt(UniValue::VOBJ);
+        appt.pushKV("bounty_id", bounty);
+        appt.pushKV("note", note);
+        a.pushKV("appointment", appt);
+        return call("acceptbountyappointment", a);
+    };
+    {
+        // Over 16 KiB in all, with each string under the 8192 bytes a signed
+        // record takes.
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("terms_id", bounty);
+        UniValue appt(UniValue::VOBJ);
+        appt.pushKV("bounty_id", bounty);
+        for (int i = 0; i < 3; ++i) appt.pushKV("note" + std::to_string(i), std::string(6000, 'a'));
+        a.pushKV("appointment", appt);
+        BOOST_CHECK(!call("acceptbountyappointment", a));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    for (int i = 0; i < 64; ++i) BOOST_REQUIRE_MESSAGE(appoint("appointment " + std::to_string(i)), err);
+    BOOST_CHECK(!appoint("appointment 64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    // listbountyevaluators for an id the store does not know adds nothing
+    // that a later save keeps.
+    const std::string unknown(96, 'e');
+    UniValue list(UniValue::VOBJ);
+    list.pushKV("bounty_id", unknown);
+    BOOST_REQUIRE_MESSAGE(call("listbountyevaluators", list), err);
+    BOOST_CHECK_EQUAL(result["evaluators"].size(), 0U);
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    std::ifstream saved(dir / "bounty-store.json");
+    const std::string text((std::istreambuf_iterator<char>(saved)), std::istreambuf_iterator<char>());
+    BOOST_CHECK(!text.empty());
+    BOOST_CHECK(text.find(unknown) == std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_records_need_a_known_bounty)
 {
     // nominatebountyevaluator, pledgebounty and freezebountyfundinground
