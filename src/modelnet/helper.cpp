@@ -2437,6 +2437,55 @@ std::vector<ProviderObservation> CurrentProviderObservations(ModelCatalog& cat, 
     return observations;
 }
 
+// Piece indexes are the catalog files laid end to end. A seeded complete
+// replica covers that whole span. Without a local file list the caller keeps
+// pieces_total at 0 and ComputeSwarmHealth uses the observation fallback.
+SwarmHealth ObservedHealth(ModelCatalog& cat, const Digest48& id, std::vector<ProviderObservation> obs)
+{
+    CatalogEntry entry;
+    if (cat.Find(id, entry) && !entry.core.files.empty()) {
+        uint32_t offset = 0;
+        bool overflow = false;
+        std::vector<uint32_t> have;
+        for (uint32_t fi = 0; fi < entry.core.files.size(); ++fi) {
+            const uint64_t sz = entry.core.files[fi].size;
+            const uint32_t n = sz == 0 ? 0u : static_cast<uint32_t>((sz + PIECE_SIZE - 1) / PIECE_SIZE);
+            if (n > std::numeric_limits<uint32_t>::max() - offset) {
+                overflow = true;
+                break;
+            }
+            std::vector<uint32_t> file_have;
+            cat.Store().ListCommittedPieces(entry.artifact_id, fi, file_have);
+            for (uint32_t piece : file_have) {
+                if (piece < n) have.push_back(offset + piece);
+            }
+            offset += n;
+        }
+        if (!overflow && offset > 0) {
+            std::vector<PieceRange> local_ranges;
+            uint32_t local_pieces = 0;
+            if (entry.seeded && !entry.incomplete) {
+                local_ranges.push_back(PieceRange{0, offset});
+                local_pieces = offset;
+            } else {
+                std::sort(have.begin(), have.end());
+                have.erase(std::unique(have.begin(), have.end()), have.end());
+                std::string rerr;
+                if (CompactPieceRanges(have, local_ranges, rerr)) {
+                    local_pieces = static_cast<uint32_t>(have.size());
+                } else {
+                    local_ranges.clear();
+                }
+            }
+            for (auto& o : obs) {
+                if (o.provider_id == "local" && o.ranges.empty()) o.ranges = local_ranges;
+            }
+            return ComputeSwarmHealth(offset, local_pieces, obs);
+        }
+    }
+    return ComputeSwarmHealth(0, 0, obs);
+}
+
 static QueryDedupe g_search_dedupe;
 static FeedStore g_feed;
 static CampaignIndex g_campaigns;
@@ -8069,7 +8118,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         UniValue arr(UniValue::VARR);
         std::vector<SearchHit> decorated;
         for (auto& h : job.hits) {
-            h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, h.rec.model_id));
+            h.health = ObservedHealth(cat, h.rec.model_id, CurrentProviderObservations(cat, h.rec.model_id));
             CatalogEntry e;
             if (cat.Find(h.rec.model_id, e)) {
                 h.local.known = true;
@@ -8288,7 +8337,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             q.scope = SearchScope::ALL;
-            const auto hits = g_search_idx.Search(q, ConnNowMs());
+            auto hits = g_search_idx.Search(q, ConnNowMs());
+            for (auto& h : hits) {
+                h.health = ObservedHealth(cat, h.rec.model_id, CurrentProviderObservations(cat, h.rec.model_id));
+            }
             UniValue arr(UniValue::VARR);
             auto entries = EconomyHits(hits, q, &cat, include_wallet_observation);
             for (const auto& e : entries) arr.push_back(EconomySearchCard(e));
@@ -8302,7 +8354,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const auto* r = g_search_idx.Get(id);
         if (r) h.rec = *r;
         else h.rec.model_id = id;
-        h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, id));
+        h.health = ObservedHealth(cat, id, CurrentProviderObservations(cat, id));
         CatalogEntry e;
         if (cat.Find(id, e)) {
             h.local.known = true;
@@ -8318,7 +8370,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const Digest48 id = ResolveUserId(Arg(0).get_str(), err);
         std::lock_guard<std::mutex> lock(g_search_mu);
         const auto obs = CurrentProviderObservations(cat, id);
-        const SwarmHealth h = ComputeSwarmHealth(0, 0, obs);
+        const SwarmHealth h = ObservedHealth(cat, id, obs);
         if (method == "getmodelproviders") {
             UniValue arr(UniValue::VARR);
             for (const auto& o : obs) {
@@ -8590,7 +8642,10 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         if (method == "getsimilarmodels" && Arg(0).isObject()) {
             if (Arg(0).exists("family")) q.filters.family = Arg(0)["family"].get_str();
         }
-        const auto hits = g_search_idx.Search(q, ConnNowMs());
+        auto hits = g_search_idx.Search(q, ConnNowMs());
+        for (auto& h : hits) {
+            h.health = ObservedHealth(cat, h.rec.model_id, CurrentProviderObservations(cat, h.rec.model_id));
+        }
         UniValue arr(UniValue::VARR);
         if (method == "getrecentreleases") {
             const std::vector<ReleaseCampaign> camps = [&] {
@@ -10599,7 +10654,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         IngestCatalogIntoSearch(cat);
         for (const auto& rec : g_search_idx.All()) AfterIndexPut(rec, ConnNowMs(), /*new_observation=*/false);
         auto decorate = [&](SearchHit h) {
-            h.health = ComputeSwarmHealth(0, 0, CurrentProviderObservations(cat, h.rec.model_id));
+            h.health = ObservedHealth(cat, h.rec.model_id, CurrentProviderObservations(cat, h.rec.model_id));
             CatalogEntry e;
             if (cat.Find(h.rec.model_id, e)) {
                 h.local.known = true;

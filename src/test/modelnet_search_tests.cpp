@@ -232,6 +232,21 @@ BOOST_AUTO_TEST_CASE(search_dir_01_to_10)
     BOOST_CHECK_EQUAL(static_cast<int>(h3.klass), static_cast<int>(AvailabilityClass::UNKNOWN));
     BOOST_CHECK(!h3.reconstructable || !h3.reconstructable_known);
 
+    ProviderObservation unnamed;
+    unnamed.provider_id = "dd";
+    unnamed.complete = true;
+    auto h4 = ComputeSwarmHealth(0, 0, {unnamed});
+    BOOST_CHECK_EQUAL(static_cast<int>(h4.klass), static_cast<int>(AvailabilityClass::HIGH));
+    BOOST_CHECK(h4.reconstructable_known);
+    BOOST_CHECK(h4.reconstructable);
+    ProviderObservation partial_only;
+    partial_only.provider_id = "ee";
+    partial_only.complete = false;
+    auto h5 = ComputeSwarmHealth(0, 0, {partial_only});
+    BOOST_CHECK_EQUAL(static_cast<int>(h5.klass), static_cast<int>(AvailabilityClass::HIGH));
+    BOOST_CHECK(h5.reconstructable_known);
+    BOOST_CHECK(!h5.reconstructable);
+
     SearchHit card;
     card.rec.display_name = "x";
     card.local.pinned = true;

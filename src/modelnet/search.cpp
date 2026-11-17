@@ -825,10 +825,16 @@ SwarmHealth ComputeSwarmHealth(uint32_t pieces_total, uint32_t pieces_local,
         else if (h.providers_complete >= 3 && h.min_piece_sources >= 3) h.klass = AvailabilityClass::EXCELLENT;
         else if (h.providers_complete >= 1) h.klass = AvailabilityClass::HIGH;
         else h.klass = AvailabilityClass::MEDIUM;
-    } else {
+    } else if (h.providers_observed == 0) {
         h.klass = AvailabilityClass::UNKNOWN;
         h.reconstructable = false;
         h.reconstructable_known = false;
+    } else {
+        // Piece count is not on the search record. A provider observation is
+        // still evidence: HIGH, and reconstructable only when one is complete.
+        h.klass = AvailabilityClass::HIGH;
+        h.reconstructable = h.providers_complete > 0;
+        h.reconstructable_known = true;
     }
     return h;
 }
