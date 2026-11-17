@@ -13,6 +13,7 @@
 #include <span.h>
 #include <test/util/setup_common.h>
 #include <util/fs.h>
+#include <util/time.h>
 
 #include <boost/test/unit_test.hpp>
 #include <chrono>
@@ -1045,6 +1046,102 @@ BOOST_AUTO_TEST_CASE(search_refreshes_signed_provider_observations)
         rpc("searchmodels", search_params);
         BOOST_CHECK_EQUAL(rpc("getmodelproviders", id_params)["providers"][0]["complete"].get_bool(), !initially_complete);
     }
+}
+
+BOOST_AUTO_TEST_CASE(search_provider_observations_end_with_their_record)
+{
+    using namespace modelnet;
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    };
+    const fs::path root = m_path_root / "observation-expiry";
+    fs::create_directories(root);
+    const fs::path model = root / "expiry.safetensors";
+    std::string header = R"({"weight":{"dtype":"F32","shape":[256],"data_offsets":[0,1024]}})";
+    header.append((8 - header.size() % 8) % 8, ' ');
+    {
+        std::ofstream file(model, std::ios::binary);
+        const uint64_t header_size = header.size();
+        for (int i = 0; i < 8; ++i) file.put(static_cast<char>(header_size >> (8 * i)));
+        file << header << std::string(1024, '\x04');
+        BOOST_REQUIRE(file.good());
+    }
+    ModelCatalog cat{root / "models", 1 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(model), false, entry, err), err);
+    BOOST_REQUIRE(cat.Seed(entry.model_id, false, err));
+    auto rpc = [&](const std::string& method, const UniValue& params) {
+        UniValue req(UniValue::VOBJ), result;
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        std::string code;
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), code + ": " + err);
+        return result;
+    };
+    struct Key {
+        std::vector<unsigned char> pk, sk;
+    };
+    Key short_key, long_key, swap_key;
+    for (Key* k : {&short_key, &long_key, &swap_key}) BOOST_REQUIRE(GenerateMlDsa44(k->pk, k->sk, err));
+    auto put = [&](const std::string& peer, const Key& key, uint64_t seq, int64_t expiry_ms) {
+        const auto& pk = key.pk;
+        const auto& sk = key.sk;
+        ProviderRecord record;
+        record.resource = entry.model_id;
+        record.pubkey = pk;
+        record.seq = seq;
+        record.complete = true;
+        record.reachability_kind = "direct";
+        record.endpoints = {"192.0.2.12:29447"};
+        record.ranges = {{0, 1}};
+        record.expiry_ms = expiry_ms;
+        BOOST_REQUIRE(SignProviderRecord(record, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        NativeRequest req;
+        req.method = "POST";
+        req.path = std::string(MODEL_HTTP_ROOT) + "ext/providers/put";
+        req.body = ProviderRecordToJson(record).write();
+        req.peer_addr = peer;
+        NativeResponse response;
+        BOOST_REQUIRE(HandleNativeRequest(cat, req, response));
+        BOOST_REQUIRE_MESSAGE(response.status == 200, response.body);
+        return record.service_id.Hex();
+    };
+    // Two providers from two peers: one record ends in a few seconds, one in five minutes.
+    const int64_t short_expiry = now_ms() + 3000;
+    put("expiry-short-fixture", short_key, 1, short_expiry);
+    const std::string lasting = put("expiry-long-fixture", long_key, 1, now_ms() + 300000);
+    UniValue query(UniValue::VOBJ), search_params(UniValue::VARR), id_params(UniValue::VARR);
+    query.pushKV("scope", "LOCAL");
+    search_params.push_back(query);
+    id_params.push_back(entry.model_id.Hex());
+    rpc("searchmodels", search_params);
+    BOOST_REQUIRE_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 2);
+    BOOST_CHECK_EQUAL(rpc("getmodelavailability", id_params)["providers_complete"].getInt<int>(), 2);
+
+    while (now_ms() <= short_expiry) UninterruptibleSleep(std::chrono::milliseconds{50});
+    // The record has left the provider cache; its copy no longer counts either.
+    const auto providers = rpc("getmodelproviders", id_params)["providers"];
+    BOOST_REQUIRE_EQUAL(providers.size(), 1);
+    BOOST_CHECK_EQUAL(providers[0]["provider_id"].get_str(), lasting);
+    BOOST_CHECK_EQUAL(rpc("getmodelavailability", id_params)["providers_complete"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(rpc("getmodelpeercount", id_params)["complete"].getInt<int>(), 1);
+    rpc("searchmodels", search_params);
+    BOOST_CHECK_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 1);
+
+    // A provider that replaces its record with one that ends sooner: once that
+    // record is gone from the cache, searchmodels drops the earlier copy too.
+    const std::string swapped = put("expiry-swap-fixture", swap_key, 1, now_ms() + 300000);
+    rpc("searchmodels", search_params);
+    BOOST_REQUIRE_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 2);
+    const int64_t swap_expiry = now_ms() + 1000;
+    BOOST_CHECK_EQUAL(put("expiry-swap-fixture", swap_key, 2, swap_expiry), swapped);
+    while (now_ms() <= swap_expiry) UninterruptibleSleep(std::chrono::milliseconds{50});
+    rpc("searchmodels", search_params);
+    const auto after_swap = rpc("getmodelproviders", id_params)["providers"];
+    BOOST_REQUIRE_EQUAL(after_swap.size(), 1);
+    BOOST_CHECK_EQUAL(after_swap[0]["provider_id"].get_str(), lasting);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

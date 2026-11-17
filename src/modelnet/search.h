@@ -170,6 +170,8 @@ struct ProviderObservation {
     bool direct{true};
     bool relayed{false};
     int64_t last_seen_ms{0};
+    /** Expiry of the provider record behind a remote observation; 0 for local seeding. */
+    int64_t expires_ms{0};
     std::vector<PieceRange> ranges;
     std::string netgroup;
 };

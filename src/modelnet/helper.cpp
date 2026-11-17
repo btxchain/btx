@@ -2417,6 +2417,17 @@ static SearchIndex g_search_idx;
 static SearchRuntime g_search_rt;
 static std::mutex g_search_mu;
 static std::map<std::string, std::vector<ProviderObservation>> g_search_obs;
+// g_search_mu must be held. A remote observation is a copy of a provider
+// record and goes when the record expires, as the record goes from the
+// provider cache. False when none is left for the model.
+static bool KeepLiveProviderObservations(std::vector<ProviderObservation>& kept, int64_t now_ms)
+{
+    kept.erase(std::remove_if(kept.begin(), kept.end(),
+                              [&](const ProviderObservation& o) { return o.expires_ms <= now_ms; }),
+               kept.end());
+    return !kept.empty();
+}
+
 // g_search_mu must be held. Remote observations are historical; local
 // seeding is known directly, so derive it from the current catalog instead
 // of caching a second copy that every unseed path would have to invalidate.
@@ -2424,7 +2435,13 @@ std::vector<ProviderObservation> CurrentProviderObservations(ModelCatalog& cat, 
 {
     std::vector<ProviderObservation> observations;
     const auto it = g_search_obs.find(id.Hex());
-    if (it != g_search_obs.end()) observations = it->second;
+    if (it != g_search_obs.end()) {
+        if (KeepLiveProviderObservations(it->second, ConnNowMs())) {
+            observations = it->second;
+        } else {
+            g_search_obs.erase(it);
+        }
+    }
     CatalogEntry entry;
     if (cat.Find(id, entry) && entry.seeded) {
         ProviderObservation local;
@@ -8105,8 +8122,26 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     o.relayed = pr.reachability_kind == "relay";
                     o.ranges = pr.ranges;
                     o.last_seen_ms = ConnNowMs();
+                    o.expires_ms = pr.expiry_ms;
                     extra_obs[h.rec.model_id.Hex()].push_back(o);
                 }
+            }
+            // A copy goes with its record, also one that the provider replaced
+            // with an earlier expiry: keep only copies of records the cache
+            // still holds, so there are never more copies than cached records.
+            const int64_t obs_now = ConnNowMs();
+            for (auto it = g_search_obs.begin(); it != g_search_obs.end();) {
+                std::set<std::string> cached;
+                Digest48 id;
+                std::string id_err;
+                if (Digest48::FromHex(it->first, id, id_err)) {
+                    for (const auto& pr : g_swarm.providers.Get(id, obs_now)) cached.insert(pr.service_id.Hex());
+                }
+                auto& kept = it->second;
+                kept.erase(std::remove_if(kept.begin(), kept.end(),
+                                          [&](const ProviderObservation& o) { return cached.count(o.provider_id) == 0; }),
+                           kept.end());
+                it = KeepLiveProviderObservations(kept, obs_now) ? std::next(it) : g_search_obs.erase(it);
             }
         }
         for (auto& kv : extra_obs) {
