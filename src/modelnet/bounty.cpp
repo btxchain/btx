@@ -59,6 +59,16 @@ void PublishBountyEvent(const UniValue& event)
     }
 }
 
+//! Size of the drafts as JSON, without the one named `skip`.
+size_t DraftBytes(const std::map<std::string, UniValue>& drafts, const std::string& skip)
+{
+    size_t bytes{0};
+    for (const auto& [id, draft] : drafts) {
+        if (id != skip) bytes += draft.write().size();
+    }
+    return bytes;
+}
+
 const std::set<std::string>& HelperMethods()
 {
     static const std::set<std::string> k = {
@@ -1460,6 +1470,14 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             err.clear();
             err_code.clear();
         }
+        // Drafts are saved with the store, which every bounty write writes
+        // again: their number and their size in all are bounded.
+        if (m_drafts.size() >= BOUNTY_DRAFTS_MAX) {
+            return fail("REJECTED", "too many bounty drafts; delete one with deletebountydraft");
+        }
+        if (DraftBytes(m_drafts, {}) + terms.write().size() > BOUNTY_DRAFT_BYTES_MAX) {
+            return fail("REJECTED", "bounty drafts would exceed 16 MiB; delete one with deletebountydraft");
+        }
         const std::string id = RandHex(16);
         m_drafts[id] = terms;
         result.setObject();
@@ -1553,6 +1571,9 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         for (const std::string& k : it->second.getKeys()) {
             if (overlay.count(k)) continue;
             merged.pushKV(k, it->second[k]);
+        }
+        if (DraftBytes(m_drafts, id) + merged.write().size() > BOUNTY_DRAFT_BYTES_MAX) {
+            return fail("REJECTED", "bounty drafts would exceed 16 MiB; delete one with deletebountydraft");
         }
         it->second = merged;
         const bool complete = ValidateBountyTerms(it->second, m_network, err);
