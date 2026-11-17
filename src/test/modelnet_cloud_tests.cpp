@@ -1475,6 +1475,78 @@ BOOST_AUTO_TEST_CASE(s3_multipart_completion_requires_success_envelope)
     for (const auto* xml : refused) BOOST_CHECK_MESSAGE(!S3MultipartCompletionSucceeded(xml), xml);
 }
 
+
+BOOST_AUTO_TEST_CASE(cloud_rpc_detach_removal_failure_preserves_origin_and_retry)
+{
+    const ScopedCloudCredentials credentials;
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "cloud-detach-failure";
+    fs::create_directories(dir);
+    const fs::path creds = dir / "creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    ModelCatalog cat{dir, 8 << 20};
+    auto call = [&](const char* method, const UniValue& options, UniValue& result,
+                    std::string& code, std::string& err) {
+        UniValue params(UniValue::VARR), req(UniValue::VOBJ);
+        params.push_back(options);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        code.clear();
+        err.clear();
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    UniValue cfg(UniValue::VOBJ), result;
+    cfg.pushKV("endpoint", "https://detach-fixture.invalid");
+    cfg.pushKV("bucket", "models");
+    cfg.pushKV("provider", "GENERIC_S3");
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
+    cfg.pushKV("use_fake", true);
+    cfg.pushKV("idempotency_key", "detach-failure-config");
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(call("setcloudstorage", cfg, result, code, err), err);
+    BOOST_REQUIRE(result["applied"].get_bool());
+    const fs::path cloud = dir / "cloud.json", saved = dir / "cloud-fixture-backup.json";
+    // Real portable remove failure: an occupied directory cannot be removed.
+    // Preserve the original file and restore it even if a later assertion throws.
+    fs::rename(cloud, saved);
+    struct RestoreConfig {
+        fs::path cloud, saved;
+        void Restore() {
+            std::error_code ec;
+            if (!std::filesystem::exists(saved, ec)) return;
+            fs::remove(cloud / "fixture-blocker", ec);
+            fs::remove(cloud, ec);
+            fs::rename(saved, cloud, ec);
+        }
+        ~RestoreConfig() { Restore(); }
+    } restore{cloud, saved};
+    BOOST_REQUIRE(fs::create_directory(cloud));
+    { std::ofstream out(cloud / "fixture-blocker"); out << "keep"; BOOST_REQUIRE(out.good()); }
+    UniValue detach(UniValue::VOBJ);
+    detach.pushKV("mode", "DETACH");
+    BOOST_CHECK(!call("removemodelstorage", detach, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO_ERROR");
+    BOOST_CHECK(!err.empty());
+    BOOST_CHECK(fs::exists(saved));
+    // A refused detach must not clear the current origin. The obstacle remains
+    // while this status is queried, so reload cannot mask a cleared live handle.
+    UniValue empty(UniValue::VOBJ);
+    BOOST_REQUIRE_MESSAGE(call("getcloudstorageinfo", empty, result, code, err), err);
+    BOOST_CHECK(result["configured"].get_bool());
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    restore.Restore();
+    BOOST_REQUIRE(fs::is_regular_file(cloud));
+    BOOST_REQUIRE_MESSAGE(call("removemodelstorage", detach, result, code, err), err);
+    BOOST_CHECK(result["detached"].get_bool());
+    BOOST_CHECK(!result["remote_objects_deleted"].get_bool());
+    BOOST_CHECK(!fs::exists(cloud));
+    BOOST_REQUIRE_MESSAGE(call("getcloudstorageinfo", empty, result, code, err), err);
+    BOOST_CHECK(!result["configured"].get_bool());
+    BOOST_REQUIRE_MESSAGE(call("removemodelstorage", detach, result, code, err), err);
+    BOOST_CHECK(result["detached"].get_bool());
+    BOOST_CHECK(!result["remote_objects_deleted"].get_bool());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 #if defined(_WIN32)
