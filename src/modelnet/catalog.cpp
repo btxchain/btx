@@ -1380,6 +1380,64 @@ bool ModelCatalog::GetVerifiedPiece(const Digest48& artifact, uint32_t file_inde
     return true;
 }
 
+CatalogFileStream::Buffer::Buffer(const ModelCatalog& catalog, const Digest48& artifact,
+                                      uint32_t file_index, const CoreFile& file)
+    : m_catalog(catalog), m_artifact(artifact), m_file_index(file_index), m_file(file)
+{
+    const uint64_t pieces = file.size / PIECE_SIZE + (file.size % PIECE_SIZE != 0);
+    if (pieces > std::numeric_limits<uint32_t>::max()) {
+        m_error = "too many upload pieces";
+    } else if (file.size == 0) {
+        Digest48 empty;
+        m_hash.Finalize(empty.data.data());
+        if (file.pieces_root != EmptyFileRoot() || file.sha384 != empty) {
+            m_error = "empty upload file identity mismatch";
+        }
+    }
+}
+
+CatalogFileStream::Buffer::int_type CatalogFileStream::Buffer::underflow()
+{
+    if (gptr() && gptr() < egptr()) return traits_type::to_int_type(*gptr());
+    if (!m_error.empty() || m_read == m_file.size) return traits_type::eof();
+    setg(nullptr, nullptr, nullptr);
+    std::vector<Digest48> proof;
+    uint64_t file_size{0};
+    if (!m_catalog.GetVerifiedPiece(m_artifact, m_file_index, m_next_piece,
+                                    m_bytes, proof, file_size, m_error)) {
+        if (m_error.empty()) m_error = "upload piece unavailable";
+        return traits_type::eof();
+    }
+    m_max_buffer = std::max(m_max_buffer, m_bytes.size());
+    const uint64_t expected = std::min<uint64_t>(PIECE_SIZE, m_file.size - m_read);
+    if (file_size != m_file.size || m_bytes.size() != expected ||
+        !VerifyPiece(m_file.pieces_root, m_file.size, m_next_piece, m_bytes, proof)) {
+        m_error = "upload piece does not match imported file";
+        return traits_type::eof();
+    }
+    m_hash.Write(m_bytes.data(), m_bytes.size());
+    m_read += m_bytes.size();
+    ++m_next_piece;
+    if (m_read == m_file.size) {
+        Digest48 digest;
+        m_hash.Finalize(digest.data.data());
+        if (digest != m_file.sha384) {
+            m_error = "upload file sha384 mismatch";
+            return traits_type::eof();
+        }
+    }
+    auto* data = reinterpret_cast<char*>(m_bytes.data());
+    setg(data, data, data + m_bytes.size());
+    return traits_type::to_int_type(*gptr());
+}
+
+CatalogFileStream::CatalogFileStream(const ModelCatalog& catalog, const Digest48& artifact,
+                                     uint32_t file_index, const CoreFile& file)
+    : std::istream(nullptr), m_buffer(catalog, artifact, file_index, file)
+{
+    rdbuf(&m_buffer);
+}
+
 bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                                      Span<const unsigned char> bytes, const std::vector<Digest48>& proof,
                                      uint64_t file_size, const Digest48& pieces_root, std::string& err)

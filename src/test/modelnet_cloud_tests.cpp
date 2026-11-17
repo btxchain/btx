@@ -1225,6 +1225,9 @@ BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
     UniValue imported;
     BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, ireq, imported, code, err), err);
     BOOST_CHECK(imported["cloud_uploaded"].get_bool());
+    Digest48 uploaded_model;
+    BOOST_REQUIRE(Digest48::FromHex(imported["model_id"].get_str(), uploaded_model, err));
+    BOOST_CHECK(!cat.TransferActive(uploaded_model));
     BOOST_CHECK_EQUAL(imported["cloud_layout"].get_str(), "SOURCE_FILES");
     BOOST_REQUIRE(imported["cloud_files"].isArray());
     BOOST_REQUIRE_GE(imported["cloud_files"].size(), 1U);
@@ -1545,6 +1548,173 @@ BOOST_AUTO_TEST_CASE(cloud_rpc_detach_removal_failure_preserves_origin_and_retry
     BOOST_REQUIRE_MESSAGE(call("removemodelstorage", detach, result, code, err), err);
     BOOST_CHECK(result["detached"].get_bool());
     BOOST_CHECK(!result["remote_objects_deleted"].get_bool());
+}
+
+namespace {
+std::vector<unsigned char> UploadModelBytes(size_t size)
+{
+    const size_t data_bytes = size - 128;
+    const std::string header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[" + std::to_string(data_bytes) +
+        "],\"data_offsets\":[0," + std::to_string(data_bytes) + "]}}";
+    std::vector<unsigned char> bytes(size, 'A');
+    WriteLE64(bytes.data(), 120);
+    std::fill(bytes.begin() + 8, bytes.begin() + 128, ' ');
+    std::copy(header.begin(), header.end(), bytes.begin() + 8);
+    return bytes;
+}
+void WriteUploadBytes(const fs::path& path, const std::vector<unsigned char>& bytes)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    BOOST_REQUIRE(out.good());
+}
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_upload_ignores_external_source_changes)
+{
+    using namespace modelnet;
+    const ScopedCloudCredentials credentials;
+    const fs::path dir = m_path_root / "verified-upload";
+    fs::create_directories(dir);
+    const fs::path creds = dir / "creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    const auto original = UploadModelBytes(2 * PIECE_SIZE + 137);
+    const fs::path source = dir / "model.safetensors";
+    WriteUploadBytes(source, original);
+    ModelCatalog cat{dir / "catalog", 32 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(source), false, entry, err), err);
+    auto changed = original;
+    changed.back() ^= 1;
+    WriteUploadBytes(source, changed);
+    for (const auto layout : {CloudObjectLayout::SOURCE_FILES, CloudObjectLayout::PIECE_OBJECTS}) {
+        auto cfg = credentials.Config(creds, "https://s3.example.invalid");
+        cfg.provider = CloudProvider::GENERIC_S3;
+        cfg.layout = layout;
+        S3PieceStore cloud{cfg};
+        BOOST_REQUIRE_MESSAGE(cloud.Init(err), err);
+        CatalogFileStream input{cat, entry.artifact_id, 0, entry.core.files[0]};
+        BOOST_REQUIRE(input.Error().empty());
+        if (layout == CloudObjectLayout::SOURCE_FILES) {
+            BOOST_REQUIRE_MESSAGE(cloud.PutSourceFile(entry.artifact_id, 0, input, original.size(), 3, err), err);
+        } else {
+            BOOST_REQUIRE_MESSAGE(cloud.PutPieceObjects(entry.artifact_id, 0, input, original.size(), err), err);
+        }
+        BOOST_CHECK(input.Error().empty());
+        BOOST_CHECK_LE(input.MaxBufferBytes(), PIECE_SIZE);
+        BOOST_CHECK_LE(cloud.LastPutMaxBufferBytes(), kCloudStreamChunkBytes);
+        std::vector<unsigned char> got;
+        if (layout == CloudObjectLayout::SOURCE_FILES) {
+            BOOST_REQUIRE_MESSAGE(cloud.GetSourceFile(entry.artifact_id, 0, got, err), err);
+        } else {
+            for (uint32_t i = 0; i < 3; ++i) {
+                std::vector<unsigned char> piece;
+                BOOST_REQUIRE_MESSAGE(cloud.GetPieceObject(entry.artifact_id, 0, i, piece, err), err);
+                got.insert(got.end(), piece.begin(), piece.end());
+            }
+        }
+        BOOST_CHECK(got == original);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_reader_withholds_invalid_last_piece_and_retries)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "verified-read-errors";
+    fs::create_directories(dir);
+    const auto bytes = UploadModelBytes(PIECE_SIZE + 137);
+    const fs::path source = dir / "model.safetensors";
+    WriteUploadBytes(source, bytes);
+    ModelCatalog cat{dir / "catalog", 16 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(source), false, entry, err), err);
+    auto wrong = entry.core.files[0];
+    wrong.sha384.data[0] ^= 1;
+    CatalogFileStream invalid{cat, entry.artifact_id, 0, wrong};
+    std::vector<char> out(bytes.size());
+    invalid.read(out.data(), out.size());
+    BOOST_CHECK_EQUAL(invalid.gcount(), PIECE_SIZE);
+    BOOST_CHECK_EQUAL(invalid.Error(), "upload file sha384 mismatch");
+    for (const bool wrong_root : {false, true}) {
+        wrong = entry.core.files[0];
+        if (wrong_root) wrong.pieces_root.data[0] ^= 1;
+        else ++wrong.size;
+        CatalogFileStream mismatch{cat, entry.artifact_id, 0, wrong};
+        char first;
+        mismatch.read(&first, 1);
+        BOOST_CHECK_EQUAL(mismatch.gcount(), 0);
+        BOOST_CHECK(!mismatch.Error().empty());
+    }
+    BOOST_REQUIRE(cat.Store().DeletePiece(entry.artifact_id, 0, 1, err));
+    CatalogFileStream missing{cat, entry.artifact_id, 0, entry.core.files[0]};
+    missing.read(out.data(), out.size());
+    BOOST_CHECK_EQUAL(missing.gcount(), PIECE_SIZE);
+    BOOST_CHECK(!missing.Error().empty());
+    const Span<const unsigned char> last{bytes.data() + PIECE_SIZE, bytes.size() - PIECE_SIZE};
+    BOOST_REQUIRE_MESSAGE(cat.Store().PutVerifiedPiece(entry.artifact_id, 0, 1, last, ChunkLeaf(1, last), err), err);
+    CatalogFileStream retry{cat, entry.artifact_id, 0, entry.core.files[0]};
+    retry.read(out.data(), out.size());
+    BOOST_CHECK_EQUAL(retry.gcount(), bytes.size());
+    BOOST_CHECK(retry.Error().empty());
+    BOOST_CHECK(std::equal(bytes.begin(), bytes.end(), reinterpret_cast<unsigned char*>(out.data())));
+    BOOST_CHECK_LE(retry.MaxBufferBytes(), PIECE_SIZE);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_reader_exact_lengths_and_corrupt_piece)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "verified-lengths";
+    fs::create_directories(dir);
+    for (const size_t size : {size_t{4096}, size_t{PIECE_SIZE}, size_t{PIECE_SIZE + 137}}) {
+        const auto bytes = UploadModelBytes(size);
+        const fs::path source = dir / "model.safetensors";
+        WriteUploadBytes(source, bytes);
+        ModelCatalog cat{dir / fs::PathFromString(std::to_string(size)), 16 << 20};
+        CatalogEntry entry;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(source), false, entry, err), err);
+        CatalogFileStream good{cat, entry.artifact_id, 0, entry.core.files[0]};
+        std::vector<char> got(size);
+        good.read(got.data(), got.size());
+        BOOST_CHECK_EQUAL(good.gcount(), size);
+        BOOST_CHECK(good.Error().empty()); // No extra EOF read is needed.
+        BOOST_CHECK(std::equal(bytes.begin(), bytes.end(), reinterpret_cast<unsigned char*>(got.data())));
+        // Only this disposable catalog's payload is changed for the integrity control.
+        auto corrupt = bytes;
+        corrupt.resize(std::min<size_t>(size, PIECE_SIZE));
+        corrupt[0] ^= 1;
+        const fs::path piece = cat.Store().Root() / "artifacts" / fs::PathFromString(entry.artifact_id.Hex()) / "0" / "0.piece";
+        WriteUploadBytes(piece, corrupt);
+        CatalogFileStream bad{cat, entry.artifact_id, 0, entry.core.files[0]};
+        char first;
+        bad.read(&first, 1);
+        BOOST_CHECK_EQUAL(bad.gcount(), 0);
+        BOOST_CHECK(!bad.Error().empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_reader_empty_identity)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "verified-empty";
+    ModelCatalog cat{dir, 8 << 20};
+    CoreFile empty;
+    empty.pieces_root = EmptyFileRoot();
+    CSHA384().Finalize(empty.sha384.data.data());
+    const auto artifact = ArtifactFill(0x73);
+    CatalogFileStream good{cat, artifact, 0, empty};
+    BOOST_CHECK(good.Error().empty());
+    BOOST_CHECK_EQUAL(good.peek(), std::char_traits<char>::eof());
+    auto wrong_root = empty;
+    wrong_root.pieces_root.data[0] ^= 1;
+    CatalogFileStream bad_root{cat, artifact, 0, wrong_root};
+    BOOST_CHECK(!bad_root.Error().empty());
+    empty.sha384.data[0] ^= 1;
+    CatalogFileStream bad{cat, artifact, 0, empty};
+    BOOST_CHECK(!bad.Error().empty());
+
 }
 
 BOOST_AUTO_TEST_SUITE_END()

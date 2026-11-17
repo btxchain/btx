@@ -421,6 +421,16 @@ bool S3PieceStore::PutSourceFile(const Digest48& artifact, uint32_t file_index, 
         err = "failed to open source file";
         return false;
     }
+    return PutSourceFile(artifact, file_index, in, expected_bytes, logical_piece_count, err);
+}
+
+bool S3PieceStore::PutSourceFile(const Digest48& artifact, uint32_t file_index, std::istream& in,
+                                 uint64_t expected_bytes, uint64_t logical_piece_count, std::string& err)
+{
+    if (m_layout != CloudObjectLayout::SOURCE_FILES) {
+        err = "PutSourceFile requires SOURCE_FILES layout";
+        return false;
+    }
     const std::string key = ObjectKeySourceFile(m_prefix, artifact.Hex(), file_index);
     if (!PutObject(key, in, expected_bytes, err)) return false;
     if (auto* fake = m_client.Fake()) {
@@ -450,6 +460,16 @@ bool S3PieceStore::PutPieceObjects(const Digest48& artifact, uint32_t file_index
     std::ifstream in{src, std::ios::binary};
     if (!in) {
         err = "failed to open source file";
+        return false;
+    }
+    return PutPieceObjects(artifact, file_index, in, expected_bytes, err);
+}
+
+bool S3PieceStore::PutPieceObjects(const Digest48& artifact, uint32_t file_index, std::istream& in,
+                                  uint64_t expected_bytes, std::string& err)
+{
+    if (m_layout != CloudObjectLayout::PIECE_OBJECTS) {
+        err = "PutPieceObjects requires PIECE_OBJECTS layout";
         return false;
     }
     const uint64_t n = expected_bytes == 0 ? 1 : ((expected_bytes + PIECE_SIZE - 1) / PIECE_SIZE);
