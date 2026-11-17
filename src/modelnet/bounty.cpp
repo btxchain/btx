@@ -36,6 +36,29 @@ std::string RandHex(size_t nbytes)
     return HexStr(b);
 }
 
+UniValue MakeBountyEvent(const std::string& kind, const std::string& bounty_id, const UniValue& payload,
+                        uint64_t& seq, uint64_t epoch)
+{
+    UniValue e(UniValue::VOBJ);
+    e.pushKV("event_id", RandHex(16));
+    e.pushKV("kind", kind);
+    e.pushKV("bounty_id", bounty_id);
+    e.pushKV("seq", static_cast<int64_t>(++seq));
+    e.pushKV("epoch", static_cast<int64_t>(epoch));
+    e.pushKV("payload", payload);
+    e.pushKV("authority", "local_signed_or_chain");
+    return e;
+}
+
+void PublishBountyEvent(const UniValue& event)
+{
+    if (BoundModelEventJournal()) {
+        ObserveResult observed;
+        std::string journal_err;
+        (void)JournalObserveBounty(event, observed, journal_err);
+    }
+}
+
 const std::set<std::string>& HelperMethods()
 {
     static const std::set<std::string> k = {
@@ -1304,20 +1327,9 @@ void BountyStore::Remember(const std::string& method, const std::string& key, co
 
 UniValue BountyStore::Event(const std::string& kind, const std::string& bounty_id, const UniValue& payload)
 {
-    UniValue e(UniValue::VOBJ);
-    e.pushKV("event_id", RandHex(16));
-    e.pushKV("kind", kind);
-    e.pushKV("bounty_id", bounty_id);
-    e.pushKV("seq", static_cast<int64_t>(++m_seq));
-    e.pushKV("epoch", static_cast<int64_t>(m_epoch));
-    e.pushKV("payload", payload);
-    e.pushKV("authority", "local_signed_or_chain");
+    UniValue e = MakeBountyEvent(kind, bounty_id, payload, m_seq, m_epoch);
     m_events.push_back(e);
-    if (BoundModelEventJournal()) {
-        ObserveResult ores;
-        std::string jerr;
-        (void)JournalObserveBounty(e, ores, jerr);
-    }
+    PublishBountyEvent(e);
     return e;
 }
 
@@ -2404,14 +2416,41 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (m_chain.UndoSteps() == 0) {
             return fail("UNDO_UNAVAILABLE", "No observed tip to undo; re-observe verified chain facts or import a known-correct recovery manifest");
         }
-        m_chain.DisconnectTip();
-        result = m_chain.Snapshot(bounty_id);
-        UniValue payload(UniValue::VOBJ);
-        payload.pushKV("corrective", true);
-        payload.pushKV("silent_delete", false);
-        result.pushKV("reorg", true);
-        result.pushKV("event", Event("REORG", bounty_id, payload));
-        return ok();
+        // Unlike a new observation, an undo cannot safely be applied twice after IO.
+        BountyChainIndex previous_chain = m_chain;
+        const uint64_t previous_seq = m_seq;
+        const size_t previous_events = m_events.size();
+        bool rollback_needed{true};
+        const auto rollback = [&] {
+            if (!rollback_needed) return;
+            rollback_needed = false;
+            m_chain = std::move(previous_chain);
+            m_seq = previous_seq;
+            m_events.resize(previous_events);
+            result.setNull();
+        };
+        try {
+            m_chain.DisconnectTip();
+            result = m_chain.Snapshot(bounty_id);
+            UniValue payload(UniValue::VOBJ);
+            payload.pushKV("corrective", true);
+            payload.pushKV("silent_delete", false);
+            const UniValue event = MakeBountyEvent("REORG", bounty_id, payload, m_seq, m_epoch);
+            m_events.push_back(event);
+            result.pushKV("reorg", true);
+            result.pushKV("event", event);
+            if (!PersistLocked(err)) {
+                rollback();
+                return fail("IO", err);
+            }
+            rollback_needed = false;
+            Remember(method, idem, result);
+            PublishBountyEvent(event);
+            return true;
+        } catch (...) {
+            rollback();
+            throw;
+        }
     }
 
     if (method == "exportbountyrecovery") {
