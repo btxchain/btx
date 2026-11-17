@@ -183,7 +183,12 @@ def _third_party_roots(info: dict) -> dict[str, Path]:
     roots: dict[str, Path] = {}
     for name, file in info["modules"].items():
         path = Path(file)
-        if path == stdlib or stdlib in path.parents or dynload in path.parents:
+        if path == stdlib or path == dynload or dynload in path.parents:
+            continue
+        # Prefix installs put third-party packages below stdlib, but the
+        # stdlib copy deliberately excludes these two package directories.
+        if (stdlib in path.parents
+                and path.relative_to(stdlib).parts[0] not in ("site-packages", "dist-packages")):
             continue
         top = name.split(".")[0]
         top_file = Path(info["modules"].get(top, file))
