@@ -85,6 +85,13 @@ class Host:
             require(type(raw) is str and len(raw)<=4_194_304,'RPC_RESPONSE_LIMIT','Native result exceeds bound')
             return json.loads(raw,parse_float=Decimal)
         except SwapError:raise
+        except LookupError as e:
+            # The embedded bridge uses this exact token for a not-found RPC.
+            # Any other LookupError stays a failure so a missing reply is not
+            # treated as an absent transaction and broadcast again.
+            if type(e) is LookupError and str(e)=='native-absent':
+                raise SwapError('CHAIN_RPC','Native object is absent') from e
+            raise SwapError('NATIVE_RPC','Native chain/wallet operation failed; inspect the node status') from e
         except Exception as e:raise SwapError('NATIVE_RPC','Native chain/wallet operation failed; inspect the node status') from e
     def _bitcoin(self,rpc,policy=None):
         policy=policy or {};info=rpc('getblockchaininfo')

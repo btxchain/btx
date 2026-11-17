@@ -2,6 +2,7 @@
 #include <bitcoin-build-config.h>
 
 #include <swapnet/node.h>
+#include <swapnet/embed.h>
 #include <swapnet/runtime.h>
 #include <chainparams.h>
 #include <clientversion.h>
@@ -63,6 +64,27 @@ std::string RequestWallet(const JSONRPCRequest& r) {
         } else out+=encoded[i];
     } return out;
 }
+bool NativeObjectAbsent(const UniValue& error) {
+    // Only the fixed not-found texts. A txindex that is still syncing uses a
+    // different sentence and must stay a failure, or a confirmed transaction
+    // would be broadcast again. The message itself is not returned to Python.
+    if (!error.isObject() || !error.exists("code") || !error["code"].isNum()) return false;
+    if (error["code"].getInt<int>() != RPC_INVALID_ADDRESS_OR_KEY) return false;
+    if (!error.exists("message") || !error["message"].isStr()) return false;
+    const std::string& message = error["message"].get_str();
+    static constexpr const char* kPrefixes[] = {
+        "Transaction not in mempool",
+        "Invalid or non-wallet transaction id",
+        "No such mempool or blockchain transaction",
+        "No such mempool transaction. Use -txindex",
+        "No such transaction found in the provided block",
+    };
+    for (const char* prefix : kPrefixes) {
+        const std::size_t n = std::char_traits<char>::length(prefix);
+        if (message.size() >= n && message.compare(0, n, prefix) == 0) return true;
+    }
+    return false;
+}
 const std::set<std::string> NATIVE_METHODS={
  "getblockchaininfo","getblockhash","getblockcount","getbestblockhash","getblockheader","getblock",
  "getrawtransaction","gettxout","scantxoutset","getmempoolentry","gettxspendingprevout","getdescriptorinfo","deriveaddresses","validateaddress",
@@ -80,14 +102,19 @@ std::string CoreCall(node::NodeContext& node,const std::string& wallet,const std
     } else if (method=="listwallets") r.m_wallet_restriction.clear();
     if (!r.params.read(params)||!r.params.isArray()) throw std::runtime_error("Invalid native parameters");
     UniValue result;
-    if (method=="_swapnet_import_htlc") {
-        WalletBridge bridge; {std::lock_guard<std::mutex> lock(g_mutex); bridge=g_wallet_bridge;}
-        if (!bridge||!node.wallet_loader) throw std::runtime_error("Wallet integration is unavailable");
-        // Wallet RPCs require WalletContext. The public table swaps it in;
-        // this internal bridge does not go through that table.
-        node.wallet_loader->assignContextHACK(r.context);
-        result=bridge(r);
-    } else result=tableRPC.execute(r);
+    try {
+        if (method=="_swapnet_import_htlc") {
+            WalletBridge bridge; {std::lock_guard<std::mutex> lock(g_mutex); bridge=g_wallet_bridge;}
+            if (!bridge||!node.wallet_loader) throw std::runtime_error("Wallet integration is unavailable");
+            // Wallet RPCs require WalletContext. The public table swaps it in;
+            // this internal bridge does not go through that table.
+            node.wallet_loader->assignContextHACK(r.context);
+            result=bridge(r);
+        } else result=tableRPC.execute(r);
+    } catch (const UniValue& error) {
+        if (NativeObjectAbsent(error)) throw NativeAbsent();
+        throw;
+    }
     auto text=result.write(); if(text.size()>4*1024*1024) throw std::runtime_error("Native result exceeds bound");
     return text;
 }
