@@ -736,6 +736,13 @@ bool ModelCatalog::LoadLocked(std::string& err)
                       (e.seeded ? AdmissionLevel::SEEDING : AdmissionLevel::STRUCTURE_VERIFIED);
         if (o.exists("bytes_verified")) e.bytes_verified = o["bytes_verified"].get_bool();
         else e.bytes_verified = e.seeded || e.pinned || AdmissionImpliesBytesVerified(e.admission);
+        if (e.incomplete) {
+            // A partial copy stays one after a restart: the levels above count
+            // as verified bytes for the serve route.
+            e.admission = AdmissionLevel::FETCHING;
+            e.bytes_verified = false;
+            e.seeded = false;
+        }
         if (e.pinned) {
             std::string pin_err;
             m_store.Pin(e.model_id, pin_err);
@@ -884,12 +891,72 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     std::vector<unsigned char> aenc;
     if (!EncodeArtifactCore(ac, aenc, err)) return false;
     const Digest48 artifact_id = ArtifactCoreId(aenc);
+    // A fetch that did not finish (getmodel stopped, importbtxpackage) leaves an
+    // incomplete entry for this model, with or without some of its pieces. This
+    // import has every byte verified, so it completes that entry. Before, the
+    // catalog got a second entry with the same model id, or kept the partial
+    // pieces and answered as if the files had been imported.
+    CatalogEntry* partial = nullptr;
+    for (auto& m : m_models) {
+        if (m.incomplete && (m.model_id == model_id || m.artifact_id == artifact_id)) {
+            partial = &m;
+            break;
+        }
+    }
+    if (partial) {
+        for (const auto& m : m_models) {
+            if (!m.incomplete && (m.artifact_id == artifact_id || m.artifact_id == partial->artifact_id)) {
+                partial = nullptr;
+                break;
+            }
+        }
+    }
+    if (partial) {
+        if (m_active_artifacts.count(partial->artifact_id) || m_active_artifacts.count(artifact_id)) {
+            err = "a transfer of this model is running";
+            return false;
+        }
+        for (const Digest48& id : {partial->artifact_id, artifact_id}) {
+            if (!m_store.RemoveArtifact(id, err)) return false;
+            DropPieceTreeCache(id);
+        }
+        if (partial->artifact_id != artifact_id) m_store.Unpin(partial->artifact_id);
+    }
     if (!m_store.RenameArtifact(staging, artifact_id, err)) {
         if (err != "destination artifact exists") return false;
+        // Prefer the complete entry: a catalog written before ImportPath
+        // completed partial entries can hold an incomplete duplicate of it, in
+        // front of it. That duplicate is dropped (quota eviction erases every
+        // entry of a model id, so it would take the complete one along).
+        CatalogEntry* found = nullptr;
         for (auto& m : m_models) {
             if (m.artifact_id != artifact_id) continue;
+            if (!found || (found->incomplete && !m.incomplete)) found = &m;
+        }
+        std::vector<CatalogEntry> dropped;
+        if (found && !found->incomplete) {
+            const Digest48 keep_model = found->model_id;
+            std::vector<CatalogEntry> kept;
+            for (auto& m : m_models) {
+                if (m.incomplete && m.model_id == keep_model && m.artifact_id == artifact_id) {
+                    dropped.push_back(std::move(m));
+                } else {
+                    kept.push_back(std::move(m));
+                }
+            }
+            m_models = std::move(kept);
+            found = nullptr;
+            for (auto& m : m_models) {
+                if (m.artifact_id == artifact_id && !m.incomplete) {
+                    found = &m;
+                    break;
+                }
+            }
+        }
+        if (found) {
+            CatalogEntry& m = *found;
             const bool promote_pin = pin && !m.pinned;
-            if (m.source_path != path || promote_pin) {
+            if (m.source_path != path || promote_pin || !dropped.empty()) {
                 const auto previous_source_path = m.source_path;
                 const bool previous_pin = m.pinned;
                 const auto previous_admission = m.admission;
@@ -907,6 +974,7 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
                     m.pinned = previous_pin;
                     m.admission = previous_admission;
                     m.bytes_verified = previous_verification;
+                    for (auto& d : dropped) m_models.push_back(std::move(d));
                     return false;
                 }
                 if (promote_pin) {
@@ -971,6 +1039,32 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     out.completed_at = out.imported_at;
     out.last_access_at = out.imported_at;
     out.incomplete = false;
+    if (partial) {
+        const CatalogEntry before = *partial;
+        out.pinned = pin || before.pinned;
+        out.admission = out.pinned ? AdmissionLevel::PINNED : AdmissionLevel::STRUCTURE_VERIFIED;
+        out.bytes_verified = out.pinned;
+        if (before.imported_at) out.imported_at = before.imported_at;
+        if (before.artifact_id == artifact_id) {
+            out.useful_bytes_served = before.useful_bytes_served;
+            out.useful_bytes_received = before.useful_bytes_received;
+            out.last_served_at = before.last_served_at;
+        }
+        DemandSeedLocked(out);
+        *partial = out;
+        if (!PersistLocked(err)) {
+            *partial = before;
+            std::string rollback_err;
+            if (m_store.RenameArtifact(artifact_id, staging, rollback_err)) commit_staging = false;
+            return false;
+        }
+        if (out.pinned) {
+            std::string pin_err;
+            m_store.Pin(model_id, pin_err);
+            m_store.Pin(artifact_id, pin_err);
+        }
+        return true;
+    }
     DemandSeedLocked(out);
     m_models.push_back(out);
     if (!PersistLocked(err)) {
@@ -1028,16 +1122,21 @@ bool ModelCatalog::PinModel(const Digest48& model_id, bool on, std::string& err)
     for (auto& m : m_models) {
         if (m.model_id == model_id || m.artifact_id == model_id) {
             m.pinned = on;
-            if (on) {
+            if (m.incomplete) {
+                // PINNED counts as verified bytes; a partial copy keeps FETCHING
+                // and its pin.
+                m.admission = AdmissionLevel::FETCHING;
+            } else if (on) {
                 m.admission = AdmissionLevel::PINNED;
+            }
+            if (on) {
                 std::string pin_err;
                 m_store.Pin(m.model_id, pin_err);
                 m_store.Pin(m.artifact_id, pin_err);
             } else {
                 m_store.Unpin(m.model_id);
                 m_store.Unpin(m.artifact_id);
-                if (m.seeded) m.admission = AdmissionLevel::SEEDING;
-                else m.admission = AdmissionLevel::STRUCTURE_VERIFIED;
+                if (!m.incomplete) m.admission = m.seeded ? AdmissionLevel::SEEDING : AdmissionLevel::STRUCTURE_VERIFIED;
             }
             return PersistLocked(err);
         }
@@ -1672,11 +1771,31 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
     }
     for (auto& existing : m_models) {
         if (existing.model_id == e.model_id) {
-            const bool pinned = existing.pinned;
-            const int64_t imported = existing.imported_at;
+            // A download of a model the catalog already lists (a repair, or the
+            // end of a partial fetch) replaces its files, not what this node
+            // recorded about it: the pin, the operator's label, and for the same
+            // artifact its source and its transfer counts (the give-back ratio
+            // reads them).
+            e.pinned = existing.pinned;
+            e.imported_at = existing.imported_at ? existing.imported_at : GetTime();
+            e.last_access_at = existing.last_access_at;
+            if (!existing.label.empty()) e.label = existing.label;
+            if (existing.artifact_id == e.artifact_id) {
+                e.source_path = existing.source_path;
+                e.observed_sources = existing.observed_sources;
+                e.last_served_at = existing.last_served_at;
+                e.useful_bytes_served = existing.useful_bytes_served;
+                e.useful_bytes_received = existing.useful_bytes_received;
+                if (existing.seeding_started_at) e.seeding_started_at = existing.seeding_started_at;
+            }
+            if (e.pinned) {
+                if (complete) e.admission = AdmissionLevel::PINNED;
+                std::string pin_err;
+                m_store.Pin(e.model_id, pin_err);
+                m_store.Pin(e.artifact_id, pin_err);
+                if (existing.artifact_id != e.artifact_id) m_store.Unpin(existing.artifact_id);
+            }
             existing = e;
-            existing.pinned = pinned;
-            existing.imported_at = imported ? imported : GetTime();
             return PersistLocked(err);
         }
     }
