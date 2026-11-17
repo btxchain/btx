@@ -105,6 +105,18 @@ class Journal:
         with self.store.lock:
             rows=self.store.db.execute('SELECT id,recipient,command,body,attempts FROM sn_outbox WHERE acknowledged=0 AND next_try<=? ORDER BY next_try LIMIT ?',(now,limit)).fetchall()
         return [(r[0],r[1],r[2],loads(r[3]),r[4]) for r in rows]
+    def has_proposal(self,sid,recipient,proposal,now):
+        """An exact queued proposal, including acknowledged/not-due rows."""
+        hex32(sid);found=False
+        with self.store.lock:
+            rows=self.store.db.execute("SELECT recipient,body FROM sn_outbox WHERE command='swterms'")
+            for queued_recipient,raw in rows:
+                body=loads(raw)['body']
+                if body['kind']!='proposal' or body['swap_id']!=sid:continue
+                require(queued_recipient==recipient and body['recipient']==recipient and body['payload']==proposal,
+                        'RECOVERY_CONFLICT','Queued proposal differs from saved intent')
+                if body['expires_at']>now:found=True
+        return found
     def sent(self,mid,now):
         with self.store.transaction() as db:
             row=db.execute('SELECT attempts FROM sn_outbox WHERE id=?',(mid,)).fetchone()

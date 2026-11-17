@@ -10,10 +10,10 @@ import secrets
 import time
 from .authorization import Principal,Grant
 from .assets import Asset
-from .canonical import atoms,hex32,hashlock,digest,exact_fields,integer
+from .canonical import atoms,hex32,hashlock,digest,exact_fields,integer,loads
 from .errors import require,SwapError,RPCConnectionRefused,RPCTransportTimeout
 from .machine import Session,decide
-from .policy import SafetyPolicy,Deadline
+from .policy import SafetyPolicy,Deadline,Mandate
 from .quote import Quote,SignedQuote
 from .terms import Agreement,LegTerms
 
@@ -80,9 +80,13 @@ class Coordinator:
         SignedQuote(q,envelope['signature']).verify(self.identity.verify,q.network,requester,now)
         require(q.network==self.identity.network,'NETWORK','Quote targets a different BTX network')
         sid=digest('BTX/SWAPNET/SWAP/2',{'quote_id':q.id,'initiator':identity})
-        try:return self.get(ctx,sid)
+        try:_,existing=self._owned(ctx,sid)
         except SwapError as e:
             if e.code!='NOT_FOUND':raise
+        else:
+            self._retry_proposal(sid,existing,(rfq,mandate_id,max_local_fee_atoms,refund_fee_atoms,
+                                             claim_fee_atoms or q.max_receive_network_fee_atoms))
+            return self._safe_view(sid,existing)
         self.journal.ensure_capacity()
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset)
         a.ready();b.ready()
@@ -110,6 +114,49 @@ class Coordinator:
         self._save_new(sid,s,ctx,q,mandate_id,max_local_fee_atoms)
         self.emit(q.provider,'proposal',sid,proposal)
         return self._safe_view(sid,s)
+    def _retry_proposal(self,sid,s,requested=None):
+        if s['role']!='initiator' or s['stage']!='proposed':return
+        p=s['proposal'];now=self.now()
+        if self.journal.has_proposal(sid,s['peer'],p,now):return
+        require(not self.journal.setting('restored_session:'+sid,False) and not s.get('recovery_facts'),
+                'RECOVERY_READ_ONLY','Restored initial intent requires separate recovery')
+        require(not any(s.get(k) for k in ('agreement','grant_id','fund_op','refund_op','claim_op',
+                    'funding_prepared','funding_broadcast','recovery_ready','secret_exposed','refs'))
+                and not self.journal.operations(sid),
+                'RECOVERY_CONFLICT','Initial proposal has financial recovery state')
+        q=Quote.parse(s['quote']['quote']);rfq=p['rfq']
+        requester=digest('BTX/SWAPNET/REQUESTER/2',{'identity':self.identity.address(),'nonce':rfq['nonce']})
+        SignedQuote(q,s['quote']['signature']).verify(self.identity.verify,self.identity.network,requester,now)
+        require(q.id==s['quote_id'] and q.provider==s['peer'] and p['quote']==s['quote']
+                and (rfq['network'],rfq['sell_asset'],rfq['buy_asset'],rfq['sell_atoms'])==
+                    (q.network,q.sell_asset,q.buy_asset,q.sell_atoms),
+                'RECOVERY_CONFLICT','Saved proposal no longer matches its quote')
+        with self.journal.store.lock:
+            r=self.journal.store.db.execute(
+                'SELECT r.principal,r.quote_id,r.cost,r.state,r.mandate_id,m.body,m.revoked,m.held,m.used '
+                'FROM reservations r JOIN mandates m ON m.id=r.mandate_id WHERE r.id=?',
+                (s['reservation_id'],)).fetchone()
+            grant=self.journal.store.db.execute('SELECT 1 FROM sn_grants WHERE swap_id=?',(sid,)).fetchone()
+        require(r and r[0]==s['principal'] and r[1]==q.id and r[3]=='held' and not grant,
+                'RESERVATION','Original held reservation is unavailable')
+        if requested is not None:
+            require(requested==(rfq,r[4],s['max_local_fee_atoms'],p['long_refund_fee_atoms'],p['short_claim_fee_atoms']),
+                    'IDEMPOTENCY_CONFLICT','Retry cannot replace the original proposal parameters')
+        mandate=Mandate(**loads(r[5]));cost=atoms(q.sell_atoms)+atoms(s['max_local_fee_atoms'])
+        require(mandate.id==r[4] and mandate.principal==s['principal'] and mandate.asset==q.sell_asset,
+                'MANDATE_SCOPE','Original mandate scope changed')
+        require(not r[6] and self.now()<mandate.expires_at,'MANDATE_EXPIRED','Original mandate expired or revoked')
+        require(atoms(r[2])==cost and atoms(r[7])>=cost
+                and atoms(r[7])+atoms(r[8])<=atoms(mandate.max_total_atoms)
+                and atoms(q.sell_atoms)<=atoms(mandate.max_trade_atoms)
+                and atoms(s['max_local_fee_atoms'])<=atoms(mandate.max_fee_atoms),
+                'BUDGET_LIMIT','Original reservation no longer covers the proposal')
+        a,b=self._driver(q.sell_asset),self._driver(q.buy_asset);a.ready();b.ready()
+        self.policy.validate_deadlines(Deadline(**p['long_deadline']),Deadline(**p['short_deadline']),
+                                       a.clock(),b.clock(),self.now())
+        require(q.live(self.now()),'QUOTE_EXPIRED','Original quote expired during retry')
+        require(self.now()<mandate.expires_at,'MANDATE_EXPIRED','Original mandate expired during retry')
+        self.emit(s['peer'],'proposal',sid,p)
     def receive_proposal(self,sender,sid,p,market):
         exact_fields(p,{'quote','rfq','hashlock','nonce','long_refund_key','long_refund_payout',
                         'short_claim_key','short_claim_payout','long_deadline','short_deadline',
@@ -580,7 +627,10 @@ class Coordinator:
                 current['last_error']={'code':e.code,'message':e.message};current['updated_at']=self.now()
                 self._save(sid,current,rev)
     def resume(self,ctx,sid):
-        self._owned(ctx,sid);self.tick_one(sid);return self.get(ctx,sid)
+        self._owned(ctx,sid);self.tick_one(sid);_,s=self._owned(ctx,sid)
+        if s['stage']=='proposed' and Quote.parse(s['quote']['quote']).live(self.now()):
+            self._retry_proposal(sid,s)
+        return self._safe_view(sid,s)
     def request_refund(self,ctx,sid):
         _,s=self._owned(ctx,sid)
         self._require_effect(sid,s)
