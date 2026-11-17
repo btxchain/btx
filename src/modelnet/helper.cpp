@@ -5178,8 +5178,9 @@ static Digest48 ResolveUserIdLocked(const std::string& s, std::string& err)
         return id;
     }
     err.clear();
-    if (const auto* rec = g_search_idx.FindByAlias(s)) return rec->model_id;
-    err = "unknown id or alias";
+    bool ambiguous = false;
+    if (const auto* rec = g_search_idx.FindByAlias(s, ConnNowMs(), &ambiguous)) return rec->model_id;
+    err = ambiguous ? "alias names more than one model; use the model id" : "unknown id or alias";
     return {};
 }
 

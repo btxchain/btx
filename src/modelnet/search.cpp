@@ -1173,19 +1173,54 @@ const ModelSearchRecord* SearchIndex::Get(const Digest48& model_id) const
     return &it->second;
 }
 
-const ModelSearchRecord* SearchIndex::FindByAlias(const std::string& alias) const
+const ModelSearchRecord* SearchIndex::FindByAlias(const std::string& alias, int64_t now_ms, bool* ambiguous) const
 {
+    if (ambiguous) *ambiguous = false;
     if (alias.empty()) return nullptr;
     const std::string needle = ToLower(alias);
-    const ModelSearchRecord* ci = nullptr;
+    // Any key may sign a record that names any alias, and the index is ordered
+    // by model id, so the first match used to be whichever record sorted first.
+    // This node's own records answer first (also one the operator hid), then
+    // a peer record search would show (live, not hidden, not muted). Two such
+    // peer records that name the alias resolve to neither: a peer can make a
+    // peer alias ambiguous, but not take it.
+    const ModelSearchRecord* found[2][2]{}; // [own][exact]
+    bool clash[2]{false, false};            // peer records, [exact]
     for (const auto& kv : m_by_model) {
-        if (kv.second.tombstone) continue;
-        for (const auto& a : kv.second.aliases) {
-            if (a == alias) return &kv.second;
-            if (!ci && ToLower(a) == needle) ci = &kv.second;
+        const ModelSearchRecord& r = kv.second;
+        if (r.tombstone) continue;
+        if (now_ms > 0 && r.expires_at > 0 && r.expires_at <= now_ms) continue;
+        if (!r.local_catalog &&
+            (m_hidden.count(r.model_id.Hex()) || m_muted_publishers.count(r.publisher_identity.Hex()))) {
+            continue;
+        }
+        int exact = -1;
+        for (const auto& a : r.aliases) {
+            if (a == alias) {
+                exact = 1;
+                break;
+            }
+            if (ToLower(a) == needle) exact = 0;
+        }
+        if (exact < 0) continue;
+        const int own = r.local_catalog ? 1 : 0;
+        if (!found[own][exact]) {
+            found[own][exact] = &r;
+        } else if (!own) {
+            clash[exact] = true;
         }
     }
-    return ci;
+    if (found[1][1]) return found[1][1];
+    if (found[1][0]) return found[1][0];
+    for (const int exact : {1, 0}) {
+        if (!found[0][exact]) continue;
+        if (clash[exact]) {
+            if (ambiguous) *ambiguous = true;
+            return nullptr;
+        }
+        return found[0][exact];
+    }
+    return nullptr;
 }
 
 std::vector<ModelSearchRecord> SearchIndex::List(int64_t updated_after, const std::string& cursor, int limit) const

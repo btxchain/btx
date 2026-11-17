@@ -1072,6 +1072,64 @@ BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
     BOOST_CHECK(loaded.Get(signed_rec.model_id)->signed_ok);
 }
 
+// FindByAlias returned the first record in model id order that named the
+// alias, whoever signed it, also a hidden or muted one: a peer could take an
+// alias this node's own model uses.
+BOOST_AUTO_TEST_CASE(alias_resolves_own_records_first_and_refuses_a_clash)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> own_pk, own_sk, a_pk, a_sk, b_pk, b_sk;
+    BOOST_REQUIRE(GenerateMlDsa44(own_pk, own_sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(a_pk, a_sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(b_pk, b_sk, err));
+    SearchIndex idx;
+    const auto put = [&](uint8_t tag, const std::string& alias, const std::vector<unsigned char>& pk,
+                         std::vector<unsigned char>& sk, bool own) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = tag;
+        r.artifact_id.data[0] = static_cast<unsigned char>(tag + 1);
+        r.canonical_name = "alias" + std::to_string(tag);
+        r.display_name = r.canonical_name;
+        r.aliases = {alias};
+        r.pubkey = pk;
+        r.expires_at = 1'000'000;
+        BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        r.local_catalog = own;
+        BOOST_REQUIRE_MESSAGE(idx.Put(r, 1, err), err);
+        return r;
+    };
+
+    put(0x10, "team-model", a_pk, a_sk, false);
+    const auto own = put(0x20, "team-model", own_pk, own_sk, true);
+    const ModelSearchRecord* hit = idx.FindByAlias("team-model", 2);
+    BOOST_REQUIRE(hit != nullptr);
+    BOOST_CHECK(hit->model_id == own.model_id);
+    // The operator can still name an own model it hid (unhidesearchmodel).
+    idx.Hide(own.model_id, true);
+    hit = idx.FindByAlias("team-model", 2);
+    BOOST_REQUIRE(hit != nullptr);
+    BOOST_CHECK(hit->model_id == own.model_id);
+    idx.Hide(own.model_id, false);
+
+    put(0x30, "two-keys", a_pk, a_sk, false);
+    put(0x31, "two-keys", b_pk, b_sk, false);
+    bool ambiguous = false;
+    BOOST_CHECK(idx.FindByAlias("two-keys", 2, &ambiguous) == nullptr);
+    BOOST_CHECK(ambiguous);
+
+    const auto solo = put(0x40, "solo", b_pk, b_sk, false);
+    BOOST_REQUIRE(idx.FindByAlias("solo", 2) != nullptr);
+    idx.Hide(solo.model_id, true);
+    BOOST_CHECK(idx.FindByAlias("solo", 2) == nullptr);
+    idx.Hide(solo.model_id, false);
+    idx.MutePublisher(solo.publisher_identity.Hex(), true);
+    BOOST_CHECK(idx.FindByAlias("solo", 2) == nullptr);
+    idx.MutePublisher(solo.publisher_identity.Hex(), false);
+    BOOST_CHECK(idx.FindByAlias("solo", 2) != nullptr);
+    BOOST_CHECK(idx.FindByAlias("solo", 1'000'000) == nullptr);
+}
+
 BOOST_AUTO_TEST_CASE(search_cap_and_local_records)
 {
     // The index cap limits what peers can add; this node's own records still

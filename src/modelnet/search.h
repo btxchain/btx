@@ -306,7 +306,9 @@ public:
              const std::string& transport_endpoint = {});
     bool Tombstone(const Digest48& model_id, uint64_t seq, int64_t now_ms, std::string& err);
     const ModelSearchRecord* Get(const Digest48& model_id) const;
-    const ModelSearchRecord* FindByAlias(const std::string& alias) const;
+    //! Own records first, then a live, shown peer record; nullptr (and
+    //! *ambiguous) when two peer records name the alias.
+    const ModelSearchRecord* FindByAlias(const std::string& alias, int64_t now_ms = 0, bool* ambiguous = nullptr) const;
     std::vector<ModelSearchRecord> List(int64_t updated_after, const std::string& cursor, int limit) const;
     std::vector<SearchHit> Search(const SearchQuery& q, int64_t now_ms) const;
     void Hide(const Digest48& model_id, bool on);
