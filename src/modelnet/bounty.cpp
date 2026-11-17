@@ -2098,8 +2098,22 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             !m_bounties.count(challenge["bounty_id"].get_str())) {
             return fail("NOT_FOUND", "bounty");
         }
+        // Challenges are saved with the store, which every bounty write
+        // writes again: a challenge has a size bound, and a bounty takes at
+        // most CHALLENGES_MAX of them.
+        constexpr size_t CHALLENGES_MAX{64};
+        constexpr size_t CHALLENGE_BYTES_MAX{16384};
+        if (challenge.write().size() > CHALLENGE_BYTES_MAX) return fail("INVALID_PARAMETER", "challenge too large");
         SignedEnvelope env;
         if (!sign_payload("Challenge", challenge, env)) return fail("REJECTED", err);
+        if (!m_challenges.count(env.record_id.Hex())) {
+            size_t kept{0};
+            for (const auto& kv : m_challenges) {
+                const UniValue& payload = kv.second.body["payload"];
+                if (payload["bounty_id"].isStr() && payload["bounty_id"].get_str() == challenge["bounty_id"].get_str()) ++kept;
+            }
+            if (kept >= CHALLENGES_MAX) return fail("REJECTED", "too many challenges for this bounty");
+        }
         m_challenges[env.record_id.Hex()] = env;
         result = EnvelopeToJson(env);
         result.pushKV("challenge_id", env.record_id.Hex());
