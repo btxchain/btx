@@ -514,6 +514,13 @@ bool MandateFromJson(const UniValue& src, SubscriptionMandate& m, std::string& e
     m.publisher_id = StrField(o, "publisher_id");
     if (!ReadStringList(o, "allowed_kinds", m.allowed_kinds, err, true)) return false;
     if (!ReadStringList(o, "allowed_actions", m.allowed_actions, err, true)) return false;
+    // A restriction of the wrong type must not read as no restriction.
+    for (const char* k : {"collection_id", "query_filter"}) {
+        if (o.exists(k) && !o[k].isNull() && !o[k].isStr()) {
+            err = k;
+            return false;
+        }
+    }
     m.collection_id = StrField(o, "collection_id");
     m.query_filter = StrField(o, "query_filter");
     if (!o.exists("per_action_principal_limit_atoms") || !o.exists("total_principal_limit_atoms") ||
@@ -544,6 +551,10 @@ bool MandateFromJson(const UniValue& src, SubscriptionMandate& m, std::string& e
     if (o.exists("minimum_confirmations")) {
         if (!ReadCount(o, "minimum_confirmations", minc, err)) return false;
     } else {
+        err = "minimum_confirmations";
+        return false;
+    }
+    if (minc < 0 || minc > std::numeric_limits<int>::max()) {
         err = "minimum_confirmations";
         return false;
     }
@@ -719,7 +730,9 @@ bool Evaluate(const SubscriptionEvent& event, const SignedTerms& terms,
     }
     if (!mandate.collection_id.empty()) {
         const std::string coll = !event.collection_id.empty() ? event.collection_id : terms.collection_id;
-        if (coll != mandate.collection_id) {
+        // As for object_kind: the terms, when they name a collection, must
+        // name the same one as the event.
+        if (coll != mandate.collection_id || (!terms.collection_id.empty() && terms.collection_id != coll)) {
             err = "collection_id";
             return false;
         }
