@@ -2191,6 +2191,12 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (withdrawn(submission_id) || (!commitment_id.empty() && withdrawn(commitment_id))) {
             return fail("REJECTED", "submission withdrawn");
         }
+        // A commitment that was never revealed has nothing to award, and an
+        // award named by the commitment id counts its revealed submission too.
+        if (!sub->second["revealed"].isTrue()) return fail("REJECTED", "submission not revealed");
+        if (sub->second["submission_id"].isStr() && withdrawn(sub->second["submission_id"].get_str())) {
+            return fail("REJECTED", "submission withdrawn");
+        }
         const UniValue mode = a.exists("mode") ? a["mode"] : UniValue("PUBLIC_PAYOUT");
         if (!mode.isStr() || (mode.get_str() != "PUBLIC_PAYOUT" && mode.get_str() != "STAGED_RELEASE")) {
             return fail("INVALID_PARAMETER", "mode must be PUBLIC_PAYOUT or STAGED_RELEASE");
@@ -2251,6 +2257,26 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         }
         if (decision == "APPROVE" && it->second.exists("rejected") && it->second["rejected"].isTrue()) {
             return fail("REJECTED", "award was rejected");
+        }
+        if (decision == "APPROVE") {
+            // The submission, or the commitment it revealed, may have been
+            // withdrawn since the award was proposed.
+            const auto withdrawn = [&](const std::string& id) {
+                const auto w = m_submissions.find(id);
+                return w == m_submissions.end() || w->second["withdrawn"].isTrue();
+            };
+            const UniValue& proposal = it->second["proposal"];
+            const std::string sid = proposal["submission_id"].isStr() ? proposal["submission_id"].get_str() : std::string{};
+            const auto sit = m_submissions.find(sid);
+            const std::string cid = sit != m_submissions.end() && sit->second["commitment_id"].isStr()
+                                        ? sit->second["commitment_id"].get_str()
+                                        : std::string{};
+            const std::string rid = sit != m_submissions.end() && sit->second["submission_id"].isStr()
+                                        ? sit->second["submission_id"].get_str()
+                                        : std::string{};
+            if (withdrawn(sid) || (!cid.empty() && withdrawn(cid)) || (!rid.empty() && withdrawn(rid))) {
+                return fail("REJECTED", "submission withdrawn");
+            }
         }
         if (decision == "REJECT") {
             it->second.pushKV("rejected", true);
