@@ -758,19 +758,67 @@ UniValue AppliedFiltersJson(const SearchFilters& f)
     return a;
 }
 
+namespace {
+struct PieceSourceCounts {
+    int min_sources{0};
+    uint32_t with_0{0};
+    uint32_t with_1{0};
+    uint32_t with_2{0};
+};
+
+// Pieces of the model by how many providers cover them. A provider counts once
+// for a piece, however many of its ranges cover it. The ranges come from peer
+// records and may span far past the model, so each one is cut to the model's
+// pieces and the work follows the number of ranges, not their span.
+PieceSourceCounts CountPieceSources(uint32_t pieces_total, const std::vector<std::vector<PieceRange>>& providers)
+{
+    std::vector<std::pair<uint32_t, int>> edges;
+    std::vector<std::pair<uint32_t, uint32_t>> spans;
+    for (const auto& ranges : providers) {
+        spans.clear();
+        for (const auto& r : ranges) {
+            // As RangeCovers: an empty or wrapping range covers nothing.
+            if (r.count == 0 || r.first >= pieces_total ||
+                r.first > std::numeric_limits<uint32_t>::max() - r.count) {
+                continue;
+            }
+            spans.emplace_back(r.first, std::min(r.first + r.count, pieces_total));
+        }
+        std::sort(spans.begin(), spans.end());
+        for (size_t i = 0; i < spans.size();) {
+            const uint32_t begin = spans[i].first;
+            uint32_t end = spans[i].second;
+            for (++i; i < spans.size() && spans[i].first <= end; ++i) end = std::max(end, spans[i].second);
+            edges.emplace_back(begin, 1);
+            edges.emplace_back(end, -1);
+        }
+    }
+    edges.emplace_back(pieces_total, 0);
+    std::sort(edges.begin(), edges.end());
+    PieceSourceCounts out;
+    out.min_sources = std::numeric_limits<int>::max();
+    uint32_t at = 0;
+    int sources = 0;
+    for (const auto& [index, step] : edges) {
+        if (index > at) {
+            const uint32_t pieces = index - at;
+            if (sources == 0) out.with_0 += pieces;
+            else if (sources == 1) out.with_1 += pieces;
+            else if (sources == 2) out.with_2 += pieces;
+            out.min_sources = std::min(out.min_sources, sources);
+            at = index;
+        }
+        sources += step;
+    }
+    if (pieces_total == 0) out.min_sources = 0;
+    return out;
+}
+} // namespace
+
 bool UnionCoversAll(uint32_t pieces_total, const std::vector<std::vector<PieceRange>>& providers)
 {
     if (pieces_total == 0) return true;
-    std::vector<uint8_t> have(pieces_total, 0);
-    for (const auto& ranges : providers) {
-        for (const auto& r : ranges) {
-            for (uint32_t i = 0; i < r.count; ++i) {
-                const uint32_t idx = r.first + i;
-                if (idx < pieces_total) have[idx] = 1;
-            }
-        }
-    }
-    return std::all_of(have.begin(), have.end(), [](uint8_t x) { return x != 0; });
+    return CountPieceSources(pieces_total, providers).with_0 == 0;
 }
 
 SwarmHealth ComputeSwarmHealth(uint32_t pieces_total, uint32_t pieces_local,
@@ -781,8 +829,6 @@ SwarmHealth ComputeSwarmHealth(uint32_t pieces_total, uint32_t pieces_local,
     h.pieces_local = pieces_local;
     std::set<std::string> ids;
     std::vector<std::vector<PieceRange>> ranges;
-    int min_src = pieces_total == 0 ? 0 : 1000000;
-    int z0 = 0, z1 = 0, z2 = 0;
     for (const auto& o : obs) {
         const std::string k = o.provider_id.empty() ? o.endpoint : o.provider_id;
         if (!ids.insert(k).second) continue;
@@ -794,31 +840,16 @@ SwarmHealth ComputeSwarmHealth(uint32_t pieces_total, uint32_t pieces_local,
         ranges.push_back(o.ranges);
     }
     if (pieces_total > 0) {
+        const PieceSourceCounts counts = CountPieceSources(pieces_total, ranges);
         h.reconstructable_known = true;
-        h.reconstructable = UnionCoversAll(pieces_total, ranges);
-        uint32_t missing = 0;
-        for (uint32_t i = 0; i < pieces_total; ++i) {
-            int src = 0;
-            for (const auto& ranges_i : ranges) {
-                for (const auto& r : ranges_i) {
-                    if (RangeCovers(r, i)) {
-                        ++src;
-                        break;
-                    }
-                }
-            }
-            if (src == 0) ++z0;
-            else if (src == 1) ++z1;
-            else if (src == 2) ++z2;
-            if (src < min_src) min_src = src;
-            if (src == 0) ++missing;
-        }
-        h.min_piece_sources = min_src == 1000000 ? 0 : min_src;
-        h.pieces_with_0_sources = z0;
-        h.pieces_with_1_source = z1;
-        h.pieces_with_2_sources = z2;
-        h.missing_piece_count = missing;
-        h.fragile = z1 > 0;
+        h.reconstructable = counts.with_0 == 0;
+        const auto as_int = [](uint32_t n) { return static_cast<int>(std::min<uint32_t>(n, std::numeric_limits<int>::max())); };
+        h.min_piece_sources = counts.min_sources;
+        h.pieces_with_0_sources = as_int(counts.with_0);
+        h.pieces_with_1_source = as_int(counts.with_1);
+        h.pieces_with_2_sources = as_int(counts.with_2);
+        h.missing_piece_count = counts.with_0;
+        h.fragile = counts.with_1 > 0;
         if (obs.empty()) h.klass = AvailabilityClass::UNKNOWN;
         else if (!h.reconstructable) h.klass = AvailabilityClass::DEGRADED;
         else if (h.fragile) h.klass = AvailabilityClass::FRAGILE;
