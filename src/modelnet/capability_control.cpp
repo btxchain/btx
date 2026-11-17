@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <poll.h>
@@ -26,8 +27,86 @@ namespace {
 
 std::mutex g_jobs_mu;
 std::map<std::string, CapabilityJob> g_jobs;
+
+//! Any caller makes a new plan with each planbtxcapability and
+//! resolvebtxcapability, and a new lock with each importbtxlock and
+//! planbtxcapabilityupdate whose lock differs; a lock holds the caller's whole
+//! lock object. Keep the newest plans and locks within a bound, oldest out
+//! first, and always the newest one.
+constexpr size_t CAPABILITY_PLANS_MAX{4096};
+constexpr size_t CAPABILITY_LOCKS_MAX{1024};
+constexpr size_t CAPABILITY_LOCK_BYTES_MAX{4 << 20};
+
 std::map<std::string, CapabilityPlan> g_plans;
-std::map<std::string, CapabilityLock> g_locks;
+std::deque<std::string> g_plan_order; //!< plan ids, oldest first
+
+//! A lock is kept as JSON text: as a UniValue, a lock object can take many
+//! times its text in memory.
+struct KeptLock {
+    std::string json;
+    Digest48 lock_id{};
+    Digest48 recipe_id{};
+    Digest48 package_core_id{};
+};
+std::map<std::string, KeptLock> g_locks;
+std::deque<std::string> g_lock_order; //!< lock ids, oldest first
+size_t g_lock_bytes{0};               //!< capacity of the kept lock texts
+
+void KeepPlanLocked(const CapabilityPlan& plan)
+{
+    if (const auto it = g_plans.find(plan.plan_id); it != g_plans.end()) {
+        it->second = plan;
+        return;
+    }
+    g_plan_order.push_back(plan.plan_id);
+    try {
+        g_plans.emplace(plan.plan_id, plan);
+    } catch (...) {
+        g_plan_order.pop_back();
+        throw;
+    }
+    while (g_plans.size() > CAPABILITY_PLANS_MAX && g_plan_order.size() > 1) {
+        g_plans.erase(g_plan_order.front());
+        g_plan_order.pop_front();
+    }
+}
+
+void KeepLockLocked(const CapabilityLock& lock)
+{
+    KeptLock kept;
+    kept.json = lock.json.write();
+    kept.json.shrink_to_fit();
+    kept.lock_id = lock.lock_id;
+    kept.recipe_id = lock.recipe_id;
+    kept.package_core_id = lock.package_core_id;
+    const size_t bytes = kept.json.capacity();
+    const std::string id = lock.lock_id.Hex();
+    // Some fields are left out of the lock_id, so the same id can come again
+    // with other contents. It then counts as the newest lock.
+    if (const auto old = g_locks.find(id); old != g_locks.end()) {
+        g_lock_bytes -= old->second.json.capacity();
+        g_locks.erase(old);
+        if (const auto pos = std::find(g_lock_order.begin(), g_lock_order.end(), id); pos != g_lock_order.end()) {
+            g_lock_order.erase(pos);
+        }
+    }
+    g_lock_order.push_back(id);
+    try {
+        g_locks.emplace(id, std::move(kept));
+    } catch (...) {
+        g_lock_order.pop_back();
+        throw;
+    }
+    g_lock_bytes += bytes;
+    while ((g_locks.size() > CAPABILITY_LOCKS_MAX || g_lock_bytes > CAPABILITY_LOCK_BYTES_MAX) &&
+           g_lock_order.size() > 1) {
+        if (const auto old = g_locks.find(g_lock_order.front()); old != g_locks.end()) {
+            g_lock_bytes -= old->second.json.capacity();
+            g_locks.erase(old);
+        }
+        g_lock_order.pop_front();
+    }
+}
 std::vector<UniValue> g_events;
 
 UniValue ObjectArg(const UniValue& params)
@@ -63,7 +142,7 @@ bool LookupCapabilityPlan(const std::string& plan_id, CapabilityPlan& out)
 void StoreCapabilityPlan(const CapabilityPlan& plan)
 {
     std::lock_guard<std::mutex> lockg(g_jobs_mu);
-    g_plans[plan.plan_id] = plan;
+    KeepPlanLocked(plan);
 }
 
 void StoreCapabilityJob(const CapabilityJob& job)
@@ -84,7 +163,7 @@ bool LookupCapabilityJob(const std::string& job_id, CapabilityJob& out)
 void StoreCapabilityLock(const CapabilityLock& lock)
 {
     std::lock_guard<std::mutex> lockg(g_jobs_mu);
-    g_locks[lock.lock_id.Hex()] = lock;
+    KeepLockLocked(lock);
 }
 
 bool LookupCapabilityLock(const std::string& lock_id, CapabilityLock& out)
@@ -92,7 +171,11 @@ bool LookupCapabilityLock(const std::string& lock_id, CapabilityLock& out)
     std::lock_guard<std::mutex> lockg(g_jobs_mu);
     auto it = g_locks.find(lock_id);
     if (it == g_locks.end()) return false;
-    out = it->second;
+    out = {};
+    if (!out.json.read(it->second.json)) return false;
+    out.lock_id = it->second.lock_id;
+    out.recipe_id = it->second.recipe_id;
+    out.package_core_id = it->second.package_core_id;
     return true;
 }
 
@@ -149,7 +232,7 @@ bool PlanCapability(const CapabilityRecipe& recipe, const CapabilityLock* lock, 
     }
     plan.json.pushKV("plan_digest48", plan.plan_digest.Hex());
     std::lock_guard<std::mutex> lockg(g_jobs_mu);
-    g_plans[plan.plan_id] = plan;
+    KeepPlanLocked(plan);
     return true;
 }
 
@@ -480,7 +563,7 @@ bool DispatchCapabilityRpc(ModelCatalog& cat, const std::string& method, const U
         CapabilityLock lock;
         if (!ParseCapabilityLock(o, lock, err_code, err)) return false;
         std::lock_guard<std::mutex> lockg(g_jobs_mu);
-        g_locks[lock.lock_id.Hex()] = lock;
+        KeepLockLocked(lock);
         result.pushKV("imported", true);
         result.pushKV("lock_id", lock.lock_id.Hex());
         PushZero(result);
