@@ -8793,8 +8793,27 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
     if (method == "addmodelindex" || method == "removemodelindex") {
         EnsureSearchBound();
         std::lock_guard<std::mutex> lock(g_search_mu);
-        if (method == "addmodelindex") g_search_idx.AddIndexPeer(Arg(0).get_str());
-        else g_search_idx.RemoveIndexPeer(Arg(0).get_str());
+        // Every search copies the list and queries at most SEARCH_FANOUT_MAX
+        // endpoints from it: the list and each endpoint are bounded.
+        constexpr size_t INDEX_PEERS_MAX{32};
+        constexpr size_t INDEX_ENDPOINT_MAX{256};
+        if (method == "addmodelindex") {
+            const std::string endpoint = Arg(0).get_str();
+            if (endpoint.size() > INDEX_ENDPOINT_MAX) {
+                err_code = "INVALID_PARAMETER";
+                err = "index endpoint too long";
+                return false;
+            }
+            const std::vector<std::string> peers = g_search_idx.IndexPeers();
+            if (std::find(peers.begin(), peers.end(), endpoint) == peers.end() && peers.size() >= INDEX_PEERS_MAX) {
+                err_code = "REJECTED";
+                err = "too many index peers; remove one with removemodelindex";
+                return false;
+            }
+            g_search_idx.AddIndexPeer(endpoint);
+        } else {
+            g_search_idx.RemoveIndexPeer(Arg(0).get_str());
+        }
         result.pushKV("schema_version", 2);
         result.pushKV("index_peers", static_cast<int>(g_search_idx.IndexPeers().size()));
         result.pushKV("addrman", false);
