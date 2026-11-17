@@ -451,7 +451,13 @@ class Coordinator:
                 require(hashlock(secret)==agr.long_leg.hashlock,'PREIMAGE','Chain preimage does not match agreement')
                 key='secret_'+sid
                 if key not in self.vault.entries:
-                    self.vault.entries[key]={'swap_id':sid,'preimage':secret.hex()};self.vault.save()
+                    self.vault.entries[key]={'swap_id':sid,'preimage':secret.hex()}
+                    try:self.vault.save()
+                    except Exception:
+                        # An unsaved cache entry must not let retry publish exposure.
+                        # This is a newly observed public preimage, not a new key.
+                        self.vault.entries.pop(key,None)
+                        raise
                 if not s['secret_exposed']:s['secret_exposed']=True;s['stage']='secret_exposed';rev=self._save(sid,s,rev)
         state=Session(sid,s['role'],s['stage'],True,s['secret_exposed'],s['funding_prepared'],s['funding_broadcast'],s['recovery_ready'])
         action=decide(state,ra.observation,rb.observation,ra.clock,rb.clock,
