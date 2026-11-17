@@ -8957,14 +8957,23 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         if (method == "seedmodel") {
+            // Seed finds a model by its artifact id too, while the admission
+            // records are kept by model id: check the model id of the entry.
+            CatalogEntry seeded_entry;
+            const bool known = cat.Find(id, seeded_entry);
             std::string admission_code;
-            if (!LivePathAllowed(id.Hex(), false, admission_code)) {
+            if (!LivePathAllowed(id.Hex(), false, admission_code) ||
+                (known && !LivePathAllowed(seeded_entry.model_id.Hex(), false, admission_code))) {
                 err_code = admission_code;
                 err = "admission denied";
                 return false;
             }
-            CatalogEntry seeded_entry;
-            if (cat.Find(id, seeded_entry) && !PlaintextServeAllowed(cat, seeded_entry)) {
+            if (known && seeded_entry.incomplete) {
+                err_code = "INCOMPLETE";
+                err = "incomplete replica cannot be seeded";
+                return false;
+            }
+            if (known && !PlaintextServeAllowed(cat, seeded_entry)) {
                 err_code = "NOT_DOWNLOADABLE";
                 err = "release plaintext is not downloadable";
                 return false;

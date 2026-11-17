@@ -883,6 +883,30 @@ BOOST_AUTO_TEST_CASE(cache_06_common_before_rare)
     BOOST_CHECK_LT(modelnet::EvictPriority(common), modelnet::EvictPriority(rare));
 }
 
+// Seed finds a model by its artifact id too, as PinModel and RemoveModel do,
+// and does not claim SEEDING for an incomplete replica.
+BOOST_AUTO_TEST_CASE(seed_takes_the_artifact_id_and_skips_an_incomplete_replica)
+{
+    const fs::path tmp = m_path_root / "seed-artifact-incomplete";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x72, false);
+    std::string err;
+    modelnet::CatalogEntry e;
+    BOOST_REQUIRE_MESSAGE(cat.Seed(imported.artifact_id, true, err), err);
+    BOOST_REQUIRE(cat.Find(imported.model_id, e));
+    BOOST_CHECK(e.seeded);
+    BOOST_REQUIRE_MESSAGE(cat.Seed(imported.artifact_id, false, err), err);
+    BOOST_REQUIRE(cat.Find(imported.model_id, e));
+    BOOST_CHECK(!e.seeded);
+
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(imported.model_id, true, err), err);
+    BOOST_CHECK(!cat.Seed(imported.model_id, true, err));
+    BOOST_CHECK_EQUAL(err, "incomplete replica");
+    BOOST_REQUIRE(cat.Find(imported.model_id, e));
+    BOOST_CHECK(!e.seeded);
+    BOOST_CHECK(e.admission != modelnet::AdmissionLevel::SEEDING);
+}
+
 BOOST_AUTO_TEST_CASE(demand_seed_skips_incomplete_replica)
 {
     const fs::path tmp = m_path_root / "demand-seed-incomplete";
