@@ -343,8 +343,8 @@ class Application:
         return {'withdrawn':True,'remote_expiry_seconds':600}
     def rpc_setswapassetpolicy(self,ctx,policy):
         self.authority.owner(ctx);require(self.configure_asset is not None,'ASSET_CONFIG','Native asset factory unavailable')
-        asset=policy.get('asset');active=[s for _,_,s in self.journal.all() if s['stage'] not in {'cancelled','refunded','complete','rejected'}]
-        require(not any(asset in (s.get('agreement',{}).get('long_leg',{}).get('asset'),s.get('agreement',{}).get('short_leg',{}).get('asset')) for s in active),
+        asset=policy.get('asset')
+        require(not self.journal.active_asset_in_use(asset),
                 'ASSET_BUSY','Cannot reconfigure an asset with active settlement obligations')
         driver=self.configure_asset(policy);driver.ready();self.drivers[asset]=driver
         policies=self.journal.setting('asset_policies',{});policies[asset]=policy;self.journal.set_setting('asset_policies',policies)
@@ -362,11 +362,11 @@ class Application:
         return bump(self.coordinator,ctx,swap_id,kind,new_fee_atoms)
     def rpc_getswapevents(self,ctx,after=0,limit=100):
         integer(after);integer(limit,lo=1,hi=500)
-        allowed={sid for sid,_,s in self.journal.all(None if ctx.owner else ctx.name)}
         with self.store.lock:rows=self.store.db.execute('SELECT seq,body,digest FROM audit WHERE seq>? ORDER BY seq LIMIT ?',(after,limit)).fetchall()
+        decoded=[(seq,loads(raw),h) for seq,raw,h in rows]
+        allowed=set() if ctx.owner else self.journal.owned_session_ids(ctx.name,[body.get('swap_id',body.get('id')) for _,body,_ in decoded])
         events=[]
-        for seq,raw,h in rows:
-            body=loads(raw)
+        for seq,body,h in decoded:
             if ctx.owner or body.get('swap_id',body.get('id')) in allowed:events.append({'sequence':seq,'event':body,'hash':h})
         return {'events':events,'next_sequence':rows[-1][0] if rows else after}
     def rpc_getswapvalidationinfo(self,ctx):
