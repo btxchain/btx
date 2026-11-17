@@ -7,6 +7,8 @@
 gui/atlas/web/views/operations.js sends a template as positional parameters,
 one per template argument, in order: a field left empty is skipped at the end
 and sent as null in the middle, and a field with a default sends the default.
+A template marked request_object sends those named fields as one object, which
+is what a SwapNet RPC accepts.
 Call every template that way and keep the node's own answer. A template is
 broken when the node does not know the method, takes fewer arguments, or
 rejects the type of an argument; any other answer (an unknown id, no model
@@ -85,9 +87,17 @@ class AtlasOperationTemplatesTest(BitcoinTestFramework):
                 problems.append(f"{method}: the node has no such RPC")
                 continue
             help_text = node.help(method)
-            params = [self.sample(op, i, a) for i, a in enumerate(op.get("args", []))]
-            while params and params[-1] is None:
-                params.pop()
+            sampled = [self.sample(op, i, a) for i, a in enumerate(op.get("args", []))]
+            if op.get("request_object"):
+                request = {}
+                for arg, value in zip(op.get("args", []), sampled):
+                    if value is not None:
+                        request[arg["name"]] = value
+                params = [request]
+            else:
+                params = sampled
+                while params and params[-1] is None:
+                    params.pop()
             if len(params) > help_arg_count(help_text):
                 problems.append(f"{method}: the template sends {len(params)} arguments, the RPC takes {help_arg_count(help_text)}")
                 continue
