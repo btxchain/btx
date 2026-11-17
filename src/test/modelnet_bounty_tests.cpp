@@ -1189,6 +1189,58 @@ BOOST_AUTO_TEST_CASE(bounty_script_001_to_020)
 #endif
 }
 
+// Challenges are saved with the bounty store: a challenge has a size bound,
+// and a bounty takes at most 64 of them.
+BOOST_AUTO_TEST_CASE(bounty_challenges_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-challenges-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto challenge = [&](const std::string& reason) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        c.pushKV("reason", reason);
+        return call("createbountychallenge", c);
+    };
+    {
+        // Over 16 KiB in all, with each string under the 8192 bytes a signed
+        // record takes.
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        for (int i = 0; i < 3; ++i) c.pushKV("reason" + std::to_string(i), std::string(6000, 'r'));
+        BOOST_CHECK(!call("createbountychallenge", c));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    for (int i = 0; i < 64; ++i) BOOST_REQUIRE_MESSAGE(challenge("reason " + std::to_string(i)), err);
+    BOOST_CHECK(!challenge("reason 64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A challenge already there is still answered at the limit.
+    BOOST_REQUIRE_MESSAGE(challenge("reason 0"), err);
+    UniValue list(UniValue::VARR);
+    list.push_back(bounty);
+    BOOST_REQUIRE(store.Dispatch("listbountychallenges", list, result, code, err));
+    BOOST_CHECK_EQUAL(result["challenges"].size(), 64U);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_lists_return_only_the_requested_records)
 {
     // listbountyevaluations takes a submission id and listbountychallenges a
