@@ -68,6 +68,9 @@ void RelayTable::Expire(int64_t now_ms)
 {
     m_rsvp.erase(std::remove_if(m_rsvp.begin(), m_rsvp.end(),
                                 [&](const RelayReservation& r) {
+                                    // Retain the accounting record until in-flight I/O is reconciled.
+                                    // Admission and byte claims still reject expired/idle reservations.
+                                    if (r.conns > 0 || r.bytes_pending > 0) return false;
                                     if (r.expiry_ms <= now_ms) return true;
                                     return now_ms - r.last_activity_ms > m_lim.idle_ms;
                                 }),
@@ -79,7 +82,7 @@ bool RelayTable::AllowForward(const std::string& reservation_id, uint64_t nbytes
     Expire(now_ms);
     for (auto& r : m_rsvp) {
         if (r.reservation_id != reservation_id) continue;
-        if (r.expiry_ms <= now_ms) {
+        if (r.expiry_ms <= now_ms || now_ms - r.last_activity_ms > m_lim.idle_ms) {
             err = "expired";
             return false;
         }
@@ -87,7 +90,9 @@ bool RelayTable::AllowForward(const std::string& reservation_id, uint64_t nbytes
             err = "connection ceiling";
             return false;
         }
-        if (r.bytes_used + nbytes > r.byte_ceiling) {
+        if (r.bytes_used >= r.byte_ceiling ||
+            r.bytes_pending > r.byte_ceiling - r.bytes_used ||
+            nbytes > r.byte_ceiling - r.bytes_used - r.bytes_pending) {
             err = "byte ceiling";
             return false;
         }
@@ -102,16 +107,42 @@ bool RelayTable::AllowForward(const std::string& reservation_id, uint64_t nbytes
     return false;
 }
 
-void RelayTable::AddForwardedBytes(const std::string& reservation_id, uint64_t nbytes, int64_t now_ms)
+uint64_t RelayTable::ReserveForwardBytes(const std::string& reservation_id, uint64_t max_bytes, int64_t now_ms)
 {
-    if (nbytes == 0) return;
     for (auto& r : m_rsvp) {
         if (r.reservation_id != reservation_id) continue;
-        r.bytes_used += nbytes;
-        r.last_activity_ms = now_ms;
-        m_forwarded += nbytes;
-        return;
+        if (r.expiry_ms <= now_ms || now_ms - r.last_activity_ms > m_lim.idle_ms ||
+            r.bytes_used >= r.byte_ceiling ||
+            r.bytes_pending >= r.byte_ceiling - r.bytes_used) return 0;
+        const uint64_t granted = std::min(max_bytes, r.byte_ceiling - r.bytes_used - r.bytes_pending);
+        r.bytes_pending += granted;
+        if (granted > 0) r.last_activity_ms = now_ms;
+        return granted;
     }
+    return 0;
+}
+
+bool RelayTable::FinishForwardBytes(const std::string& reservation_id, uint64_t reserved_bytes,
+                                   uint64_t forwarded_bytes, int64_t now_ms)
+{
+    if (forwarded_bytes > reserved_bytes) return false;
+    for (auto& r : m_rsvp) {
+        if (r.reservation_id != reservation_id) continue;
+        if (reserved_bytes > r.bytes_pending) return false;
+        r.bytes_pending -= reserved_bytes;
+        r.bytes_used += forwarded_bytes;
+        m_forwarded += forwarded_bytes;
+        if (forwarded_bytes > 0) r.last_activity_ms = now_ms;
+        return true;
+    }
+    return false;
+}
+
+uint64_t RelayTable::AddForwardedBytes(const std::string& reservation_id, uint64_t nbytes, int64_t now_ms)
+{
+    const uint64_t granted = ReserveForwardBytes(reservation_id, nbytes, now_ms);
+    (void)FinishForwardBytes(reservation_id, granted, granted, now_ms);
+    return granted;
 }
 
 void RelayTable::CloseConn(const std::string& reservation_id)
