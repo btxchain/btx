@@ -22,7 +22,7 @@ TERMINAL={'complete','refunded','cancelled','rejected'}
 class Coordinator:
     def __init__(self,journal,authority,drivers,identity,vault,emit,*,clock=None,policy=None):
         self.journal,self.authority,self.drivers,self.identity,self.vault,self.emit=journal,authority,drivers,identity,vault,emit
-        self.now=clock or (lambda:int(time.time()));self.policy=policy or SafetyPolicy();self._cursor=0;self._terminal_cursor=0
+        self.now=clock or (lambda:int(time.time()));self.policy=policy or SafetyPolicy();self._cursor='';self._terminal_cursor=''
         self._terminal_due=0
     def _driver(self,asset):
         require(asset in self.drivers,'ASSET_UNAVAILABLE','No qualified local chain driver for this asset')
@@ -558,19 +558,15 @@ class Coordinator:
             return Report(LegObservation(observed_at=self.now()),driver.clock())
     def tick(self):
         # Bounded work per pass; terminal sessions remain monitored for deep reorgs.
-        rows=self.journal.all(limit=4096)
-        if not rows:return
-        active=[r for r in rows if r[2]['stage'] not in TERMINAL]
-        terminal=[r for r in rows if r[2]['stage'] in {'complete','refunded'}]
-        selected=[]
-        if active:
-            start=self._cursor % len(active);selected=(active+active)[start:start+min(4,len(active))]
-            self._cursor=(start+len(selected)) % len(active)
-        # Deep-reorg watch of finished swaps: not one session every one-second tick (that alone kept a node pair
-        # at ~1,900 EVM RPCs a minute after a single swap), but one per policy.terminal_recheck_seconds.
-        if terminal and self.now()>=self._terminal_due:
-            selected.append(terminal[self._terminal_cursor % len(terminal)])
-            self._terminal_cursor+=1;self._terminal_due=self.now()+self.policy.terminal_recheck_seconds
+        selected=self.journal.scheduled(terminal=False,after=self._cursor,limit=4)
+        if selected:self._cursor=selected[-1][0]
+        # Closed unsigned history must not hide live work or terminal reorg watch.
+        if self.now()>=self._terminal_due:
+            terminal=self.journal.scheduled(terminal=True,after=self._terminal_cursor,limit=1)
+            if terminal:
+                selected+=terminal
+                self._terminal_cursor=terminal[-1][0]
+                self._terminal_due=self.now()+self.policy.terminal_recheck_seconds
         for sid,_,s in selected:
             try:self.tick_one(sid)
             except SwapError as e:
