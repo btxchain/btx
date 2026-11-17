@@ -3385,14 +3385,13 @@ export const OPERATIONS = [
       {
         "name": "query",
         "kind": "json",
-        "required": true,
+        "required": false,
         "default": {
-          "scope": "LOCAL",
           "limit": 50
         }
       }
     ],
-    "notes": "A silent read requires scope LOCAL. Network scope opens native review. No hub is compiled in. automatic_spend_atoms stays 0.",
+    "notes": "Local search index only. The handler searches the whole index; scope in this request is not a peer fan-out. Not a census. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3458,14 +3457,13 @@ export const OPERATIONS = [
       {
         "name": "query",
         "kind": "json",
-        "required": true,
+        "required": false,
         "default": {
-          "scope": "LOCAL",
           "limit": 50
         }
       }
     ],
-    "notes": "A silent read requires scope LOCAL. Network scope opens native review. No hub is compiled in. automatic_spend_atoms stays 0.",
+    "notes": "Local search index only. Sort defaults to availability on this node. This call does not dial peers. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3477,14 +3475,13 @@ export const OPERATIONS = [
       {
         "name": "query",
         "kind": "json",
-        "required": true,
+        "required": false,
         "default": {
-          "scope": "LOCAL",
           "limit": 50
         }
       }
     ],
-    "notes": "A silent read requires scope LOCAL. Network scope opens native review. No hub is compiled in. automatic_spend_atoms stays 0. Trend is local observation, not a global rank.",
+    "notes": "Local search index only. Trend is observed provider growth on this node, not a global rank. This call does not dial peers. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3496,14 +3493,13 @@ export const OPERATIONS = [
       {
         "name": "query",
         "kind": "json",
-        "required": true,
+        "required": false,
         "default": {
-          "scope": "LOCAL",
           "limit": 50
         }
       }
     ],
-    "notes": "A silent read requires scope LOCAL. Network scope opens native review. No hub is compiled in. automatic_spend_atoms stays 0. Similarity is metadata only.",
+    "notes": "Local search index only. Optional family matches metadata. This call does not dial peers. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3522,7 +3518,7 @@ export const OPERATIONS = [
         }
       }
     ],
-    "notes": "An omitted scope stays on this node's index. Network scope opens native review. automatic_spend_atoms stays 0.",
+    "notes": "An omitted scope stays on this node's index. A non-local scope is forwarded to the feed and opens native review. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3630,7 +3626,7 @@ export const OPERATIONS = [
         "required": false
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Optional sell, buy, after, and limit. Local provider catalog. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3645,7 +3641,7 @@ export const OPERATIONS = [
         "required": false
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Optional sell, buy, after, and limit. Same local catalog as listswapproviders. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3657,10 +3653,13 @@ export const OPERATIONS = [
       {
         "name": "request",
         "kind": "json",
-        "required": false
+        "required": true,
+        "default": {
+          "request_id": ""
+        }
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Requires request_id. This read does not accept a quote. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3675,7 +3674,7 @@ export const OPERATIONS = [
         "required": false
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Optional limit. This node's swaps. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3687,10 +3686,13 @@ export const OPERATIONS = [
       {
         "name": "request",
         "kind": "json",
-        "required": false
+        "required": true,
+        "default": {
+          "swap_id": ""
+        }
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id. This read does not resume, refund, or spend. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3702,10 +3704,13 @@ export const OPERATIONS = [
       {
         "name": "request",
         "kind": "json",
-        "required": false
+        "required": true,
+        "default": {
+          "swap_id": ""
+        }
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id. Audit read. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3720,7 +3725,7 @@ export const OPERATIONS = [
         "required": false
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "No request fields. Lists mandates. Creating or revoking one is a separate reviewed operation. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3747,10 +3752,13 @@ export const OPERATIONS = [
       {
         "name": "request",
         "kind": "json",
-        "required": false
+        "required": true,
+        "default": {
+          "swap_id": ""
+        }
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id. Audit read. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3792,10 +3800,13 @@ export const OPERATIONS = [
       {
         "name": "request",
         "kind": "json",
-        "required": false
+        "required": true,
+        "default": {
+          "swap_id": ""
+        }
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id. Status only. Recovery export is a separate reviewed operation. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3855,7 +3866,7 @@ export const OPERATIONS = [
         "required": false
       }
     ],
-    "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+    "notes": "Optional after and limit. Local event log. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3883,10 +3894,14 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "sell_asset": "",
+          "buy_asset": "",
+          "sell_atoms": ""
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires sell_asset, buy_asset, and sell_atoms. nonce is optional. Prepared for native review. This emits an RFQ. It does not reserve or fund. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3899,10 +3914,14 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "quote_id": "",
+          "mandate_id": "",
+          "max_local_fee_atoms": ""
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires quote_id, mandate_id, and max_local_fee_atoms. refund_fee_atoms and claim_fee_atoms are optional. Prepared for native review. This can reserve inside an existing mandate. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3915,10 +3934,12 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "swap_id": ""
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id. Prepared for native review. Refuses once funding is prepared or broadcast. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3931,10 +3952,20 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "mandate": {
+            "principal": "",
+            "asset": "",
+            "max_total_atoms": "",
+            "max_trade_atoms": "",
+            "max_fee_atoms": "",
+            "expires_at": 0,
+            "nonce": ""
+          }
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires mandate: principal, asset, max_total_atoms, max_trade_atoms, max_fee_atoms, expires_at, nonce. Prepared for native review. Installing a mandate does not broadcast. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3947,10 +3978,12 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "mandate_id": ""
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires mandate_id. Prepared for native review. Revokes the mandate and keeps recovery. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3963,10 +3996,12 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "swap_id": ""
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id. Prepared for native review. Resume can broadcast funding, a claim, or a refund. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3979,10 +4014,12 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "swap_id": ""
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id. Prepared for native review. This can broadcast a refund. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -3994,11 +4031,10 @@ export const OPERATIONS = [
       {
         "name": "request",
         "kind": "json",
-        "required": true,
-        "default": {}
+        "required": false
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "No request fields. Prepared for native review. This signs and sends the local advertisement. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -4010,11 +4046,10 @@ export const OPERATIONS = [
       {
         "name": "request",
         "kind": "json",
-        "required": true,
-        "default": {}
+        "required": false
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "No request fields. Prepared for native review. Clears the local markets and advertisement. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -4030,7 +4065,7 @@ export const OPERATIONS = [
         "default": {}
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires market (sell_asset, buy_asset, numerator, denominator, maker_fee_atoms, max_receive_network_fee_atoms, max_input_atoms, expires_at), mandate_id, max_local_fee_atoms, refund_fee_atoms, and claim_fee_atoms. enabled defaults to true and then advertises. Prepared for native review. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -4046,7 +4081,7 @@ export const OPERATIONS = [
         "default": {}
       }
     ],
-    "notes": "Owner-scoped. Prepared for native review. automatic_spend_atoms stays 0.",
+    "notes": "Owner read of this node's identity and foreign-chain accounts. It does not create an address and does not spend. Prepared for native review. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -4059,10 +4094,14 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "policy": {
+            "asset": ""
+          }
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires policy, and policy.asset. Prepared for native review. Stores the asset policy. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -4078,7 +4117,7 @@ export const OPERATIONS = [
         "default": {}
       }
     ],
-    "notes": "Prepared for native review. A passphrase in the request is redacted in the approval dialog and is not stored in this template. automatic_spend_atoms stays 0.",
+    "notes": "Requires passphrase. Prepared for native review. The approval dialog redacts passphrase. This template does not store one. automatic_spend_atoms stays 0.",
     "wallet": false
   },
   {
@@ -4091,10 +4130,14 @@ export const OPERATIONS = [
         "name": "request",
         "kind": "json",
         "required": true,
-        "default": {}
+        "default": {
+          "swap_id": "",
+          "kind": "",
+          "new_fee_atoms": ""
+        }
       }
     ],
-    "notes": "Prepared for native review. Atlas does not send this by itself. automatic_spend_atoms stays 0.",
+    "notes": "Requires swap_id, kind (claim or refund), and new_fee_atoms. Prepared for native review. This can broadcast a replacement. automatic_spend_atoms stays 0.",
     "wallet": false
   }
 ];

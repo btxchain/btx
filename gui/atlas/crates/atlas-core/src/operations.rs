@@ -313,31 +313,7 @@ pub fn read_allowed(method: &str, params: &Value) -> bool {
     ) {
         return search_stays_local(params);
     }
-    // These handlers default an omitted scope to the current network view.
-    // A silent read has to name LOCAL. Network scope stays on the approval path.
-    if matches!(
-        method,
-        "browsemodels" | "gettrendingmodels" | "getsimilarmodels" | "getmodeldirectory"
-    ) {
-        return explicit_local_scope(params);
-    }
     true
-}
-fn explicit_local_scope(params: &Value) -> bool {
-    let query = if params.is_array() {
-        match params.get(0) {
-            Some(v) => v,
-            None => return false,
-        }
-    } else if params.is_object() {
-        params.get("query").unwrap_or(params)
-    } else {
-        return false;
-    };
-    match query {
-        Value::Object(o) => matches!(o.get("scope"), Some(Value::String(s)) if s.eq_ignore_ascii_case("local")),
-        _ => false,
-    }
 }
 fn search_stays_local(params: &Value) -> bool {
     let query = if params.is_array() {
@@ -744,17 +720,18 @@ mod tests {
     }
     #[test]
     fn directory_and_swap_reads() {
+        // These four scan the local index. They do not forward a non-local scope.
         for method in [
             "browsemodels",
             "gettrendingmodels",
             "getsimilarmodels",
             "getmodeldirectory",
         ] {
-            assert!(!read_allowed(method, &json!([])));
-            assert!(!read_allowed(method, &json!([{"scope":"NETWORK"}])));
-            assert!(read_allowed(method, &json!([{"scope":"LOCAL","limit":50}])));
+            assert!(read_allowed(method, &json!([])));
+            assert!(read_allowed(method, &json!([{"limit":50}])));
         }
         assert!(read_allowed("getnewmodels", &json!([])));
+        assert!(read_allowed("getnewmodels", &json!([{"scope":"LOCAL"}])));
         assert!(!read_allowed("getnewmodels", &json!([{"scope":"NETWORK"}])));
         assert!(read_allowed("getmodelavailability", &json!(["abc"])));
         assert!(read_allowed("getnetworkmodelstats", &json!([])));
