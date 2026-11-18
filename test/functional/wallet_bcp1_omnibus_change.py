@@ -9,7 +9,9 @@ watch-only wallet, pick the omnibus address from the pool labels: change 0 of
 account 0, else deposit 0. importdepositpool labels indexed entries
 <account>/<deposit|change>/<index>; the legacy labels change/<index> and
 deposit/<index> keep working. A pool without either label must ask for a
-change address instead of using some other address-book entry.
+change address instead of using some other address-book entry. That includes a
+pool imported without indexes: every entry is labelled bcp1-deposit, which
+names no slot.
 """
 from decimal import Decimal
 
@@ -100,6 +102,21 @@ class WalletBCP1OmnibusChangeTest(BitcoinTestFramework):
         wallet = self.venue("custom", entries, [a for _pk, a in keys])
         assert_raises_rpc_error(-8, "change_address required", wallet.createconsolidationtx, {"min_confirmations": 1})
         sweep = keys[0][1]
+        assert_equal(self.outputs(wallet.createconsolidationtx({"min_confirmations": 1, "change_address": sweep})), [sweep])
+
+        self.log.info("A pool imported without indexes asks for a change address too")
+        keys = self.pool_keys(3)
+        wallet = self.venue("unindexed", [{"pubkey": pk} for pk, _a in keys], [a for _pk, a in keys])
+        assert_equal([wallet.getaddressinfo(a)["labels"] for _pk, a in keys], [["bcp1-deposit"]] * len(keys))
+        assert_raises_rpc_error(-8, "change_address required", wallet.createconsolidationtx, {"min_confirmations": 1})
+        # The batch has no preset change destination either, as for a pool without a label.
+        assert_raises_rpc_error(-4, "Transaction needs a change address", wallet.createexchangebatch,
+                                [{"address": payee, "amount": 1}])
+        change = self.miner.getnewaddress()
+        assert_equal(sorted(self.outputs(wallet.createexchangebatch([{"address": payee, "amount": 1}],
+                                                                    {"change_address": change}))),
+                     sorted([payee, change]))
+        sweep = self.miner.getnewaddress()
         assert_equal(self.outputs(wallet.createconsolidationtx({"min_confirmations": 1, "change_address": sweep})), [sweep])
 
 
