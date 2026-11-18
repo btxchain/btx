@@ -11829,6 +11829,20 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
         return true;
     };
 
+    // Rebase once per peer attempt from this artifact's retained live pieces.
+    // UsedBytes() also includes every unrelated model in the catalog.
+    uint64_t model_bytes = progress ? cat.Store().ArtifactBytes(artifact) : 0;
+    if (progress) {
+        NoteRetrieveBytes(progress, model_bytes);
+        progress->pieces_committed.store(0);
+    }
+    auto install_download = [&]() {
+        const bool installed = cat.InstallFromManifest(man, err);
+        // Also include pieces supplied by another local writer before install.
+        // This final rebase is once per completed attempt, never per piece.
+        if (installed && progress) NoteRetrieveBytes(progress, cat.Store().ArtifactBytes(artifact));
+        return installed;
+    };
     std::mutex store_mu;
     auto fetch_one = [&](Pq1Session& s, uint32_t file_index, uint64_t i, uint64_t size, const Digest48& pieces_root,
                           std::vector<unsigned char>& raw, std::vector<Digest48>& proof, uint64_t& hdr_size,
@@ -11863,7 +11877,14 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                 if (presp.status == 200 &&
                     parse_piece(presp, size, pieces_root, raw, proof, hdr_size, hdr_root, local_err)) {
                     std::lock_guard<std::mutex> lock(store_mu);
+                    const bool had_piece = cat.Store().HasPiece(artifact, file_index, static_cast<uint32_t>(i));
                     if (cat.PutFetchedPiece(artifact, file_index, static_cast<uint32_t>(i), raw, proof, hdr_size, hdr_root, local_err)) {
+                        // Duplicate puts add no storage. Publish while holding the
+                        // same lock as the write, so parallel pieces cannot regress it.
+                        if (progress && !had_piece) {
+                            model_bytes += raw.size();
+                            NoteRetrieveBytes(progress, model_bytes);
+                        }
                         return true;
                     }
                 } else if (presp.status == 403 &&
@@ -11914,11 +11935,6 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
         return false;
     };
 
-    if (progress) {
-        NoteRetrieveBytes(progress, cat.UsedBytes());
-        progress->pieces_committed.store(0);
-    }
-
     // Whole-file stream is a single-origin shortcut. A live multi-peer swarm
     // must use the piece picker (rarity, diversity, inflight). extras is the
     // additional BTX providers already known to this catalog.
@@ -11967,6 +11983,23 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                 if (automatic && !authorize_peer(sess.host, sess.port, sess.transport_pin, berr)) return false;
                 return hyd.Feed(chunk, berr);
             };
+            // A stream file is capped at 64 MiB (16 pieces). Count only
+            // pieces newly promoted to the live store, never quarantine data.
+            std::vector<uint32_t> absent_pieces;
+            if (progress) {
+                for (uint32_t i = 0; uint64_t{i} * PIECE_SIZE < size; ++i) {
+                    if (!cat.Store().HasPiece(artifact, fi, i)) absent_pieces.push_back(i);
+                }
+            }
+            auto note_stream_pieces = [&]() {
+                if (!progress) return;
+                for (uint32_t i : absent_pieces) {
+                    if (cat.Store().HasPiece(artifact, fi, i)) {
+                        model_bytes += std::min<uint64_t>(PIECE_SIZE, size - uint64_t{i} * PIECE_SIZE);
+                    }
+                }
+                NoteRetrieveBytes(progress, model_bytes);
+            };
             auto keep_flushed_pieces = [&]() {
                 // Complete pieces already split out of the stream. The piece
                 // retriever skips these and continues the rest, instead of
@@ -11987,23 +12020,26 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             (void)http_status;
             if (!stream_read || fell_back) {
                 if (fell_back) keep_flushed_pieces();
+                note_stream_pieces();
                 stream_ok = false;
                 sess.Close();
                 break;
             }
-            if (!hyd.Finish(gerr) || !hyd.IsAdvertisable()) {
+            const bool finished = hyd.Finish(gerr);
+            // Finish can promote a prefix before a later live copy fails.
+            note_stream_pieces();
+            if (!finished || !hyd.IsAdvertisable()) {
                 stream_ok = false;
                 sess.Close();
                 break;
             }
             if (progress) {
                 progress->file_index.store(fi);
-                NoteRetrieveBytes(progress, cat.UsedBytes());
             }
             ++fi;
         }
         if (stream_ok && fi == static_cast<uint32_t>(man["files"].getValues().size())) {
-            return cat.InstallFromManifest(man, err);
+            return install_download();
         }
     }
 
@@ -12033,7 +12069,6 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                 if (progress) {
                     progress->piece_index.store(static_cast<uint32_t>(i));
                     progress->pieces_committed.fetch_add(1);
-                    NoteRetrieveBytes(progress, cat.UsedBytes());
                 }
             } else {
                 missing.push_back(i);
@@ -12051,7 +12086,6 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
             if (!first || !progress) return;
             progress->piece_index.store(idx);
             progress->pieces_committed.fetch_add(1);
-            NoteRetrieveBytes(progress, cat.UsedBytes());
         };
         std::atomic<int> extra_ok{0};
         std::mutex rid_mu;
@@ -12546,7 +12580,7 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
         }
         ++file_index;
     }
-    return cat.InstallFromManifest(man, err);
+    return install_download();
 }
 
 bool RetrieveFreeFromPeer(ModelCatalog& cat, Pq1Context& pq, const std::string& host, uint16_t port,
