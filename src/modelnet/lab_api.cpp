@@ -2453,19 +2453,32 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
                     }
                     std::vector<ExchangeObject> objects;
                     if (!VerifyExchangeManifest(manifest, objects, err)) return false;
+                    // Only the requested model and its pieces, checked on a copy:
+                    // a piece of another model this node holds would replace
+                    // that model's bytes, and a failed match would stay stored.
+                    Store pending;
+                    pending.models = store.models;
+                    pending.model_pieces = store.model_pieces;
                     for (const ExchangeObject& object : objects) {
-                        if (object.kind == "piece" && static_cast<int64_t>(object.content.size()) > max_bytes) {
-                            return Fail(err, "BTX035_LIMIT_EXCEEDED");
+                        if (object.kind == "model" && object.digest != digest) continue;
+                        if (object.kind == "piece") {
+                            std::string piece_model;
+                            size_t piece_index = 0;
+                            std::string piece_chunk;
+                            if (!DecodePieceLine(object.content, piece_model, piece_index, piece_chunk, err)) return false;
+                            if (piece_model != digest) continue;
+                            if (static_cast<int64_t>(object.content.size()) > max_bytes) return Fail(err, "BTX035_LIMIT_EXCEEDED");
                         }
-                    }
-                    for (const ExchangeObject& object : objects) {
-                        if (!AcceptModelObject(store, object, err)) return false;
+                        if (!AcceptModelObject(pending, object, err)) return false;
                     }
                     pulled = true;
-                    if (ModelBytesMatch(store, digest, err)) {
-                        if (static_cast<int64_t>(store.models[digest].size()) > max_bytes) {
+                    if (ModelBytesMatch(pending, digest, err)) {
+                        if (static_cast<int64_t>(pending.models[digest].size()) > max_bytes) {
                             return OpOut(store, result, id, "FAILED", "STOPPED_QUIESCENT");
                         }
+                        store.models[digest] = std::move(pending.models[digest]);
+                        const auto staged = pending.model_pieces.find(digest);
+                        if (staged != pending.model_pieces.end()) store.model_pieces[digest] = std::move(staged->second);
                         remember(store.models[digest]);
                         return OpOut(store, result, id, "COMPLETE", "STOPPED_QUIESCENT");
                     }
@@ -3530,24 +3543,46 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
         if (!CollectTrains(objects, trains, launch_trains, err)) return false;
         if (!AttachLineage(objects, observed, err)) return false;
         const std::string repo = RequireStr(req, "repository_id");
+        // A pulled manifest is checked like lab.snapshot_import checks one:
+        // on a copy, so an object that fails leaves the live store as it was,
+        // and with each piece held to the model it names.
+        Store pending;
+        pending.records = store.records;
+        pending.models = store.models;
+        pending.model_pieces = store.model_pieces;
+        pending.trains = store.trains;
+        pending.observations = std::move(observed);
+        RestorePublished(pending);
+        RestoreTrains(pending, trains);
+        RestoreLaunch(pending, launch_trains);
+        if (!ApplyReplayAuthors(pending, objects, err)) return false;
         for (const ExchangeObject& object : objects) {
             if (object.kind != "model" && object.kind != "piece") continue;
-            if (!AcceptModelObject(store, object, err)) return false;
+            if (!AcceptModelObject(pending, object, err)) return false;
         }
         for (const ExchangeObject& object : objects) {
-            if (!AcceptBlob(store, object, err)) return false;
+            if (!AcceptBlob(pending, object, err)) return false;
         }
         for (const ExchangeObject& object : objects) {
             if (object.kind != "model") continue;
-            if (!ModelBytesMatch(store, object.digest, err)) return false;
+            if (!ModelBytesMatch(pending, object.digest, err)) return false;
+        }
+        for (const ExchangeObject& object : objects) {
+            if (object.kind != "piece") continue;
+            std::string model_digest;
+            size_t piece_index = 0;
+            std::string piece_chunk;
+            if (!DecodePieceLine(object.content, model_digest, piece_index, piece_chunk, err)) return false;
+            if (!ModelBytesMatch(pending, model_digest, err)) return false;
         }
         store.repos.insert(repo);
         store.repo_objects[repo] = std::move(objects);
-        store.observations = std::move(observed);
-        RestorePublished(store);
-        RestoreTrains(store, trains);
-        RestoreLaunch(store, launch_trains);
-        if (!ApplyReplayAuthors(store, store.repo_objects[repo], err)) return false;
+        store.observations = std::move(pending.observations);
+        store.published = std::move(pending.published);
+        store.trains = std::move(pending.trains);
+        store.models = std::move(pending.models);
+        store.model_pieces = std::move(pending.model_pieces);
+        store.records = std::move(pending.records);
         result.pushKV("manifest", manifest);
         result.pushKV("repository_id", repo);
         return true;
