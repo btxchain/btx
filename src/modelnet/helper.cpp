@@ -6169,10 +6169,10 @@ UniValue CloudPublicJson()
     return o;
 }
 
-void EnsureCloudLoaded(ModelCatalog& cat)
+// The caller owns g_cloud_mu, including store initialization and budget reload.
+void EnsureCloudLoadedLocked(ModelCatalog& cat)
 {
     const fs::path dir = HelperDir(cat);
-    std::lock_guard<std::mutex> lock(g_cloud_mu);
     if (g_cloud && g_cloud_dir == dir) {
         ApplyCloudCapsLocked();
         return;
@@ -6201,6 +6201,12 @@ void EnsureCloudLoaded(ModelCatalog& cat)
     ApplyCloudCapsLocked();
 }
 
+void EnsureCloudLoaded(ModelCatalog& cat)
+{
+    std::lock_guard<std::mutex> lock(g_cloud_mu);
+    EnsureCloudLoadedLocked(cat);
+}
+
 void PublishCatalogToCloud(ModelCatalog& cat, const CatalogEntry& e, UniValue& result)
 {
     std::string admission_code;
@@ -6217,6 +6223,7 @@ void PublishCatalogToCloud(ModelCatalog& cat, const CatalogEntry& e, UniValue& r
     cat.BeginTransfer(e.artifact_id);
     const ActiveUpload active{cat, e.artifact_id};
     std::lock_guard<std::mutex> lock(g_cloud_mu);
+    EnsureCloudLoadedLocked(cat);
     if (!g_cloud || !g_cloud->IsReady()) {
         result.pushKV("cloud_uploaded", false);
         return;
@@ -6263,6 +6270,7 @@ bool TryHydrateFromCloud(ModelCatalog& cat, CatalogEntry& e, UniValue& result, s
         return false;
     }
     std::lock_guard<std::mutex> lock(g_cloud_mu);
+    EnsureCloudLoadedLocked(cat);
     if (!g_cloud || !g_cloud->IsReady() || e.core.files.empty()) return false;
     const CloudObjectLayout layout = g_cloud->Layout();
     if (layout != CloudObjectLayout::SOURCE_FILES && layout != CloudObjectLayout::PIECE_OBJECTS) return false;
@@ -6406,6 +6414,7 @@ bool IsCloudHelperMethod(const std::string& method)
            method == "removemodelstorage" || method == "setmodelstoragepolicy";
 }
 
+// DispatchHelperRpc holds g_cloud_mu for this entire operation.
 bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const UniValue& params, UniValue& result,
                              std::string& err_code, std::string& err)
 {
@@ -6436,7 +6445,6 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
         }
         std::error_code pec;
         fs::permissions(cloud_path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, pec);
-        std::lock_guard<std::mutex> lock(g_cloud_mu);
         g_cloud.reset();
         g_cloud_cfg = cfg;
         g_cloud_dir = HelperDir(cat);
@@ -6455,9 +6463,7 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }
-    EnsureCloudLoaded(cat);
     if (method == "testcloudstorage") {
-        std::lock_guard<std::mutex> lock(g_cloud_mu);
         result = CloudPublicJson();
         bool probe_ok = false;
         if (g_cloud && g_cloud->IsReady()) {
@@ -6479,8 +6485,6 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
         return true;
     }
     if (method == "getcloudstorageinfo") {
-        EnsureCloudLoaded(cat);
-        std::lock_guard<std::mutex> lock(g_cloud_mu);
         result = CloudPublicJson();
         result.pushKV("automatic_spend_atoms", 0);
         return true;
@@ -6510,7 +6514,6 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
             err = "could not remove cloud configuration: " + rec.message();
             return false;
         }
-        std::lock_guard<std::mutex> lock(g_cloud_mu);
         g_cloud.reset();
         g_cloud_cfg = CloudStoreConfig{};
         ApplyCloudCapsLocked();
@@ -6522,8 +6525,6 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
         return true;
     }
     if (method == "setmodelstoragepolicy") {
-        EnsureCloudLoaded(cat);
-        std::lock_guard<std::mutex> lock(g_cloud_mu);
         result = CloudPublicJson();
         result.pushKV("policy_applied", g_cloud && g_cloud->IsReady());
         result.pushKV("bulk_io", false);
@@ -6871,9 +6872,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
 
     if (!BoundModelEventJournal()) BindModelEventLayer(HelperDir(cat));
     EnsureSafetyBound(HelperDir(cat));
-    EnsureCloudLoaded(cat);
     LoadRetrieveJobs(cat);
     if (IsCloudHelperMethod(method)) {
+        // Refuse contention before idempotency can cache a transient busy reply
+        // or a configuration write can replace the active upload's settings.
+        std::unique_lock<std::mutex> cloud_lock(g_cloud_mu, std::try_to_lock);
+        if (!cloud_lock.owns_lock()) {
+            err_code = "HELPER_BUSY";
+            err = "cloud operation in progress; retry later";
+            return false;
+        }
+        if (method != "setcloudstorage" && method != "removemodelstorage") EnsureCloudLoadedLocked(cat);
         if (method == "setcloudstorage" || method == "setmodelstoragepolicy") {
             return WithNetwork02Idempotency(method, params, result, err_code, err, [&] {
                 return DispatchCloudStorageRpc(cat, method, params, result, err_code, err);
@@ -7240,13 +7249,15 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             bool source_files = true;
             uint64_t n_files = 0;
             uint64_t n_pieces = 0;
-            {
-                std::lock_guard<std::mutex> lock(g_cloud_mu);
+            caps.local_piece_complete = CatalogHasVerifiedSeededRange(cat);
+            std::unique_lock<std::mutex> cloud_lock(g_cloud_mu, std::try_to_lock);
+            result.pushKV("cloud_storage_busy", !cloud_lock.owns_lock());
+            if (cloud_lock.owns_lock()) {
+                EnsureCloudLoadedLocked(cat);
                 const bool ready = g_cloud && g_cloud->IsReady();
                 const bool live_origin = ready && !g_cloud_cfg.s3.use_fake;
                 caps.direct_file_seed = live_origin && g_cloud->Layout() == CloudObjectLayout::SOURCE_FILES;
                 caps.origin_file_complete = ready;
-                caps.local_piece_complete = CatalogHasVerifiedSeededRange(cat);
                 source_files = !ready || g_cloud->Layout() == CloudObjectLayout::SOURCE_FILES;
                 if (ready) {
                     if (live_origin) origin_ids.push_back(std::string("cloud:") + g_cloud_cfg.s3.bucket);
@@ -7254,9 +7265,11 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 }
             }
             result.pushKV("delivery", FileStreamCapsJson(caps));
-            result.pushKV("origin_diversity", OriginDiversityJson(SummarizeOriginDiversity(
-                0, 0, 0, origin_ids, /*enough_p2p_without_origin=*/false)));
-            result.pushKV("cloud_amplification", CloudAmplificationJson(n_files, n_pieces, source_files));
+            if (cloud_lock.owns_lock()) {
+                result.pushKV("origin_diversity", OriginDiversityJson(SummarizeOriginDiversity(
+                    0, 0, 0, origin_ids, /*enough_p2p_without_origin=*/false)));
+                result.pushKV("cloud_amplification", CloudAmplificationJson(n_files, n_pieces, source_files));
+            }
             result.pushKV("origin_stampede", GlobalOriginStampede().Json(ConnNowMs()));
         }
         result.pushKV("nat_limited", !g_runtime.public_host_reachable);
@@ -9247,6 +9260,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 if (const auto* rec = g_search_idx.Get(r.digest)) artifact = rec->artifact_id;
             }
             std::lock_guard<std::mutex> lock(g_cloud_mu);
+            EnsureCloudLoadedLocked(cat);
             if (g_cloud && g_cloud->IsReady() && !g_cloud_cfg.s3.use_fake) {
                 result.pushKV("cloud_origin", true);
                 result.pushKV("cloud_layout", CloudObjectLayoutName(g_cloud->Layout()));
