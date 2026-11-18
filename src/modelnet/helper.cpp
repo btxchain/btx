@@ -8833,6 +8833,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.refund_height = c.refund_height;
                 }
                 if (h.rec.release_id.empty()) h.rec.release_id = c.release_id.Hex();
+                if (FeedHidesModel(c.model_id, h.rec)) continue;
                 FillKnownCatalogFields(cat, h);
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat, include_wallet_observation));
                 if (!MatchesEconomyFilters(e, q.filters)) continue;
@@ -11178,6 +11179,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     h.rec.key_hash = c.key_hash;
                     h.rec.refund_height = c.refund_height;
                 }
+                if (FeedHidesModel(c.model_id, h.rec)) continue;
                 FillKnownCatalogFields(cat, h);
                 auto e = ComposeEconomyEntry(h, &c, ObservationFromHit(h, &c, &cat, include_wallet_observation));
                 if (!e.fundable_now) continue;
@@ -11207,6 +11209,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             const auto items = g_feed.Query(fq, ConnNowMs(), next);
             UniValue arr(UniValue::VARR);
             for (const auto& ev : items) {
+                if (FeedHidesModel(ev.model_id, ev.rec)) continue;
                 SearchHit h;
                 h.rec = ev.rec;
                 arr.push_back(EconomySearchCard(decorate(h)));
