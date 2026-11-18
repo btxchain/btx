@@ -19,6 +19,8 @@
 
 #include <atomic>
 #include <fstream>
+#include <functional>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1164,6 +1166,99 @@ BOOST_AUTO_TEST_CASE(malformed_search_query_is_refused)
     refused("getmodelfeed", R"({"filters":{"family":7}})");
     // The same input is refused by browsemodels already (with its own code).
     refused("browsemodels", R"({"sort":"nearly-funded"})", "INVALID_PARAMS");
+}
+
+// Release-list wrappers must apply the same local display policy as the feed.
+// Direct campaign lookup remains available for an operator inspecting a hidden item.
+BOOST_AUTO_TEST_CASE(release_lists_respect_local_hide_without_changing_campaigns)
+{
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "release-list-visibility";
+    ModelCatalog cat{root, 64 << 20};
+    std::vector<std::string> ids, uris, releases;
+    for (int i = 0; i < 4; ++i) {
+        const fs::path file = root / fs::PathFromString("model" + std::to_string(i) + ".safetensors");
+        fs::create_directories(root);
+        const std::string header = "{\"__metadata__\":{\"case\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> bytes(8 + header.size());
+        WriteLE64(bytes.data(), header.size());
+        std::copy(header.begin(), header.end(), bytes.begin() + 8);
+        { std::ofstream out(file, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+        UniValue host(UniValue::VARR);
+        host.push_back(fs::PathToString(file));
+        const auto model = HelperDispatch(cat, "hostmodel", host);
+        ids.push_back(model["model_id"].get_str());
+        uris.push_back(model["uri"].get_str());
+        const std::string secret(64, static_cast<char>('a' + i));
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("uri", uris.back());
+        body.pushKV("secret32_hex", secret);
+        body.pushKV("refund_height", 100000);
+        body.pushKV("target_atoms", 5'000'000);
+        body.pushKV("display_name", "Visibility " + std::to_string(i));
+        UniValue create(UniValue::VARR);
+        create.push_back(body);
+        releases.push_back(HelperDispatch(cat, "createmodelrelease", create)["release_id"].get_str());
+        if (i >= 2) {
+            UniValue claim(UniValue::VARR);
+            claim.push_back(releases.back());
+            claim.push_back(secret);
+            BOOST_REQUIRE(HelperDispatch(cat, "claimmodelrelease", claim)["secret_disclosed"].get_bool());
+        }
+    }
+    const auto campaigns = [&] {
+        std::ifstream in(root / "campaigns.json", std::ios::binary);
+        BOOST_REQUIRE(in.good());
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string original = campaigns();
+    std::function<bool(const UniValue&, const std::string&)> contains;
+    contains = [&](const UniValue& v, const std::string& id) {
+        if (v.isStr()) return v.get_str() == id || v.get_str() == "btx://" + id;
+        if (v.isArray() || v.isObject()) {
+            for (const auto& child : v.getValues()) if (contains(child, id)) return true;
+        }
+        return false;
+    };
+    const auto check = [&](bool hidden) {
+        for (const std::string method : {"getrecentreleases", "getfundablemodels", "getrecentlyunlockedmodels"}) {
+            UniValue q(UniValue::VOBJ);
+            q.pushKV("scope", "LOCAL");
+            q.pushKV("limit", 100);
+            UniValue args(UniValue::VARR);
+            args.push_back(q);
+            const UniValue page = HelperDispatch(cat, method, args);
+            BOOST_REQUIRE(page["results"].isArray());
+            for (int i = 0; i < 4; ++i) {
+                const bool applies = method == "getrecentreleases" ||
+                    (method == "getfundablemodels" ? i < 2 : i >= 2);
+                if (applies) {
+                    const bool want = !hidden || i % 2 == 1;
+                    BOOST_CHECK_MESSAGE(contains(page["results"], ids[i]) == want,
+                                        method << ": model " << i << ", hidden=" << (hidden ? 1 : 0));
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            UniValue id(UniValue::VARR);
+            id.push_back(releases[i]);
+            BOOST_CHECK(contains(HelperDispatch(cat, "getmodelrelease", id), ids[i]));
+        }
+        BOOST_CHECK_EQUAL(campaigns(), original);
+    };
+    check(false);
+    for (const int i : {0, 2}) {
+        UniValue args(UniValue::VARR);
+        args.push_back(uris[i]);
+        BOOST_REQUIRE(HelperDispatch(cat, "hidesearchmodel", args)["hidden"].get_bool());
+    }
+    check(true);
+    for (const int i : {0, 2}) {
+        UniValue args(UniValue::VARR);
+        args.push_back(uris[i]);
+        BOOST_CHECK(!HelperDispatch(cat, "unhidesearchmodel", args)["hidden"].get_bool());
+    }
+    check(false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
