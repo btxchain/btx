@@ -982,6 +982,173 @@ BOOST_AUTO_TEST_CASE(search_quota_counts_live_records)
     BOOST_CHECK_EQUAL(err, "publisher spam");
 }
 
+// Put refuses an older sequence while the newer record is in the index. Once
+// that record expired and was pruned, or expired while the helper was down,
+// an older copy that had not expired yet was taken back.
+BOOST_AUTO_TEST_CASE(expired_record_sequence_is_not_taken_back)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> pk, sk, other_pk, other_sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(other_pk, other_sk, err));
+    const auto rec = [&](uint8_t tag, uint64_t seq, int64_t expires_at, bool other = false) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = tag;
+        r.canonical_name = "seq" + std::to_string(seq);
+        r.display_name = r.canonical_name;
+        r.metadata_sequence = seq;
+        r.expires_at = expires_at;
+        r.pubkey = other ? other_pk : pk;
+        const auto& key = other ? other_sk : sk;
+        BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{key.data(), key.size()}, err));
+        return r;
+    };
+    const auto seq1 = rec(0x50, 1, 5'000'000);
+    const auto seq2 = rec(0x50, 2, 2'000'000);
+    const Digest48 signer = seq1.signer_id;
+    const fs::path dir = m_path_root / "search-seq-floor";
+    fs::create_directories(dir);
+
+    // Pruned at run time.
+    {
+        SearchIndex idx;
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq1, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq2, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x51, 1, 9'000'000), 3'000'000, err), err);
+        BOOST_REQUIRE(idx.Get(seq1.model_id) == nullptr);
+        BOOST_CHECK(!idx.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(seq1.model_id, signer), 2U);
+        // Another record under the expired one's sequence is not taken either.
+        auto twin = rec(0x50, 2, 9'000'000);
+        twin.display_name = "twin";
+        BOOST_REQUIRE(SignSearchRecord(twin, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        BOOST_CHECK(!idx.Put(twin, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        // This node's unsigned catalog stub for the model does not open the way.
+        ModelSearchRecord stub;
+        stub.model_id = seq1.model_id;
+        stub.canonical_name = "stub";
+        stub.display_name = stub.canonical_name;
+        stub.local_catalog = true;
+        BOOST_REQUIRE_MESSAGE(idx.Put(stub, 3'000'000, err), err);
+        BOOST_CHECK(!idx.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        BOOST_REQUIRE_MESSAGE(idx.Save(dir / "pruned.json", err), err);
+        SearchIndex reread;
+        BOOST_REQUIRE(reread.Load(dir / "pruned.json", 3'000'000, err));
+        BOOST_CHECK(!reread.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(seq1.model_id, signer), 2U);
+        // A newer record holds the sequence from then on.
+        BOOST_CHECK_MESSAGE(reread.Put(rec(0x50, 3, 9'000'000), 3'000'000, err), err);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(seq1.model_id, signer), 0U);
+        // A record at sequence 0 leaves no floor, as SequenceFloor reads 0 as none.
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x53, 0, 3'500'000), 3'000'000, err), err);
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x54, 1, 9'000'000), 4'000'000, err), err);
+        BOOST_CHECK(reread.Get(rec(0x53, 0, 3'500'000).model_id) == nullptr);
+        auto zero = rec(0x53, 0, 9'000'000);
+        zero.display_name = "zero again";
+        BOOST_REQUIRE(SignSearchRecord(zero, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        BOOST_CHECK_MESSAGE(reread.Put(zero, 4'000'000, err), err);
+    }
+    // Expired while the helper was down.
+    {
+        SearchIndex idx;
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq2, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Save(dir / "offline.json", err), err);
+        SearchIndex reread;
+        BOOST_REQUIRE(reread.Load(dir / "offline.json", 3'000'000, err));
+        BOOST_CHECK(reread.Get(seq2.model_id) == nullptr);
+        BOOST_CHECK(!reread.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+    }
+    // Another key has its own floor: it cannot raise or clear this one.
+    {
+        SearchIndex idx;
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq2, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x51, 1, 9'000'000), 3'000'000, err), err);
+        const auto high = rec(0x50, 1'000'000, 4'000'000, /*other=*/true);
+        BOOST_REQUIRE_MESSAGE(idx.Put(high, 3'000'000, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x52, 1, 9'000'000), 4'500'000, err), err);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(seq1.model_id, high.signer_id), 1'000'000U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(seq1.model_id, signer), 2U);
+        BOOST_CHECK(!idx.Put(seq1, 4'500'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        BOOST_CHECK_MESSAGE(idx.Put(rec(0x50, 3, 9'000'000), 4'500'000, err), err);
+    }
+    // Floors from peer records are bounded like the index; the oldest go
+    // first, also after a restart. The floor of this node's own record stays.
+    {
+        const auto model = [](uint8_t tag) {
+            Digest48 id;
+            id.data[0] = tag;
+            return id;
+        };
+        SearchIndex idx;
+        auto own = rec(0x5f, 9, 1000);
+        own.local_catalog = true;
+        BOOST_REQUIRE_MESSAGE(idx.Put(own, 1, err), err);
+        for (uint8_t i = 0; i < 6; ++i) BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x60 + i, 7, 1000 + i), 1, err), err);
+        idx.SetCap(4);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x70, 1, 9'000'000), 1'000'000, err), err);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x5f), signer), 9U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x61), signer), 0U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x62), signer), 7U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x65), signer), 7U);
+        BOOST_REQUIRE_MESSAGE(idx.Save(dir / "bound.json", err), err);
+        SearchIndex reread;
+        reread.SetCap(4);
+        BOOST_REQUIRE(reread.Load(dir / "bound.json", 1'500'000, err));
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x66, 7, 2'000'000), 1'500'000, err), err);
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x71, 1, 9'000'000), 2'500'000, err), err);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x62), signer), 0U);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x63), signer), 7U);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x66), signer), 7U);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x5f), signer), 9U);
+    }
+}
+
+// The helper's own publish paths sign with this node's key. After its own
+// record expired and was pruned, publishing the model again was refused.
+BOOST_AUTO_TEST_CASE(own_record_published_again_after_expiry)
+{
+    using namespace modelnet;
+    const fs::path tmp = m_path_root / "search-own-floor";
+    fs::create_directories(tmp);
+    ModelCatalog cat{tmp, 1 << 20};
+    const auto now_ms = [] {
+        return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    };
+    const auto publish = [&](const std::string& id, int64_t expires_at, std::string& e) {
+        UniValue meta(UniValue::VOBJ);
+        meta.pushKV("display_name", "Floor Model");
+        meta.pushKV("canonical_name", "Floor Model");
+        if (expires_at) meta.pushKV("expires_at", expires_at);
+        UniValue params(UniValue::VARR);
+        params.push_back(id);
+        params.push_back(meta);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "publishmodelsearchrecord");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string code;
+        if (!DispatchHelperRpc(cat, req, result, code, e, nullptr)) return int64_t{-1};
+        return result["sequence"].getInt<int64_t>();
+    };
+    const std::string model(96, 'f');
+    std::string e;
+    const int64_t expiry = now_ms() + 3000;
+    const int64_t first = publish(model, expiry, e);
+    BOOST_REQUIRE_MESSAGE(first > 0, e);
+    BOOST_REQUIRE_EQUAL(publish(model, expiry, e), first + 1);
+    while (now_ms() <= expiry) UninterruptibleSleep(std::chrono::milliseconds{50});
+    // Another publish prunes the expired record.
+    BOOST_REQUIRE_MESSAGE(publish(std::string(95, 'f') + "e", 0, e) > 0, e);
+    BOOST_CHECK_EQUAL(publish(model, 0, e), first + 2);
+}
+
 BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
 {
     using namespace modelnet;
