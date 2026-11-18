@@ -1777,6 +1777,13 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
     }
     for (auto& existing : m_models) {
         if (existing.model_id == e.model_id) {
+            // A fetch or a package import that only starts on a copy this node
+            // already holds whole and verified would turn it back into a
+            // partial one: no checkout, no serving, no seeding.
+            if (!complete && existing.artifact_id == e.artifact_id && !existing.incomplete &&
+                (existing.bytes_verified || AdmissionImpliesBytesVerified(existing.admission))) {
+                return true;
+            }
             // A download of a model the catalog already lists (a repair, or the
             // end of a partial fetch) replaces its files, not what this node
             // recorded about it: the pin, the operator's label, and for the same
