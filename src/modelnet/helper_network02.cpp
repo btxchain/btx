@@ -624,6 +624,18 @@ bool ExecuteImport(ModelCatalog& cat, const UniValue& o, UniValue& result, std::
     return true;
 }
 
+/** The payload a package carries: its core, observations and signatures, and
+ *  nothing else (the signatures cover the core only). Request fields such as
+ *  idempotency_key or profile are not part of it. */
+bool CanonicalPackagePayload(const UniValue& from, UniValue& out, std::string& err_code, std::string& err)
+{
+    out = UniValue(UniValue::VOBJ);
+    out.pushKV("core", from.exists("core") ? from["core"] : UniValue(UniValue::VOBJ));
+    out.pushKV("observations", from.exists("observations") ? from["observations"] : UniValue(UniValue::VARR));
+    out.pushKV("signatures", from.exists("signatures") ? from["signatures"] : UniValue(UniValue::VARR));
+    return ValidatePackagePayload(out, err_code, err);
+}
+
 bool PackageFromObject(const UniValue& o, UniValue& result, std::string& err_code, std::string& err)
 {
     UniValue payload = o;
@@ -732,7 +744,9 @@ bool PackageFromObject(const UniValue& o, UniValue& result, std::string& err_cod
                 return false;
             }
         }
-        if (!EncodeBtxPackage(payload, bytes, err)) {
+        UniValue canonical;
+        if (!CanonicalPackagePayload(payload, canonical, err_code, err)) return false;
+        if (!EncodeBtxPackage(canonical, bytes, err)) {
             err_code = "INVALID_PARAMETER";
             return false;
         }
@@ -786,7 +800,9 @@ bool PackageFromObject(const UniValue& o, UniValue& result, std::string& err_cod
             for (const auto& f : flags) lint.push_back(f);
             result.pushKV("lint_flags", lint);
         }
-        if (!EncodeBtxPackage(payload, bytes, err)) {
+        UniValue canonical;
+        if (!CanonicalPackagePayload(payload, canonical, err_code, err)) return false;
+        if (!EncodeBtxPackage(canonical, bytes, err)) {
             err_code = "INVALID_PARAMETER";
             return false;
         }
@@ -1154,6 +1170,16 @@ bool DispatchNetwork02RpcOnce(ModelCatalog& cat, const std::string& method, cons
     }
     if (method == "inspectbtxpackage" || method == "verifybtxpackage" || method == "importbtxpackage") {
         if (!InspectPackage(o, result, err_code, err)) return false;
+        // The signatures cover the core only. A payload with anything next to
+        // core, observations and signatures (a "manifest" to install, say)
+        // fails ValidatePackagePayload, and that part is signed by no one.
+        if (method != "inspectbtxpackage" && result.exists("core_valid") && result["core_valid"].isBool() &&
+            !result["core_valid"].get_bool()) {
+            err_code = result.exists("core_error") && result["core_error"].isStr() ? result["core_error"].get_str() :
+                                                                                     "NONCANONICAL_PAYLOAD";
+            err = "package payload is not valid; inspect remains available";
+            return false;
+        }
         if (method == "verifybtxpackage") {
             const std::string st = result.exists("signature_status") && result["signature_status"].isStr() ?
                                         result["signature_status"].get_str() :
