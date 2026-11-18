@@ -464,11 +464,13 @@ CREATE TABLE IF NOT EXISTS sn_invite_connections(
         require(row and row[0]==ctx.name and row[1]==ctx.wallet,'FORBIDDEN','Preview does not belong to this principal and wallet')
         body=loads(row[3]);q=Quote.parse(body['quote']['quote'])
         sid=digest('BTX/SWAPNET/SWAP/2',{'quote_id':q.id,'initiator':self.identity.address()})
-        # Recover the exact already-started trade after a reply/write failure;
-        # do not make a new mandate or require the old quote to remain live.
+        # Reuse the exact already-started intent after a reply/write failure.
+        # Only an unsent initial proposal needs live original authority;
+        # live queued proposals and progressed trades remain status-only retries.
         with self.store.lock:existing=self.store.db.execute('SELECT principal FROM sn_negotiations WHERE id=?',(sid,)).fetchone()
         if existing:
             require(existing[0]==ctx.name,'FORBIDDEN','Trade belongs to another principal')
+            self.coordinator._retry_proposal(sid,self.coordinator._owned(ctx,sid)[1])
             result=self.coordinator.get(ctx,sid)
         else:
             self.participation.require_trade()
