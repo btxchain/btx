@@ -157,6 +157,15 @@ public:
     explicit constexpr operator int64_t() const { return static_cast<int64_t>(lo); }
     explicit constexpr operator uint32_t() const { return static_cast<uint32_t>(lo); }
     explicit constexpr operator int32_t() const { return static_cast<int32_t>(lo); }
+    // Same bits as static_cast<unsigned __int128>(signed __int128). MSVC needs
+    // this for the matmul accumulator reduction; GCC keeps the native type.
+    explicit constexpr operator Unsigned128() const
+    {
+        Unsigned128 u;
+        u.lo = lo;
+        u.hi = hi;
+        return u;
+    }
 
     friend constexpr bool operator==(Signed128 a, Signed128 b) { return a.lo == b.lo && a.hi == b.hi; }
     friend constexpr bool operator!=(Signed128 a, Signed128 b) { return !(a == b); }

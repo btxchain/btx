@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from dataclasses import replace
 import json
+import os
 import socket
 import threading
 import urllib.error
@@ -42,11 +43,15 @@ def refused_client(path, missing=False):
     if not missing:
         cookie.write_text('test:disposable'); cookie.chmod(0o600)
     # Release a locally chosen port: a bound non-listening socket times out on
-    # Darwin. Verify the actual exception rather than assuming the OS outcome.
+    # Darwin. Windows reports a closed loopback port as a timeout for about two
+    # seconds and then as a refusal. The product timeout is 10 seconds, so a
+    # down local node is still a refusal there. This probe waits long enough
+    # for that refusal without treating a timeout as one.
     with socket.socket() as guard:
         guard.bind(('127.0.0.1', 0))
         port = guard.getsockname()[1]
-    client = LocalRPC('http://127.0.0.1:' + str(port), cookie_path=cookie, timeout=1)
+    timeout = 5 if os.name == 'nt' else 1
+    client = LocalRPC('http://127.0.0.1:' + str(port), cookie_path=cookie, timeout=timeout)
     with pytest.raises(SwapError) as error:
         client('getblockcount')
     if not missing:

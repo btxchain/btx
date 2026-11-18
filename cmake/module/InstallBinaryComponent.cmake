@@ -48,7 +48,12 @@ function(btx_set_packaged_lib_runpath target_name)
     # Mach-O has no $ORIGIN. @executable_path/../lib is the same bin/ -> lib/ hop.
     target_link_options(${target_name} PRIVATE "LINKER:-rpath,@executable_path/../lib")
   else()
-    target_link_options(${target_name} PRIVATE "LINKER:--enable-new-dtags,-rpath,\$ORIGIN/../lib")
+    # One dollar must reach the linker. A backslash before $ORIGIN is doubled
+    # by CMake 3.22's Unix Makefiles generator, so the binary's RUNPATH is
+    # $$ORIGIN and the loader does not treat it as the executable's directory.
+    # A plain dollar is escaped once for Make and for Ninja.
+    string(ASCII 36 btx_dollar)
+    target_link_options(${target_name} PRIVATE "LINKER:--enable-new-dtags,-rpath,${btx_dollar}ORIGIN/../lib")
   endif()
   set_target_properties(${target_name} PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
 endfunction()

@@ -80,6 +80,8 @@ BOOST_AUTO_TEST_CASE(portable_signed_matches_native)
             BOOST_CHECK(BitsI(pa - pb) == na - nb);
             BOOST_CHECK(BitsI(pa * pb) == na * nb);
             BOOST_CHECK(BitsI(-pa) == -na);
+            BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(pa)) == static_cast<btx::U128>(na));
+            BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(-pa)) == static_cast<btx::U128>(-na));
             BOOST_CHECK((pa < pb) == (na < nb));
             BOOST_CHECK((pa >= pb) == (na >= nb));
             BOOST_CHECK((pa != 0) == (na != 0));

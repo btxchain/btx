@@ -7948,8 +7948,11 @@ bool CShieldedWallet::MaybeRehydrateSpendingKeys()
                     note_without_key = false;
                     if (!m_scan_incomplete) {
                         for (const auto& [_, coin] : m_notes) {
+                            // A local, not the structured binding. Clang with OpenMP
+                            // rejects a lambda that captures the binding.
+                            const auto& recipient = coin.note.recipient_pk_hash;
                             const auto key_it = std::find_if(m_key_sets.begin(), m_key_sets.end(), [&](const auto& entry) {
-                                return entry.second.spending_pk_hash == coin.note.recipient_pk_hash;
+                                return entry.second.spending_pk_hash == recipient;
                             });
                             if (key_it == m_key_sets.end()) {
                                 note_without_key = true;

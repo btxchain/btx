@@ -19,7 +19,8 @@ param(
     [string]$VcpkgBuildtreesRoot = "C:\btx-deps\vcpkg-buildtrees",
     [string]$CudaToolkitRoot = "",
     [string]$CudaArchitectures = "120",
-    [string]$OpenSSLRoot = ""
+    [string]$OpenSSLRoot = "",
+    [switch]$WithoutModelNet
 )
 
 $ErrorActionPreference = "Stop"
@@ -446,8 +447,10 @@ if ($InstallDependencies) {
         Fail "Could not install contrib/swapnet/requirements-tested-runtime.txt"
     }
 }
-if ([string]::IsNullOrWhiteSpace($OpenSSLRoot)) {
-    Write-Step "ModelNet needs OpenSSL 3.5 or newer. The pinned vcpkg baseline does not ship it. Pass -OpenSSLRoot, or configure with -DWITH_MODELNET=OFF."
+if ($WithoutModelNet) {
+    Write-Step "ModelNet is off for this build (-WithoutModelNet)."
+} elseif ([string]::IsNullOrWhiteSpace($OpenSSLRoot)) {
+    Write-Step "ModelNet needs OpenSSL 3.5 or newer. The pinned vcpkg baseline does not ship it. Pass -OpenSSLRoot, or rerun with -WithoutModelNet."
 }
 $vcpkg = Ensure-Vcpkg -Git $tools.Git -Root $VcpkgRoot
 
@@ -512,7 +515,9 @@ if ($EnableCudaExperimental) {
     $cmakeArgs += "-DCUDAToolkit_ROOT=`"$cudaRoot`""
     $cmakeArgs += "-DCMAKE_CUDA_COMPILER=`"$nvcc`""
 }
-if (-not [string]::IsNullOrWhiteSpace($OpenSSLRoot)) {
+if ($WithoutModelNet) {
+    $cmakeArgs += "-DWITH_MODELNET=OFF"
+} elseif (-not [string]::IsNullOrWhiteSpace($OpenSSLRoot)) {
     $OpenSSLRoot = Resolve-NormalPath -Path $OpenSSLRoot
     $cmakeArgs += "-DOPENSSL_ROOT_DIR=`"$OpenSSLRoot`""
 }

@@ -2,10 +2,10 @@
 
 Humans: read [HUMANS.md](HUMANS.md), then ignore this file. Product overview:
 [README.md](README.md). This is the operations manual for coding agents,
-research agents, and automation in BTX **0.35.0rc1** (`CLIENT_VERSION_MINOR=35`,
-`CLIENT_VERSION_BUILD=0`, `CLIENT_VERSION_RC=1`, `IS_RELEASE=true`).
-`btxd -version` prints `v0.35.0rc1`. This is not the shipping tag `v0.35.0`.
-The last shipping tag remains **v0.34.15**. Structure:
+research agents, and automation on this branch, BTX **0.34.17**
+(`CLIENT_VERSION_MINOR=34`, `CLIENT_VERSION_BUILD=17`, `CLIENT_VERSION_RC=0`,
+`IS_RELEASE=true`). `btxd -version` prints `v0.34.17`. The last shipping tag
+is **v0.34.16**. There is no `v0.34.17` tag yet. Structure:
 [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
 
 Default posture is **read-only**. Do not compile, commit, push, spend, evaluate,

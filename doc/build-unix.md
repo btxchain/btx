@@ -254,7 +254,9 @@ Finally, clang (often less resource hungry) can be used instead of gcc, which is
 
 Build requirements:
 
-    sudo apt-get install build-essential cmake pkgconf python3
+    sudo apt-get install build-essential cmake pkgconf python3 python3-dev python3-cryptography
+
+`btxd` links `libpython`. Configure requires Python 3.11 or newer, its development headers, and that interpreter's `cryptography` module. Ubuntu 22.04's Python 3.10 is not enough; install a newer Python and point CMake at it with `-DPython3_EXECUTABLE=`.
 
 Now, you can either build from self-compiled [depends](#dependencies) or install the required dependencies:
 
