@@ -138,6 +138,81 @@ BOOST_AUTO_TEST_CASE(hosted_grant_issue_then_retrieve_then_replay)
     BOOST_CHECK_EQUAL(nresp.status, 403);
 }
 
+// A grant use is recorded before the piece is read. A request that then fails
+// (here an unaligned subpiece offset) takes the use back, so the same grant
+// still fetches the piece once.
+BOOST_AUTO_TEST_CASE(hosted_grant_is_not_spent_by_a_failed_request)
+{
+    const fs::path tmp = m_path_root / "authz-grant-failed";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat);
+
+    modelnet::NativeRequest nreq;
+    nreq.method = "POST";
+    nreq.path = "/btx-model/2/ext/free/grant";
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("model_id", imported.model_id.Hex());
+    req.pushKV("first_piece", 0);
+    req.pushKV("piece_count", 1);
+    nreq.body = req.write();
+    modelnet::NativeResponse nresp;
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_REQUIRE_EQUAL(nresp.status, 200);
+    UniValue gj;
+    BOOST_REQUIRE(gj.read(nresp.body));
+
+    nreq = {};
+    nreq.method = "GET";
+    nreq.path = "/btx-model/2/transfers/" + imported.artifact_id.Hex() + "/pieces/0/0";
+    nreq.headers = {
+        {"X-BTX-Grant-Payload", gj["payload_hex"].get_str()},
+        {"X-BTX-Grant-Sig", gj["sig_hex"].get_str()},
+        {"X-BTX-Grant-Pubkey", gj["pubkey_hex"].get_str()},
+        {"X-BTX-Subpiece-Offset", "1"},
+    };
+    nresp = {};
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_CHECK_EQUAL(nresp.status, 400);
+
+    nreq.headers.pop_back();
+    nresp = {};
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_CHECK_EQUAL(nresp.status, 200);
+    nresp = {};
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_CHECK_EQUAL(nresp.status, 403);
+
+    // A grant gets at most 4 failed uses back; after the fifth failure it is
+    // spent, so failed requests do not make it an unbounded amount of work.
+    nreq = {};
+    nreq.method = "POST";
+    nreq.path = "/btx-model/2/ext/free/grant";
+    nreq.body = req.write();
+    nresp = {};
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_REQUIRE_EQUAL(nresp.status, 200);
+    UniValue g2;
+    BOOST_REQUIRE(g2.read(nresp.body));
+    nreq = {};
+    nreq.method = "GET";
+    nreq.path = "/btx-model/2/transfers/" + imported.artifact_id.Hex() + "/pieces/0/0";
+    nreq.headers = {
+        {"X-BTX-Grant-Payload", g2["payload_hex"].get_str()},
+        {"X-BTX-Grant-Sig", g2["sig_hex"].get_str()},
+        {"X-BTX-Grant-Pubkey", g2["pubkey_hex"].get_str()},
+        {"X-BTX-Subpiece-Offset", "1"},
+    };
+    for (int i = 0; i < 5; ++i) {
+        nresp = {};
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+        BOOST_CHECK_EQUAL(nresp.status, 400);
+    }
+    nreq.headers.pop_back();
+    nresp = {};
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_CHECK_EQUAL(nresp.status, 403);
+}
+
 BOOST_AUTO_TEST_CASE(hosted_grant_is_bound_to_its_model_and_piece_range)
 {
     // A valid grant covers the model and the pieces it was issued for, and

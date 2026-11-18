@@ -73,6 +73,11 @@ bool VerifyFreeGrant(Span<const unsigned char> payload,
                      UniValue& body,
                      std::string& err);
 
+//! Take back a use VerifyHostedFreeGrant recorded for use_key, when the request
+//! it was recorded for was not served after all. A use that is not there is
+//! left alone.
+bool ReleaseHostedFreeGrantUse(const fs::path& helper_dir, const std::string& nonce_hex, const std::string& use_key,
+                               uint64_t redeem_bytes, std::string& err);
 /** Verify against this helper's service identity and mark `use_key` redeemed.
  *  A redemption is single-use. `redeem_bytes` is charged against the grant's
  *  `maximum_bytes` only when `record_use` is true. */
