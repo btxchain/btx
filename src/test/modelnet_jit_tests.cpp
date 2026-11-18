@@ -1367,9 +1367,9 @@ BOOST_AUTO_TEST_CASE(jit_api_priv_scale_journey_safety)
         BOOST_CHECK(CLIENT_VERSION_IS_RELEASE);
         BOOST_CHECK_EQUAL(CLIENT_VERSION_MAJOR, 0);
         BOOST_CHECK_EQUAL(CLIENT_VERSION_MINOR, 34);
-        BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 16);
-        BOOST_CHECK_EQUAL(std::string(CLIENT_VERSION_STRING), "0.34.16");
-        BOOST_TEST_MESSAGE("lab candidate is 0.34.16; this test does not restart production");
+        BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 17);
+        BOOST_CHECK_EQUAL(std::string(CLIENT_VERSION_STRING), "0.34.17");
+        BOOST_TEST_MESSAGE("lab candidate is 0.34.17; this test does not restart production");
     }
 }
 

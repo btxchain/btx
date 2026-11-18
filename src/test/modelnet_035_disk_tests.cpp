@@ -12,6 +12,7 @@
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 #include <util/string.h>
 
 #include <boost/test/unit_test.hpp>
@@ -1275,6 +1276,20 @@ modelnet::ExchangeObject PieceObject(const std::string& model_digest, const std:
     return DigestedObject("piece", "v1|" + model_digest + "|" + index + "|" + hex);
 }
 
+/** A model followed by its pieces, split the way the store splits model bytes, so the pieces import. */
+std::vector<modelnet::ExchangeObject> ModelWithPieces(const std::string& bytes)
+{
+    std::vector<std::string> chunks;
+    std::string err;
+    BOOST_REQUIRE(modelnet::SplitModelPieces(bytes, chunks, err));
+    BOOST_REQUIRE_GE(chunks.size(), 2U);
+    std::vector<modelnet::ExchangeObject> objects{DigestedObject("model", bytes)};
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        objects.push_back(PieceObject(objects.front().digest, util::ToString(i), HexStr(chunks[i])));
+    }
+    return objects;
+}
+
 bool ImportObjects(const std::vector<modelnet::ExchangeObject>& objects, const std::string& idem, std::string& err)
 {
     std::string manifest;
@@ -1362,14 +1377,14 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     const std::string last = util::ToString(modelnet::MODEL_MAX_PIECES - 1);
     const std::string cap = util::ToString(modelnet::MODEL_MAX_PIECES);
     const std::string cap_plus_one = util::ToString(modelnet::MODEL_MAX_PIECES + 1);
-    const std::string model_a(96, '1');
+    const std::vector<modelnet::ExchangeObject> model_a = ModelWithPieces("btx035 piece bounds model, two pieces long");
     const std::string model_b(96, '2');
     const std::string model_c(96, '3');
     const std::string model_d(96, '4');
     std::string err;
 
     // Pieces in index order still import.
-    BOOST_CHECK(ImportObjects({PieceObject(model_a, "0", "aa"), PieceObject(model_a, "1", "bb")}, "idempotency-bound-piece-ok", err));
+    BOOST_CHECK(ImportObjects(model_a, "idempotency-bound-piece-ok", err));
     BOOST_CHECK(err.empty());
 
     // An index at or past MODEL_MAX_PIECES is refused before anything is stored.
@@ -1389,7 +1404,9 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     LabDirEnv env(dir.path);
     modelnet::ResetLabApi();
     const modelnet::ExchangeObject blob = DigestedObject("blob", "piece bounds manifest\n");
-    BOOST_REQUIRE(ImportObjects({blob, PieceObject(model_a, "0", "aa")}, "idempotency-bound-piece-disk", err));
+    std::vector<modelnet::ExchangeObject> disk_import{blob};
+    disk_import.insert(disk_import.end(), model_a.begin(), model_a.end());
+    BOOST_REQUIRE(ImportObjects(disk_import, "idempotency-bound-piece-disk", err));
     UniValue disk = ReadLabJson(dir.path);
     BOOST_REQUIRE(disk["repo_objects"].isObject());
     UniValue repos = disk["repo_objects"];
@@ -1404,7 +1421,7 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     WriteLabJson(dir.path, disk);
 
     modelnet::ReloadLabFromDisk();
-    BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_a, "0"), "OK");
+    BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_a.front().digest, "0"), "OK");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_b, cap), "BTX035_NOT_FOUND");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_c, cap), "BTX035_NOT_FOUND");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_d, "0"), "OK");
@@ -1421,7 +1438,7 @@ BOOST_AUTO_TEST_CASE(manifest_pieces_out_of_index_order_are_a_gap)
     modelnet::ResetLabApi();
 
     const std::string model_e(96, '5');
-    const std::string model_f(96, '6');
+    const std::vector<modelnet::ExchangeObject> model_f = ModelWithPieces("btx035 piece order model, two pieces long");
     std::string err;
 
     // An export lists a model's pieces in index order from 0. A complete set in another order is refused
@@ -1430,7 +1447,7 @@ BOOST_AUTO_TEST_CASE(manifest_pieces_out_of_index_order_are_a_gap)
     BOOST_CHECK_EQUAL(err, "BTX035_GAP");
 
     // The same pieces in index order import.
-    BOOST_CHECK(ImportObjects({PieceObject(model_f, "0", "aa"), PieceObject(model_f, "1", "bb")}, "idempotency-piece-order-ok", err));
+    BOOST_CHECK(ImportObjects(model_f, "idempotency-piece-order-ok", err));
     BOOST_CHECK(err.empty());
 
     modelnet::ResetLabApi();
