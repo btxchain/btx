@@ -1105,6 +1105,10 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
     for (auto pit = m_by_model.begin(); pit != m_by_model.end();) {
         const int64_t exp = pit->second.expires_at;
         if (exp > 0 && exp <= now_ms) {
+            if (pit->second.signed_ok) {
+                NoteSequenceFloor(pit->second.model_id, pit->second.signer_id, pit->second.metadata_sequence,
+                                  pit->second.local_catalog);
+            }
             release(pit->first);
             pit = m_by_model.erase(pit);
         } else {
@@ -1113,6 +1117,15 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
     }
     const std::string key = r.model_id.Hex();
     auto it = m_by_model.find(key);
+    // A record of this signer up to this sequence expired and was pruned,
+    // also when this node's unsigned catalog stub came back in its place.
+    // One with the same sequence is that record or another one under its
+    // number; either way not taken.
+    const auto floor = verified ? m_seq_floor.find({r.model_id, r.signer_id}) : m_seq_floor.end();
+    if (floor != m_seq_floor.end() && r.metadata_sequence <= floor->second.seq) {
+        err = "sequence rollback";
+        return false;
+    }
     if (it != m_by_model.end()) {
         if (it->second.signed_ok) {
             if (!verified) {
@@ -1154,6 +1167,11 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
         m_pub_window[qk] += 1;
         m_pub_charge[key] = qk;
     }
+    if (floor != m_seq_floor.end()) {
+        // The record in the index holds the sequence from here on.
+        if (!floor->second.own) m_seq_floor_order.erase(floor->second.stamp);
+        m_seq_floor.erase(floor);
+    }
     ModelSearchRecord stored = r;
     stored.signed_ok = verified;
     if (verified && stored.record_version < 2) stored.publisher_identity = stored.signer_id;
@@ -1165,6 +1183,34 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
     m_by_model[key] = std::move(stored);
     ++m_seq;
     return true;
+}
+
+void SearchIndex::NoteSequenceFloor(const Digest48& model_id, const Digest48& signer, uint64_t seq, bool own)
+{
+    // Nothing is older than sequence 0; SequenceFloor() reads 0 as none.
+    if (seq == 0) return;
+    const SeqFloorKey k{model_id, signer};
+    auto [it, added] = m_seq_floor.try_emplace(k);
+    SeqFloor& f = it->second;
+    if (!added && seq <= f.seq && (f.own || !own)) return;
+    f.seq = std::max(f.seq, seq);
+    if (!added && !f.own) m_seq_floor_order.erase(f.stamp);
+    f.own = f.own || own;
+    if (f.own) return;
+    // Peers can make floors with new keys; their number is bounded like the
+    // index, the oldest go first. Floors of this node's own records stay.
+    f.stamp = m_seq_floor_stamp++;
+    m_seq_floor_order.emplace(f.stamp, k);
+    while (m_seq_floor_order.size() > m_cap) {
+        m_seq_floor.erase(m_seq_floor_order.begin()->second);
+        m_seq_floor_order.erase(m_seq_floor_order.begin());
+    }
+}
+
+uint64_t SearchIndex::SequenceFloor(const Digest48& model_id, const Digest48& signer) const
+{
+    const auto it = m_seq_floor.find({model_id, signer});
+    return it == m_seq_floor.end() ? 0 : it->second.seq;
 }
 
 bool SearchIndex::Tombstone(const Digest48& model_id, uint64_t seq, int64_t now_ms, std::string& err)
@@ -1426,6 +1472,20 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
     snap.pushKV("muted_publishers", muted);
     snap.pushKV("sequence", static_cast<int64_t>(m_seq));
     snap.pushKV("records", arr);
+    UniValue floors(UniValue::VARR);
+    const auto push_floor = [&](const SeqFloorKey& k, const SeqFloor& fl) {
+        UniValue f(UniValue::VOBJ);
+        f.pushKV("model_id", k.first.Hex());
+        f.pushKV("signer_id", k.second.Hex());
+        f.pushKV("metadata_sequence", static_cast<int64_t>(fl.seq));
+        if (fl.own) f.pushKV("own", true);
+        floors.push_back(std::move(f));
+    };
+    for (const auto& [k, fl] : m_seq_floor) {
+        if (fl.own) push_floor(k, fl);
+    }
+    for (const auto& [stamp, k] : m_seq_floor_order) push_floor(k, m_seq_floor.at(k)); // oldest first, as Load adds them
+    snap.pushKV("sequence_floors", floors);
     fs::create_directories(path.parent_path());
     // Write a temp file, check it after close and rename it over the index, so
     // a write that a full disk cuts short keeps the previous file.
@@ -1471,6 +1531,26 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
         UniValue o;
         if (!o.read(raw) || !o.isObject()) return keep_unreadable("parse");
         if (o.exists("records") && !o["records"].isArray()) return keep_unreadable("records type");
+        // Floors first: a record below one is not taken back from the file.
+        if (o.exists("sequence_floors") && o["sequence_floors"].isArray()) {
+            for (const auto& f : o["sequence_floors"].getValues()) {
+                Digest48 model_id, signer;
+                std::string ferr;
+                if (!f.isObject() || !f["model_id"].isStr() || !f["signer_id"].isStr() || !f["metadata_sequence"].isNum() ||
+                    !Digest48::FromHex(f["model_id"].get_str(), model_id, ferr) ||
+                    !Digest48::FromHex(f["signer_id"].get_str(), signer, ferr)) {
+                    LogSkippedJson("sequence floor");
+                    continue;
+                }
+                try {
+                    const int64_t seq = f["metadata_sequence"].getInt<int64_t>();
+                    const bool own = f.exists("own") && f["own"].isBool() && f["own"].get_bool();
+                    if (seq > 0) NoteSequenceFloor(model_id, signer, static_cast<uint64_t>(seq), own);
+                } catch (const std::exception& ex) {
+                    LogSkippedJson(std::string("sequence floor ") + ex.what());
+                }
+            }
+        }
         const UniValue no_records(UniValue::VARR);
         for (const auto& recj : (o.exists("records") ? o["records"] : no_records).getValues()) {
             ModelSearchRecord rec;
@@ -1487,6 +1567,13 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
             } catch (...) {
                 LogSkippedJson("record");
                 continue;
+            }
+            // Put refuses a record that expired while the helper was down; its
+            // sequence still counts for the key that signed it. (This file is
+            // the one this node wrote; Put verified the record when it came.)
+            if (!rec.sig.empty() && rec.pubkey.size() == MLDSA44_PK && rec.expires_at > 0 && rec.expires_at <= now_ms) {
+                NoteSequenceFloor(rec.model_id, ResearchIdentityId(Span<const unsigned char>{rec.pubkey.data(), rec.pubkey.size()}),
+                                  rec.metadata_sequence, rec.local_catalog);
             }
             (void)Put(rec, now_ms, err);
         }
@@ -1533,6 +1620,9 @@ void SearchIndex::Clear()
     m_muted_publishers.clear();
     m_pub_window.clear();
     m_pub_charge.clear();
+    m_seq_floor.clear();
+    m_seq_floor_order.clear();
+    m_seq_floor_stamp = 0;
     m_seq = 0;
 }
 

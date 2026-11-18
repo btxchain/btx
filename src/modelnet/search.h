@@ -291,6 +291,24 @@ class SearchIndex {
     //! The quota key each counted record was charged to, by model id. The key
     //! is not always in the record ("ep:" names the peer that sent it).
     std::map<std::string, std::string> m_pub_charge;
+    //! The highest sequence a signed record reached before it expired, by
+    //! model id and signer, so an older copy of that record that has not
+    //! expired yet is not taken back (see Put()). Each signer has its own
+    //! entry: one key cannot raise or clear another's. Saved with the index.
+    using SeqFloorKey = std::pair<Digest48, Digest48>;
+    struct SeqFloor {
+        uint64_t seq{0};
+        //! From a record this node signed; never dropped for the bound.
+        bool own{false};
+        //! Its key in m_seq_floor_order; only for a floor that is not own.
+        uint64_t stamp{0};
+    };
+    std::map<SeqFloorKey, SeqFloor> m_seq_floor;
+    //! Floors from peer records by when they were set, oldest first; at
+    //! most m_cap.
+    std::map<uint64_t, SeqFloorKey> m_seq_floor_order;
+    uint64_t m_seq_floor_stamp{0};
+    void NoteSequenceFloor(const Digest48& model_id, const Digest48& signer, uint64_t seq, bool own);
     size_t m_cap{100000};
     std::vector<std::string> m_index_peers;
     uint64_t m_seq{0};
@@ -306,6 +324,10 @@ public:
              const std::string& transport_endpoint = {});
     bool Tombstone(const Digest48& model_id, uint64_t seq, int64_t now_ms, std::string& err);
     const ModelSearchRecord* Get(const Digest48& model_id) const;
+    //! Highest sequence a record of this model signed by \p signer reached
+    //! before it expired, or 0. A record this node publishes again after its
+    //! own expired starts above it.
+    uint64_t SequenceFloor(const Digest48& model_id, const Digest48& signer) const;
     //! Own records first, then a live, shown peer record; nullptr (and
     //! *ambiguous) when two peer records name the alias.
     const ModelSearchRecord* FindByAlias(const std::string& alias, int64_t now_ms = 0, bool* ambiguous = nullptr) const;

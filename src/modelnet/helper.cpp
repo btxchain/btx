@@ -1344,11 +1344,20 @@ bool EnsureDefaultPublisherIdentity(const fs::path& dir, std::vector<unsigned ch
     return WritePublisherIdentityFiles(dir, pk, sk, "local publisher", publisher_id, err);
 }
 
+// Takes g_search_mu; the caller does not hold it.
+uint64_t SearchSequenceFloor(const Digest48& model_id, const Digest48& signer);
+
 bool SignSearchRecordWithDefaultIdentity(const fs::path& dir, ModelSearchRecord& rec, std::string& err)
 {
     std::vector<unsigned char> pk, sk;
     Digest48 publisher_id;
     if (!EnsureDefaultPublisherIdentity(dir, pk, sk, publisher_id, err)) return false;
+    // A record this key published before and that expired set a floor; one
+    // published again starts above it, or the index refuses it as a rollback.
+    const uint64_t floor = SearchSequenceFloor(rec.model_id, ResearchIdentityId(pk));
+    if (floor > 0 && floor < static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        rec.metadata_sequence = std::max(rec.metadata_sequence, floor + 1);
+    }
     rec.pubkey = pk;
     if (rec.publisher_display_name.empty()) rec.publisher_display_name = "local publisher";
     if (!SignSearchRecord(rec, Span<const unsigned char>{sk.data(), sk.size()}, err)) {
@@ -2466,6 +2475,15 @@ int64_t ConnNowMs()
 static SearchIndex g_search_idx;
 static SearchRuntime g_search_rt;
 static std::mutex g_search_mu;
+
+namespace {
+uint64_t SearchSequenceFloor(const Digest48& model_id, const Digest48& signer)
+{
+    std::lock_guard<std::mutex> lock(g_search_mu);
+    return g_search_idx.SequenceFloor(model_id, signer);
+}
+} // namespace
+
 static std::map<std::string, std::vector<ProviderObservation>> g_search_obs;
 // g_search_mu must be held. A remote observation is a copy of a provider
 // record and goes when the record expires, as the record goes from the
