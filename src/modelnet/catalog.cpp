@@ -736,6 +736,13 @@ bool ModelCatalog::LoadLocked(std::string& err)
                       (e.seeded ? AdmissionLevel::SEEDING : AdmissionLevel::STRUCTURE_VERIFIED);
         if (o.exists("bytes_verified")) e.bytes_verified = o["bytes_verified"].get_bool();
         else e.bytes_verified = e.seeded || e.pinned || AdmissionImpliesBytesVerified(e.admission);
+        if (e.incomplete) {
+            // A partial copy stays one after a restart: the levels above count
+            // as verified bytes for the serve route.
+            e.admission = AdmissionLevel::FETCHING;
+            e.bytes_verified = false;
+            e.seeded = false;
+        }
         if (e.pinned) {
             std::string pin_err;
             m_store.Pin(e.model_id, pin_err);
@@ -1121,16 +1128,21 @@ bool ModelCatalog::PinModel(const Digest48& model_id, bool on, std::string& err)
     for (auto& m : m_models) {
         if (m.model_id == model_id || m.artifact_id == model_id) {
             m.pinned = on;
-            if (on) {
+            if (m.incomplete) {
+                // PINNED counts as verified bytes; a partial copy keeps FETCHING
+                // and its pin.
+                m.admission = AdmissionLevel::FETCHING;
+            } else if (on) {
                 m.admission = AdmissionLevel::PINNED;
+            }
+            if (on) {
                 std::string pin_err;
                 m_store.Pin(m.model_id, pin_err);
                 m_store.Pin(m.artifact_id, pin_err);
             } else {
                 m_store.Unpin(m.model_id);
                 m_store.Unpin(m.artifact_id);
-                if (m.seeded) m.admission = AdmissionLevel::SEEDING;
-                else m.admission = AdmissionLevel::STRUCTURE_VERIFIED;
+                if (!m.incomplete) m.admission = m.seeded ? AdmissionLevel::SEEDING : AdmissionLevel::STRUCTURE_VERIFIED;
             }
             return PersistLocked(err);
         }
@@ -1769,11 +1781,38 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
     }
     for (auto& existing : m_models) {
         if (existing.model_id == e.model_id) {
-            const bool pinned = existing.pinned;
-            const int64_t imported = existing.imported_at;
+            // A fetch or a package import that only starts on a copy this node
+            // already holds whole and verified would turn it back into a
+            // partial one: no checkout, no serving, no seeding.
+            if (!complete && existing.artifact_id == e.artifact_id && !existing.incomplete &&
+                (existing.bytes_verified || AdmissionImpliesBytesVerified(existing.admission))) {
+                return true;
+            }
+            // A download of a model the catalog already lists (a repair, or the
+            // end of a partial fetch) replaces its files, not what this node
+            // recorded about it: the pin, the operator's label, and for the same
+            // artifact its source and its transfer counts (the give-back ratio
+            // reads them).
+            e.pinned = existing.pinned;
+            e.imported_at = existing.imported_at ? existing.imported_at : GetTime();
+            e.last_access_at = existing.last_access_at;
+            if (!existing.label.empty()) e.label = existing.label;
+            if (existing.artifact_id == e.artifact_id) {
+                e.source_path = existing.source_path;
+                e.observed_sources = existing.observed_sources;
+                e.last_served_at = existing.last_served_at;
+                e.useful_bytes_served = existing.useful_bytes_served;
+                e.useful_bytes_received = existing.useful_bytes_received;
+                if (existing.seeding_started_at) e.seeding_started_at = existing.seeding_started_at;
+            }
+            if (e.pinned) {
+                if (complete) e.admission = AdmissionLevel::PINNED;
+                std::string pin_err;
+                m_store.Pin(e.model_id, pin_err);
+                m_store.Pin(e.artifact_id, pin_err);
+                if (existing.artifact_id != e.artifact_id) m_store.Unpin(existing.artifact_id);
+            }
             existing = e;
-            existing.pinned = pinned;
-            existing.imported_at = imported ? imported : GetTime();
             return PersistLocked(err);
         }
     }

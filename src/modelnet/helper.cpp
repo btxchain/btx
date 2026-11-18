@@ -11302,8 +11302,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             CatalogEntry local;
             if (cat.Find(cid, local) || (have_camp && cat.Find(camp.model_id, local))) {
                 std::vector<unsigned char> bytes;
-                if (ReadCatalogBytes(cat, local, bytes, err) &&
-                    LooksLikeBtxEnc2(Span<const unsigned char>{bytes.data(), bytes.size()})) {
+                const bool read = ReadCatalogBytes(cat, local, bytes, err);
+                if (read && LooksLikeBtxEnc2(Span<const unsigned char>{bytes.data(), bytes.size()})) {
                     result.pushKV("status", "local");
                     result.pushKV("verified_ciphertext", true);
                     result.pushKV("plaintext_unavailable", true);
@@ -11312,6 +11312,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                         result.pushKV("seeded_ciphertext", true);
                     }
                     return true;
+                }
+                // A copy whose bytes cannot be read is fetched again as a partial
+                // one, as getmodel does: a fetch does not reset a complete entry.
+                if (!read && !local.incomplete) {
+                    std::string mark_err;
+                    (void)cat.MarkIncomplete(local.model_id, true, mark_err);
                 }
             }
             lock.unlock();
