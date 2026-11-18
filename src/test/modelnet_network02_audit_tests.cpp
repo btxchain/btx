@@ -14,6 +14,7 @@
 #include <modelnet/file_stream.h>
 #include <modelnet/hello_caps.h>
 #include <modelnet/helper.h>
+#include <modelnet/identity.h>
 #include <modelnet/import_plan.h>
 #include <modelnet/io_executor.h>
 #include <modelnet/lan_discovery.h>
@@ -21,6 +22,7 @@
 #include <modelnet/operation_budget.h>
 #include <modelnet/query_router.h>
 #include <modelnet/object_layout.h>
+#include <modelnet/package_core.h>
 #include <modelnet/package_export.h>
 #include <modelnet/physical_dedup.h>
 #include <modelnet/residency_state.h>
@@ -31,11 +33,13 @@
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -702,6 +706,112 @@ BOOST_AUTO_TEST_CASE(n02_bootstrap_routing_discovery_package_import_export)
         BOOST_CHECK(err.find("VerifiedManifest") != std::string::npos || err.find("manifest") != std::string::npos ||
                     err.find("INVALID") != std::string::npos);
     }
+}
+
+// The package signatures cover the core only. importbtxpackage took the
+// manifest it installs from the rest of the payload, which no one signs, and
+// verify and import went on although ValidatePackagePayload refused it.
+BOOST_AUTO_TEST_CASE(package_import_takes_nothing_the_signature_does_not_cover)
+{
+    const fs::path tmp = m_path_root / "n02-package-unsigned-manifest";
+    fs::create_directories(tmp / "src");
+    const auto st = TinySafeTensors(0x5a);
+    {
+        std::ofstream out(tmp / "src" / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    std::string code, err;
+    // The manifest of a model the signed core does not name.
+    UniValue manifest;
+    modelnet::Digest48 other_model;
+    {
+        modelnet::ModelCatalog other{tmp / "other", 8 << 20};
+        modelnet::CatalogEntry entry;
+        BOOST_REQUIRE_MESSAGE(other.ImportPath(fs::PathToString(tmp / "src" / "model.safetensors"), false, entry, err), err);
+        other_model = entry.model_id;
+        BOOST_REQUIRE_MESSAGE(other.GetManifest(other_model, manifest, err), err);
+    }
+    // A package whose core carries a valid ML-DSA-44 signature.
+    std::vector<unsigned char> bytes;
+    {
+#ifdef MODELNET_AHP_FIXTURE_DIR
+        const fs::path fixture = fs::PathFromString(MODELNET_AHP_FIXTURE_DIR) / "model-agent.btx";
+#else
+        const fs::path fixture = fs::PathFromString(std::string{__FILE__}).parent_path() / "data" / "agent-package" / "model-agent.btx";
+#endif
+        std::ifstream in{fixture, std::ios::binary};
+        BOOST_REQUIRE(in);
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    modelnet::DecodedBtxPackage pkg;
+    BOOST_REQUIRE_MESSAGE(modelnet::DecodeBtxPackage(bytes, pkg, err), err);
+    std::vector<unsigned char> pk, sk, sig;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    BOOST_REQUIRE(modelnet::SignMlDsa44(sk, Span<const unsigned char>{pkg.package_core_id.data.data(), pkg.package_core_id.data.size()}, sig, err));
+    UniValue signature(UniValue::VOBJ);
+    signature.pushKV("scope", "PACKAGE_CORE");
+    signature.pushKV("algorithm", "ML-DSA-44");
+    signature.pushKV("signer_id", modelnet::PublisherId(pk).Hex());
+    signature.pushKV("public_key_hex", HexStr(pk));
+    signature.pushKV("signature_hex", HexStr(sig));
+    UniValue signatures(UniValue::VARR);
+    signatures.push_back(signature);
+    UniValue payload = pkg.payload;
+    payload.pushKV("signatures", signatures);
+    const auto call = [&](modelnet::ModelCatalog& cat, const std::string& method, const UniValue& p, UniValue& result) {
+        std::vector<unsigned char> encoded;
+        BOOST_REQUIRE_MESSAGE(modelnet::EncodeBtxPackage(p, encoded, err), err);
+        UniValue arg(UniValue::VOBJ);
+        arg.pushKV("hex", HexStr(encoded));
+        UniValue params(UniValue::VARR);
+        params.push_back(arg);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, Rpc(method, params), result, code, err);
+    };
+    modelnet::ModelCatalog cat{tmp / "cat", 8 << 20};
+    UniValue result;
+    // The signed package as it is verifies.
+    BOOST_REQUIRE_MESSAGE(call(cat, "verifybtxpackage", payload, result), err);
+    BOOST_CHECK(result["core_valid"].get_bool());
+    BOOST_CHECK_EQUAL(result["signature_cryptographic"].get_str(), "PASS");
+
+    // The same signed core, with a manifest put next to it.
+    UniValue extended = payload;
+    extended.pushKV("manifest", manifest);
+    BOOST_REQUIRE(call(cat, "inspectbtxpackage", extended, result));
+    BOOST_CHECK(!result["core_valid"].get_bool());
+    BOOST_CHECK_EQUAL(result["signature_cryptographic"].get_str(), "PASS");
+    BOOST_CHECK(!call(cat, "verifybtxpackage", extended, result));
+    BOOST_CHECK_EQUAL(code, "NONCANONICAL_PAYLOAD");
+    BOOST_CHECK_EQUAL(err, "package payload is not valid; inspect remains available");
+    BOOST_CHECK(!call(cat, "importbtxpackage", extended, result));
+    BOOST_CHECK_EQUAL(err, "package payload is not valid; inspect remains available");
+    modelnet::CatalogEntry found;
+    BOOST_CHECK(!cat.Find(other_model, found));
+
+    // createbtxpackage writes the payload alone, not the request fields next
+    // to it (idempotency_key, profile), so what it creates still validates.
+    UniValue create(UniValue::VOBJ);
+    create.pushKV("profile", "agent_handoff");
+    create.pushKV("core", pkg.core);
+    create.pushKV("observations", UniValue(UniValue::VARR));
+    create.pushKV("signatures", UniValue(UniValue::VARR));
+    UniValue create_params(UniValue::VARR);
+    create_params.push_back(create);
+    UniValue created;
+    BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, Rpc("createbtxpackage", create_params), created, code, err), err);
+    std::vector<unsigned char> created_bytes;
+    BOOST_REQUIRE(TryParseHex<unsigned char>(created["hex"].get_str()).has_value());
+    created_bytes = *TryParseHex<unsigned char>(created["hex"].get_str());
+    modelnet::DecodedBtxPackage created_pkg;
+    BOOST_REQUIRE_MESSAGE(modelnet::DecodeBtxPackage(created_bytes, created_pkg, err), err);
+    UniValue created_payload = created_pkg.payload;
+    BOOST_CHECK(!created_payload.exists("idempotency_key"));
+    BOOST_CHECK(!created_payload.exists("profile"));
+    BOOST_CHECK(call(cat, "inspectbtxpackage", created_payload, result));
+    BOOST_CHECK(result["core_valid"].get_bool());
 }
 
 BOOST_AUTO_TEST_CASE(n02_query_io_erasure_acq_import_lifecycle)
