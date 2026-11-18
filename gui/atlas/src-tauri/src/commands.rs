@@ -88,6 +88,14 @@ pub async fn atlas_execute(
     let h = state.inner().clone();
     blocking(move||{
   let _gate=lock(&h.gate)?;let c=h.connected()?;let request=lock(&h.approvals)?.consume(&id,c.epoch)?;let params=request.parse()?;
+  if request.method=="confirmswap"{
+   let result=atlas_core::swapnet::execute_reviewed_trade(&request,
+    ||h.recheck(&c),
+    |method,params,timeout|c.rpc.call(method,params,request.wallet.as_deref(),timeout),
+    |summary|confirm(&app,"Authorize exact operation",format!("Chain: {}\nGenesis: {}\n\n{}\n\nThis is a native approval, not a model recommendation. A timeout after submission is UNKNOWN and will NOT be retried automatically.",c.chain,c.genesis,summary)),
+    |phase|h.audit(&id,&request.method,phase))?;
+   return h.envelope(&c,result);
+  }
   h.recheck(&c)?;let summary=if request.method=="walletprocesspsbt"{
    let p=params.get(0).and_then(Value::as_str).or_else(||params.get("psbt").and_then(Value::as_str)).or_else(||params.get("args").and_then(|a|a.get(0)).and_then(Value::as_str)).ok_or_else(||Error::new("PSBT","Missing PSBT"))?;
    let decoded=c.rpc.call("decodepsbt",&json!([p]),None,20)?;

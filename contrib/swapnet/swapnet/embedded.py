@@ -167,11 +167,16 @@ class Host:
         try:
             require(type(owner) is bool,'AUTH','Role must be supplied by native host')
             if wallet:
-                if not self._wallet:
+                if method=='getswaptradepreview':
+                    # A review lookup must not establish a wallet binding or
+                    # probe a wallet merely to inspect its historical terms.
+                    require(not self._wallet or wallet==self._wallet,'WALLET_SCOPE','RPC wallet differs from the bound SwapNet wallet')
+                elif not self._wallet:
                     require(owner,'OWNER_REQUIRED','Only an owner may establish the native wallet binding')
                     require(wallet in self.native('listwallets'),'WALLET_UNLOADED','Requested wallet not loaded')
                     self.journal.set_setting('native_wallet',wallet);self._wallet=wallet
-                require(wallet==self._wallet,'WALLET_SCOPE','RPC wallet differs from the bound SwapNet wallet')
+                if method!='getswaptradepreview':
+                    require(wallet==self._wallet,'WALLET_SCOPE','RPC wallet differs from the bound SwapNet wallet')
             require(len(params_json)<=65536,'RPC_REQUEST_LIMIT','Request too large')
             params=json.loads(params_json)
             result=self.app.rpc(Principal(principal,owner,wallet or self._wallet),method,params)

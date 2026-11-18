@@ -59,6 +59,7 @@ RPCHelpMan requestpublicswapquote() { return SwapRPC("requestpublicswapquote"); 
 RPCHelpMan getswapmakercapacity() { return SwapRPC("getswapmakercapacity"); }
 RPCHelpMan previewswap() { return SwapRPC("previewswap"); }
 RPCHelpMan confirmswap() { return SwapRPC("confirmswap"); }
+RPCHelpMan getswaptradepreview() { return SwapRPC("getswaptradepreview"); }
 RPCHelpMan createswapinvite() { return SwapRPC("createswapinvite"); }
 RPCHelpMan inspectswapinvite() { return SwapRPC("inspectswapinvite"); }
 RPCHelpMan connectswapinvite() { return SwapRPC("connectswapinvite"); }
@@ -117,6 +118,7 @@ void RegisterSwapNetRPCCommands(CRPCTable& table) {
         {"swapnet", &getswapmakercapacity},
         {"swapnet", &previewswap},
         {"swapnet", &confirmswap},
+        {"swapnet", &getswaptradepreview},
         {"swapnet", &createswapinvite},
         {"swapnet", &inspectswapinvite},
         {"swapnet", &connectswapinvite},

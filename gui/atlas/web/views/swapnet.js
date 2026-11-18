@@ -35,6 +35,8 @@ export function swapnetView(app){
  }
  root.append(el('div',{class:'row'},refresh),host,el('h2',{},'Look up'),el('div',{class:'actions'},...LOOKUP.map(method=>button(method,()=>operationDialog(app,method)))),el('h2',{},'Native review'),note('These change a route, a mandate, or funds. The form is prepared for review. It is not sent from this page.'),el('div',{class:'actions'},...REVIEW.map(method=>button(method,()=>operationDialog(app,method)))));
  load();
- root.append(swapnetWorkspace(app));
+ const workspace=swapnetWorkspace(app),earlierCleanup=app.cleanup;
+ app.cleanup=()=>{workspace.dispose();if(typeof earlierCleanup==='function')earlierCleanup();};
+ root.append(workspace);
  return root;
 }

@@ -22,7 +22,7 @@ MARKET_METHODS={
  'getswapmode':'read','setswapmode':'owner','getswapreadiness':'read','getswapauthinfo':'read',
  'listswappublicoffers':'read','publishswapoffer':'owner','withdrawswapoffer':'owner',
  'requestpublicswapquote':'quote','getswapmakercapacity':'owner',
- 'previewswap':'trade','confirmswap':'owner','createswapinvite':'owner',
+ 'previewswap':'trade','confirmswap':'owner','getswaptradepreview':'owner','createswapinvite':'owner',
  'inspectswapinvite':'read','connectswapinvite':'owner',
  'exportswapreceipt':'owner','verifyswapreceipt':'owner',
  'listswaprefusals':'audit','setswapexecutionpolicy':'owner',
@@ -457,6 +457,43 @@ CREATE TABLE IF NOT EXISTS sn_invite_connections(
             db.execute('INSERT INTO sn_trade_previews VALUES(?,?,?,?,?,NULL)',(token,ctx.name,ctx.wallet,body['expires_at'],dumps(body)))
         return {'preview_id':token,**{k:v for k,v in body.items() if k not in {'quote','mandate'}},
                 'requires_owner_confirmation':True,'funds_reserved':False,'refundable_after_chain_deadline':True}
+
+    def rpc_getswaptradepreview(self,ctx,preview_id):
+        """Read exact stored review terms, including an expired prior attempt.
+
+        This is not an admission check: confirmswap retains authority over new
+        trades and recovery of an already-started trade after a lost reply.
+        """
+        self.authority.owner(ctx)
+        preview_id=hex32(preview_id)
+        with self.store.lock:
+            row=self.store.db.execute('SELECT principal,wallet,expires,body FROM sn_trade_previews WHERE id=?',(preview_id,)).fetchone()
+        require(row and row[0]==ctx.name and row[1]==ctx.wallet,'FORBIDDEN','Preview does not belong to this principal and wallet')
+        try:
+            body=loads(row[3]);q=Quote.parse(body['quote']['quote'])
+            outgoing=atoms(body['max_local_fee_atoms'],positive=True)
+            refund=atoms(body['refund_fee_atoms'],positive=True)
+            claim=atoms(body['claim_fee_atoms'])
+            minimum=atoms(body['minimum_receive_atoms'],positive=True)
+            atoms(body['maximum_send_atoms'],positive=True)
+            atoms(body['net_receive_floor_atoms'],positive=True)
+            expires=integer(body['expires_at'])
+            expected={'sell_asset':q.sell_asset,'buy_asset':q.buy_asset,'sell_atoms':q.sell_atoms,
+                      'maximum_send_atoms':str(atoms(q.sell_atoms)+outgoing),
+                      'net_receive_floor_atoms':str(q.net_buy),'provider':q.provider}
+            require(q.network==self.network and expires==row[2] and expires<=q.expires_at,
+                    'PREVIEW_STATE','Stored preview context is inconsistent')
+            require(refund<=outgoing and claim<=atoms(q.max_receive_network_fee_atoms) and minimum<=q.net_buy,
+                    'PREVIEW_STATE','Stored preview limits are inconsistent')
+            require(all(body.get(k)==v for k,v in expected.items()),'PREVIEW_STATE','Stored preview terms are inconsistent')
+        except (SwapError,KeyError,TypeError,ValueError) as error:
+            raise SwapError('PREVIEW_STATE','Stored preview cannot be displayed consistently') from error
+        return {'preview_id':preview_id,'quote_id':q.id,'principal':row[0],'wallet':row[1],
+                **expected,'buy_atoms':q.buy_atoms,'maker_fee_atoms':q.maker_fee_atoms,
+                'max_receive_network_fee_atoms':q.max_receive_network_fee_atoms,
+                'minimum_receive_atoms':body['minimum_receive_atoms'],
+                'max_local_fee_atoms':body['max_local_fee_atoms'],'refund_fee_atoms':body['refund_fee_atoms'],
+                'claim_fee_atoms':body['claim_fee_atoms'],'expires_at':expires,'quote_expires_at':q.expires_at}
 
     def rpc_confirmswap(self,ctx,preview_id):
         self.authority.owner(ctx)
