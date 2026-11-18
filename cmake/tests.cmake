@@ -18,3 +18,18 @@ if(PYTHON_COMMAND)
     )
   endif()
 endif()
+
+if(BUILD_TESTS AND PYTHON_COMMAND
+    AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
+    AND NOT CMAKE_CROSSCOMPILING AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$"
+    AND (CMAKE_GENERATOR STREQUAL "Unix Makefiles" OR CMAKE_GENERATOR STREQUAL "Ninja"))
+  add_test(NAME util_install_binary_component_runpath_test
+    COMMAND ${PYTHON_COMMAND} ${PROJECT_SOURCE_DIR}/test/util/install_binary_component_runpath_test.py
+      --cmake "${CMAKE_COMMAND}" --compiler "${CMAKE_CXX_COMPILER}"
+      --generator "${CMAKE_GENERATOR}"
+      --output-dir "${PROJECT_BINARY_DIR}/test/util/runpath-regression"
+  )
+  set_tests_properties(util_install_binary_component_runpath_test PROPERTIES
+    TIMEOUT 120 PROCESSORS 1 LABELS "release;build"
+  )
+endif()
