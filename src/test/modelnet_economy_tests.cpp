@@ -914,6 +914,18 @@ BOOST_AUTO_TEST_CASE(peer_and_restricted_views_omit_local_funding_outpoints)
     BOOST_CHECK(resp.body.find(rid) != std::string::npos);
     BOOST_CHECK(resp.body.find(txid) == std::string::npos);
     BOOST_CHECK(resp.body.find(script) == std::string::npos);
+
+    // pledgemodelrelease is a write that btxd sends unscoped for any RPC user.
+    // Its campaign answer must leave them out as well.
+    UniValue pledge_params(UniValue::VARR);
+    pledge_params.push_back(rid);
+    pledge_params.push_back(0);
+    const UniValue pledged = HelperDispatch(cat, "pledgemodelrelease", pledge_params);
+    BOOST_CHECK_EQUAL(pledged["release_id"].get_str(), rid);
+    BOOST_CHECK_EQUAL(pledged["pledged_atoms"].getInt<int64_t>(), 0);
+    BOOST_CHECK(pledged.write().find(txid) == std::string::npos);
+    BOOST_CHECK(pledged.write().find(script) == std::string::npos);
+    BOOST_CHECK(HelperDispatch(cat, "getmodelrelease", rid_params).write().find(txid) != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)

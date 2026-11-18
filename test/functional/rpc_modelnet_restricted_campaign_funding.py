@@ -11,7 +11,9 @@ transaction is on the chain, but these fields tie it to a wallet of this node.
 
 An -rpcauth user restricted to another wallet, or to no wallet ("-"), reads
 the release views. They must list the release without the funding txid and
-the output script. The unrestricted user still sees both.
+the output script. The unrestricted user still sees both. A zero
+pledgemodelrelease, a write that btxd passes to the helper unscoped, must
+answer these users without them as well.
 """
 import hashlib
 import hmac
@@ -126,6 +128,15 @@ class RpcModelnetRestrictedCampaignFundingTest(BitcoinTestFramework):
                 assert rid in result, f"{user} {method}: release missing"
                 assert txid not in result, f"{user} {method}: funding txid visible"
                 assert script not in result, f"{user} {method}: output script visible"
+
+        self.log.info("A zero pledge answers them without them too")
+        for user in USERS:
+            result = json.dumps(self.call_as(user, "pledgemodelrelease", [rid, 0]))
+            assert rid in result, f"{user} pledgemodelrelease: release missing"
+            assert txid not in result, f"{user} pledgemodelrelease: funding txid visible"
+            assert script not in result, f"{user} pledgemodelrelease: output script visible"
+        operator = json.dumps(node.getmodelrelease(rid))
+        assert txid in operator and script in operator
 
 
 if __name__ == "__main__":
