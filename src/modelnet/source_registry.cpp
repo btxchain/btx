@@ -176,6 +176,7 @@ std::map<std::string, std::vector<unsigned char>> g_url_bytes;
 std::map<std::string, std::vector<unsigned char>> g_type_bytes;
 std::set<std::string> g_type_error;
 std::map<std::string, std::string> g_redirect_final;
+RegistryTransportFn g_test_transport;
 
 bool EnvLiveWan()
 {
@@ -291,6 +292,15 @@ bool ParseHttpsUrl(const std::string& url, ParsedHttps& out, std::string& err)
     return true;
 }
 
+/** Authority of a URL and value of its Host header: an IPv6 literal in
+ *  brackets, and the port when it is not 443 (RFC 9110 7.2). */
+std::string HostHeaderValue(const ParsedHttps& u)
+{
+    std::string host = u.host.find(':') != std::string::npos ? "[" + u.host + "]" : u.host;
+    if (u.port != 443) host += ":" + std::to_string(u.port);
+    return host;
+}
+
 bool ResolveHttpsRedirectInner(const std::string& current_url, const std::string& location, std::string& out,
                                std::string& err)
 {
@@ -326,9 +336,7 @@ bool ResolveHttpsRedirectInner(const std::string& current_url, const std::string
         const std::string dir = slash == std::string::npos ? "/" : cur.path.substr(0, slash + 1);
         path = dir + loc;
     }
-    std::string hostport = cur.host;
-    if (cur.port != 443) hostport += ":" + std::to_string(cur.port);
-    out = "https://" + hostport + path;
+    out = "https://" + HostHeaderValue(cur) + path;
     err.clear();
     return true;
 }
@@ -394,6 +402,25 @@ bool HttpsExchangeOnce(const std::string& url, uint64_t offset, uint64_t length,
     }
     ParsedHttps u;
     if (!ParseHttpsUrl(url, u, err)) return false;
+
+    const bool range_requested = length > 0;
+    std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + HostHeaderValue(u) +
+                      "\r\nUser-Agent: BTX-modelnet/0.34.9\r\nAccept: */*\r\nConnection: close\r\n";
+    if (range_requested) {
+        req += "Range: bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1) + "\r\n";
+    }
+    req += "\r\n";
+
+    RegistryTransportFn transport;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        transport = g_test_transport;
+    }
+    if (transport) {
+        std::string raw_resp;
+        if (!transport(url, req, raw_resp, err)) return false;
+        return ParseRegistryHttpResponse(raw_resp, resp, err);
+    }
 
     addrinfo hints{};
     hints.ai_socktype = SOCK_STREAM;
@@ -480,13 +507,6 @@ bool HttpsExchangeOnce(const std::string& url, uint64_t offset, uint64_t length,
         return false;
     }
 
-    const bool range_requested = length > 0;
-    std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.host +
-                      "\r\nUser-Agent: BTX-modelnet/0.34.9\r\nAccept: */*\r\nConnection: close\r\n";
-    if (range_requested) {
-        req += "Range: bytes=" + std::to_string(offset) + "-" + std::to_string(offset + length - 1) + "\r\n";
-    }
-    req += "\r\n";
     if (SSL_write(ssl, req.data(), static_cast<int>(req.size())) <= 0) {
         SSL_free(ssl);
         SSL_CTX_free(ctx);
@@ -524,17 +544,14 @@ bool HttpsExchangeOnce(const std::string& url, uint64_t offset, uint64_t length,
     return ParseRegistryHttpResponse(raw_resp, resp, err);
 }
 
-bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out,
-                   std::string& err)
+/** Follow up to three redirects from start. final_url is the URL whose
+ *  response was checked; out holds its body when that check passed. */
+bool WalkRedirects(const std::string& start, uint64_t offset, uint64_t length, std::vector<unsigned char>& out,
+                   std::string& final_url, std::string& err, std::chrono::steady_clock::time_point deadline)
 {
     out.clear();
-    std::string current = url;
-    {
-        std::lock_guard<std::mutex> lock(g_mu);
-        auto it = g_redirect_final.find(url);
-        if (it != g_redirect_final.end()) current = it->second;
-    }
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRegistryHttpsTimeoutMs);
+    final_url.clear();
+    std::string current = start;
     for (int hop = 0; hop <= 3; ++hop) {
         RegistryHttpResponse resp;
         if (!HttpsExchangeOnce(current, offset, length, resp, err, deadline)) return false;
@@ -557,14 +574,54 @@ bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std
             current = next;
             continue;
         }
-        if (current != url) {
-            std::lock_guard<std::mutex> lock(g_mu);
-            g_redirect_final[url] = current;
-        }
+        final_url = current;
         return RegistryHttpBodyAllowed(resp, length > 0, offset, length, out, err);
     }
     err = "too many redirects";
     return false;
+}
+
+bool HttpsGetRange(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out,
+                   std::string& err)
+{
+    out.clear();
+    std::string cached;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_redirect_final.find(url);
+        if (it != g_redirect_final.end()) cached = it->second;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRegistryHttpsTimeoutMs);
+    std::string final_url;
+    if (!cached.empty()) {
+        if (WalkRedirects(cached, offset, length, out, final_url, err, deadline)) {
+            if (final_url != cached) {
+                // The remembered target moved on: remember where it went.
+                std::lock_guard<std::mutex> lock(g_mu);
+                if (final_url == url) {
+                    g_redirect_final.erase(url);
+                } else {
+                    g_redirect_final[url] = final_url;
+                }
+            }
+            err.clear();
+            return true;
+        }
+        // A remembered target can stop working (signed CDN links expire): forget
+        // it and ask the origin URL again.
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto it = g_redirect_final.find(url);
+        if (it != g_redirect_final.end() && it->second == cached) g_redirect_final.erase(it);
+        out.clear();
+    }
+    if (!WalkRedirects(url, offset, length, out, final_url, err, deadline)) return false;
+    // Remember a redirect target only once its response was accepted.
+    if (final_url != url) {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_redirect_final[url] = final_url;
+    }
+    err.clear();
+    return true;
 }
 
 bool FetchUrl(const std::string& url, uint64_t offset, uint64_t length, std::vector<unsigned char>& out, bool live_wan,
@@ -629,6 +686,13 @@ void ClearRegistryInjections()
     g_type_error.clear();
     g_redirect_final.clear();
     g_test_get = nullptr;
+    g_test_transport = nullptr;
+}
+
+void SetRegistryTransportForTests(RegistryTransportFn fn)
+{
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_test_transport = std::move(fn);
 }
 
 bool LiveRegistryWanEnabled()

@@ -28,6 +28,13 @@ void InjectRegistryUrlBytes(const std::string& url, std::vector<unsigned char> b
 void InjectRegistryOriginBytes(const std::string& origin_type, std::vector<unsigned char> bytes);
 void InjectRegistryOriginError(const std::string& origin_type);
 void ClearRegistryInjections();
+
+using RegistryTransportFn = std::function<bool(const std::string& url, const std::string& request,
+                                               std::string& raw_response, std::string& err)>;
+/** Test hook: replace only the TLS connection of a live HTTPS read. The request
+ *  is built, and the response parsed, checked and redirected, as on the wire.
+ *  Cleared by ClearRegistryInjections. */
+void SetRegistryTransportForTests(RegistryTransportFn fn);
 bool LiveRegistryWanEnabled();
 
 enum class IdentityMatch : uint8_t {
