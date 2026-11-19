@@ -397,6 +397,50 @@ BOOST_AUTO_TEST_CASE(peer_discouragement)
     connman->ClearTestNodes();
 }
 
+BOOST_AUTO_TEST_CASE(peer_discouragement_disconnects_only_the_misbehaving_peer)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    auto banman = std::make_unique<BanMan>(m_args.GetDataDirBase() / "banlist", nullptr, DEFAULT_MISBEHAVING_BANTIME);
+    auto connman = std::make_unique<ConnmanTestMsg>(0x1337, 0x1337, *m_node.addrman, *m_node.netgroupman, Params());
+    auto peerLogic = PeerManager::make(*connman, *m_node.addrman, banman.get(), *m_node.chainman, *m_node.mempool, *m_node.warnings, {});
+
+    // Two inbound peers behind one address, as with clearnet peers reaching us through the same Tor exit.
+    const CAddress shared_addr{ip(0xa0b0c001), NODE_NONE};
+    banman->ClearBanned();
+    std::array<CNode*, 2> nodes;
+    for (size_t i{0}; i < nodes.size(); ++i) {
+        nodes[i] = new CNode{/*id=*/static_cast<NodeId>(i),
+                             /*sock=*/nullptr,
+                             shared_addr,
+                             /*nKeyedNetGroupIn=*/0,
+                             /*nLocalHostNonceIn=*/i,
+                             CAddress(),
+                             /*addrNameIn=*/"",
+                             ConnectionType::INBOUND,
+                             /*inbound_onion=*/false,
+                             /*network_key=*/1};
+        nodes[i]->SetCommonVersion(PROTOCOL_VERSION);
+        peerLogic->InitializeNode(*nodes[i], NODE_NETWORK);
+        nodes[i]->fSuccessfullyConnected = true;
+        connman->AddTestNode(*nodes[i]);
+    }
+
+    peerLogic->UnitTestMisbehaving(nodes[0]->GetId());
+    BOOST_CHECK(peerLogic->SendMessages(nodes[0]));
+
+    // The address is discouraged and the misbehaving peer is disconnected...
+    BOOST_CHECK(banman->IsDiscouraged(shared_addr));
+    BOOST_CHECK(nodes[0]->fDisconnect);
+    // ...but the other peer on the same address stays connected.
+    BOOST_CHECK(!nodes[1]->fDisconnect);
+
+    for (CNode* node : nodes) {
+        peerLogic->FinalizeNode(*node);
+    }
+    connman->ClearTestNodes();
+}
+
 BOOST_AUTO_TEST_CASE(DoS_bantime)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
