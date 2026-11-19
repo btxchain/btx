@@ -145,6 +145,9 @@ BOOST_AUTO_TEST_CASE(erasure_tail_dummy_zeros_are_not_stored_replicas)
     UniValue raw = BaseErasureJson();
     raw.pushKV("stripe_count", "1");
     raw.pushKV("final_real_piece_count", 12);
+    // A one-stripe file of 12 shards: the padding claim has to follow from the
+    // file size, so the 400 GiB of BaseErasureJson would leave no tail to pad.
+    raw.pushKV("file_size_bytes", std::to_string(12 * 4194304));
     // 12 real data + 2 parity = 14 stored; dummy zeros 12..15 make effective >= 16.
     UniValue pos(UniValue::VARR);
     for (int i = 0; i < 12; ++i) pos.push_back(i);
