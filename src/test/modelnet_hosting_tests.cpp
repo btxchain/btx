@@ -1162,6 +1162,71 @@ BOOST_AUTO_TEST_CASE(exportmodelpath_returns_usable_runtime_root_from_pieces)
     }
 }
 
+// The end of a download replaced the whole catalog entry: the bytes it had
+// received (the give-back ratio reads them) went back to 0 and a pinned model
+// lost the PINNED admission.
+BOOST_AUTO_TEST_CASE(finished_download_keeps_the_pin_and_the_received_bytes)
+{
+    const fs::path tmp = m_path_root / "reinstall-keeps";
+    modelnet::ModelCatalog cat_a{tmp / "a", 8 << 20};
+    const auto imported = ImportTiny(cat_a, tmp / "src", 0x92, false);
+    std::string err;
+    UniValue man;
+    BOOST_REQUIRE_MESSAGE(cat_a.GetManifest(imported.model_id, man, err), err);
+    std::vector<unsigned char> bytes;
+    std::vector<modelnet::Digest48> proof;
+    uint64_t file_size = 0;
+    BOOST_REQUIRE_MESSAGE(cat_a.GetVerifiedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size, err), err);
+
+    modelnet::ModelCatalog cat_b{tmp / "b", 8 << 20};
+    BOOST_REQUIRE_MESSAGE(cat_b.InstallFromManifest(man, err, /*complete=*/false), err);
+    BOOST_REQUIRE_MESSAGE(cat_b.PutFetchedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size,
+                                                imported.core.files[0].pieces_root, err), err);
+    BOOST_REQUIRE_MESSAGE(cat_b.PinModel(imported.model_id, true, err), err);
+    modelnet::CatalogEntry before;
+    BOOST_REQUIRE(cat_b.Find(imported.model_id, before));
+    BOOST_REQUIRE_GT(before.useful_bytes_received, 0);
+
+    BOOST_REQUIRE_MESSAGE(cat_b.InstallFromManifest(man, err, /*complete=*/true), err);
+    modelnet::CatalogEntry after;
+    BOOST_REQUIRE(cat_b.Find(imported.model_id, after));
+    BOOST_CHECK(!after.incomplete);
+    BOOST_CHECK(after.pinned);
+    BOOST_CHECK(after.admission == modelnet::AdmissionLevel::PINNED);
+    BOOST_CHECK_EQUAL(after.useful_bytes_received, before.useful_bytes_received);
+}
+
+// FETCHING is the admission of a partial copy. PINNED, and the levels LoadLocked
+// gave every entry after a restart, count as verified bytes for the serve route,
+// so pinning a partial copy or restarting the helper made it look complete.
+BOOST_AUTO_TEST_CASE(partial_copy_stays_unverified_after_pin_and_restart)
+{
+    const fs::path tmp = m_path_root / "partial-pin-restart";
+    modelnet::Digest48 id;
+    std::string err;
+    {
+        modelnet::ModelCatalog cat{tmp, 8 << 20};
+        id = ImportTiny(cat, tmp / "src", 0x91, false).model_id;
+        BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(id, true, err), err);
+        modelnet::CatalogEntry e;
+        for (const bool on : {true, false, true}) {
+            BOOST_REQUIRE_MESSAGE(cat.PinModel(id, on, err), err);
+            BOOST_REQUIRE(cat.Find(id, e));
+            BOOST_CHECK_EQUAL(e.pinned, on);
+            BOOST_CHECK(e.admission == modelnet::AdmissionLevel::FETCHING);
+            BOOST_CHECK(!e.bytes_verified);
+        }
+    }
+    modelnet::ModelCatalog resumed{tmp, 8 << 20};
+    modelnet::CatalogEntry found;
+    BOOST_REQUIRE(resumed.Find(id, found));
+    BOOST_CHECK(found.incomplete);
+    BOOST_CHECK(found.pinned);
+    BOOST_CHECK(found.admission == modelnet::AdmissionLevel::FETCHING);
+    BOOST_CHECK(!found.bytes_verified);
+    BOOST_CHECK(!found.seeded);
+}
+
 // importmodel of the files of a model that a fetch left incomplete added a
 // second entry with the same model id when no piece had arrived, and answered
 // with the partial entry, unchanged, when some had.
@@ -1242,6 +1307,61 @@ BOOST_AUTO_TEST_CASE(import_completes_a_partial_entry_of_the_same_model)
     BOOST_REQUIRE(dup_cat.Find(imported.model_id, e));
     BOOST_CHECK(!e.incomplete);
     BOOST_CHECK(e.admission == modelnet::AdmissionLevel::PINNED);
+}
+
+// InstallFromManifest(complete=false) replaced every entry of the model with
+// a FETCHING one, also a copy this node already held whole and verified, so a
+// package import or a fetch that only started took the model out of service.
+BOOST_AUTO_TEST_CASE(complete_copy_stays_complete_when_a_fetch_starts)
+{
+    const fs::path tmp = m_path_root / "complete-stays";
+    modelnet::ModelCatalog cat{tmp / "cat", 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x93, false);
+    std::string err;
+    UniValue man;
+    BOOST_REQUIRE_MESSAGE(cat.GetManifest(imported.model_id, man, err), err);
+    modelnet::CatalogEntry before;
+    BOOST_REQUIRE(cat.Find(imported.model_id, before));
+    BOOST_REQUIRE(!before.incomplete && before.bytes_verified);
+
+    BOOST_REQUIRE_MESSAGE(cat.InstallFromManifest(man, err, /*complete=*/false), err);
+    modelnet::CatalogEntry after;
+    BOOST_REQUIRE(cat.Find(imported.model_id, after));
+    BOOST_CHECK(!after.incomplete);
+    BOOST_CHECK(after.bytes_verified);
+    BOOST_CHECK(after.admission == before.admission);
+    BOOST_CHECK_EQUAL(after.label, before.label);
+    std::vector<unsigned char> bytes;
+    std::vector<modelnet::Digest48> proof;
+    uint64_t file_size = 0;
+    BOOST_CHECK_MESSAGE(cat.GetVerifiedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size, err), err);
+
+    // Without auto seeding an import keeps bytes_verified false; its admission
+    // still counts as verified bytes, and the copy stays as it is too.
+    {
+        modelnet::ModelCatalog manual{tmp / "manual", 8 << 20};
+        modelnet::PreservationPolicy pol = manual.Policy();
+        pol.seed_mode = modelnet::SeedMode::OFF;
+        manual.SetPolicy(pol);
+        const auto held = ImportTiny(manual, tmp / "src-manual", 0x94, false);
+        UniValue held_man;
+        BOOST_REQUIRE_MESSAGE(manual.GetManifest(held.model_id, held_man, err), err);
+        modelnet::CatalogEntry was;
+        BOOST_REQUIRE(manual.Find(held.model_id, was));
+        BOOST_REQUIRE(!was.incomplete && !was.bytes_verified);
+        BOOST_REQUIRE_MESSAGE(manual.InstallFromManifest(held_man, err, /*complete=*/false), err);
+        modelnet::CatalogEntry is;
+        BOOST_REQUIRE(manual.Find(held.model_id, is));
+        BOOST_CHECK(!is.incomplete);
+        BOOST_CHECK(is.admission == was.admission);
+    }
+
+    // A partial copy still takes the fetch.
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(imported.model_id, true, err), err);
+    BOOST_REQUIRE_MESSAGE(cat.InstallFromManifest(man, err, /*complete=*/false), err);
+    BOOST_REQUIRE(cat.Find(imported.model_id, after));
+    BOOST_CHECK(after.incomplete);
+    BOOST_CHECK(after.admission == modelnet::AdmissionLevel::FETCHING);
 }
 
 BOOST_AUTO_TEST_CASE(loadmodel_incomplete_replica_is_rejected)
