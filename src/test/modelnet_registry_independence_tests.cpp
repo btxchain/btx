@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <fstream>
+#include <map>
 #include <netinet/in.h>
 #include <string>
 #include <utility>
@@ -935,6 +936,115 @@ BOOST_AUTO_TEST_CASE(parseimportplan_expands_modelpack_without_wallet)
     BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int>(), 0);
     BOOST_REQUIRE(result["files"].isArray());
     BOOST_CHECK_EQUAL(result["files"][0]["destination_path"].get_str(), "weights.safetensors");
+}
+
+// A registry origin's redirect target was remembered for the life of the
+// process, and remembered before its response was checked. Signed CDN links
+// expire, so once a remembered target answered 403 every later read of that
+// file failed until restart; a target that answered 403 on the first read was
+// remembered too. The Host header also dropped a non-default port and the
+// brackets of an IPv6 literal, and a relative redirect on an IPv6 origin lost
+// its brackets.
+BOOST_AUTO_TEST_CASE(registry_redirect_target_is_dropped_when_it_stops_working)
+{
+    modelnet::ClearRegistryInjections();
+    struct ClearOnExit {
+        ~ClearOnExit() { modelnet::ClearRegistryInjections(); }
+    } clear_on_exit;
+    std::map<std::string, std::string> answer;
+    std::vector<std::string> asked;
+    std::map<std::string, std::string> host_of;
+    modelnet::SetRegistryTransportForTests(
+        [&](const std::string& url, const std::string& request, std::string& raw, std::string& err) {
+            asked.push_back(url);
+            const auto h = request.find("\r\nHost: ");
+            BOOST_REQUIRE(h != std::string::npos);
+            host_of[url] = request.substr(h + 8, request.find("\r\n", h + 8) - (h + 8));
+            const auto it = answer.find(url);
+            if (it == answer.end()) {
+                err = "connect";
+                return false;
+            }
+            raw = it->second;
+            return true;
+        });
+    const auto redirect = [](const std::string& to) {
+        return "HTTP/1.1 302 Found\r\nLocation: " + to + "\r\nContent-Length: 0\r\n\r\n";
+    };
+    const auto piece = [](const std::string& body) {
+        return "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-" + std::to_string(body.size() - 1) +
+               "/100\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+    };
+    const std::string forbidden = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+
+    modelnet::ImportOrigin origin;
+    origin.type = "https";
+    origin.locator = "https://mirror.example:8443/m";
+    origin.snapshot_token = "rev";
+    modelnet::ResolvedRegistryUrl resolved;
+    std::string err;
+    BOOST_REQUIRE(modelnet::ResolveRegistryFileUrl("https", origin.locator, "rev", "model.safetensors", resolved, err));
+    const std::string file_url = resolved.url;
+    modelnet::RegistryByteSource src{origin, /*live_wan=*/true};
+    src.SelectFile("model.safetensors", "");
+    const auto read = [&]() {
+        asked.clear();
+        std::vector<unsigned char> out;
+        std::string why;
+        if (!src.Read(modelnet::ReadExtent{0, 4}, out, 4, why)) return "fail:" + why;
+        return std::string(out.begin(), out.end());
+    };
+
+    // A target that answers 403 is not remembered.
+    answer[file_url] = redirect("https://cdn.example/a");
+    answer["https://cdn.example/a"] = forbidden;
+    BOOST_CHECK(read().starts_with("fail:"));
+    answer[file_url] = redirect("https://cdn.example/b");
+    answer["https://cdn.example/b"] = piece("good");
+    BOOST_CHECK_EQUAL(read(), "good");
+    BOOST_REQUIRE(!asked.empty());
+    BOOST_CHECK_EQUAL(asked.front(), file_url);
+
+    // An accepted target is remembered.
+    BOOST_CHECK_EQUAL(read(), "good");
+    BOOST_CHECK(asked == std::vector<std::string>{"https://cdn.example/b"});
+
+    // When the remembered target expires, the origin is asked again.
+    answer["https://cdn.example/b"] = forbidden;
+    answer[file_url] = redirect("https://cdn.example/c");
+    answer["https://cdn.example/c"] = piece("next");
+    BOOST_CHECK_EQUAL(read(), "next");
+    BOOST_CHECK((asked == std::vector<std::string>{"https://cdn.example/b", file_url, "https://cdn.example/c"}));
+    BOOST_CHECK_EQUAL(read(), "next");
+    BOOST_CHECK(asked == std::vector<std::string>{"https://cdn.example/c"});
+
+    // When the remembered target redirects on, the new target is remembered.
+    answer["https://cdn.example/c"] = redirect("https://cdn.example/d");
+    answer["https://cdn.example/d"] = piece("last");
+    BOOST_CHECK_EQUAL(read(), "last");
+    BOOST_CHECK_EQUAL(read(), "last");
+    BOOST_CHECK(asked == std::vector<std::string>{"https://cdn.example/d"});
+
+    // The Host header names the port when it is not 443, and brackets an IPv6 literal.
+    BOOST_CHECK_EQUAL(host_of[file_url], "mirror.example:8443");
+    BOOST_CHECK_EQUAL(host_of["https://cdn.example/c"], "cdn.example");
+    for (const auto& [locator, host] : std::vector<std::pair<std::string, std::string>>{
+             {"https://[2001:db8::1]:8443/m", "[2001:db8::1]:8443"}, {"https://[2001:db8::1]/m", "[2001:db8::1]"}}) {
+        modelnet::ImportOrigin v6 = origin;
+        v6.locator = locator;
+        BOOST_REQUIRE(modelnet::ResolveRegistryFileUrl("https", locator, "rev", "model.safetensors", resolved, err));
+        answer[resolved.url] = piece("six!");
+        modelnet::RegistryByteSource src6{v6, /*live_wan=*/true};
+        src6.SelectFile("model.safetensors", "");
+        std::vector<unsigned char> out;
+        BOOST_REQUIRE_MESSAGE(src6.Read(modelnet::ReadExtent{0, 4}, out, 4, err), err);
+        BOOST_CHECK_EQUAL(host_of[resolved.url], host);
+    }
+    std::string next;
+    BOOST_REQUIRE(modelnet::ResolveHttpsRedirect("https://[2001:db8::1]:8443/m/a", "/x", next, err));
+    BOOST_CHECK_EQUAL(next, "https://[2001:db8::1]:8443/x");
+    BOOST_REQUIRE(modelnet::ResolveHttpsRedirect("https://[2001:db8::1]/m/a", "b", next, err));
+    BOOST_CHECK_EQUAL(next, "https://[2001:db8::1]/m/b");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
