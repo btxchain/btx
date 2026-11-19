@@ -920,6 +920,54 @@ bool RealmRollout::ReadOfflineBundle(const std::filesystem::path& path, const st
         err = "BTX035_REALM";
         return false;
     }
+    // A bundle restores a realm; it does not take one back. Against a realm
+    // this node holds, its policy must be the same, every revocation must
+    // still be in it, and no channel may be older or differ at the same
+    // sequence (PublishChannel and SetPolicy refuse the same).
+    const auto held = m_realms.find(parsed.realm);
+    if (held != m_realms.end()) {
+        const RealmState& h = held->second;
+        if (h.policy_set && h.threshold != parsed.threshold) {
+            err = "BTX035_THRESHOLD";
+            return false;
+        }
+        if (h.policy_set && h.pinned != parsed.pinned) {
+            err = "BTX035_POLICY";
+            return false;
+        }
+        for (const std::string& id : h.revoked) {
+            if (!parsed.revoked.count(id)) {
+                err = "BTX035_ROLLBACK";
+                return false;
+            }
+        }
+        if (h.has_channel && !(parsed.has_channel && parsed.channel_name.empty())) {
+            err = "BTX035_ROLLBACK";
+            return false;
+        }
+    }
+    // A named channel this node holds stays the one the bundle names: another
+    // name, or none, would drop it from the next export.
+    const std::string named_prefix = parsed.realm + "\n";
+    for (auto it = m_realms.lower_bound(named_prefix); it != m_realms.end() && it->first.rfind(named_prefix, 0) == 0; ++it) {
+        if (it->second.has_channel && (!parsed.has_channel || it->first != named_prefix + parsed.channel_name)) {
+            err = "BTX035_ROLLBACK";
+            return false;
+        }
+    }
+    const std::string channel_key = parsed.channel_name.empty() ? parsed.realm : parsed.realm + "\n" + parsed.channel_name;
+    const auto held_channel = m_realms.find(channel_key);
+    if (parsed.has_channel && held_channel != m_realms.end() && held_channel->second.has_channel) {
+        if (parsed.channel_sequence < held_channel->second.channel_sequence) {
+            err = "BTX035_ROLLBACK";
+            return false;
+        }
+        if (parsed.channel_sequence == held_channel->second.channel_sequence &&
+            parsed.body_hash != held_channel->second.body_hash) {
+            err = "BTX035_STALE";
+            return false;
+        }
+    }
 
     RealmState st;
     st.policy_set = true;
