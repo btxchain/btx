@@ -3,11 +3,13 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <compat/wide128.h>
+#include <random.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <cstdint>
+#include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(wide128_tests, BasicTestingSetup)
 
@@ -104,6 +106,101 @@ BOOST_AUTO_TEST_CASE(portable_signed_matches_native)
     BOOST_CHECK(BitsI(got) == combined);
     BOOST_CHECK(static_cast<uint64_t>(got % btx::wide_detail::Signed128(1000003)) ==
                 static_cast<uint64_t>(combined % 1000003));
+}
+
+// The cases above use operands that fit in 64 bits, so the high word only
+// ever holds a sign extension. On MSVC this emulation carries consensus
+// arithmetic (pow, matmul, smile2), so check it with both words set, every
+// shift amount and divisors wider than 64 bits.
+static btx::U128 MakeU(uint64_t hi, uint64_t lo)
+{
+    return (static_cast<btx::U128>(hi) << 64) | lo;
+}
+
+static std::vector<btx::U128> FullWidthSamples(FastRandomContext& rng)
+{
+    std::vector<btx::U128> v{0, 1, 2, ~btx::U128{0},
+                             MakeU(0, ~uint64_t{0}), MakeU(1, 0), MakeU(1, 1),
+                             MakeU(0x8000000000000000ULL, 0), MakeU(0x8000000000000000ULL, 1),
+                             MakeU(0x7fffffffffffffffULL, ~uint64_t{0}), MakeU(~uint64_t{0}, 0),
+                             MakeU(0, 0x8000000000000000ULL), MakeU(0xffffffffULL, 0xffffffff00000000ULL)};
+    while (v.size() < 64) {
+        // Sparse high words and set top bits make carries, borrows and
+        // division steps cross the word boundary.
+        const uint64_t hi{v.size() % 3 == 0 ? rng.rand64() >> rng.randrange(64) : rng.rand64()};
+        const uint64_t lo{v.size() % 4 == 0 ? rng.rand64() | 0x8000000000000000ULL : rng.rand64()};
+        v.push_back(MakeU(hi, lo));
+    }
+    return v;
+}
+
+BOOST_AUTO_TEST_CASE(portable_unsigned_matches_native_full_width)
+{
+    const auto samples{FullWidthSamples(m_rng)};
+    for (const btx::U128 na : samples) {
+        const auto pa{NativeU(na)};
+        for (int s = 0; s < 128; ++s) {
+            BOOST_CHECK(BitsU(pa << s) == (na << s));
+            BOOST_CHECK(BitsU(pa >> s) == (na >> s));
+        }
+        BOOST_CHECK(static_cast<uint64_t>(pa) == static_cast<uint64_t>(na));
+        BOOST_CHECK(static_cast<uint32_t>(pa) == static_cast<uint32_t>(na));
+        for (const btx::U128 nb : samples) {
+            const auto pb{NativeU(nb)};
+            BOOST_CHECK(BitsU(pa + pb) == na + nb);
+            BOOST_CHECK(BitsU(pa - pb) == na - nb);
+            BOOST_CHECK(BitsU(pa * pb) == na * nb);
+            BOOST_CHECK(BitsU(pa & pb) == (na & nb));
+            BOOST_CHECK(BitsU(pa | pb) == (na | nb));
+            BOOST_CHECK(BitsU(pa ^ pb) == (na ^ nb));
+            BOOST_CHECK((pa == pb) == (na == nb));
+            BOOST_CHECK((pa < pb) == (na < nb));
+            BOOST_CHECK((pa <= pb) == (na <= nb));
+            BOOST_CHECK((pa > pb) == (na > nb));
+            BOOST_CHECK((pa >= pb) == (na >= nb));
+            if (nb != 0) {
+                BOOST_CHECK(BitsU(pa / pb) == na / nb);
+                BOOST_CHECK(BitsU(pa % pb) == na % nb);
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(portable_signed_matches_native_full_width)
+{
+    const auto samples{FullWidthSamples(m_rng)};
+    const btx::I128 min{static_cast<btx::I128>(btx::U128{1} << 127)};
+    for (const btx::U128 ua : samples) {
+        const btx::I128 na{static_cast<btx::I128>(ua)};
+        const auto pa{NativeI(na)};
+        // Wrapping results are compared through the unsigned bits, since
+        // signed overflow is undefined for the native type.
+        BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(-pa)) == btx::U128{0} - ua);
+        BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(pa)) == ua);
+        BOOST_CHECK(static_cast<int64_t>(pa) == static_cast<int64_t>(na));
+        BOOST_CHECK(static_cast<uint64_t>(pa) == static_cast<uint64_t>(na));
+        for (int s = 0; s < 128; ++s) {
+            BOOST_CHECK(BitsI(pa >> s) == (na >> s));
+            BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(pa << s)) == (ua << s));
+        }
+        for (const btx::U128 ub : samples) {
+            const btx::I128 nb{static_cast<btx::I128>(ub)};
+            const auto pb{NativeI(nb)};
+            BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(pa + pb)) == ua + ub);
+            BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(pa - pb)) == ua - ub);
+            BOOST_CHECK(BitsU(static_cast<btx::wide_detail::Unsigned128>(pa * pb)) == ua * ub);
+            BOOST_CHECK(BitsI(pa & pb) == (na & nb));
+            BOOST_CHECK(BitsI(pa | pb) == (na | nb));
+            BOOST_CHECK((pa == pb) == (na == nb));
+            BOOST_CHECK((pa < pb) == (na < nb));
+            BOOST_CHECK((pa <= pb) == (na <= nb));
+            BOOST_CHECK((pa >= pb) == (na >= nb));
+            if (nb != 0 && !(na == min && nb == -1)) {
+                BOOST_CHECK(BitsI(pa / pb) == na / nb);
+                BOOST_CHECK(BitsI(pa % pb) == na % nb);
+            }
+        }
+    }
 }
 #endif
 
