@@ -9449,14 +9449,16 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
         const std::string peer = Arg(0).get_str();
         result.setObject();
         result.pushKV("schema_version", 2);
-        const bool added = cat.AddPeer(peer);
+        std::string save_error;
+        const bool added = cat.AddPeer(peer, &save_error);
         result.pushKV("ok", added);
         if (added) result.pushKV("added", peer);
         else {
             result.pushKV("added", false);
             std::string host;
             uint16_t port{0};
-            result.pushKV("reason", peer.empty()                       ? "empty endpoint" :
+            result.pushKV("reason", !save_error.empty()              ? save_error :
+                                    peer.empty()                     ? "empty endpoint" :
                                     !SplitHostPort(peer, host, port) ? "endpoint must be host:port" :
                                                                        "peer list full");
         }

@@ -1621,7 +1621,7 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
     return true;
 }
 
-bool ModelCatalog::AddPeer(const std::string& endpoint)
+bool ModelCatalog::AddPeer(const std::string& endpoint, std::string* save_error)
 {
     // There is no RPC to remove a contact, so one that cannot be dialed would
     // hold its slot for good.
@@ -1631,7 +1631,11 @@ bool ModelCatalog::AddPeer(const std::string& endpoint)
     if (m_peers.size() >= 64) return false;
     m_peers.push_back(endpoint);
     std::string err;
-    PersistLocked(err);
+    if (!PersistLocked(err)) {
+        m_peers.pop_back();
+        if (save_error) *save_error = std::move(err);
+        return false;
+    }
     return true;
 }
 
