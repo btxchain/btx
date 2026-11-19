@@ -454,7 +454,7 @@ bool DenseAvxStateEnabled()
     GetCPUID(1, 0, eax, ebx, ecx, edx);
     if (((ecx >> 27) & 1u) == 0) return false; // OSXSAVE
     uint32_t a = 0, d = 0;
-    __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
+    GetXGETBV(a, d);
     return (a & 0x6u) == 0x6u; // XMM (bit1) | YMM (bit2) enabled by the OS.
 }
 

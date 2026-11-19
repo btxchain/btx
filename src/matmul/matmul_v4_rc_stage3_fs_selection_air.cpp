@@ -874,7 +874,7 @@ AlgebraicQueryIndexAirV1 BuildAlgebraicQueryIndexAirFromLaneV1(
         const btx::U128 aliased =
             static_cast<btx::U128>(canonical) +
             static_cast<btx::U128>(gf::kP);
-        if (aliased >> 64) {
+        if ((aliased >> 64) != 0) {
             out.note =
                 "stage3:fs_selection_air:alg_query_no_64bit_alias";
             return out;

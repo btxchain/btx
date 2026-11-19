@@ -113,11 +113,19 @@ constexpr Fp kOmega2_32 = 0x185629dcda58878cULL;
 // row-leaf digest stage of every row-Merkle commit runs on the GPU, producing
 // digests bit-identical to alg_hash::LeafHashRow.
 #if !defined(__APPLE__)
+#if defined(_MSC_VER)
+// MSVC has no weak extern. The Windows node does not link the CUDA row-leaf
+// hook, so the pointer stays null and every call site uses the CPU path.
+using GpuRowLeafDigestsFn = void (*)(const unsigned long long*, unsigned int,
+                                     unsigned int, unsigned long long*);
+GpuRowLeafDigestsFn gpu_row_leaf_digests = nullptr;
+#else
 #define BTX_GPU_PROVE_WEAK __attribute__((weak))
 extern "C" void gpu_row_leaf_digests(const unsigned long long* h_lde,
                                      unsigned int W, unsigned int n_lde,
                                      unsigned long long* h_dig)
     BTX_GPU_PROVE_WEAK;
+#endif
 
 bool GpuProveEnabled()
 {
@@ -1521,10 +1529,14 @@ std::vector<Fri3AlgDigest> RowLeafDigestsCpu(const std::vector<std::vector<Fp3>>
 #endif
     {
         std::vector<Fp3> row(W);
+        // MSVC OpenMP 2.0 rejects an unsigned loop index. The leaf number
+        // stays a uint32_t inside the body.
+        const int64_t leaf_count = static_cast<int64_t>(n_lde);
 #if defined(_OPENMP)
 #pragma omp for schedule(static)
 #endif
-        for (uint32_t i = 0; i < n_lde; ++i) {
+        for (int64_t leaf = 0; leaf < leaf_count; ++leaf) {
+            const uint32_t i = static_cast<uint32_t>(leaf);
             for (uint32_t c = 0; c < W; ++c) row[c] = column_lde[c][i];
             leaves[i] = AlgHashRowLeafForLane(row, i, lane);
         }
@@ -2469,10 +2481,14 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     if (!stream_column_lde) out.column_lde.resize(W);
     // LDE-NTT: forward coset-LDE per column, independent transforms writing
     // distinct out.column_lde[i]. padded scratch is loop-local (thread-private).
+    // MSVC OpenMP 2.0 rejects an unsigned loop index. The column number
+    // stays a uint32_t inside the body.
+    const int64_t column_count = static_cast<int64_t>(W);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
 #endif
-    for (uint32_t i = 0; i < W; ++i) {
+    for (int64_t column = 0; column < column_count; ++column) {
+        const uint32_t i = static_cast<uint32_t>(column);
         p.column_len[i] = static_cast<uint32_t>(columns[i].size());
         if (!stream_column_lde) {
             std::vector<Fp3> padded(n, Fp3::Zero());
@@ -7475,7 +7491,7 @@ Fri3AlgGrindPredicateAirV1 BuildFri3AlgGrindPredicateAirV1(
         const btx::U128 aliased =
             static_cast<btx::U128>(canonical) +
             static_cast<btx::U128>(gkr_field::kP);
-        if (aliased >> 64) {
+        if ((aliased >> 64) != 0) {
             out.note = "grind predicate: value admits no 64-bit alias";
             return out;
         }
