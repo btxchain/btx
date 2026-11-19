@@ -807,6 +807,39 @@ class OrphanHandlingTest(BitcoinTestFramework):
         assert orphan["txid"] in final_mempool
         assert tx_replacer_C["txid"] in final_mempool
 
+    @cleanup
+    def test_orphan_in_mempool(self):
+        self.log.info("Test that an orphan in the mempool, or with a different-witness version in the mempool, is removed from the orphanage when found as the child of a 1p1c package")
+        node = self.nodes[0]
+        # Only a TRUC parent may be below the min relay feerate here: it is then rejected as
+        # reconsiderable, and submitpackage can let its child pay for it.
+        parent = self.wallet.create_self_transfer(fee_rate=0, confirmed_only=True, version=3)
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"], version=3)
+        parent_bad_wit = self.create_malleated_version(parent)
+        child_bad_wit = self.create_malleated_version(child)
+        peer = node.add_p2p_connection(PeerTxRelayer())
+
+        # A version of the parent with another witness is rejected for its feerate (reconsiderable),
+        # and both versions of the child are stored as orphans.
+        peer.send_and_ping(msg_tx(parent_bad_wit))
+        peer.send_and_ping(msg_tx(child["tx"]))
+        peer.send_and_ping(msg_tx(child_bad_wit))
+        assert tx_in_orphanage(node, child["tx"])
+        assert tx_in_orphanage(node, child_bad_wit)
+
+        # The child enters the mempool by RPC, which does not remove either version from the orphanage.
+        assert_equal(node.submitpackage([parent["hex"], child["hex"]])["package_msg"], "success")
+        assert tx_in_orphanage(node, child["tx"])
+        assert tx_in_orphanage(node, child_bad_wit)
+
+        # The same parent version is paired with each orphan, newest first, and each orphan's txid
+        # is in the mempool, so both are removed. Had the different-witness orphan been picked for
+        # a package, the search would have stopped there and left the other orphan.
+        peer.send_and_ping(msg_tx(parent_bad_wit))
+        assert not tx_in_orphanage(node, child["tx"])
+        assert not tx_in_orphanage(node, child_bad_wit)
+        assert child["txid"] in node.getrawmempool()
+
     def run_test(self):
         self.nodes[0].setmocktime(int(time.time()))
         self.wallet_nonsegwit = MiniWallet(self.nodes[0], mode=MiniWalletMode.RAW_P2PKH)
@@ -827,6 +860,7 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.test_orphan_handling_prefer_outbound()
         self.test_announcers_before_and_after()
         self.test_parents_change()
+        self.test_orphan_in_mempool()
 
 
 if __name__ == '__main__':
