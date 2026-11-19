@@ -841,6 +841,53 @@ BOOST_AUTO_TEST_CASE(feed_leaves_out_hidden_models_and_muted_publishers)
     BOOST_CHECK(lists_model());
 }
 
+// removemodelsearchrecord replaces a signed record with a signed tombstone,
+// which searchmodels skips. The feed kept the record it had noted: getmodelfeed
+// listed the model and ext/feed served the record to peers for the feed's
+// whole lifetime.
+BOOST_AUTO_TEST_CASE(feed_leaves_out_a_removed_search_record)
+{
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "feed-removed";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const std::string model_id = HelperDispatch(cat, "hostmodel", host_params)["model_id"].get_str();
+
+    UniValue feed_query(UniValue::VOBJ);
+    feed_query.pushKV("scope", "LOCAL");
+    feed_query.pushKV("limit", 50);
+    UniValue feed_args(UniValue::VARR);
+    feed_args.push_back(feed_query);
+    const auto lists_model = [&] {
+        const bool local = HelperDispatch(cat, "getmodelfeed", feed_args).write().find(model_id) != std::string::npos;
+        NativeRequest req;
+        req.method = "POST";
+        req.path = "/btx-model/2/ext/feed";
+        req.body = R"({"limit":50})";
+        NativeResponse resp;
+        BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+        BOOST_REQUIRE_EQUAL(resp.status, 200);
+        const bool peer = resp.body.find(model_id) != std::string::npos;
+        BOOST_CHECK_EQUAL(local, peer);
+        return local && peer;
+    };
+    BOOST_REQUIRE(lists_model());
+
+    UniValue rec_params(UniValue::VARR);
+    rec_params.push_back(model_id);
+    const UniValue removed = HelperDispatch(cat, "removemodelsearchrecord", rec_params);
+    BOOST_REQUIRE(removed["tombstone"].get_bool());
+    BOOST_CHECK_MESSAGE(!lists_model(), "the feed lists a model whose search record was removed");
+}
+
 BOOST_AUTO_TEST_CASE(recent_releases_local_scope_applies_query)
 {
     // The NETWORK scope passes limit and filters to getmodelfeed; the LOCAL
