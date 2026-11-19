@@ -12,6 +12,8 @@
 #include <util/time.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -599,6 +601,11 @@ bool DispatchCapabilityRpc(ModelCatalog& cat, const std::string& method, const U
     return false;
 }
 
+//! How long capabilityd waits for one client's request line. It serves one
+//! client at a time, so a client that sends nothing, or sends slowly, must
+//! not hold it.
+constexpr int CAPABILITY_REQUEST_TIMEOUT_MS{5000};
+
 int RunCapabilityDaemon(const fs::path& modeldir, fs::path socket, std::atomic<bool>* stop)
 {
     std::atomic<bool> local_stop{false};
@@ -632,12 +639,32 @@ int RunCapabilityDaemon(const fs::path& modeldir, fs::path socket, std::atomic<b
         Sock connection{cfd};
         std::string body;
         char buf[4096];
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{CAPABILITY_REQUEST_TIMEOUT_MS};
+        bool complete = false;
         while (body.size() < (1 << 20)) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (stop->load() || left <= 0) break;
+            pollfd cp{};
+            cp.fd = cfd;
+            cp.events = POLLIN;
+            const int ready = ::poll(&cp, 1, static_cast<int>(std::min<int64_t>(left, 250)));
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0) break;
+            if (ready == 0) continue;
             const ssize_t n = ::recv(cfd, buf, sizeof(buf), 0);
-            if (n <= 0) break;
+            if (n <= 0) {
+                complete = true;
+                break;
+            }
             body.append(buf, static_cast<size_t>(n));
-            if (body.find('\n') != std::string::npos) break;
+            if (body.find('\n') != std::string::npos) {
+                complete = true;
+                break;
+            }
         }
+        // A client that sent nothing in time, or no full line before the stop,
+        // gets no answer.
+        if (!complete && body.find('\n') == std::string::npos) continue;
         UniValue req;
         UniValue reply(UniValue::VOBJ);
         reply.pushKV("jsonrpc", "1.0");

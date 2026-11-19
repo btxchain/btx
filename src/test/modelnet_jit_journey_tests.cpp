@@ -21,11 +21,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <cstring>
 #include <string>
 #include <thread>
 #ifdef _WIN32
 #include <io.h>
 #else
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #endif
 #include <vector>
@@ -886,5 +890,95 @@ BOOST_AUTO_TEST_CASE(jit_api_04_cli_verbs)
     }
     BOOST_CHECK_MESSAGE(!socket_entry_present, "daemon socket directory entry must be gone before fallback cleanup");
 }
+
+#ifndef _WIN32
+// capabilityd serves one client at a time and read a request with recv() and
+// no time limit, so a client that connected and sent nothing held it: every
+// other call waited until that client went away, and so did the stop.
+BOOST_AUTO_TEST_CASE(capabilityd_drops_a_client_that_sends_nothing)
+{
+    // Writes to a client that went away must fail, not end the test process.
+    struct IgnorePipe {
+        void (*old)(int);
+        IgnorePipe() : old{::signal(SIGPIPE, SIG_IGN)} {}
+        ~IgnorePipe() { ::signal(SIGPIPE, old); }
+    } ignore_pipe;
+    const fs::path modeldir = m_path_root / "capd-idle";
+    fs::create_directories(modeldir);
+    fs::path sock = m_path_root / "i.sock";
+    if (fs::PathToString(sock).size() >= 100) {
+        sock = fs::PathFromString(std::string("/tmp/btx-idle-") + std::to_string(test::ProcessId()) + ".sock");
+    }
+    ::unlink(fs::PathToString(sock).c_str());
+    std::atomic<bool> stop{false};
+    std::atomic<int> daemon_result{-1};
+    std::thread daemon([&] { daemon_result.store(modelnet::RunCapabilityDaemon(modeldir, sock, &stop)); });
+    int idle = -1;
+    struct Join {
+        std::atomic<bool>& stop;
+        std::thread& th;
+        fs::path sock;
+        int& idle;
+        ~Join()
+        {
+            if (idle >= 0) ::close(idle);
+            stop.store(true);
+            if (th.joinable()) th.join();
+            ::unlink(fs::PathToString(sock).c_str());
+        }
+    } join{stop, daemon, sock, idle};
+
+    bool ready = false;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8)) {
+        UniValue reply;
+        modelnet::CapabilityError error;
+        if (modelnet::CallCapabilityUnix(fs::PathToString(sock), "getbtxruntimecapabilities", UniValue{UniValue::VOBJ}, reply, error)) {
+            ready = true;
+            break;
+        }
+        if (daemon_result.load() != -1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    BOOST_REQUIRE(ready);
+
+    // A client that connects and sends nothing.
+    idle = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(idle >= 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, fs::PathToString(sock).c_str(), sizeof(addr.sun_path) - 1);
+    BOOST_REQUIRE_EQUAL(::connect(idle, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // The next call is answered once the daemon gives up on it.
+    const auto started = std::chrono::steady_clock::now();
+    UniValue reply;
+    modelnet::CapabilityError error;
+    BOOST_CHECK(modelnet::CallCapabilityUnix(fs::PathToString(sock), "getbtxruntimecapabilities", UniValue{UniValue::VOBJ}, reply, error));
+    const auto waited = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count();
+    BOOST_CHECK_LT(waited, 15);
+
+    // A client that sends one byte every 100 ms and never a full line.
+    ::close(idle);
+    idle = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    BOOST_REQUIRE(idle >= 0);
+    BOOST_REQUIRE_EQUAL(::connect(idle, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+    std::atomic<bool> drip_stop{false};
+    std::thread drip([&] {
+        for (int i = 0; i < 300 && !drip_stop.load(); ++i) {
+            if (::send(idle, "x", 1, 0) != 1) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto drip_started = std::chrono::steady_clock::now();
+    BOOST_CHECK(modelnet::CallCapabilityUnix(fs::PathToString(sock), "getbtxruntimecapabilities", UniValue{UniValue::VOBJ}, reply, error));
+    const auto drip_waited = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - drip_started).count();
+    BOOST_CHECK_LT(drip_waited, 15);
+    drip_stop = true;
+    drip.join();
+}
+#endif // _WIN32
 
 BOOST_AUTO_TEST_SUITE_END()
