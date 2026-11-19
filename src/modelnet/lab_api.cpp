@@ -3222,10 +3222,15 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
                 store.verified_rings[rollout_id].insert(ring);
                 if (!store.rollout.StageGeneration(rollout_id, {}, err)) return false;
                 const bool owner_ok = OwnerActivation(store, payload, rollout_id);
-                if (store.verified_rings[rollout_id].size() >= 2 && owner_ok) {
+                // Only a running plan switches the active generation: not one
+                // that was never started, is paused or was rolled back. The
+                // endpoint report above is recorded either way.
+                const auto plan = store.plans.find(rollout_id);
+                const bool running = plan != store.plans.end() && plan->second != "PAUSED" && plan->second != "ROLLED_BACK";
+                if (store.verified_rings[rollout_id].size() >= 2 && owner_ok && running) {
                     if (!store.rollout.ActivateGeneration(rollout_id, true, true, err)) return false;
                 }
-                if (store.plans.count(rollout_id) && store.plans[rollout_id] != "PAUSED") {
+                if (running) {
                     const bool active = store.verified_rings[rollout_id].size() >= 2 && owner_ok;
                     store.plans[rollout_id] = active ? "ACTIVE" : "CANARY";
                 }
