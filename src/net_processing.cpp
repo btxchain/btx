@@ -23587,7 +23587,14 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
 
     CNodeState &state = *State(pto.GetId());
 
-    if (!state.m_chain_sync.m_protect && pto.IsOutboundOrBlockRelayConn() && state.fSyncStarted) {
+    // The header-sync height gate (c5b53ce1, f175e710) never sets fSyncStarted
+    // for a peer whose best known block, or VERSION height, is below our tip.
+    // That is the peer stuck on an old chain, so out of IBD the chain-sync
+    // rule covers every outbound peer that can serve blocks, not only the ones
+    // header sync started with. The gate itself is unchanged.
+    const bool chain_sync_applies{state.fSyncStarted ||
+        (!m_chainman.IsInitialBlockDownload() && CanServeBlocks(peer))};
+    if (!state.m_chain_sync.m_protect && pto.IsOutboundOrBlockRelayConn() && chain_sync_applies) {
         // This is an outbound peer subject to disconnection if they don't
         // announce a block with as much work as the current tip within
         // CHAIN_SYNC_TIMEOUT + HEADERS_RESPONSE_TIME seconds (note: if
@@ -23632,13 +23639,15 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
                 pto.fDisconnect = true;
             } else {
                 assert(state.m_chain_sync.m_work_header);
-                // Here, we assume that the getheaders message goes out,
-                // because it'll either go out or be skipped because of a
-                // getheaders in-flight already, in which case the peer should
-                // still respond to us with a sufficiently high work chain tip.
+                // Bypass the send window. A background refresh or the
+                // best-known probe, anchored at our tip, can hold it on every
+                // pass and gets an empty reply from a synced peer; this request
+                // is anchored below the benchmark, so it is the one the peer
+                // must answer. It goes out at most once per peer per
+                // CHAIN_SYNC_TIMEOUT.
                 MaybeSendGetHeaders(pto,
                         GetLocator(state.m_chain_sync.m_work_header->pprev),
-                        peer);
+                        peer, /*bypass_send_window=*/true);
                 LogDebug(BCLog::NET, "sending getheaders to outbound peer=%d to verify chain work (current best known block:%s, benchmark blockhash: %s)\n", pto.GetId(), state.pindexBestKnownBlock != nullptr ? state.pindexBestKnownBlock->GetBlockHash().ToString() : "<none>", state.m_chain_sync.m_work_header->GetBlockHash().ToString());
                 state.m_chain_sync.m_sent_getheaders = true;
                 // Bump the timeout to allow a response, which could clear the timeout
@@ -24187,11 +24196,17 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
         }
         if (!consensus_ok) {
-            state.m_chain_sync.m_timeout = 0s;
-            state.m_chain_sync.m_work_header = nullptr;
-            state.m_chain_sync.m_sent_getheaders = false;
+            // Losing the tier releases chain-sync protection and restarts the
+            // chain-sync timer once, on that transition. Do not zero the timer
+            // on every pass: since 75a9d850 stopped rotating these peers, that
+            // reset let ConsiderEviction re-arm the 20-minute timeout forever,
+            // so an ineligible outbound peer that fell behind our tip was never
+            // evicted. The tier is a preference; lagging is judged by work.
             if (state.m_chain_sync.m_protect) {
                 state.m_chain_sync.m_protect = false;
+                state.m_chain_sync.m_timeout = 0s;
+                state.m_chain_sync.m_work_header = nullptr;
+                state.m_chain_sync.m_sent_getheaders = false;
                 int recomputed_count{0};
                 for (const auto& entry : m_node_states) {
                     recomputed_count += entry.second.m_chain_sync.m_protect;

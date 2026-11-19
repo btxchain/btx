@@ -811,6 +811,121 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     BOOST_CHECK(!consensus_peer.fDisconnect);
 }
 
+BOOST_AUTO_TEST_CASE(matmul_ineligible_outbound_peer_behind_tip_is_evicted)
+{
+    // With RC active, an outbound peer without NODE_MATMUL_CONSENSUS loses
+    // chain-sync protection but is still held to the chain-sync rule: one that
+    // stays behind our tip is evicted, one that has shown us our tip is not.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    connman.SetPeerConnectTimeout(99999s);
+    PeerManager& peerman = *m_node.peerman;
+    const ServiceFlags base{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+
+    const auto saved_mock_time{GetMockTime()};
+    struct RestoreMockTime {
+        std::chrono::seconds saved;
+        ~RestoreMockTime() { SetMockTime(saved); }
+    } restore_mock_time{saved_mock_time};
+    const CBlockIndex* starting_tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(starting_tip != nullptr);
+    mineBlock(m_node, std::chrono::seconds{starting_tip->GetBlockTime() + 1});
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    const std::chrono::seconds start{tip->GetBlockTime() + 60};
+    SetMockTime(start);
+    BOOST_REQUIRE(!m_node.chainman->IsInitialBlockDownload());
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    struct RestoreHeights {
+        Consensus::Params& params;
+        int32_t rc;
+        int32_t v4;
+        ~RestoreHeights()
+        {
+            params.nMatMulRCHeight = rc;
+            params.nMatMulV4Height = v4;
+        }
+    } restore{consensus, consensus.nMatMulRCHeight, consensus.nMatMulV4Height};
+    consensus.nMatMulV4Height = 0;
+    consensus.nMatMulRCHeight = 0;
+    BOOST_REQUIRE(consensus.IsMatMulRCActive(tip->nHeight));
+
+    CNode lagging{/*id=*/1,
+                  /*sock=*/nullptr,
+                  CAddress{},
+                  /*nKeyedNetGroupIn=*/0,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/"lagging-ineligible",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false,
+                  /*network_key=*/0};
+    CNode synced{/*id=*/2,
+                 /*sock=*/nullptr,
+                 CAddress{},
+                 /*nKeyedNetGroupIn=*/0,
+                 /*nLocalHostNonceIn=*/0,
+                 CAddress{},
+                 /*addrNameIn=*/"synced-ineligible",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false,
+                 /*network_key=*/0};
+    connman.Handshake(lagging, /*successfully_connected=*/true, base, base,
+                      PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight + 1);
+    connman.Handshake(synced, /*successfully_connected=*/true, base, base,
+                      PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight + 1);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        CNode& a;
+        CNode& b;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(a);
+            peerman.FinalizeNode(b);
+        }
+    } finalize{peerman, lagging, synced};
+
+    BOOST_CHECK(peerman.SendMessages(&lagging));
+    BOOST_CHECK(peerman.SendMessages(&synced));
+    connman.FlushSendBuffer(lagging);
+    connman.FlushSendBuffer(synced);
+
+    // The synced peer shows us our tip; the lagging one never does.
+    std::vector<CBlock> tip_headers{CBlock{tip->GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        synced, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(tip_headers))));
+    synced.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(synced);
+
+    const auto pass{[&](int minute) {
+        SetMockTime(start + std::chrono::minutes{minute});
+        BOOST_CHECK(peerman.SendMessages(&lagging));
+        BOOST_CHECK(peerman.SendMessages(&synced));
+        connman.FlushSendBuffer(lagging);
+        connman.FlushSendBuffer(synced);
+    }};
+    for (int minute : {5, 10, 15, 19}) {
+        pass(minute);
+        BOOST_CHECK(!lagging.fDisconnect);
+        BOOST_CHECK(!synced.fDisconnect);
+    }
+    {
+        ASSERT_DEBUG_LOG("Outbound peer has old chain");
+        for (int minute = 21; minute <= 40 && !lagging.fDisconnect; minute += 3) {
+            pass(minute);
+        }
+    }
+    BOOST_CHECK(lagging.fDisconnect);
+    BOOST_CHECK(!synced.fDisconnect);
+}
+
 BOOST_AUTO_TEST_CASE(chain_sync_protects_peer_when_tip_has_auth_work_deficit)
 {
     // Issue #190: TrustAdjustedWork(peer) vs raw tip->nChainWork is

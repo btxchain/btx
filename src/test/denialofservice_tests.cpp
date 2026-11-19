@@ -16,6 +16,7 @@
 #include <script/signingprovider.h>
 #include <script/solver.h>
 #include <serialize.h>
+#include <test/util/logging.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
@@ -99,6 +100,74 @@ BOOST_AUTO_TEST_CASE(outbound_slow_chain_eviction)
     BOOST_CHECK(dummyNode1.fDisconnect == true);
 
     peerman.FinalizeNode(dummyNode1);
+}
+
+BOOST_FIXTURE_TEST_CASE(outbound_peer_behind_tip_is_evicted, TestChain100Setup)
+{
+    // An outbound peer that advertised a height below our tip and never shows
+    // us a better chain is evicted by the chain-sync rule once we are out of
+    // IBD, although the header-sync height gate never starts header sync with
+    // it.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    connman.SetPeerConnectTimeout(99999s);
+    PeerManager& peerman = *m_node.peerman;
+
+    int tip_height;
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(!m_node.chainman->IsInitialBlockDownload());
+        tip_height = m_node.chainman->ActiveChain().Height();
+        BOOST_REQUIRE(tip_height > 1);
+    }
+
+    CAddress addr(ip(0xa0b0c002), NODE_NONE);
+    CNode node{/*id=*/0,
+               /*sock=*/nullptr,
+               addr,
+               /*nKeyedNetGroupIn=*/0,
+               /*nLocalHostNonceIn=*/0,
+               CAddress(),
+               /*addrNameIn=*/"",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(
+        /*node=*/node,
+        /*successfully_connected=*/true,
+        /*remote_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        /*local_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        /*version=*/PROTOCOL_VERSION,
+        /*relay_txs=*/true,
+        /*starting_height=*/tip_height - 1);
+
+    const int64_t start{GetTime()};
+    BOOST_CHECK(peerman.SendMessages(&node)); // arms the chain-sync timeout
+    connman.FlushSendBuffer(node);
+    CNodeStateStats stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(node.GetId(), stats));
+    BOOST_CHECK(!stats.m_headers_sync_started); // the height gate held it back
+
+    // Inside the 20-minute window the peer stays.
+    for (int minute : {5, 10, 15, 19}) {
+        SetMockTime(start + minute * 60);
+        BOOST_CHECK(peerman.SendMessages(&node));
+        connman.FlushSendBuffer(node);
+        BOOST_CHECK(!node.fDisconnect);
+    }
+    // After it: one getheaders below the benchmark, then the last call.
+    {
+        ASSERT_DEBUG_LOG("Outbound peer has old chain");
+        for (int minute = 21; minute <= 40 && !node.fDisconnect; minute += 3) {
+            SetMockTime(start + minute * 60);
+            BOOST_CHECK(peerman.SendMessages(&node));
+            connman.FlushSendBuffer(node);
+        }
+    }
+    BOOST_CHECK(node.fDisconnect);
+
+    peerman.FinalizeNode(node);
 }
 
 struct OutboundTest : TestingSetup {
