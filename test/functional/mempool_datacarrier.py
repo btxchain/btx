@@ -2,7 +2,7 @@
 # Copyright (c) 2020-2022 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test that BTX's financial-only relay policy cannot be bypassed by datacarrier settings."""
+"""Test -datacarrier and -datacarriersize. BTX keeps -datacarrier off by default."""
 from test_framework.messages import (
     CTxOut,
     MAX_OP_RETURN_RELAY,
@@ -14,7 +14,7 @@ from test_framework.script import (
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.test_node import TestNode
 from test_framework.util import assert_raises_rpc_error
-from test_framework.wallet import MiniWallet, MiniWalletMode
+from test_framework.wallet import MiniWallet
 
 from random import randbytes
 
@@ -44,19 +44,42 @@ class DataCarrierTest(BitcoinTestFramework):
             assert_raises_rpc_error(-26, "scriptpubkey", self.wallet.sendrawtransaction, from_node=node, tx_hex=tx_hex)
 
     def run_test(self):
-        self.wallet = MiniWallet(self.nodes[0], mode=MiniWalletMode.ADDRESS_OP_TRUE)  # BTX: these checks expect MiniWallet's non-standard P2TR output; keep it until they are ported to P2MR
+        self.wallet = MiniWallet(self.nodes[0])
 
-        # BTX rejects null-data outputs independent of the inherited
-        # -datacarrier/-datacarriersize knobs.
+        # By default, only 80 bytes are used for data (+1 for OP_RETURN, +2 for the pushdata opcodes).
         default_size_data = randbytes(MAX_OP_RETURN_RELAY - 3)
         too_long_data = randbytes(MAX_OP_RETURN_RELAY - 2)
         small_data = randbytes(MAX_OP_RETURN_RELAY - 4)
         one_byte = randbytes(1)
         zero_bytes = randbytes(0)
+        all_data = (default_size_data, too_long_data, small_data, None, zero_bytes, one_byte)
 
-        for node in self.nodes:
-            for data in (default_size_data, too_long_data, small_data, None, zero_bytes, one_byte):
-                self.test_null_data_transaction(node=node, data=data, success=False)
+        self.log.info("Testing null data transactions with the default -datacarrier, which is off on BTX.")
+        for data in all_data:
+            self.test_null_data_transaction(node=self.nodes[0], data=data, success=False)
+
+        self.log.info("Testing null data transactions with -datacarrier=false.")
+        for data in all_data:
+            self.test_null_data_transaction(node=self.nodes[1], data=data, success=False)
+
+        self.log.info("Testing a null data transaction with a size larger than accepted by -datacarriersize.")
+        self.test_null_data_transaction(node=self.nodes[2], data=default_size_data, success=False)
+        self.test_null_data_transaction(node=self.nodes[2], data=too_long_data, success=False)
+
+        self.log.info("Testing a null data transaction with a size smaller than accepted by -datacarriersize.")
+        self.test_null_data_transaction(node=self.nodes[2], data=small_data, success=True)
+
+        self.log.info("Testing a null data transaction with no data.")
+        self.test_null_data_transaction(node=self.nodes[2], data=None, success=True)
+        self.test_null_data_transaction(node=self.nodes[3], data=None, success=True)
+
+        self.log.info("Testing a null data transaction with zero bytes of data.")
+        self.test_null_data_transaction(node=self.nodes[2], data=zero_bytes, success=True)
+        self.test_null_data_transaction(node=self.nodes[3], data=zero_bytes, success=True)
+
+        self.log.info("Testing a null data transaction with one byte of data.")
+        self.test_null_data_transaction(node=self.nodes[2], data=one_byte, success=True)
+        self.test_null_data_transaction(node=self.nodes[3], data=one_byte, success=False)
 
 
 if __name__ == '__main__':
