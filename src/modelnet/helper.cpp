@@ -2956,8 +2956,9 @@ UniValue EconomyCard(const SearchHit& h)
 }
 
 //! g_search_mu must be held. The feed shows what searchmodels shows: no model the
-//! operator hid and no publisher the operator muted (SearchIndex::Search skips
-//! both). rec is the record the feed holds; the index copy may be newer.
+//! operator hid, no publisher the operator muted and no model whose record was
+//! removed (SearchIndex::Search skips all three). rec is the record the feed
+//! holds; the index copy may be newer.
 bool FeedHidesModel(const Digest48& model_id, const ModelSearchRecord& rec)
 {
     const Digest48& id = rec.model_id.IsNull() ? model_id : rec.model_id;
@@ -2965,6 +2966,7 @@ bool FeedHidesModel(const Digest48& model_id, const ModelSearchRecord& rec)
     if (g_search_idx.Hidden(id)) return true;
     if (!rec.publisher_identity.IsNull() && g_search_idx.Muted(rec.publisher_identity.Hex())) return true;
     const ModelSearchRecord* cur = g_search_idx.Get(id);
+    if (cur && cur->tombstone) return true;
     return cur && !cur->publisher_identity.IsNull() && g_search_idx.Muted(cur->publisher_identity.Hex());
 }
 
