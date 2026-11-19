@@ -222,6 +222,9 @@ bool RepairCanonicalFromShards(const ErasureManifest& man,
         err = "stripe_index required";
         return false;
     }
+    // A single stripe is the stripe: its positions and hashes bind the
+    // shards as a named one would.
+    if (stripe_index < 0 && man.stripes.size() == 1) stripe_index = static_cast<int>(man.stripes[0].stripe_index);
     if (stripe_index >= 0) {
         const ErasureStripe* bound = nullptr;
         for (const auto& st : man.stripes) {
@@ -235,11 +238,21 @@ bool RepairCanonicalFromShards(const ErasureManifest& man,
             return false;
         }
         std::set<int> have(bound->positions.begin(), bound->positions.end());
-        for (int p : positions) {
-            if (!have.count(p)) {
-                err = "stripe position";
-                return false;
+        // The tail stripe's dummy-zero slots, proven by file_size_bytes, are
+        // known bytes: a repair may use them as all-zero shards.
+        std::set<int> padding;
+        if (static_cast<uint64_t>(stripe_index) + 1 == man.stripe_count) {
+            for (int p : ErasureTailPaddingSlots(man)) padding.insert(p);
+        }
+        for (size_t i = 0; i < positions.size(); ++i) {
+            const int p = positions[i];
+            if (have.count(p)) continue;
+            if (padding.count(p) &&
+                std::all_of(shards[i].begin(), shards[i].end(), [](unsigned char b) { return b == 0; })) {
+                continue;
             }
+            err = "stripe position";
+            return false;
         }
     }
     for (size_t i = 0; i < positions.size(); ++i) {
