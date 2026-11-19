@@ -1,10 +1,28 @@
+#include <modelnet/git_snapshot.h>
 #include <modelnet/lab_api.h>
+#include <modelnet/lab_exchange.h>
 #include <modelnet/research_rpc.h>
+#include <span.h>
+#include <util/strencodings.h>
 #include <univalue.h>
 #include <test/util/setup_common.h>
 #include <boost/test/unit_test.hpp>
+#include <test/util/environment.h>
+
+#ifndef WIN32
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <string>
 #include <thread>
@@ -1245,5 +1263,229 @@ BOOST_AUTO_TEST_CASE(lab_integer_params_outside_int_are_schema)
     }
     modelnet::ResetLabApi();
 }
+
+#ifndef WIN32
+namespace {
+
+modelnet::ExchangeObject LabObject(const std::string& kind, const std::string& content)
+{
+    modelnet::ExchangeObject object;
+    object.kind = kind;
+    object.content = content;
+    std::string err;
+    const std::vector<unsigned char> bytes(content.begin(), content.end());
+    BOOST_REQUIRE(modelnet::GitObjectDigest(kind, Span<const unsigned char>{bytes.data(), bytes.size()}, object.digest, err));
+    return object;
+}
+
+std::string LabManifest(const std::vector<modelnet::ExchangeObject>& objects)
+{
+    std::string manifest, err;
+    BOOST_REQUIRE_MESSAGE(modelnet::WriteExchangeManifest(objects, manifest, err), err);
+    return manifest;
+}
+
+std::string HttpReply(const std::string& status, const std::string& body)
+{
+    return "HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
+           "\r\nConnection: close\r\n\r\n" + body;
+}
+
+/** The reply of a peer's lab.snapshot_export: {"manifest": manifest} in the lab's RPC envelope. */
+std::string ExportReply(const std::string& manifest)
+{
+    UniValue inner(UniValue::VOBJ);
+    inner.pushKV("manifest", manifest);
+    UniValue envelope(UniValue::VOBJ);
+    envelope.pushKV("result", inner);
+    envelope.pushKV("automatic_spend_atoms", "0");
+    UniValue rpc(UniValue::VOBJ);
+    rpc.pushKV("result", envelope);
+    rpc.pushKV("error", UniValue());
+    rpc.pushKV("id", "lab");
+    return HttpReply("200 OK", rpc.write());
+}
+
+/** A loopback peer that answers its next requests with the given replies, one
+ *  per connection. It serves from a child process: the lab refuses a peer on a
+ *  port this process listens on. The child does not allocate after fork. */
+class LoopbackPeerProcess
+{
+public:
+    explicit LoopbackPeerProcess(std::vector<std::string> replies) : m_replies(std::move(replies))
+    {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        BOOST_REQUIRE(fd >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t length = sizeof(address);
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 || ::listen(fd, 4) != 0 ||
+            ::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            ::close(fd);
+            BOOST_FAIL("loopback listener");
+        }
+        m_port = ntohs(address.sin_port);
+        m_pid = ::fork();
+        if (m_pid < 0) ::close(fd);
+        BOOST_REQUIRE(m_pid >= 0);
+        if (m_pid == 0) {
+            static char request[65536];
+            for (const std::string& reply : m_replies) {
+                pollfd pfd{fd, POLLIN, 0};
+                if (::poll(&pfd, 1, 5000) <= 0) ::_exit(1);
+                const int c = ::accept(fd, nullptr, nullptr);
+                if (c < 0) ::_exit(1);
+                size_t have = 0;
+                while (have < sizeof(request) - 1) {
+                    request[have] = '\0';
+                    const char* head = std::strstr(request, "\r\n\r\n");
+                    if (head) {
+                        const char* cl = std::strstr(request, "Content-Length: ");
+                        const size_t want = cl ? std::strtoul(cl + 16, nullptr, 10) : 0;
+                        if (have >= static_cast<size_t>(head - request) + 4 + want) break;
+                    }
+                    pollfd rfd{c, POLLIN, 0};
+                    if (::poll(&rfd, 1, 5000) <= 0) ::_exit(1);
+                    const auto n = ::recv(c, request + have, sizeof(request) - 1 - have, 0);
+                    if (n <= 0) break;
+                    have += static_cast<size_t>(n);
+                }
+                size_t sent = 0;
+                while (sent < reply.size()) {
+                    const auto n = ::send(c, reply.data() + sent, reply.size() - sent, 0);
+                    if (n <= 0) break;
+                    sent += static_cast<size_t>(n);
+                }
+                ::close(c);
+            }
+            ::_exit(0);
+        }
+        ::close(fd);
+    }
+    /** True once the child answered every request it was given and exited. */
+    bool Served()
+    {
+        if (m_pid <= 0) return false;
+        int status = 0;
+        for (int i = 0; i < 100; ++i) {
+            if (::waitpid(m_pid, &status, WNOHANG) == m_pid) {
+                m_pid = -1;
+                return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        return false;
+    }
+    ~LoopbackPeerProcess()
+    {
+        if (m_pid <= 0) return;
+        int status = 0;
+        for (int i = 0; i < 100; ++i) {
+            if (::waitpid(m_pid, &status, WNOHANG) == m_pid) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        ::kill(m_pid, SIGKILL);
+        ::waitpid(m_pid, &status, 0);
+    }
+    int Port() const { return m_port; }
+
+private:
+    const std::vector<std::string> m_replies;
+    pid_t m_pid{-1};
+    int m_port{0};
+};
+
+UniValue LabResult(const std::string& method, const UniValue& req, std::string& err)
+{
+    std::string response;
+    UniValue parsed;
+    if (!modelnet::DispatchLab035(method, req.write(), response, err)) return parsed;
+    BOOST_REQUIRE(parsed.read(response));
+    return parsed;
+}
+
+} // namespace
+
+// lab.snapshot_import checks a manifest on a copy of the store and holds every
+// piece to the model it names. lab.snapshot_pull wrote the pulled objects into
+// the live store first, so a manifest that failed a check stayed in it, and a
+// piece for a model this node already held replaced that model's bytes.
+BOOST_AUTO_TEST_CASE(pulled_snapshot_is_checked_before_it_is_stored)
+{
+    modelnet::ResetLabApi();
+    const auto hex = [](const std::string& s) { return HexStr(Span<const unsigned char>{reinterpret_cast<const unsigned char*>(s.data()), s.size()}); };
+    const auto model = LabObject("model", "lab model bytes");
+    const auto piece = [&](const modelnet::ExchangeObject& m, const std::string& bytes) {
+        return LabObject("piece", "v1|" + m.digest + "|0|" + hex(bytes));
+    };
+    std::string err;
+    UniValue import(UniValue::VOBJ);
+    import.pushKV("manifest", LabManifest({model, piece(model, "lab model bytes")}));
+    import.pushKV("idempotency_key", "idempotency-pull-checked-import");
+    import.pushKV("expected_state", UniValue());
+    const UniValue imported = LabResult("lab.snapshot_import", import, err);
+    BOOST_REQUIRE_MESSAGE(err.empty(), err);
+    const std::string repo = imported["result"].exists("repository_id") ? imported["result"]["repository_id"].get_str() :
+                                                                           imported["repository_id"].get_str();
+    const auto export_ok = [&](const std::string& key) {
+        UniValue exp(UniValue::VOBJ);
+        exp.pushKV("repository_id", repo);
+        exp.pushKV("idempotency_key", key);
+        exp.pushKV("expected_state", UniValue());
+        return LabCode("lab.snapshot_export", exp);
+    };
+    BOOST_REQUIRE_EQUAL(export_ok("idempotency-pull-checked-export-0"), "OK");
+
+    const auto pull = [&](const std::string& manifest, const std::string& key) {
+        LoopbackPeerProcess peer{{ExportReply(manifest)}};
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("host", "127.0.0.1");
+        req.pushKV("port", peer.Port());
+        req.pushKV("rpc_user", "lab");
+        req.pushKV("rpc_password", "lab-pass-0001");
+        req.pushKV("repository_id", std::string(96, 'e'));
+        req.pushKV("idempotency_key", key);
+        req.pushKV("expected_state", UniValue());
+        return LabCode("lab.snapshot_pull", req);
+    };
+    // A piece that names the held model with other bytes.
+    BOOST_CHECK_EQUAL(pull(LabManifest({piece(model, "lab model bytez")}), "idempotency-pull-checked-1"), "BTX035_ID_MISMATCH");
+    BOOST_CHECK_EQUAL(export_ok("idempotency-pull-checked-export-1"), "OK");
+    // A model whose pieces do not add up to it.
+    const auto other = LabObject("model", "other model bytes");
+    BOOST_CHECK_EQUAL(pull(LabManifest({other, piece(other, "other model bytez")}), "idempotency-pull-checked-2"), "BTX035_ID_MISMATCH");
+    BOOST_CHECK_EQUAL(export_ok("idempotency-pull-checked-export-2"), "OK");
+    // A good manifest still pulls, and its repository exports.
+    BOOST_CHECK_EQUAL(pull(LabManifest({other, piece(other, "other model bytes")}), "idempotency-pull-checked-3"), "OK");
+    UniValue pulled_export(UniValue::VOBJ);
+    pulled_export.pushKV("repository_id", std::string(96, 'e'));
+    pulled_export.pushKV("idempotency_key", "idempotency-pull-checked-export-3");
+    pulled_export.pushKV("expected_state", UniValue());
+    BOOST_CHECK_EQUAL(LabCode("lab.snapshot_export", pulled_export), "OK");
+
+    // lab.artifact_acquire pulls the same kind of manifest for one model. A
+    // piece of the held model in it is not taken.
+    LoopbackPeerProcess peer{{HttpReply("404 Not Found", "BTX035_NOT_FOUND"),
+                              ExportReply(LabManifest({piece(model, "lab model bytez")}))}};
+    test::ScopedEnvVar env_peer{"BTX035_LAB_PEER", ("127.0.0.1:" + std::to_string(peer.Port())).c_str()};
+    test::ScopedEnvVar env_user{"BTX035_LAB_PEER_USER", "lab"};
+    test::ScopedEnvVar env_pass{"BTX035_LAB_PEER_PASSWORD", "lab-pass-0001"};
+    UniValue resource(UniValue::VOBJ);
+    resource.pushKV("digest", LabObject("model", "wanted model bytes").digest);
+    resource.pushKV("repository_id", std::string(96, 'd'));
+    UniValue acquire(UniValue::VOBJ);
+    acquire.pushKV("resource", resource);
+    acquire.pushKV("origin_policy_id", std::string(96, 'a'));
+    acquire.pushKV("max_bytes", "4096");
+    acquire.pushKV("destination_class", "d");
+    acquire.pushKV("idempotency_key", "idempotency-acquire-checked");
+    acquire.pushKV("expected_state", UniValue());
+    BOOST_CHECK_EQUAL(LabCode("lab.artifact_acquire", acquire), "OK");
+    BOOST_CHECK(peer.Served());
+    BOOST_CHECK_EQUAL(export_ok("idempotency-pull-checked-export-4"), "OK");
+    modelnet::ResetLabApi();
+}
+#endif // WIN32
 
 BOOST_AUTO_TEST_SUITE_END()
