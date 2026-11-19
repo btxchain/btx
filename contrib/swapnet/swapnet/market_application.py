@@ -16,6 +16,7 @@ from .marketmaker import Market
 from .quote import Quote,SignedQuote
 from .market_lifecycle import Participation
 from .public_market import PublicMarket,MAX_RECORD
+from .store import apply_script
 from . import node_invites,market_receipts
 
 MARKET_METHODS={
@@ -42,7 +43,7 @@ class Application(BaseApplication):
         self.market_peers=set();self.offer_pages={};self.alternatives={};self.route_attempts={}
         self._incoming_envelope=None;self._next_offer_refresh=0
         with self.store.lock:
-            self.store.db.executescript('''
+            apply_script(self.store.db, '''
 CREATE TABLE IF NOT EXISTS sn_trade_previews(
  id TEXT PRIMARY KEY, principal TEXT NOT NULL, wallet TEXT NOT NULL,
  expires INTEGER NOT NULL, body BLOB NOT NULL, swap_id TEXT);

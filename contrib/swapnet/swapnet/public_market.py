@@ -14,6 +14,7 @@ from typing import Any, Callable
 from .assets import Asset
 from .canonical import atoms, digest, dumps, exact_fields, hex32, integer, loads
 from .errors import SwapError, require
+from .store import apply_script
 from .marketmaker import Market
 from .quote import Quote
 
@@ -166,7 +167,7 @@ class PublicMarket:
     def __init__(self, store: Any, journal: Any, network: str, identity: Any):
         self.store, self.journal, self.network, self.identity = store,journal,hex32(network),identity
         with store.lock:
-            store.db.executescript(SCHEMA)
+            apply_script(store.db, SCHEMA)
 
     def ingest(self, envelope: dict, now: int, *, local: bool = False) -> bool:
         body = validate_offer(envelope,self.network,now,self.identity.verify)

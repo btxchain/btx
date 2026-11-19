@@ -12,6 +12,7 @@ import json
 import time
 from .canonical import dumps, loads, hex32, digest, atoms, integer
 from .errors import require, SwapError
+from .store import apply_script
 
 MIGRATION = '''
 CREATE TABLE IF NOT EXISTS sn_settings(k TEXT PRIMARY KEY, body BLOB NOT NULL);
@@ -56,10 +57,14 @@ class Journal:
     def __init__(self,store):
         self.store=store
         with store.lock:
-            require(store.db.execute('PRAGMA user_version').fetchone()[0] in (0,2),
+            version = store.db.execute('PRAGMA user_version').fetchone()[0]
+            require(version in (0,2),
                     'SCHEMA_VERSION','Financial journal requires an explicitly supported migration')
-            store.db.executescript(MIGRATION)
-            store.db.execute('PRAGMA user_version=2')
+            apply_script(store.db, MIGRATION)
+            # Writing the same user_version again changes the schema cookie and
+            # invalidates a SELECT that was already prepared.
+            if version != 2:
+                store.db.execute('PRAGMA user_version=2')
     def setting(self,key,default=None):
         with self.store.lock:
             r=self.store.db.execute('SELECT body FROM sn_settings WHERE k=?',(key,)).fetchone()
