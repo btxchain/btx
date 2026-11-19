@@ -287,4 +287,91 @@ BOOST_AUTO_TEST_CASE(offline_bundle_reload)
     BOOST_CHECK_EQUAL(mismatch.RingGeneration("beta"), static_cast<int64_t>(1));
 }
 
+// A bundle restores a realm; it does not take one back. ReadOfflineBundle
+// replaced the channel, the revocations and the threshold of a realm this node
+// already held with whatever the file said, so an old bundle rolled the
+// channel back (and let it be published again) and undid revocations.
+BOOST_AUTO_TEST_CASE(offline_bundle_does_not_take_a_realm_back)
+{
+    std::string err;
+    modelnet::RealmRollout roll;
+    BOOST_REQUIRE(roll.SetPolicy("alpha", 2, {"a", "b", "c", "d"}, err));
+    BOOST_REQUIRE(roll.RevokeAttestor("alpha", "b", err));
+    BOOST_REQUIRE(roll.PublishChannel("alpha", 0, "h0", err));
+    const fs::path old_bundle = m_path_root / "wan-offline-old.txt";
+    BOOST_REQUIRE(roll.WriteOfflineBundle(old_bundle, "alpha", err));
+    BOOST_REQUIRE(roll.PublishChannel("alpha", 1, "h1", err));
+    BOOST_REQUIRE(roll.PublishChannel("alpha", 2, "h2", err));
+
+    // An older channel, with the same policy and revocations.
+    BOOST_CHECK(!roll.ReadOfflineBundle(old_bundle, "alpha", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_ROLLBACK");
+    BOOST_CHECK_EQUAL(roll.ChannelSequence("alpha"), static_cast<int64_t>(2));
+    BOOST_CHECK_EQUAL(roll.ChannelBody("alpha"), "h2");
+    BOOST_CHECK(!roll.PublishChannel("alpha", 1, "h1", err));
+
+    // The same channel, without a later revocation.
+    const fs::path before_revoke = m_path_root / "wan-offline-before-revoke.txt";
+    BOOST_REQUIRE(roll.WriteOfflineBundle(before_revoke, "alpha", err));
+    BOOST_REQUIRE(roll.RevokeAttestor("alpha", "c", err));
+    BOOST_CHECK(!roll.ReadOfflineBundle(before_revoke, "alpha", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_ROLLBACK");
+    BOOST_CHECK(!roll.Quorum("alpha", {"a", "c"}));
+    BOOST_CHECK(roll.Quorum("alpha", {"a", "d"}));
+
+    // The current bundle still loads into the realm it came from.
+    const fs::path current = m_path_root / "wan-offline-current.txt";
+    BOOST_REQUIRE(roll.WriteOfflineBundle(current, "alpha", err));
+    BOOST_CHECK_MESSAGE(roll.ReadOfflineBundle(current, "alpha", err), err);
+    BOOST_CHECK_EQUAL(roll.ChannelSequence("alpha"), static_cast<int64_t>(2));
+
+    // Another threshold, or another body at the same sequence.
+    const std::string text = FileText(current);
+    const auto rewrite = [&](const std::string& from, const std::string& to, const char* name) {
+        std::string changed = text;
+        const auto at = changed.find(from);
+        BOOST_REQUIRE(at != std::string::npos);
+        changed.replace(at, from.size(), to);
+        const fs::path path = m_path_root / name;
+        std::ofstream out(path, std::ios::out | std::ios::trunc);
+        out << changed;
+        out.close();
+        return path;
+    };
+    BOOST_CHECK(!roll.ReadOfflineBundle(rewrite("threshold=2", "threshold=1", "wan-offline-threshold.txt"), "alpha", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_THRESHOLD");
+    BOOST_CHECK_EQUAL(roll.Threshold("alpha"), 2);
+    BOOST_CHECK(!roll.ReadOfflineBundle(rewrite("body=h2", "body=hx", "wan-offline-body.txt"), "alpha", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_STALE");
+    BOOST_CHECK_EQUAL(roll.ChannelBody("alpha"), "h2");
+    // Other pins.
+    BOOST_CHECK(!roll.ReadOfflineBundle(rewrite("d\nrevoked=", "e\nrevoked=", "wan-offline-pins.txt"), "alpha", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_POLICY");
+
+    // A named channel, as the lab keeps them (realm, newline, name).
+    modelnet::RealmRollout named;
+    BOOST_REQUIRE(named.SetPolicy("beta", 1, {"a"}, err));
+    BOOST_REQUIRE(named.PublishChannel("beta\nmodel", 0, "n0", err));
+    const fs::path named_old = m_path_root / "wan-offline-named-old.txt";
+    BOOST_REQUIRE(named.WriteOfflineBundle(named_old, "beta", err));
+    BOOST_REQUIRE(FileText(named_old).find("name=model\n") != std::string::npos);
+    BOOST_REQUIRE(named.PublishChannel("beta\nmodel", 1, "n1", err));
+    BOOST_CHECK(!named.ReadOfflineBundle(named_old, "beta", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_ROLLBACK");
+    BOOST_CHECK_EQUAL(named.ChannelSequence("beta\nmodel"), static_cast<int64_t>(1));
+    BOOST_CHECK_EQUAL(named.ChannelBody("beta\nmodel"), "n1");
+    // A bundle that names another channel would leave this one out of the next export.
+    std::string other_text = FileText(named_old);
+    other_text.replace(other_text.find("name=model"), 10, "name=other");
+    const fs::path named_other = m_path_root / "wan-offline-named-other.txt";
+    {
+        std::ofstream out(named_other, std::ios::out | std::ios::trunc);
+        out << other_text;
+    }
+    BOOST_CHECK(!named.ReadOfflineBundle(named_other, "beta", err));
+    BOOST_CHECK_EQUAL(err, "BTX035_ROLLBACK");
+    const fs::path named_now = m_path_root / "wan-offline-named-now.txt";
+    BOOST_CHECK_MESSAGE(named.WriteOfflineBundle(named_now, "beta", err), err);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
