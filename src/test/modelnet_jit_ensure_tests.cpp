@@ -38,7 +38,30 @@
 #include <string>
 #include <vector>
 
-BOOST_FIXTURE_TEST_SUITE(modelnet_jit_ensure_tests, BasicTestingSetup)
+namespace modelnet {
+void ResetCapabilityStoreForTests();
+} // namespace modelnet
+
+namespace {
+//! The plan, job and lock store and the host broker are process-wide, and
+//! other cases and suites in the same test run leave theirs behind. With the
+//! fixed test seed, plan ids repeat from one case to the next, so a case found
+//! plans of an earlier case under its own ids, or a host budget an earlier
+//! suite had set. Each case here starts as a fresh process would: no kept
+//! plans, jobs or locks, and a broker with no limits and nothing reserved.
+void ResetCapabilityTestState()
+{
+    modelnet::ResetCapabilityStoreForTests();
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalCapabilityBroker().Configure(modelnet::MemoryLimits{}, err));
+}
+
+struct CapabilityTestingSetup : public BasicTestingSetup {
+    CapabilityTestingSetup() { ResetCapabilityTestState(); }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(modelnet_jit_ensure_tests, CapabilityTestingSetup)
 
 namespace {
 
@@ -1127,6 +1150,28 @@ BOOST_AUTO_TEST_CASE(ensure_staging_dir_is_private)
     } else {
         ::unsetenv("TMPDIR");
     }
+}
+
+// Plans and the host budget used to carry over from earlier cases and suites
+// in the same run: capability_plans_and_locks_are_bounded failed when an
+// earlier case had kept a plan under one of its ids, and ensure cases failed
+// with "host budget" after modelnet_jit_journey_tests had set an 8 MiB limit.
+BOOST_AUTO_TEST_CASE(each_case_starts_with_an_empty_capability_store)
+{
+    // What an earlier case could leave behind.
+    const auto plan = StorePlan();
+    modelnet::MemoryLimits lim;
+    lim.host_physical_bytes = 64;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalCapabilityBroker().Configure(lim, err));
+    BOOST_REQUIRE(!modelnet::GlobalCapabilityBroker().Reserve(1 << 20, 0, 0, false, err));
+
+    // What the next case's setup does.
+    ResetCapabilityTestState();
+    modelnet::CapabilityPlan kept;
+    BOOST_CHECK(!modelnet::LookupCapabilityPlan(plan.plan_id, kept));
+    BOOST_CHECK_MESSAGE(modelnet::GlobalCapabilityBroker().Reserve(1 << 20, 0, 0, false, err), err);
+    modelnet::GlobalCapabilityBroker().Release(1 << 20, 0, 0, false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

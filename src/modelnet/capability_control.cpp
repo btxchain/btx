@@ -181,6 +181,18 @@ bool LookupCapabilityLock(const std::string& lock_id, CapabilityLock& out)
     return true;
 }
 
+//! Test only: forget every kept plan, job and lock.
+void ResetCapabilityStoreForTests()
+{
+    std::lock_guard<std::mutex> lockg(g_jobs_mu);
+    g_plans.clear();
+    g_plan_order.clear();
+    g_jobs.clear();
+    g_locks.clear();
+    g_lock_order.clear();
+    g_lock_bytes = 0;
+}
+
 int64_t CriticalPathTtcMs(const std::vector<int64_t>& stage_ms, bool overlapped)
 {
     if (stage_ms.empty()) return 0;
