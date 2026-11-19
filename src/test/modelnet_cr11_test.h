@@ -44,7 +44,8 @@ inline std::string Tok(modelnet::HcpEngine& e, const std::vector<std::string>& s
 inline UniValue Json(const modelnet::HcpHttpResponse& r)
 {
     UniValue o;
-    o.read(r.body);
+    // A body that is not JSON leaves o null, which callers check.
+    (void)o.read(r.body);
     return o;
 }
 
