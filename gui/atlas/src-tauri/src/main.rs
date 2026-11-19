@@ -3,6 +3,7 @@
 mod commands;
 mod host;
 mod neuronlab;
+mod swapnet_invitation;
 use host::Host;
 use std::sync::Arc;
 use tauri::{
@@ -65,7 +66,8 @@ fn main() {
             commands::atlas_copy,
             commands::atlas_desktop,
             neuronlab::atlas_neuronlab,
-            neuronlab::atlas_neuronlab_cancel
+            neuronlab::atlas_neuronlab_cancel,
+            swapnet_invitation::atlas_take_swapnet_invites
         ])
         .setup(|app| {
             let dir = app.path().app_local_data_dir()?;
