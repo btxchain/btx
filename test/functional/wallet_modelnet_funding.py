@@ -4,7 +4,7 @@
 # file COPYING or https://opensource.org/license/mit/.
 """Coordinator model-funding RPCs: prepare / sign / submit.
 
-Options-only prepare (helper optional). Frozen descriptor is htlc_sha256,
+Explicit-term prepare (helper optional), with and without a release reference. Frozen descriptor is htlc_sha256,
 never htlc_sha256_tx. automatic_spend is always 0.
 
 B0 SCRIPT library (no new opcode). Claim/refund on chain is the existing
@@ -66,6 +66,37 @@ class ModelnetFundingTest(BitcoinTestFramework):
         # Options-only form: first RPCArg is STR with skip_type_check.
         return node.preparemodelfunding(options)
 
+    def assert_funding_readers(self, node, wallet, txid, frozen, since_hash):
+        transaction = wallet.gettransaction(txid)
+        decoded = node.decoderawtransaction(transaction["hex"])
+        outputs = [out for out in decoded["vout"]
+                   if out["scriptPubKey"]["hex"] == frozen["output_script"]]
+        assert_equal(len(outputs), 1)
+        expected = {
+            "modelnet": "funding",
+            "model_output_script": frozen["output_script"],
+            "model_output_vout": str(outputs[0]["n"]),
+            "model_key_hash": frozen["key_hash"],
+            "model_descriptor": frozen["descriptor"],
+            "model_refund_pubkey": frozen["refund_pubkey"],
+            "model_refund_height": str(frozen["refund_height"]),
+            "model_claimant": frozen["claimant"],
+        }
+        if frozen.get("release_id"):
+            expected["model_release_id"] = frozen["release_id"]
+        if not frozen.get("release_id"):
+            assert "model_release_id" not in transaction
+        rows = [transaction]
+        for entries in (wallet.listtransactions("*", 1000),
+                        wallet.listsinceblock(since_hash)["transactions"]):
+            matches = [entry for entry in entries if entry["txid"] == txid]
+            assert matches, "funding transaction missing from reader result"
+            rows.extend(matches)
+        for row in rows:
+            for key, value in expected.items():
+                assert isinstance(row[key], str), (key, row[key])
+                assert_equal(row[key], value)
+
     def run_test(self):
         node = self.nodes[0]
         helptext = node.help()
@@ -103,7 +134,11 @@ class ModelnetFundingTest(BitcoinTestFramework):
         # funds release-campaign HTLCs and bounty lots.
         funder = node.get_wallet_rpc(self.default_wallet_name)
         funding_addr = funder.getnewaddress()
-        self.generatetoaddress(self.nodes[0], 101, funding_addr)
+        initial_blocks = self.generatetoaddress(self.nodes[0], 101, funding_addr)
+        ordinary_txid = node.getblock(initial_blocks[0])["tx"][0]
+        ordinary = funder.gettransaction(ordinary_txid)
+        assert_equal(ordinary["txid"], ordinary_txid)
+        assert not any(key.startswith("model_") or key == "modelnet" for key in ordinary)
 
         node.createwallet(wallet_name="release_claimer")
         claimer = node.get_wallet_rpc("release_claimer")
@@ -124,7 +159,10 @@ class ModelnetFundingTest(BitcoinTestFramework):
             "assurance": "KEY_RELEASE_ONLY",
             "assurance_mode": "KEY_RELEASE_ONLY",
         }
-        frozen = self.prepare(funder, options)
+        # Explicit terms are supported when the helper is unavailable.
+        release_id = hashlib.sha384(b"model-funding-reader-regtest").hexdigest()
+        frozen = funder.preparemodelfunding(release_id, options)
+        assert_equal(frozen["release_id"], release_id)
         assert_zero_spend(frozen)
         assert_equal(frozen["htlc"], "htlc_sha256")
         desc = frozen["descriptor"]
@@ -148,8 +186,11 @@ class ModelnetFundingTest(BitcoinTestFramework):
         mempool = node.getrawmempool()
         assert txid in mempool, submitted
         self.generatetoaddress(self.nodes[0], 1, funding_addr)
-        # After mining the tx leaves mempool. Avoid wallet gettransaction:
-        # coverage.py type-checks its result against RPCHelpMan.
+        # The ordinary functional configuration keeps rpcdoccheck enabled.
+        # All three readers must declare the funding metadata they return.
+        self.assert_funding_readers(node, funder, txid, frozen, initial_blocks[-1])
+        assert_equal(funder.gettransaction(ordinary_txid)["txid"], ordinary_txid)
+        # After mining the tx leaves mempool.
         assert txid not in node.getrawmempool()
         tip = node.getblock(node.getbestblockhash(), 2)
         mined = [tx["txid"] if isinstance(tx, dict) else tx for tx in tip["tx"]]
@@ -210,8 +251,10 @@ class ModelnetFundingTest(BitcoinTestFramework):
         assert_equal(frozen_r["htlc"], "htlc_sha256")
         signed_r = funder.signmodelfunding(frozen_r["unsigned_hex"], frozen_r)
         assert signed_r.get("complete"), signed_r
+        before_refund_funding = node.getbestblockhash()
         sub_r = funder.submitmodelfunding(signed_r["hex"], frozen_r)
         self.generatetoaddress(self.nodes[0], 1, funding_addr)
+        self.assert_funding_readers(node, funder, sub_r["txid"], frozen_r, before_refund_funding)
         info_r = node.getdescriptorinfo(frozen_r["descriptor"])
         desc_r = frozen_r["descriptor"]
         if "#" not in desc_r:
