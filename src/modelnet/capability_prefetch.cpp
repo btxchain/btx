@@ -91,6 +91,11 @@ bool IsDemandHint(const UniValue& hint)
     if (hint.exists("class") && hint["class"].isStr()) {
         return hint["class"].get_str() == "DEMAND";
     }
+    // The Qt Prefetch button asks with "kind" (src/qt/modelnetpage.cpp).
+    if (hint.exists("kind") && hint["kind"].isStr()) {
+        const std::string k = hint["kind"].get_str();
+        return k == "DEMAND" || k == "URGENT";
+    }
     return false;
 }
 

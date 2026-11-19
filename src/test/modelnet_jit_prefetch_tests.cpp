@@ -960,4 +960,34 @@ BOOST_AUTO_TEST_CASE(JIT_KV_EXPIRED_AND_CHAT_TEMPLATE)
     BOOST_CHECK(k0 != k1);
 }
 
+// The Qt Prefetch button asks with {"kind": "DEMAND"}. IsDemandHint read only
+// demand, urgent, priority and class, so each click was a speculative hint, and
+// after PREFETCH_JOB_MAX clicks every further one failed with BUDGET_EXCEEDED.
+BOOST_AUTO_TEST_CASE(gui_demand_kind_is_a_demand_hint)
+{
+    ResetCapabilityPrefetchForTests();
+    auto broker = MakeBroker(10 * 1024, 64);
+    auto grant = MakeGrant(10 * 1024);
+    std::string ec, err;
+    for (int i = 0; i < PREFETCH_JOB_MAX + 2; ++i) {
+        UniValue hint(UniValue::VOBJ);
+        hint.pushKV("kind", "DEMAND");
+        hint.pushKV("recipe_id", "gui-" + std::to_string(i));
+        hint.pushKV("bytes", "1");
+        UniValue job;
+        BOOST_REQUIRE_MESSAGE(AdmitPrefetchHint(hint, grant, broker, job, ec, err), ec + " " + err);
+        BOOST_CHECK_EQUAL(job["priority"].get_str(), "DEMAND");
+        BOOST_CHECK(!job["speculative"].get_bool());
+    }
+    BOOST_CHECK_EQUAL(broker.PrefetchJobs(), 0);
+    // Other kinds stay speculative.
+    UniValue other(UniValue::VOBJ);
+    other.pushKV("kind", "WARM");
+    other.pushKV("recipe_id", "gui-warm");
+    other.pushKV("bytes", "1");
+    UniValue job;
+    BOOST_REQUIRE_MESSAGE(AdmitPrefetchHint(other, grant, broker, job, ec, err), ec + " " + err);
+    BOOST_CHECK_EQUAL(job["priority"].get_str(), "SPECULATIVE");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
