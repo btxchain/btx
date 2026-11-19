@@ -64,6 +64,11 @@
 #include <sched.h>
 #endif
 
+namespace modelnet {
+bool ReadCatalogBytes(ModelCatalog&, const CatalogEntry&, std::vector<unsigned char>&, std::string&);
+bool CipherCopyMissingPiece(ModelCatalog&, const CatalogEntry&);
+}
+
 BOOST_FIXTURE_TEST_SUITE(modelnet_hosting_tests, BasicTestingSetup)
 
 namespace {
@@ -2445,6 +2450,44 @@ BOOST_AUTO_TEST_CASE(model_dns_seeds_stay_empty_and_reject_addresses)
     BOOST_CHECK_EQUAL(looked, 1);
     BOOST_REQUIRE_EQUAL(got.size(), 1U);
     BOOST_CHECK_EQUAL(got[0], "192.0.2.10:" + std::to_string(modelnet::DEFAULT_MODEL_PORT));
+}
+
+BOOST_AUTO_TEST_CASE(wrap_bound_does_not_make_a_complete_copy_look_missing)
+{
+    // The ciphertext wrap stops at 64 MiB before it reads a piece. A complete
+    // copy of a larger file still has every piece. cacheencryptedmodel uses
+    // this predicate, and only then marks the copy incomplete.
+    const fs::path tmp = m_path_root / "wrap-bound";
+    const fs::path dir = tmp / "wide.safetensors.dir";
+    fs::create_directories(dir);
+    const uint64_t target = (64ull << 20) + 1;
+    std::string json;
+    uint64_t n = target;
+    for (int i = 0; i < 4; ++i) {
+        json = "{\"w\":{\"dtype\":\"U8\",\"shape\":[" + std::to_string(n) + "],\"data_offsets\":[0," + std::to_string(n) + "]}}";
+        n = target - 8 - json.size();
+    }
+    BOOST_REQUIRE_EQUAL(8 + json.size() + n, target);
+    {
+        std::ofstream out(dir / "wide.safetensors", std::ios::binary | std::ios::trunc);
+        unsigned char hdr[8];
+        WriteLE64(hdr, json.size());
+        out.write(reinterpret_cast<const char*>(hdr), 8);
+        out.write(json.data(), static_cast<std::streamsize>(json.size()));
+        out.seekp(static_cast<std::streamoff>(target - 1));
+        const char zero = 0;
+        out.write(&zero, 1);
+        BOOST_REQUIRE(out);
+    }
+    modelnet::ModelCatalog cat{tmp / "cat", 256ull << 20};
+    std::string err;
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(dir), false, imported, err), err);
+    BOOST_CHECK(!imported.incomplete);
+    BOOST_CHECK(imported.bytes_verified);
+    std::vector<unsigned char> bytes;
+    BOOST_CHECK(!modelnet::ReadCatalogBytes(cat, imported, bytes, err));
+    BOOST_CHECK(!modelnet::CipherCopyMissingPiece(cat, imported));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

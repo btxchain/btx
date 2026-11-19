@@ -2838,6 +2838,18 @@ bool ReadCatalogBytes(ModelCatalog& cat, const CatalogEntry& e, std::vector<unsi
     return true;
 }
 
+bool CipherCopyMissingPiece(ModelCatalog& cat, const CatalogEntry& local)
+{
+    for (uint32_t fi = 0; fi < local.core.files.size(); ++fi) {
+        const uint64_t size = local.core.files[fi].size;
+        const uint64_t count = size == 0 ? 0 : (size - 1) / PIECE_SIZE + 1;
+        for (uint64_t pi = 0; pi < count; ++pi) {
+            if (!cat.Store().HasPiece(local.artifact_id, fi, static_cast<uint32_t>(pi))) return true;
+        }
+    }
+    return false;
+}
+
 /** include_wallet_observation=false leaves out g_chain_obs: those entries come from
  *  btxd's join against the local wallets (ObserveReleaseFunding reads mapWallet), so
  *  they must not reach a remote peer. */
@@ -11300,7 +11312,8 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             }
             result.pushKV("ciphertext_artifact_id", cid.Hex());
             CatalogEntry local;
-            if (cat.Find(cid, local) || (have_camp && cat.Find(camp.model_id, local))) {
+            const bool found_cipher = cat.Find(cid, local);
+            if (found_cipher || (have_camp && cat.Find(camp.model_id, local))) {
                 std::vector<unsigned char> bytes;
                 const bool read = ReadCatalogBytes(cat, local, bytes, err);
                 if (read && LooksLikeBtxEnc2(Span<const unsigned char>{bytes.data(), bytes.size()})) {
@@ -11313,9 +11326,12 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                     }
                     return true;
                 }
-                // A copy whose bytes cannot be read is fetched again as a partial
-                // one, as getmodel does: a fetch does not reset a complete entry.
-                if (!read && !local.incomplete) {
+                // getmodel marks a copy incomplete only after a piece is missing.
+                // The wrap read also fails, before any piece lookup, when the
+                // first file is over 64 MiB. That includes the plaintext model
+                // named in place of a ciphertext that was never stored. Those
+                // bytes are still on disk.
+                if (found_cipher && !local.incomplete && CipherCopyMissingPiece(cat, local)) {
                     std::string mark_err;
                     (void)cat.MarkIncomplete(local.model_id, true, mark_err);
                 }
