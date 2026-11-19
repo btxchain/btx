@@ -143,8 +143,10 @@ class P2POutEvict(BitcoinTestFramework):
         # Trigger the timeouts and check how we are still connected
         cur_mock_time += (CHAIN_SYNC_TIMEOUT + 1)
         node.setmocktime(cur_mock_time)
+        # BTX: a protected peer is outside the chain-sync rule, and the only
+        # getheaders it gets here is the background refresh anchored at our tip,
+        # so sync on a ping rather than on a getheaders for the tip's parent.
         peer.sync_with_ping()
-        peer.wait_for_getheaders(block_hash=tip_header.hashPrevBlock)
         cur_mock_time += (HEADERS_RESPONSE_TIME + 1)
         node.setmocktime(cur_mock_time)
         self.log.info("Test that the peer does not get evicted")
@@ -198,7 +200,10 @@ class P2POutEvict(BitcoinTestFramework):
         # Let the timeouts hit and check back
         cur_mock_time += (CHAIN_SYNC_TIMEOUT + 1)
         node.setmocktime(cur_mock_time)
-        for peer in protected_peers + misbehaving_unprotected_peers:
+        for peer in protected_peers:
+            # BTX: see test_outbound_eviction_protected.
+            peer.sync_with_ping()
+        for peer in misbehaving_unprotected_peers:
             peer.sync_with_ping()
             peer.wait_for_getheaders(block_hash=target_hash)
         for peer in honest_unprotected_peers:
