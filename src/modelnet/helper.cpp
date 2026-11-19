@@ -3002,6 +3002,26 @@ void AfterIndexPut(const ModelSearchRecord& rec, int64_t now_ms, bool new_observ
     }
 }
 
+// Save the proposed index before exposing the alias or its derived events.
+static bool SaveAliasRecord(ModelCatalog& cat, const ModelSearchRecord& rec,
+                            std::string& err_code, std::string& err)
+{
+    std::lock_guard<std::mutex> lock(g_search_mu);
+    SearchIndex staged = g_search_idx;
+    if (!staged.Put(rec, ConnNowMs(), err)) {
+        err_code = "REJECTED";
+        if (err.empty()) err = "search put rejected";
+        return false;
+    }
+    if (!staged.Save(HelperDir(cat) / "search-index.json", err)) {
+        err_code = "INTERNAL";
+        return false;
+    }
+    g_search_idx = std::move(staged);
+    AfterIndexPut(rec, ConnNowMs());
+    return true;
+}
+
 std::vector<ModelEconomyEntry> EconomyHits(std::vector<SearchHit> hits, const SearchQuery& q, ModelCatalog* cat = nullptr, bool include_wallet_observation = true)
 {
     std::vector<ModelEconomyEntry> out;
@@ -7939,19 +7959,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         MarkOwnSearchRecord(rec);
-        {
-            std::lock_guard<std::mutex> lock(g_search_mu);
-            if (!g_search_idx.Put(rec, ConnNowMs(), err)) {
-                err_code = "REJECTED";
-                if (err.empty()) err = "search put rejected";
-                return false;
-            }
-            AfterIndexPut(rec, ConnNowMs());
-            // Aliases live only in the search index; save it as hidesearchmodel does,
-            // or the change is gone after a restart.
-            std::string save_err;
-            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
-        }
+        if (!SaveAliasRecord(cat, rec, err_code, err)) return false;
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
         result.pushKV("removed", alias);
@@ -8088,19 +8096,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
             return false;
         }
         MarkOwnSearchRecord(rec);
-        {
-            std::lock_guard<std::mutex> lock(g_search_mu);
-            if (!g_search_idx.Put(rec, ConnNowMs(), err)) {
-                err_code = "REJECTED";
-                if (err.empty()) err = "search put rejected";
-                return false;
-            }
-            AfterIndexPut(rec, ConnNowMs());
-            // Aliases live only in the search index; save it as hidesearchmodel does,
-            // or the change is gone after a restart.
-            std::string save_err;
-            (void)g_search_idx.Save(HelperDir(cat) / "search-index.json", save_err);
-        }
+        if (!SaveAliasRecord(cat, rec, err_code, err)) return false;
         result.pushKV("schema_version", 2);
         result.pushKV("model_id", rec.model_id.Hex());
         result.pushKV("alias", alias);
