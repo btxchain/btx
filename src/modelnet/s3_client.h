@@ -78,6 +78,11 @@ std::string RedactCloudSecrets(std::string_view text, std::string_view extra_sec
 
 bool ParseS3Endpoint(std::string_view endpoint, ParsedS3Endpoint& out, std::string& err);
 bool ValidateS3Endpoint(std::string_view endpoint, bool allow_http_loopback, bool allow_link_local, std::string& err);
+
+/** Set SO_RCVTIMEO and, with send, SO_SNDTIMEO of a socket to timeout_ms
+ *  (at least 1), in the form each platform reads: a timeval on POSIX, a DWORD
+ *  of milliseconds on Windows. */
+void SetSocketTimeoutsMs(int fd, int timeout_ms, bool send = true);
 bool S3HostBlockedAsMetadata(std::string_view host);
 bool LoadS3Secrets(const CredentialRef& ref, std::string& access_key_id, std::string& secret_access_key,
                    std::string& err);

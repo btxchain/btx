@@ -6,6 +6,7 @@
 
 #include <crypto/sha384.h>
 #include <modelnet/registry_resolver.h>
+#include <modelnet/s3_client.h>
 #include <modelnet/source_local.h>
 #include <modelnet/store.h>
 #include <modelnet/types.h>
@@ -335,15 +336,6 @@ bool ResolveHttpsRedirectInner(const std::string& current_url, const std::string
 
 constexpr int kRegistryHttpsTimeoutMs = 15000;
 
-void ApplySocketTimeouts(int fd, int timeout_ms)
-{
-    timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
 bool WaitFd(int fd, short events, int timeout_ms, std::string& err)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -452,7 +444,7 @@ bool HttpsExchangeOnce(const std::string& url, uint64_t offset, uint64_t length,
             continue;
         }
         if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-        ApplySocketTimeouts(fd, RemainingMs(deadline));
+        SetSocketTimeoutsMs(fd, RemainingMs(deadline));
         break;
     }
     freeaddrinfo(raw);
