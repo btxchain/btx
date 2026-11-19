@@ -373,15 +373,6 @@ bool WaitFd(int fd, short events, int timeout_ms, std::string& err)
     }
 }
 
-void ApplySocketTimeouts(int fd, int timeout_ms)
-{
-    timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
 // Winsock SOCKETs are not CRT file descriptors, even when stored as int.
 void CloseS3Socket(int fd)
 {
@@ -469,7 +460,7 @@ bool ConnectTcp(const ParsedS3Endpoint& ep, bool allow_http_loopback, bool allow
             continue;
         }
         if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-        ApplySocketTimeouts(fd, kS3HttpsTimeoutMs);
+        SetSocketTimeoutsMs(fd, kS3HttpsTimeoutMs);
         int nodelay = 1;
         (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
         freeaddrinfo(raw);
@@ -2454,6 +2445,26 @@ UniValue S3Client::ConfigJson() const
 size_t S3Client::LastPutMaxBufferBytes() const
 {
     return m_last_put_max_buffer;
+}
+
+void SetSocketTimeoutsMs(int fd, int timeout_ms, bool send)
+{
+    // 0 means no timeout on both platforms; a deadline that has passed is the
+    // shortest one instead.
+    if (timeout_ms < 1) timeout_ms = 1;
+#ifdef WIN32
+    // Winsock reads SO_RCVTIMEO and SO_SNDTIMEO as a DWORD of milliseconds,
+    // not as a timeval: a timeval of 5 s would be read as 5 ms.
+    const DWORD ms = static_cast<DWORD>(timeout_ms);
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &ms, sizeof(ms));
+    if (send) (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &ms, sizeof(ms));
+#else
+    timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (send) (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 }
 
 } // namespace modelnet

@@ -1504,6 +1504,32 @@ BOOST_AUTO_TEST_CASE(cloud_https_refuses_redirect)
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(206, {}));
 }
 
+// The cloud client and the source registry set a socket timeout as a timeval.
+// Winsock reads SO_RCVTIMEO and SO_SNDTIMEO as a DWORD of milliseconds, so on
+// Windows 5 s became 5 ms (and the registry's 15 s became 15 ms): a remote
+// endpoint timed out on its first reply.
+BOOST_AUTO_TEST_CASE(cloud_socket_timeouts_read_back_as_set)
+{
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    BOOST_REQUIRE(handle != INVALID_SOCKET);
+    Sock sock{handle};
+    modelnet::SetSocketTimeoutsMs(static_cast<int>(handle), 5000);
+    for (const int option : {SO_RCVTIMEO, SO_SNDTIMEO}) {
+#ifdef WIN32
+        DWORD ms = 0;
+        int length = sizeof(ms);
+        BOOST_REQUIRE_EQUAL(::getsockopt(handle, SOL_SOCKET, option, reinterpret_cast<char*>(&ms), &length), 0);
+        BOOST_CHECK_EQUAL(ms, 5000U);
+#else
+        timeval tv{};
+        socklen_t length = sizeof(tv);
+        BOOST_REQUIRE_EQUAL(::getsockopt(handle, SOL_SOCKET, option, &tv, &length), 0);
+        BOOST_CHECK_EQUAL(tv.tv_sec, 5);
+        BOOST_CHECK_EQUAL(tv.tv_usec, 0);
+#endif
+    }
+}
+
 BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
 {
     const ScopedCloudCredentials credentials;

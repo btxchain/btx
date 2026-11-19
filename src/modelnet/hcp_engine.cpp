@@ -11,6 +11,7 @@
 #include <modelnet/identity.h>
 #include <modelnet/package_core.h>
 #include <modelnet/package_pjson.h>
+#include <modelnet/s3_client.h>
 #include <crypto/sha256.h>
 #include <crypto/sha384.h>
 #include <random.h>
@@ -3376,10 +3377,7 @@ int RunHcpDaemon(HcpConfig cfg, const std::string& bind, const fs::path& socket,
         if (select(fd + 1, &rf, nullptr, nullptr, &tv) <= 0) continue;
         int cfd = accept(fd, nullptr, nullptr);
         if (cfd < 0) continue;
-        timeval rcv_to{};
-        rcv_to.tv_sec = 2;
-        rcv_to.tv_usec = 0;
-        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+        SetSocketTimeoutsMs(cfd, 2000, /*send=*/false);
         const int64_t body_limit = cfg.max_body_bytes > 0 ? cfg.max_body_bytes : 0;
         size_t accum_cap = static_cast<size_t>(body_limit) + 8192;
         std::string reqs;
