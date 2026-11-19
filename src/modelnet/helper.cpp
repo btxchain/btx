@@ -6182,11 +6182,29 @@ void EnsureCloudLoaded(ModelCatalog& cat)
     g_cloud_dir = dir;
     g_cloud_init_error.clear();
     ApplyCloudCapsLocked();
+    const fs::path config_path = dir / "cloud.json";
+    std::error_code status_error;
+    const auto status = fs::symlink_status(config_path, status_error);
+    if (status.type() == fs::file_type::not_found &&
+        (!status_error || status_error == std::errc::no_such_file_or_directory)) {
+        return;
+    }
+
+    // Keep this diagnosis independent of the contents and location of the file.
+    g_cloud_init_error = "saved cloud configuration (cloud.json) could not be loaded; restore a valid copy";
     UniValue stored;
-    if (!ReadJsonFile(dir / "cloud.json", stored) || !stored.isObject() || !stored.exists("endpoint")) return;
+    if (status_error || !fs::is_regular_file(config_path, status_error) ||
+        !ReadJsonFile(config_path, stored) || !stored.isObject()) {
+        return;
+    }
     std::string err;
     CloudStoreConfig cfg;
-    if (!CloudConfigFromJson(stored, cfg, err)) return;
+    try {
+        if (!CloudConfigFromJson(stored, cfg, err)) return;
+    } catch (const std::runtime_error&) {
+        // For example, a saved budget field can be outside its integer range.
+        return;
+    }
     cfg.budget_state_path = dir / "cloud-budget.json";
     cfg.s3.fake_store_dir = dir;
     auto store = std::make_unique<S3PieceStore>(cfg);
@@ -6196,6 +6214,7 @@ void EnsureCloudLoaded(ModelCatalog& cat)
         g_cloud_init_error = err.empty() ? "cloud origin not ready" : err;
         return;
     }
+    g_cloud_init_error.clear();
     g_cloud_cfg = cfg;
     g_cloud = std::move(store);
     ApplyCloudCapsLocked();
@@ -6513,6 +6532,7 @@ bool DispatchCloudStorageRpc(ModelCatalog& cat, const std::string& method, const
         std::lock_guard<std::mutex> lock(g_cloud_mu);
         g_cloud.reset();
         g_cloud_cfg = CloudStoreConfig{};
+        g_cloud_init_error.clear();
         ApplyCloudCapsLocked();
         result = CloudPublicJson();
         result.pushKV("detached", true);
