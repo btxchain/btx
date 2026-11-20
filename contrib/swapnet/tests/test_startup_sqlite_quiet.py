@@ -4,26 +4,46 @@ The node installs one process-wide SQLite log. executescript() steps a null
 trailing statement, and a repeated user_version write invalidates a prepared
 SELECT. Both showed up on every start, including a fresh datadir.
 """
+import importlib.util
 import os
 import subprocess
 import sys
 import textwrap
 
+import pytest
+
 
 def test_schema_setup_does_not_log_sqlite_misuse_or_schema_change():
+    extension = importlib.util.find_spec("_sqlite3")
+    if extension is None or not extension.has_location:
+        pytest.skip("SQLite log hook requires a loadable _sqlite3 extension")
+
     script = textwrap.dedent(
         r"""
         import ctypes, os, tempfile
         from pathlib import Path
-        lib = ctypes.CDLL("libsqlite3.so.0")
+        # Resolve the library through the extension Python actually uses,
+        # without importing it before configuring SQLite's process-wide hook.
+        lib = ctypes.CDLL(os.environ["SWAPNET_SQLITE_EXTENSION"])
         msgs = []
         LOG = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p)
         def cb(arg, code, msg):
             msgs.append((code, msg.decode() if msg else ""))
         hook = LOG(cb)
-        if lib.sqlite3_config(16, hook, None) != 0:
+        # ctypes needs the fixed arguments of variadic functions on Apple ARM64.
+        lib.sqlite3_config.argtypes = [ctypes.c_int]
+        lib.sqlite3_log.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        lib.sqlite3_log.restype = None
+        if lib.sqlite3_config(16, hook, ctypes.c_void_p()) != 0:
             raise SystemExit("sqlite log hook")
-        import sys
+        lib.sqlite3_log(1, b"SwapNet test hook control")
+        if msgs != [(1, "SwapNet test hook control")]:
+            raise SystemExit("sqlite log hook did not receive control message")
+        msgs.clear()
+        import sqlite3, sys
+        lib.sqlite3_libversion.restype = ctypes.c_char_p
+        if lib.sqlite3_libversion().decode() != sqlite3.sqlite_version:
+            raise SystemExit("SQLite hook resolved a different library")
         sys.path.insert(0, os.environ["SWAPNET_ROOT"])
         from swapnet.store import Store
         from swapnet.journal import Journal
@@ -52,5 +72,6 @@ def test_schema_setup_does_not_log_sqlite_misuse_or_schema_change():
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     env = os.environ.copy()
     env["SWAPNET_ROOT"] = root
+    env["SWAPNET_SQLITE_EXTENSION"] = extension.origin
     proc = subprocess.run([sys.executable, "-c", script], env=env, text=True, capture_output=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
