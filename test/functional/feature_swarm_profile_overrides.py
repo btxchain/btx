@@ -64,6 +64,15 @@ class SwarmProfileOverridesTest(BitcoinTestFramework):
         self.wait_until(lambda: node.getmodelnetworkinfo().get("helper_ready") is True
                         and node.getmodelnetworkinfo().get("owner_helper_pid") != before, timeout=60)
 
+    def check_auto_quota(self):
+        info = self.nodes[0].getmodelnetworkinfo()
+        assert_equal(info["storage_mode"], "AUTO")
+        target = info["storage_target_bytes"]
+        assert target > 0
+        safe_available = max(0, info["filesystem_available_bytes"] - info["filesystem_reserve_bytes"])
+        assert_equal(info["quota_bytes"], min(target, safe_available))
+        return target
+
     def test_mirror_cli(self):
         cli = Path(self.config["environment"]["SRCDIR"]) / "contrib/modelnet/btx-model"
         prefix = [sys.executable, str(cli), "--socket", str(self.socket_path), "--json", "mirror"]
@@ -172,11 +181,12 @@ class SwarmProfileOverridesTest(BitcoinTestFramework):
         assert_equal(node.getmodelnetworkinfo()["quota_bytes"], 16 * 1024 ** 2)
         self.restart_node(0, extra_args=base_args + ["-modelprofile=personal"])
         self.ready()
-        preset_quota = node.getmodelnetworkinfo()["quota_bytes"]
+        preset_target = self.check_auto_quota()
         assert not self.helper("setmodelprofile", ["custom", {"storage_bytes": 8 * 1024 ** 2}]).get("error")
         self.wait_until(lambda: node.getmodelnetworkinfo()["quota_bytes"] == 8 * 1024 ** 2, timeout=10)
         self.restart_managed_helper()
-        assert_equal(node.getmodelnetworkinfo()["quota_bytes"], preset_quota)
+        # The same policy can compute a different quota from current free space.
+        assert_equal(self.check_auto_quota(), preset_target)
         guard_file = self.modeldir / "swarm" / "guard-process.json"
         self.wait_until(lambda: guard_file.is_file() and json.loads(guard_file.read_text()).get("ready") is True, timeout=30)
         running = json.loads(guard_file.read_text())

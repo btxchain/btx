@@ -25,7 +25,7 @@ from pathlib import Path
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import get_datadir_path
+from test_framework.util import get_datadir_path, unix_socket_path
 
 MATMUL_OFF_ARGS = [
     "-regtestmatmulbindingheight=2147483647",
@@ -84,6 +84,7 @@ class ModelNetBtxModelTest(BitcoinTestFramework):
         self.modeld_log = None
         self.modeldir = None
         self.modeld_socket = None
+        self.modeld_socket_dir = None
         self.executed = []
         self.skipped = []
 
@@ -117,10 +118,10 @@ class ModelNetBtxModelTest(BitcoinTestFramework):
         datadir.mkdir(parents=True, exist_ok=True)
         self.modeldir = datadir / "modeldir"
         self.modeldir.mkdir(parents=True, exist_ok=True)
-        # _assert_scratch_socket refuses a socket outside the test directory, and
-        # <datadir>/modeldir/modeld.sock does not fit in sun_path under
-        # test_runner.py, so the socket sits at the top of the test directory.
-        self.modeld_socket = Path(self.options.tmpdir) / "modeld.sock"
+        # Use a private temporary directory if the test directory is too long.
+        # Remember the chosen scratch directory for every CLI call.
+        self.modeld_socket = unix_socket_path(Path(self.options.tmpdir) / "modeld.sock")
+        self.modeld_socket_dir = self.modeld_socket.parent.resolve()
         if self.modeld_socket.exists():
             self.modeld_socket.unlink()
         argv = [
@@ -170,13 +171,12 @@ class ModelNetBtxModelTest(BitcoinTestFramework):
         return super().shutdown()
 
     def _assert_scratch_socket(self):
-        sock = str(self.modeld_socket.resolve()).replace("\\", "/")
+        sock = self.modeld_socket.resolve()
         for marker in _FORBIDDEN_SOCKET_MARKERS:
-            if marker in sock:
+            if marker in sock.as_posix():
                 raise AssertionError(f"refusing production helper socket {sock}")
-        tmpdir = str(Path(self.options.tmpdir).resolve()).replace("\\", "/")
-        if tmpdir not in sock:
-            raise AssertionError(f"CLI socket must live under test tmpdir: {sock}")
+        if sock.parent != self.modeld_socket_dir:
+            raise AssertionError(f"CLI socket must live in the test scratch directory: {sock}")
 
     def _walk_invariants(self, obj, where):
         if isinstance(obj, dict):
