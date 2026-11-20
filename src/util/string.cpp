@@ -4,13 +4,14 @@
 
 #include <util/string.h>
 
-#include <regex>
 #include <string>
 
 namespace util {
 void ReplaceAll(std::string& in_out, const std::string& search, const std::string& substitute)
 {
     if (search.empty()) return;
-    in_out = std::regex_replace(in_out, std::regex(search), substitute);
+    for (size_t pos{0}; (pos = in_out.find(search, pos)) != std::string::npos; pos += substitute.size()) {
+        in_out.replace(pos, search.size(), substitute);
+    }
 }
 } // namespace util

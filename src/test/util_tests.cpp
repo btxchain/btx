@@ -383,6 +383,7 @@ BOOST_AUTO_TEST_CASE(util_ReplaceAll)
     test_replaceall("", "foo", original);
     test_replaceall(original, "foo", "foo");
     test_replaceall("%s", "foo", "A test \"foo\" string 'foo'.");
+    test_replaceall("%s", "a$&b", "A test \"a$&b\" string 'a$&b'.");
     test_replaceall("\"", "foo", "A test foo%sfoo string '%s'.");
     test_replaceall("'", "foo", "A test \"%s\" string foo%sfoo.");
 }
