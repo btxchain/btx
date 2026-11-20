@@ -348,6 +348,13 @@ void MeshRequireLive(Database& db,const Policy& p,const std::string& capsule,int
         for(const auto& r:rounds){
             auto challenge=Parse(r[0]);const auto& b=challenge["body"];
             if(DigestField(b,"campaign")!=campaign)continue;
+            // A challenge counts for the campaign it names only when it asks what
+            // the campaign asks (MeshTick copies these fields), and while neither it
+            // nor its coordinator signature is revoked.
+            if(DigestField(b,"composition")!=DigestField(bc,"composition")||DigestField(b,"package")!=DigestField(bc,"package")||
+               DigestField(b,"suite")!=DigestField(bc,"suite")||DigestField(b,"sample_commitment")!=DigestField(bc,"sample_commitment")||
+               Text(b,"gate")!=Text(bc,"gate"))continue;
+            if(db.Revoked(RecordId(challenge),now)||CurrentSigners(db,p,challenge,"coordinator",now).empty())continue;
             const auto issued=UInt(b,"issued_ms",INT64_MAX);
             if(issued>most_recent){most_recent=issued;latest=challenge;}
         }
