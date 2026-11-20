@@ -46,13 +46,13 @@ Json Common(const std::string& realm,uint64_t epoch,int64_t now,uint64_t ttl=600
 }
 struct Fixture {
     Temp temp;fs::path root;Database db;
-    KeyPair owner=GenerateKey(),publisher=GenerateKey(),second=GenerateKey(),alice=GenerateKey(),bob=GenerateKey();
+    KeyPair owner=GenerateKey(),publisher=GenerateKey(),second=GenerateKey(),alice=GenerateKey(),bob=GenerateKey(),carol=GenerateKey();
     std::string realm=Hash("test realm"),session=Hex(RandomBytes(32)),runtime=Hash("test runtime"),schema=Hash("tool schema");
     int64_t now=NowMs();Json policy_record,local;
     Policy policy;
     fs::path probe;
     std::string capsule,composition;std::vector<std::string> evaluations;
-    explicit Fixture(fs::path executable={},bool common_domain=false,bool evidence=true):root(temp.root/"security"),db(root),probe(std::move(executable)) {
+    explicit Fixture(fs::path executable={},bool common_domain=false,bool evidence=true,bool third_evaluator=false):root(temp.root/"security"),db(root),probe(std::move(executable)) {
         if(!probe.empty())runtime=Hash(ReadFile(probe,128*1024*1024));
         auto pins=Object();pins.pushKV("schema","BTX/SecurityRootPins/v1");pins.pushKV("keys",Strings({KeyId(owner.public_key)}));pins.pushKV("threshold",1);WritePrivate(root/"root-pins.json",Canonical(pins));
         Json b=Object();b.pushKV("realm",realm);b.pushKV("epoch",1);b.pushKV("issued_ms",now);b.pushKV("expires_ms",now+3600000);
@@ -65,6 +65,7 @@ struct Fixture {
         principal(publisher,{"publisher"},"author","publisher-host");principal(second,{"release","revoker"},"release","release-host");
         principal(alice,{"evaluator","worker","peer"},"eval-a","host-a",Hash("pin-a"));
         principal(bob,{"evaluator","worker","peer"},common_domain?"eval-a":"eval-b","host-b",Hash("pin-b"));
+        if(third_evaluator)principal(carol,{"evaluator","worker","peer"},"eval-c","host-c",Hash("pin-c"));
         b.pushKV("principals",principals);policy_record=Signed("policy",b,owner);InstallPolicy(db,policy_record,now);policy=Policy::Load(db,now);
         EnsurePrivateDirectory(temp.root/"workspace");WritePrivate(temp.root/"workspace"/"source.txt","hello safe workspace\n");
         WritePrivate(temp.root/"workspace"/".env","SYNTHETIC_DECOY=not-a-real-secret\n");
@@ -231,6 +232,14 @@ int main(int argc,char** argv) {
     h.Test("one-domain-sybil-identities-insufficient",[&]{Fixture f({},true);Reject([&]{AdmitCapsule(f.db,f.policy,f.capsule,f.now);},"SEC_INDEPENDENT_COVERAGE");});
     h.Test("missing-gate-blocks-admission",[&]{Fixture f;auto refs=f.evaluations;refs.resize(10);auto id=f.Capsule(f.composition,refs);Reject([&]{AdmitCapsule(f.db,f.policy,id,f.now);},"SEC_INDEPENDENT_COVERAGE");});
     h.Test("unreferenced-negative-result-blocks-admission",[&]{Fixture f;auto ch=f.Challenge(f.composition,"adversarial");f.Import(f.Evaluation(ch,f.alice,"host-a","FAIL"));Reject([&]{AdmitCapsule(f.db,f.policy,f.capsule,f.now);},"SEC_NEGATIVE_EVIDENCE");});
+    // A FAIL report blocks admission while its evaluator is enrolled; once that
+    // key is revoked it is no evidence either way. Policy::Check threw for the
+    // revoked key and kept the composition out for good. A FAIL that a current
+    // evaluator co-signed still blocks.
+    h.Test("revoked-evaluator-negative-result-does-not-block-admission",[&]{Fixture f({},false,true,true);auto ch=f.Challenge(f.composition,"adversarial");f.Import(f.Evaluation(ch,f.carol,"host-c","FAIL"));
+        Reject([&]{AdmitCapsule(f.db,f.policy,f.capsule,NowMs());},"SEC_NEGATIVE_EVIDENCE");f.Revoke(KeyId(f.carol.public_key));(void)AdmitCapsule(f.db,Policy::Load(f.db,NowMs()),f.capsule,NowMs());
+        Fixture g({},false,true,true);auto cosigned=g.Evaluation(g.Challenge(g.composition,"adversarial"),g.carol,"host-c","FAIL");AddSignature(cosigned,g.bob);g.Import(cosigned);g.Revoke(KeyId(g.carol.public_key));
+        Reject([&]{AdmitCapsule(g.db,Policy::Load(g.db,NowMs()),g.capsule,NowMs());},"SEC_NEGATIVE_EVIDENCE");});
     h.Test("dangling-execution-receipt-cannot-pass",[&]{Fixture f;auto e=f.db.Get(f.evaluations[0]);auto body=e["body"];body.pushKV("execution_receipt",Hash("absent receipt"));auto replacement=f.Import(Signed("evaluation",body,f.alice));auto refs=f.evaluations;refs[0]=replacement;auto cap=f.Capsule(f.composition,refs);Reject([&]{AdmitCapsule(f.db,f.policy,cap,f.now);},"SEC_OBJECT_ABSENT");});
     h.Test("modified-evaluation-signature-refused",[&]{Fixture f;auto e=f.db.Get(f.evaluations[0]);auto b=e["body"];b.pushKV("cases",999);e.pushKV("body",b);Reject([&]{f.Import(e);},"SEC_SIGNATURE");});
     h.Test("wrong-release-threshold-refused",[&]{Fixture f;auto e=f.db.Get(f.capsule);auto one=Envelope("capsule",e["body"]);AddSignature(one,f.owner);auto b=one["body"];b.pushKV("expires_ms",f.now+59000);one=Signed("capsule",b,f.owner);Reject([&]{f.Import(one);},"SEC_SIGNATURE_THRESHOLD");});
