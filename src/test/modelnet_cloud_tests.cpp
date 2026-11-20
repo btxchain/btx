@@ -44,6 +44,11 @@
 #include <util/fs.h>
 #include <util/sock.h>
 
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
+
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
 
@@ -61,6 +66,7 @@
 #include <fstream>
 #include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -234,6 +240,87 @@ void CheckS3SocketCleanup(bool reject_tls)
         BOOST_CHECK(got == payload);
     }
     BOOST_CHECK(server.get());
+}
+
+// A loopback listener for one connection; every wait on it is bounded.
+std::unique_ptr<Sock> ListenLoopback(uint16_t& port, SOCKET* raw = nullptr)
+{
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (handle == INVALID_SOCKET) return nullptr;
+    if (raw) *raw = handle;
+    auto listener = std::make_unique<Sock>(handle);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(addr);
+    if (listener->Bind(reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listener->Listen(1) != 0 ||
+        listener->GetSockName(reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        return nullptr;
+    }
+    port = ntohs(addr.sin_port);
+    return listener;
+}
+
+std::unique_ptr<Sock> AcceptWithin(const Sock& listener, std::chrono::milliseconds wait)
+{
+    Sock::Event occurred{0};
+    if (!listener.Wait(wait, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return nullptr;
+    return listener.Accept(nullptr, nullptr);
+}
+
+// A self-signed certificate for 127.0.0.1, written as the only CA the client
+// trusts, so the client's TLS checks pass against a loopback server.
+struct LoopbackTlsIdentity {
+    EVP_PKEY* key{nullptr};
+    X509* cert{nullptr};
+    ~LoopbackTlsIdentity()
+    {
+        X509_free(cert);
+        EVP_PKEY_free(key);
+    }
+};
+
+bool MakeLoopbackTlsIdentity(LoopbackTlsIdentity& id, const fs::path& ca_file)
+{
+    id.key = EVP_EC_gen("P-256");
+    id.cert = X509_new();
+    if (!id.key || !id.cert) return false;
+    X509_set_version(id.cert, 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(id.cert), 1);
+    X509_gmtime_adj(X509_getm_notBefore(id.cert), -60);
+    X509_gmtime_adj(X509_getm_notAfter(id.cert), 3600);
+    X509_set_pubkey(id.cert, id.key);
+    X509_NAME* name = X509_get_subject_name(id.cert);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("127.0.0.1"), -1, -1, 0);
+    X509_set_issuer_name(id.cert, name);
+    X509V3_CTX v3;
+    X509V3_set_ctx_nodb(&v3);
+    X509V3_set_ctx(&v3, id.cert, id.cert, nullptr, nullptr, 0);
+    for (const auto& [nid, value] : std::vector<std::pair<int, const char*>>{
+             {NID_basic_constraints, "critical,CA:TRUE"}, {NID_subject_alt_name, "IP:127.0.0.1"}}) {
+        X509_EXTENSION* ext = X509V3_EXT_conf_nid(nullptr, &v3, nid, value);
+        if (!ext) return false;
+        X509_add_ext(id.cert, ext, -1);
+        X509_EXTENSION_free(ext);
+    }
+    if (X509_sign(id.cert, id.key, EVP_sha256()) == 0) return false;
+    BIO* out = BIO_new_file(fs::PathToString(ca_file).c_str(), "w");
+    if (!out) return false;
+    const bool ok = PEM_write_bio_X509(out, id.cert) == 1;
+    BIO_free(out);
+    return ok;
+}
+
+modelnet::S3ClientConfig LoopbackS3Config(const std::string& scheme, uint16_t port)
+{
+    modelnet::S3ClientConfig cfg;
+    cfg.endpoint = scheme + "://127.0.0.1:" + std::to_string(port);
+    cfg.bucket = "btx-models";
+    cfg.region = "auto";
+    cfg.use_fake = false;
+    cfg.allow_http_loopback = scheme == "http";
+    cfg.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_S3_SOCKET_CREDS"};
+    return cfg;
 }
 
 } // namespace
@@ -1502,6 +1589,147 @@ BOOST_AUTO_TEST_CASE(cloud_https_refuses_redirect)
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(200, {}));
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(404, {}));
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(206, {}));
+}
+
+// Without Content-Length the body ends at EOF. A body longer than the range
+// asked for was cut to the length of the range and returned as that range.
+BOOST_AUTO_TEST_CASE(cloud_unchunked_body_past_its_limit_is_refused)
+{
+    test::ScopedEnvVar credentials{"BTX_TEST_S3_SOCKET_CREDS", "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\n"};
+    for (const std::string body : {"0123456789", "0123"}) {
+        uint16_t port = 0;
+        auto listener = ListenLoopback(port);
+        BOOST_REQUIRE(listener);
+        auto server = std::async(std::launch::async, [&] {
+            auto peer = AcceptWithin(*listener, std::chrono::seconds{5});
+            if (!peer) return false;
+            std::string request;
+            char buf[4096];
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                Sock::Event occurred{0};
+                if (!peer->Wait(std::chrono::seconds{5}, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return false;
+                const auto n = peer->Recv(buf, sizeof(buf), 0);
+                if (n <= 0) return false;
+                request.append(buf, n);
+            }
+            // The body comes after the head, as from a real server: the bytes
+            // that arrive with the head were already checked.
+            CThreadInterrupt interrupt;
+            for (const std::string part : {std::string{"HTTP/1.1 206 Partial Content\r\nConnection: close\r\n\r\n"}, body}) {
+                peer->SendComplete(Span<const unsigned char>{reinterpret_cast<const unsigned char*>(part.data()), part.size()},
+                                   std::chrono::seconds{5}, interrupt);
+                std::this_thread::sleep_for(std::chrono::milliseconds{300});
+            }
+            return true;
+        });
+        modelnet::S3Client client;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(client.Init(LoopbackS3Config("http", port), err), err);
+        std::vector<unsigned char> got;
+        const bool ok = client.RangeGet("loopback-object", 0, 4, got, err);
+        if (body.size() > 4) {
+            BOOST_CHECK(!ok);
+            BOOST_CHECK_EQUAL(err, "s3 https object too large for unchunked GET");
+        } else {
+            BOOST_CHECK_MESSAGE(ok, err);
+            BOOST_CHECK(got == std::vector<unsigned char>(body.begin(), body.end()));
+        }
+        BOOST_CHECK(server.get());
+    }
+}
+
+// The client's socket blocks with a 5 s timeout. A TLS read or write that
+// hits it comes back as SSL_ERROR_WANT_READ or SSL_ERROR_WANT_WRITE: the write
+// retried it forever while the server read nothing, and the read took it for
+// the end of a body without Content-Length.
+BOOST_AUTO_TEST_CASE(cloud_tls_read_and_write_end_at_the_socket_timeout)
+{
+    LoopbackTlsIdentity id;
+    const fs::path ca_file = m_path_root / "loopback-ca.pem";
+    BOOST_REQUIRE(MakeLoopbackTlsIdentity(id, ca_file));
+    const std::string ca_path = fs::PathToString(ca_file);
+    test::ScopedEnvVar ca{"SSL_CERT_FILE", ca_path.c_str()};
+    test::ScopedEnvVar credentials{"BTX_TEST_S3_SOCKET_CREDS", "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\n"};
+    std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> server_ctx{SSL_CTX_new(TLS_server_method()), SSL_CTX_free};
+    BOOST_REQUIRE(server_ctx);
+    BOOST_REQUIRE_EQUAL(SSL_CTX_use_certificate(server_ctx.get(), id.cert), 1);
+    BOOST_REQUIRE_EQUAL(SSL_CTX_use_PrivateKey(server_ctx.get(), id.key), 1);
+#ifndef WIN32
+    // Without the fix the stalled write only ends when the server closes.
+    struct IgnorePipe {
+        void (*previous)(int){std::signal(SIGPIPE, SIG_IGN)};
+        ~IgnorePipe() { std::signal(SIGPIPE, previous); }
+    } ignore_pipe;
+#endif
+    for (const bool write_stalls : {false, true}) {
+        uint16_t port = 0;
+        SOCKET listen_handle = INVALID_SOCKET;
+        auto listener = ListenLoopback(port, &listen_handle);
+        BOOST_REQUIRE(listener);
+        std::promise<void> client_returned;
+        std::shared_future<void> returned = client_returned.get_future().share();
+        // Release the server however this iteration ends.
+        struct Release {
+            std::promise<void>& p;
+            bool done{false};
+            void operator()()
+            {
+                if (!done) p.set_value();
+                done = true;
+            }
+            ~Release() { (*this)(); }
+        } release_server{client_returned};
+        auto server = std::async(std::launch::async, [&, returned] {
+            Sock::Event occurred{0};
+            if (!listener->Wait(std::chrono::seconds{5}, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return false;
+            const SOCKET fd = ::accept(listen_handle, nullptr, nullptr);
+            if (fd == INVALID_SOCKET) return false;
+            Sock peer{fd};
+            std::unique_ptr<SSL, decltype(&SSL_free)> ssl{SSL_new(server_ctx.get()), SSL_free};
+            if (!ssl || SSL_set_fd(ssl.get(), static_cast<int>(fd)) != 1 || SSL_accept(ssl.get()) != 1) return false;
+            if (!write_stalls) {
+                std::string request;
+                char buf[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const int n = SSL_read(ssl.get(), buf, sizeof(buf));
+                    if (n <= 0) return false;
+                    request.append(buf, n);
+                }
+                const std::string head = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc";
+                if (SSL_write(ssl.get(), head.data(), static_cast<int>(head.size())) <= 0) return false;
+            }
+            // Neither read on nor close until the client has returned.
+            return returned.wait_for(std::chrono::seconds{90}) == std::future_status::ready;
+        });
+        modelnet::S3Client client;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(client.Init(LoopbackS3Config("https", port), err), err);
+        const auto start = std::chrono::steady_clock::now();
+        auto call = std::async(std::launch::async, [&] {
+            if (write_stalls) {
+                // More than the socket buffers of both ends hold.
+                const std::vector<unsigned char> body(size_t{64} << 20, 'x');
+                return client.Put("loopback-object", body, err);
+            }
+            std::vector<unsigned char> got;
+            return client.Get("loopback-object", got, err);
+        });
+        // A few socket timeouts at most; without the fix the write never ends.
+        BOOST_CHECK_MESSAGE(call.wait_for(std::chrono::seconds{60}) == std::future_status::ready,
+                            (write_stalls ? "write" : "read") << " still waiting on a stalled server");
+        BOOST_TEST_MESSAGE((write_stalls ? "write" : "read") << " returned after "
+                           << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms");
+        release_server();
+        BOOST_CHECK(!call.get());
+#ifndef WIN32
+        BOOST_CHECK_EQUAL(err, write_stalls ? "s3 https write timed out" : "s3 https read timed out");
+#else
+        // Winsock reports the timeout as an error of its own, which OpenSSL
+        // passes on as SSL_ERROR_SYSCALL: the call fails, under another name.
+        BOOST_CHECK(!err.empty());
+#endif
+        BOOST_CHECK(server.get());
+    }
 }
 
 // The cloud client and the source registry set a socket timeout as a timeval.
