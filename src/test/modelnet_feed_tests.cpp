@@ -589,4 +589,30 @@ BOOST_AUTO_TEST_CASE(legacy_unlock_history_preserves_first_publisher_observation
     modelnet::FeedQuery q; q.mode = modelnet::FeedMode::NEW_PUBLISHERS;
     std::string next; BOOST_CHECK_EQUAL(restored.Query(q, 111, next).size(), 1U);
 }
+// NEARLY_FUNDED sorts by the amount left to fund. A campaign with nothing
+// left was "equal" to every other one while those two still had an order,
+// which std::sort does not allow; the result depended on the input order.
+BOOST_AUTO_TEST_CASE(nearly_funded_orders_by_remaining_amount)
+{
+    modelnet::FeedStore feed;
+    auto campaign = [](unsigned id, int64_t target, int64_t published) {
+        modelnet::ModelSearchRecord r = TestRecord(id);
+        r.release_id = std::string(96, static_cast<char>('a' + id));
+        r.release_target_atoms = target;
+        r.published_at = published;
+        return r;
+    };
+    // Nothing left, newest; 200 left; 100 left, oldest.
+    BOOST_REQUIRE(feed.NoteSearchRecord(campaign(1, 0, 3000), 100));
+    BOOST_REQUIRE(feed.NoteSearchRecord(campaign(2, 200, 2000), 101));
+    BOOST_REQUIRE(feed.NoteSearchRecord(campaign(3, 100, 1000), 102));
+    modelnet::FeedQuery q;
+    q.mode = modelnet::FeedMode::NEARLY_FUNDED;
+    q.limit = 50;
+    std::string next;
+    std::vector<unsigned> order;
+    for (const auto& ev : feed.Query(q, 200, next)) order.push_back(ev.model_id.data[0]);
+    BOOST_CHECK((order == std::vector<unsigned>{3, 2, 1}));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
