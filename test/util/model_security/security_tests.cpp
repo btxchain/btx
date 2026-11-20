@@ -7,6 +7,7 @@
 #include <tuple>
 #include <atomic>
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -322,6 +323,13 @@ int main(int argc,char** argv) {
     // makes MeshTick walk them. This node is host-a (alice).
     auto mesh_on=[](Fixture& f,bool fixture_campaigns){std::vector<std::string> c;if(fixture_campaigns)for(const auto& g:GATES)c.push_back(Hash("campaign "+g));auto s=Object();s.pushKV("enabled",true);s.pushKV("max_evidence_age_ms",static_cast<uint64_t>(60000));s.pushKV("allowed_campaigns",Strings(c));f.local.pushKV("continuous_security",s);f.SaveLocal();};
     h.Test("mesh-tick-skips-revoked-evaluator",[&]{Fixture f;mesh_on(f,true);MeshTick(f.db,NowMs());f.Revoke(KeyId(f.bob.public_key));f.db.Exec("DELETE FROM mesh_outbox");MeshTick(f.db,NowMs());Check(f.db.Query("SELECT count(*) FROM mesh_outbox WHERE kind='evaluation'")[0][0]=="6","local evaluations not exported");});
+    // 1024 stored evaluation records sort before this host's own. MeshTick read
+    // only the first 1024 by ID on every tick, so its evaluations were never
+    // exported; it now pages on with a cursor and reaches them on the next tick.
+    h.Test("mesh-tick-exports-local-evaluations-past-the-first-1024",[&]{Fixture f;mesh_on(f,true);
+        for(int n=0;n<1024;++n){auto b=Object();b.pushKV("n",n);char id[97];std::snprintf(id,sizeof(id),"00000000%088x",n);f.db.Exec("INSERT INTO objects(id,kind,envelope,visibility,received) VALUES(?,?,?,?,?)",{id,"evaluation",Canonical(Envelope("evaluation",b)),"public","0"});}
+        MeshTick(f.db,NowMs());MeshTick(f.db,NowMs());
+        Check(f.db.Query("SELECT count(*) FROM mesh_outbox WHERE kind='evaluation'")[0][0]=="6","local evaluations past the first 1024 not exported");});
     h.Test("mesh-tick-skips-evaluator-dropped-by-new-policy",[&]{Fixture f;mesh_on(f,true);MeshTick(f.db,NowMs());auto carol=GenerateKey();auto b=f.policy_record["body"];Json principals=Array();for(auto row:b["principals"].getValues()){if(Text(row,"public_key",PK_BYTES*2)==Hex(f.bob.public_key))row.pushKV("public_key",Hex(carol.public_key));principals.push_back(row);}const auto now=NowMs();b.pushKV("epoch",2);b.pushKV("issued_ms",now);b.pushKV("expires_ms",now+3600000);b.pushKV("principals",principals);InstallPolicy(f.db,Signed("policy",b,f.owner),now);MeshTick(f.db,NowMs());});
     h.Test("mesh-tick-skips-revoked-worker-result",[&]{Fixture f;mesh_on(f,false);const auto package=Hash("remote package");auto rw=Object();rw.pushKV("enabled",true);rw.pushKV("packages",Strings({package}));rw.pushKV("compositions",Strings({f.composition}));f.local.pushKV("remote_work",rw);f.SaveLocal();
         auto wb=Common(f.realm,1,NowMs(),50000);wb.pushKV("composition",f.composition);wb.pushKV("capsule",f.capsule);wb.pushKV("package",package);wb.pushKV("purpose","verification");wb.pushKV("input_sha384",Hash("in"));wb.pushKV("expected_output_sha384",Hash("out"));wb.pushKV("target_host","any");wb.pushKV("nonce",Hex(RandomBytes(32)));wb.pushKV("max_output_bytes",static_cast<uint64_t>(8192));const auto work=f.Import(Signed("work",wb,f.owner));

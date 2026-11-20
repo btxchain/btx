@@ -102,6 +102,17 @@ std::vector<std::string> CurrentSigners(Database& db,const Policy& p,const Json&
         return {};
     }
 }
+// One page of stored records of a kind, after the cursor kept under key. The
+// cursor moves to the page's last ID and wraps to the start after a short page,
+// so records past the first page are reached on later ticks. It is local
+// scheduling state, never admission authority.
+std::vector<std::vector<std::string>> NextPage(Database& db,const std::string& kind,const std::string& key){
+    const auto cursor=db.Meta(key);
+    auto rows=db.Query("SELECT id,envelope FROM objects WHERE kind=? AND id>? ORDER BY id LIMIT 1024",{kind,cursor});
+    const auto next=rows.size()<1024?std::string():rows.back()[0];
+    if(next!=cursor)db.SetMeta(key,next); // no write while the cursor stays at the start
+    return rows;
+}
 uint64_t MaxAge(Database& db){
     auto local=ReadLocalConfig(db);const auto& settings=local["continuous_security"];
     if(!settings.isObject())return 0;
@@ -291,8 +302,8 @@ void MeshTick(Database& db,int64_t now){
     }
     // Result publication requires the exact campaign to have been enrolled
     // locally, a real signed local evaluator, and a matching authorized challenge.
-    for(const auto& row:db.Query("SELECT envelope FROM objects WHERE kind='evaluation' ORDER BY id LIMIT 1024")){
-        auto e=Parse(row[0]);auto b=e["body"];
+    for(const auto& row:NextPage(db,"evaluation","mesh_export_cursor:evaluation")){
+        auto e=Parse(row[1]);auto b=e["body"];
         if(!b["campaign"].isStr()||!ApprovedCampaign(db,b["campaign"].get_str()))continue;
         auto signers=CurrentSigners(db,p,e,"evaluator",now);
         if(signers.size()!=1)continue;
@@ -308,8 +319,8 @@ void MeshTick(Database& db,int64_t now){
     }
     if(local["remote_work"].isObject()&&local["remote_work"]["enabled"].isBool()&&
        local["remote_work"]["enabled"].get_bool()){
-        for(const auto& row:db.Query("SELECT envelope FROM objects WHERE kind='result' ORDER BY id LIMIT 1024")){
-            auto result=Parse(row[0]);const auto& b=result["body"];
+        for(const auto& row:NextPage(db,"result","mesh_export_cursor:result")){
+            auto result=Parse(row[1]);const auto& b=result["body"];
             const auto work_id=DigestField(b,"work");if(!db.Has(work_id))continue;
             auto work=db.Get(work_id);
             auto signers=CurrentSigners(db,p,result,"worker",now);
