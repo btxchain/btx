@@ -2425,11 +2425,12 @@ bool Apply(const std::string& method, const UniValue& req, UniValue& result, std
                         const std::vector<unsigned char> raw_joined(joined.begin(), joined.end());
                         if (!GitObjectDigest("model", Span<const unsigned char>{raw_joined.data(), raw_joined.size()}, got, err)) return false;
                         if (got != digest) return Fail(err, "BTX035_ID_MISMATCH");
-                        store.models[digest] = joined;
-                        store.model_pieces[digest] = std::move(chunks);
+                        // A model over max_bytes is not kept, as on the manifest path below.
                         if (static_cast<int64_t>(joined.size()) > max_bytes) {
                             return OpOut(store, result, id, "FAILED", "STOPPED_QUIESCENT");
                         }
+                        store.models[digest] = joined;
+                        store.model_pieces[digest] = std::move(chunks);
                         remember(store.models[digest]);
                         return OpOut(store, result, id, "COMPLETE", "STOPPED_QUIESCENT");
                     }

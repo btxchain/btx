@@ -1486,6 +1486,46 @@ BOOST_AUTO_TEST_CASE(pulled_snapshot_is_checked_before_it_is_stored)
     BOOST_CHECK_EQUAL(export_ok("idempotency-pull-checked-export-4"), "OK");
     modelnet::ResetLabApi();
 }
+
+// A model pulled piece by piece that is larger than max_bytes fails the
+// acquisition and is not kept: a later acquisition with a larger limit and no
+// peer does not find it.
+BOOST_AUTO_TEST_CASE(acquire_does_not_keep_a_pulled_model_over_max_bytes)
+{
+    modelnet::ResetLabApi();
+    const auto model = LabObject("model", "pulled model bytes");
+    UniValue piece(UniValue::VOBJ);
+    piece.pushKV("content_hex", HexStr(MakeUCharSpan(model.content)));
+    UniValue resource(UniValue::VOBJ);
+    resource.pushKV("digest", model.digest);
+    resource.pushKV("repository_id", std::string(96, 'd'));
+    UniValue acquire(UniValue::VOBJ);
+    acquire.pushKV("resource", resource);
+    acquire.pushKV("origin_policy_id", std::string(96, 'a'));
+    acquire.pushKV("max_bytes", "4");
+    acquire.pushKV("destination_class", "d");
+    acquire.pushKV("idempotency_key", "idempotency-acquire-over-max");
+    acquire.pushKV("expected_state", UniValue());
+    auto state = [](const UniValue& req) {
+        std::string response, err;
+        if (!modelnet::DispatchLab035("lab.artifact_acquire", req.write(), response, err)) return err;
+        UniValue out;
+        if (!out.read(response)) return std::string{"UNREADABLE"};
+        return out["result"]["state"].get_str();
+    };
+    {
+        LoopbackPeerProcess peer{{HttpReply("200 OK", piece.write())}};
+        test::ScopedEnvVar env_peer{"BTX035_LAB_PEER", ("127.0.0.1:" + std::to_string(peer.Port())).c_str()};
+        test::ScopedEnvVar env_user{"BTX035_LAB_PEER_USER", "lab"};
+        test::ScopedEnvVar env_pass{"BTX035_LAB_PEER_PASSWORD", "lab-pass-0001"};
+        BOOST_CHECK_EQUAL(state(acquire), "FAILED");
+        BOOST_CHECK(peer.Served());
+    }
+    acquire.pushKV("max_bytes", "4096");
+    acquire.pushKV("idempotency_key", "idempotency-acquire-over-max-2");
+    BOOST_CHECK(state(acquire) != "COMPLETE");
+    modelnet::ResetLabApi();
+}
 #endif // WIN32
 
 BOOST_AUTO_TEST_SUITE_END()
