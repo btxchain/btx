@@ -169,7 +169,11 @@ class EVMDriver:
         return Prepared(txid,'0x'+raw.hex(),m.get('reference',{}),str(m['gas']*maximum),metadata)
     def has_transaction(self,txid):
         tx=self.rpc('eth_getTransactionByHash',txid)
-        return bool(tx and tx.get('hash')==txid)
+        if tx is None:
+            return False
+        require(isinstance(tx, dict) and tx.get('hash') == txid,
+                'CHAIN_RESPONSE', 'Unexpected EVM transaction lookup result')
+        return True
     def broadcast(self,raw):return self.adapter.broadcast(bytes.fromhex(raw.removeprefix('0x')))
     def observe(self,t,ref):
         clock=self.clock();now=self.now();self.verify_terms(t)
