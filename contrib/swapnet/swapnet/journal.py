@@ -17,6 +17,7 @@ from .store import apply_script
 MIGRATION = '''
 CREATE TABLE IF NOT EXISTS sn_settings(k TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sn_inbox(id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sn_inbox_broadcast(id TEXT PRIMARY KEY, sender TEXT NOT NULL, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sn_commit_receipts(
  id TEXT PRIMARY KEY REFERENCES sn_inbox(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS sn_outbox(id TEXT PRIMARY KEY, recipient TEXT NOT NULL,
@@ -76,18 +77,37 @@ class Journal:
         with self.store.transaction() as db:
             db.execute('INSERT INTO sn_sequences VALUES(?,1) ON CONFLICT(identity) DO UPDATE SET n=n+1',(identity,))
             return db.execute('SELECT n FROM sn_sequences WHERE identity=?',(identity,)).fetchone()[0]
-    def seen(self,mid,expires,now):
-        """Return True for prior admission, not necessarily completed handling."""
+    def seen(self,mid,expires,now,*,sender='',broadcast=False):
+        """Return True for prior admission, not necessarily completed handling.
+
+        A broadcast row can be dropped to keep room for a directed packet.
+        Directed rows are not dropped to admit more broadcasts.
+        """
         hex32(mid)
+        sender=sender if type(sender) is str else ''
+        if len(sender)>128:sender=sender[:128]
         with self.store.transaction() as db:
             db.execute('DELETE FROM sn_inbox WHERE expires<?',(now,))
+            db.execute('DELETE FROM sn_inbox_broadcast WHERE id NOT IN (SELECT id FROM sn_inbox)')
             if db.execute('SELECT 1 FROM sn_inbox WHERE id=?',(mid,)).fetchone():return True
-            require(db.execute('SELECT count(*) FROM sn_inbox').fetchone()[0]<8192,'INBOX_LIMIT','Replay cache full')
+            if broadcast and sender:
+                rows=db.execute('SELECT id FROM sn_inbox_broadcast WHERE sender=? ORDER BY expires',(sender,)).fetchall()
+                if len(rows)>=32:
+                    db.execute('DELETE FROM sn_inbox WHERE id=?',(rows[0][0],))
+                    db.execute('DELETE FROM sn_inbox_broadcast WHERE id=?',(rows[0][0],))
+            while db.execute('SELECT count(*) FROM sn_inbox').fetchone()[0]>=8192:
+                old=db.execute('SELECT id FROM sn_inbox_broadcast ORDER BY expires LIMIT 1').fetchone()
+                require(old is not None,'INBOX_LIMIT','Replay cache full')
+                db.execute('DELETE FROM sn_inbox WHERE id=?',(old[0],))
+                db.execute('DELETE FROM sn_inbox_broadcast WHERE id=?',(old[0],))
             db.execute('INSERT INTO sn_inbox VALUES(?,?)',(mid,expires))
+            if broadcast:db.execute('INSERT INTO sn_inbox_broadcast VALUES(?,?,?)',(mid,sender,expires))
         return False
     def forget_message(self,mid):
         # A message whose processing raised before commit may be retried safely.
-        with self.store.transaction() as db:db.execute('DELETE FROM sn_inbox WHERE id=?',(mid,))
+        with self.store.transaction() as db:
+            db.execute('DELETE FROM sn_inbox WHERE id=?',(mid,))
+            db.execute('DELETE FROM sn_inbox_broadcast WHERE id=?',(mid,))
     def commit_completed(self,mid):
         """Negotiation completion; retain the historical commit-named API/table."""
         hex32(mid)

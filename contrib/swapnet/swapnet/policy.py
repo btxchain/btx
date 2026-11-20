@@ -80,7 +80,8 @@ class SafetyPolicy:
         a_min, _ = long.remaining(clock_a)
         _, b_max = short.remaining(clock_b)
         require(a_min >= b_max + self.settlement_margin_seconds, "UNSAFE_TIMEOUT", "Long leg does not conservatively outlive short leg")
-        require(short.remaining(clock_b)[0] > self.reveal_margin_seconds, "LATE_REVEAL", "Short leg is too close to expiry")
+        confirm_wait=self.confirmations(clock_b.family)*clock_b.fastest_block_seconds
+        require(short.remaining(clock_b)[0] > self.reveal_margin_seconds+confirm_wait, "LATE_REVEAL", "Short leg is too close to expiry")
         return True
 
 @dataclass(frozen=True)

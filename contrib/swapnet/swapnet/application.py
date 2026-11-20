@@ -151,7 +151,7 @@ class Application:
             return
         if b['kind']=='ack':
             exact_fields(b['payload'],{'message_id'});self.journal.ack(b['payload']['message_id'],b['sender']);return
-        seen=self.journal.seen(mid,b['expires_at'],self.now())
+        seen=self.journal.seen(mid,b['expires_at'],self.now(),sender=b['sender'],broadcast=b['recipient']=='*')
         # Admission can survive an interrupted negotiation handler before its
         # response is queued. Only completion permits skipping it; replay uses
         # the handler's saved financial intent and existing recovery guards.
@@ -159,8 +159,10 @@ class Application:
         if needs_completion:seen=self.journal.commit_completed(mid)
         if not seen:
             try:
-                self._process(b)
+                acted=self._process(b)
                 if needs_completion:self.journal.complete_commit(mid)
+                if b['recipient']=='*' and b['kind']=='rfq' and not acted:
+                    self.journal.forget_message(mid)
             except Exception:
                 self.journal.forget_message(mid);raise
         if b['recipient']!='*':self.emit(b['sender'],'ack',b['swap_id'],{'message_id':mid})
@@ -182,7 +184,7 @@ class Application:
                     quote=maker.quote(p['rfq'],market,self.now())
                     self._quote_within_mandate(policy,quote.quote,sender)
                     self.emit(sender,'quote',sid,{'request_id':p['request_id'],'quote':quote.as_dict()})
-                    return
+                    return True
                 except SwapError as e:
                     refusal=e
             if refusal is not None:

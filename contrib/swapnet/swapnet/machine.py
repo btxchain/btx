@@ -69,9 +69,14 @@ def decide(s:Session,a:LegObservation,b:LegObservation,clock_a:ChainClock,clock_
     local=a if s.role=='initiator' else b
     local_clock=clock_a if s.role=='initiator' else clock_b
     local_deadline=long if s.role=='initiator' else short
+    other_conflict=b.conflicting if s.role=='initiator' else a.conflicting
+    if local.refunded and local.settled(local_clock.family,policy,now): return 'refunded'
+    if other_conflict and not local.conflicting and local.present and not local.claimed and not local.refunded:
+        expired=(local_clock.height >= local_deadline.value if local_deadline.domain=='height'
+                 else local_clock.timestamp >= local_deadline.value)
+        if expired: return 'refund_local_leg'
     if a.conflicting or b.conflicting: return 'freeze_and_reconcile'
     if a.claimed and b.claimed and a_ok and b_ok: return 'complete'
-    if local.refunded and local.settled(local_clock.family,policy,now): return 'refunded'
     # After exposure continue recovery/claim, including after chain reorganization.
     if s.secret_exposed:
         if s.role=='responder' and a_ok and not a.claimed and not a.refunded:

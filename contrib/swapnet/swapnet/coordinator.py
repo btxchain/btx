@@ -282,6 +282,9 @@ class Coordinator:
         else:
             exact_fields(ref,{'txid','lock_id','salt'});hex32(ref['txid'].removeprefix('0x'));hex32(ref['lock_id']);hex32(ref['salt'])
             self._driver(leg.asset).verify_reference(sid,leg,ref)
+        report=self._driver(leg.asset).observe(leg,ref)
+        require(report.observation.present and report.observation.exact_terms and not report.observation.conflicting,
+                'FUNDING_UNVERIFIED','Funding receipt does not match the agreed output')
         if expected in s['refs']:
             require(s['refs'][expected]==ref,'FUNDING_REPLACED','Counterparty attempted to change funding reference');return
         s['refs'][expected]=ref;s['updated_at']=self.now();self._save(sid,s,rev)
@@ -313,6 +316,8 @@ class Coordinator:
         self._require_effect(sid,s)
         own_name,own,incoming_name,incoming=self._own(s,agr)
         driver=self._driver(own.asset);incoming_driver=self._driver(incoming.asset)
+        if incoming_driver.family=='evm' and hasattr(incoming_driver,'claim_account_can_cover'):
+            incoming_driver.claim_account_can_cover(incoming.max_claim_fee_atoms)
         if s['role']=='responder' and 'claim_template' not in s:
             s['claim_template']=incoming_driver.prepare_claim_template(sid,incoming,s['refs'][incoming_name],s['keys']['claim'])
             rev=self._save(sid,s,rev)

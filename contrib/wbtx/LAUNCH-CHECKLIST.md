@@ -45,6 +45,8 @@ Tests: `forge test` green; Python SDK selftests green.
       reduces to `min(signer honesty, dominant-producer honesty, governance-key security)`.
 - [ ] **Governance = Timelock owned by a multisig** for the bridge admin, WBTX admin, and the verifier admin
       (three distinct signer sets where possible). The contracts *recommend* but cannot *enforce* this.
+      `setLimits` and `setComplianceHook` apply in the same transaction. That immediacy is the intended
+      admin behavior. The external Timelock is the delay.
 - [ ] **Deploy/wiring dry-run on testnet:** the immutable-bridge ↔ token construction order, role provisioning
       (GOVERNANCE/GUARDIAN/FEDERATION/PAUSER all granted — the constructor grants none), the attestation
       relayer, and `setLimits` with conservative non-zero breakers **before** the first mint.

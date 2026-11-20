@@ -34,6 +34,16 @@ def test_never_reveal_unverified_short(change):
     assert act(s,FUNDED_A,replace(FUNDED_B,**change))!='persist_secret_exposure_then_claim_short_leg'
 def test_refund_is_available_after_expiry():
     s=Session('1'*64,'initiator');assert act(s,FUNDED_A,EMPTY,replace(A,height=2001))=='refund_local_leg'
+def test_counterparty_conflict_still_refunds_a_mature_local_leg():
+    s=Session('1'*64,'initiator')
+    other=replace(FUNDED_B,conflicting=True,exact_terms=False)
+    assert act(s,FUNDED_A,other,replace(A,height=2001))=='refund_local_leg'
+    assert act(s,replace(FUNDED_A,refunded=True),other)=='refunded'
+    assert act(s,replace(FUNDED_A,conflicting=True,exact_terms=False),EMPTY)=='freeze_and_reconcile'
+def test_short_leg_must_cover_its_confirmation_wait():
+    tight=Deadline('height',1013)
+    with pytest.raises(SwapError,match='LATE_REVEAL'):P.validate_deadlines(Deadline('height',5000),tight,A,B,NOW)
+    assert P.validate_deadlines(LONG,SHORT,A,B,NOW)
 def test_stale_observation_blocks():
     with pytest.raises(SwapError):act(Session('1'*64,'initiator'),replace(EMPTY,observed_at=NOW-61))
 def test_stalled_chain_blocks():

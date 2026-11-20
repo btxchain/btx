@@ -363,9 +363,15 @@ class UTXODriver:
         start=max(0,funding_height,cached.get('height',funding_height)-20)
         stop=min(tip,start+63)
         for height in range(start,stop+1):
-            blockhash=self.rpc('getblockhash',height);block=self.rpc('getblock',blockhash,2)
-            for tx in block['tx']:
-                if any(i.get('txid')==ref['txid'] and i.get('vout')==ref['vout'] for i in tx['vin']):
+            blockhash=self.rpc('getblockhash',height)
+            listed=self.rpc('getblock',blockhash,1)
+            txids=listed.get('tx') if isinstance(listed,dict) else None
+            require(isinstance(txids,list),'CHAIN_RESPONSE','Block transaction list is unavailable')
+            for txid in txids:
+                if not isinstance(txid,str):continue
+                try:tx=self.rpc('getrawtransaction',txid,True,blockhash)
+                except SwapError:continue
+                if any(i.get('txid')==ref['txid'] and i.get('vout')==ref['vout'] for i in tx.get('vin',[])):
                     tx={**tx,'blockhash':blockhash,'confirmations':tip-height+1}
                     self.journal.set_setting(key,{'txid':tx['txid'],'height':height});return tx
         self.journal.set_setting(key,{'height':stop+1})

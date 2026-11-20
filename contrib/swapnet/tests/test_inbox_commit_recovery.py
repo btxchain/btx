@@ -213,6 +213,20 @@ def test_receipts_share_capacity_and_expiry(apps):
  j.complete_commit(mid);j.forget_message(mid);assert not j.commit_completed(mid)
  assert alice.store.db.execute('PRAGMA foreign_key_check').fetchall()==[]
 
+def test_broadcast_rows_yield_to_a_directed_packet(apps):
+ alice=apps[0]['alice'];j=alice.journal;now=alice.now()
+ with alice.store.transaction() as db:
+  db.executemany('INSERT INTO sn_inbox VALUES(?,?)',[(format(i,'064x'),now+10) for i in range(8192)])
+  db.executemany('INSERT INTO sn_inbox_broadcast VALUES(?,?,?)',[(format(i,'064x'),'s%d'%(i%256),now+10) for i in range(8192)])
+ directed='ab'*32
+ assert j.seen(directed,now+10,now,sender='counterparty',broadcast=False) is False
+ assert alice.store.db.execute('SELECT count(*) FROM sn_inbox').fetchone()[0]==8192
+ assert alice.store.db.execute('SELECT 1 FROM sn_inbox WHERE id=?',(directed,)).fetchone() is not None
+ for n in range(32):
+  assert j.seen(format(9000+n,'064x'),now+10,now,sender='one-peer',broadcast=True) is False
+ assert j.seen(format(9100,'064x'),now+10,now,sender='one-peer',broadcast=True) is False
+ assert alice.store.db.execute('SELECT count(*) FROM sn_inbox_broadcast WHERE sender=?',('one-peer',)).fetchone()[0]==32
+
 def test_original_refund_after_recovered_commit(apps):
  nodes,time,ledgers,wire,deliver,step=apps;sid,command,raw,mid=commit_boundary(apps);bob=nodes['bob'];legacy_row(bob,mid,raw);bob.on_message(1,command,raw)
  assert bob.journal.load(sid)[1]['stage']=='committed'

@@ -127,7 +127,7 @@ def test_reimport_retains_observation_only_latch(restored,tmp_path):
 
 def test_peer_hint_cannot_enable_actions(restored):
  p,sid,h,o,m,e,snap,reopen=restored;c=o['c'];c.resume(Principal('alice'),sid);state=o['j'].load(sid)[1];before=snap();original=state['recovery_facts']['original']
- c.receive_reference('bob',sid,{'agreement_id':state['agreement_id'],'leg':'b','reference':{'txid':'cd'*32,'vout':0}})
+ with pytest.raises(SwapError,match='FUNDING_UNVERIFIED'):c.receive_reference('bob',sid,{'agreement_id':state['agreement_id'],'leg':'b','reference':{'txid':'cd'*32,'vout':0}})
  c.tick_one(sid);assert c.get(Principal('alice'),sid)['recovery']['original']==original and not e
  assert snap()==before
 

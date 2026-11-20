@@ -32,6 +32,11 @@ class EVMDriver:
         key=self.vault.key(kid,family='evm',genesis=self.asset.genesis,role='funding')
         return kid,key,address_from_key(key)
     def ready(self):self.adapter.check_chain();self._account();return True
+    def claim_account_can_cover(self,cap_atoms):
+        cap=atoms(cap_atoms,positive=True)
+        _,_,sender=self._account()
+        balance=int(self.rpc('eth_getBalance',sender,'pending'),16)
+        require(balance>=cap,'INSUFFICIENT_GAS','Claim account cannot cover the signed claim cap')
     def inventory(self):
         # Quotes reserve against the local latest balance. A freshly funded
         # account is still 0 at finalized, which is not the same as a reservation.

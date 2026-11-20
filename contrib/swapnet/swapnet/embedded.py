@@ -16,6 +16,7 @@ from .assets import Asset
 from .application import NativeIdentity
 from .market_application import Application as MarketApplication
 from .market_setup import configure_bitcoin
+from .deployment import CONTRACT, INIT_HASH
 from .deployment_attestation import verify_deployment
 from .private_storage import protect_private_directory
 from .authorization import Principal
@@ -141,12 +142,14 @@ class Host:
         rpc=LocalRPC(policy['rpc_url'],cookie_path=policy.get('cookie_path'))
         if asset.family=='btc':return self._bitcoin(rpc,policy)
         require('watch_wallet' not in policy,'ASSET_POLICY','Watch wallet is Bitcoin-only')
-        require({'contract','runtime_hash'}<=set(policy),'ASSET_POLICY','EVM requires the deployed address and exact runtime code hash')
+        require({'contract','runtime_hash','deployment'}<=set(policy),'ASSET_POLICY','EVM requires the deployed address, runtime hash, and creation manifest')
+        manifest=policy['deployment']
+        require(type(manifest) is dict and manifest.get('creation_hash')==INIT_HASH,'DEPLOYMENT_CREATION','Creation bytecode must be the pinned init code')
+        if manifest.get('kind')=='create2':
+            require(policy['contract'].lower()==CONTRACT,'DEPLOYMENT_ADDRESS','CREATE2 trades use the pinned contract address')
         driver=EVMDriver(asset.id,rpc,self.journal,self.vault,policy['contract'],policy['runtime_hash'])
-        if 'deployment' in policy:
-            manifest=policy['deployment']
-            contract=policy['contract']
-            driver.new_trade_ready=lambda:verify_deployment(rpc,contract,manifest)
+        contract=policy['contract']
+        driver.new_trade_ready=lambda:verify_deployment(rpc,contract,manifest)
         return driver
     def wallet_info(self):
         loaded=False;warning=None
