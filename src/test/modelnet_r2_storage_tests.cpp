@@ -6,7 +6,7 @@
 // audit/r2-storage.md; each case below names the finding it pins.
 //
 // R2S-01  r2s_01_layout_identity_invariant_across_key_families
-// R2S-03  r2s_02_multipart_part_size_planner_vs_client            (tripwire)
+// R2S-03  r2s_02_multipart_part_size_planner_vs_client            (fixed)
 // R2S-01  r2s_03_source_files_cold_get_estimate_is_per_object     (tripwire)
 // R2S-04  r2s_04_over_budget_get_is_recorded_and_stops_retries    (fixed)
 // R2S-05  r2s_05_put_path_is_not_metered                          (tripwire)
@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -61,9 +62,8 @@ constexpr char kPrefix[] = "v1";
 // std::vector<unsigned char> tmp(1 << 16) and issues one origin read per pass.
 constexpr uint64_t kHydrationReadBytes = uint64_t{1} << 16;
 
-// Mirrors kS3HttpsMaxParts in s3_client.cpp, which is file-local and so cannot
-// be referenced here.
-constexpr uint64_t kClientMaxMultipartParts = 10000;
+// Share the production upload ceiling; do not duplicate a test-only limit.
+constexpr uint64_t kClientMaxMultipartParts = modelnet::kCloudMaxMultipartParts;
 
 void WriteCreds(const fs::path& path, const std::string& access, const std::string& secret)
 {
@@ -261,23 +261,37 @@ BOOST_AUTO_TEST_CASE(r2s_01_layout_identity_invariant_across_key_families)
     }
 }
 
-// R2S-03 tripwire. getmodelobjectlayout publishes 64 MiB parts, but
-// S3Client::PutStream uploads kCloudStreamChunkBytes parts, and a 400 GiB object
-// at that part size exceeds the client's own part ceiling — so the planned
-// upload cannot complete and the published Class A count is 8x low.
+// R2S-03. The live known-length uploader must fit the large-file example
+// within the real part ceiling while retaining a bounded payload buffer.
 BOOST_AUTO_TEST_CASE(r2s_02_multipart_part_size_planner_vs_client)
 {
     using namespace modelnet;
     const uint64_t planned = MultipartPartCount(OBJECT_LAYOUT_EXAMPLE_BYTES, MULTIPART_PART_BYTES);
-    const uint64_t actual = MultipartPartCount(OBJECT_LAYOUT_EXAMPLE_BYTES, kCloudStreamChunkBytes);
+    const size_t part_bytes = CloudUploadPartBytes(OBJECT_LAYOUT_EXAMPLE_BYTES);
+    BOOST_REQUIRE_EQUAL(part_bytes, kCloudMaxUploadPartBytes);
+    const uint64_t actual = MultipartPartCount(OBJECT_LAYOUT_EXAMPLE_BYTES, part_bytes);
     BOOST_CHECK_EQUAL(planned, 6400U);
-    BOOST_CHECK_EQUAL(actual, 51200U);
+    BOOST_CHECK_EQUAL(actual, planned);
+    BOOST_CHECK_LE(actual, kClientMaxMultipartParts);
     BOOST_CHECK_EQUAL(PlanObjectLayout(OBJECT_LAYOUT_EXAMPLE_BYTES).multipart_parts, planned);
-    BOOST_CHECK_GT(actual, planned);
-    BOOST_CHECK_GT(actual, kClientMaxMultipartParts);
-    // The largest object the client can finish at its current part size is well
-    // short of the illustration, and the ceiling is only noticed mid-upload.
-    BOOST_CHECK_LT(kClientMaxMultipartParts * uint64_t{kCloudStreamChunkBytes}, OBJECT_LAYOUT_EXAMPLE_BYTES);
+}
+
+BOOST_AUTO_TEST_CASE(r2s_02_upload_capacity_boundaries)
+{
+    using namespace modelnet;
+    const uint64_t base = kCloudStreamChunkBytes;
+    const uint64_t parts = kCloudMaxMultipartParts;
+    BOOST_CHECK_EQUAL(CloudUploadPartBytes(0), base);
+    BOOST_CHECK_EQUAL(CloudUploadPartBytes(1), base);
+    BOOST_CHECK_EQUAL(CloudUploadPartBytes(2 * base), base);
+    for (uint64_t chunk = base; chunk <= kCloudMaxUploadPartBytes; chunk *= 2) {
+        const uint64_t limit = chunk * parts;
+        BOOST_CHECK_EQUAL(CloudUploadPartBytes(limit - 1), chunk);
+        BOOST_CHECK_EQUAL(CloudUploadPartBytes(limit), chunk);
+        BOOST_CHECK_EQUAL(CloudUploadPartBytes(limit + 1),
+                          chunk == kCloudMaxUploadPartBytes ? 0 : chunk * 2);
+    }
+    BOOST_CHECK_EQUAL(CloudUploadPartBytes(std::numeric_limits<uint64_t>::max()), 0U);
 }
 
 // R2S-01 / R2S-02 tripwire. The planning model reports one origin GET per file

@@ -22,6 +22,12 @@
 namespace modelnet {
 
 constexpr size_t kCloudStreamChunkBytes = size_t{8} << 20;
+constexpr int kCloudMaxMultipartParts = 10000;
+constexpr size_t kCloudMaxUploadPartBytes = size_t{64} << 20;
+
+/** Live known-length upload part size, or zero if the bounded upload cannot fit.
+ * Zero length denotes an unknown-length stream and retains the 8 MiB chunk. */
+size_t CloudUploadPartBytes(uint64_t content_length);
 constexpr int kS3PresignTtlMaxSeconds = 3600;
 
 enum class CredentialRefKind : uint8_t {

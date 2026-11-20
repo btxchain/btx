@@ -299,7 +299,7 @@ constexpr size_t kS3HttpsReadBuf = size_t{64} << 10;
 constexpr uint64_t kS3HttpsMaxGetBytes = uint64_t{1} << 30;
 constexpr uint64_t kS3HttpsMaxControlBytes = uint64_t{1} << 20;
 constexpr uint64_t kS3HttpsForbidObjectBytes = uint64_t{400} << 30;
-constexpr int kS3HttpsMaxParts = 10000;
+constexpr int kS3HttpsMaxParts = kCloudMaxMultipartParts;
 
 struct SslCtxFree {
     void operator()(SSL_CTX* c) const
@@ -1962,11 +1962,26 @@ bool S3Client::Put(const std::string& key, Span<const unsigned char> body, std::
     return true;
 }
 
+size_t CloudUploadPartBytes(uint64_t content_length)
+{
+    size_t part_bytes = kCloudStreamChunkBytes;
+    while (content_length > uint64_t{part_bytes} * kCloudMaxMultipartParts &&
+           part_bytes < kCloudMaxUploadPartBytes) {
+        part_bytes *= 2;
+    }
+    return content_length <= uint64_t{part_bytes} * kCloudMaxMultipartParts ? part_bytes : 0;
+}
+
 bool S3Client::PutStream(const std::string& key, std::istream& body, uint64_t content_length, std::string& err)
 {
     if (!EnsureReady(err)) return false;
     m_last_put_max_buffer = 0;
-    const size_t chunk = kCloudStreamChunkBytes;
+    const size_t chunk = m_fake ? kCloudStreamChunkBytes : CloudUploadPartBytes(content_length);
+    if (chunk == 0) {
+        err = FailCloud("s3 https multipart upload exceeds bounded capacity");
+        ++m_errors;
+        return false;
+    }
     auto read_n = [&](std::vector<unsigned char>& buf, size_t n) -> bool {
         buf.resize(n);
         if (n == 0) return true;
@@ -2171,6 +2186,7 @@ bool S3Client::PutStream(const std::string& key, std::istream& body, uint64_t co
         return false;
     }
     uint64_t remaining = content_length;
+    std::vector<unsigned char> buf;
     while (remaining > 0) {
         if (part > kS3HttpsMaxParts) {
             live_abort(upload_id);
@@ -2179,7 +2195,6 @@ bool S3Client::PutStream(const std::string& key, std::istream& body, uint64_t co
             return false;
         }
         const size_t n = static_cast<size_t>(std::min<uint64_t>(remaining, chunk));
-        std::vector<unsigned char> buf;
         if (!read_n(buf, n) || buf.size() != n) {
             live_abort(upload_id);
             err = "cloud put chunk read failed";
