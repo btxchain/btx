@@ -230,6 +230,9 @@ namespace modelnet::security {
                         auto a=AdmitCapsule(m_db,p,row[2],now);
                         CheckMandate(p,m_db.Get(row[5]),a,now);
                         (void)VerifyResident(m_db,a.composition_id);
+                        // The previous generation must meet what activation required:
+                        // live coverage when the mesh is required (as in Eligible).
+                        if(m_db.Meta("mesh_required","0")=="1")MeshRequireLive(m_db,p,row[2],now);
                         rollback=true;
                     }
                     catch(...) {

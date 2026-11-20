@@ -253,6 +253,14 @@ int main(int argc,char** argv) {
         a.l.Tick(f.now);Check(a.l.Status()[0]["candidate_capsule"].get_str()==cap,"eligible restored active destroyed canary");
         f.Revoke(a.old);a.l.Tick(f.now);Phase(f.db,"frozen","fresh incident after eligibility recovery was suppressed");Check(a.l.Status()[0]["candidate_capsule"].get_str().empty(),"fresh same-generation incident retained candidate");
     });
+    // With mesh_required, activation needs live coverage (Eligible), but the
+    // rollback to the previous generation did not check it: a previous capsule
+    // without coverage became active again until the next tick froze it.
+    h.Test("mesh-required-rollback-needs-live-coverage",[]{
+        Active a;auto& f=a.f;f.now=a.base+1001;auto c=f.MakeComposition("rollback-live");auto cap=f.MakeEvidence(c);auto u=a.Next(c,cap);Observe(f,a.l,c,u,a.plan,a.base+2001);a.l.Activate("coding/stable",f.now);
+        auto settings=Object();settings.pushKV("enabled",true);settings.pushKV("max_evidence_age_ms",180000);settings.pushKV("allowed_campaigns",Array());f.local.pushKV("continuous_security",settings);f.SaveLocal();f.db.SetMeta("mesh_required","1");
+        f.Revoke(cap);a.l.Tick(f.now);Phase(f.db,"frozen","previous generation without live coverage rolled back");
+    });
     if(h.passed+h.failed==0){std::cerr<<"unknown test: "<<h.only<<'\n';return 2;}
     auto result=Object();result.pushKV("passed",static_cast<uint64_t>(h.passed));result.pushKV("failed",static_cast<uint64_t>(h.failed));result.pushKV("tests",h.results);
     if(argc>1){EnsurePrivateDirectory(fs::path(argv[1]).parent_path());WritePrivate(argv[1],Canonical(result),true);std::string journal;for(const auto& record:signed_records.getValues())journal+=Canonical(record)+"\n";WritePrivate(std::string(argv[1])+".records.jsonl",journal,true);}std::cout<<Canonical(result)<<'\n';return h.failed?1:0;
