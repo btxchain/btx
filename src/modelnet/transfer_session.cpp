@@ -148,7 +148,11 @@ void TransferSession::NoteCommitted(uint64_t request_id, uint64_t useful_bytes)
     std::lock_guard<std::mutex> lock(m_mu);
     for (auto& r : m_ledger) {
         if (r.request_id != request_id) continue;
-        if (r.generation != m_generation || r.phase == RequestPhase::COMMITTED || r.phase == RequestPhase::CANCELLED) return;
+        // A failed request already gave its credit back.
+        if (r.generation != m_generation || r.phase == RequestPhase::COMMITTED || r.phase == RequestPhase::CANCELLED ||
+            r.phase == RequestPhase::FAILED) {
+            return;
+        }
         r.phase = RequestPhase::COMMITTED;
         m_credit->Release(r.bytes);
         auto& m = m_metrics[r.endpoint];
@@ -167,7 +171,7 @@ void TransferSession::NoteFailed(uint64_t request_id)
     for (auto& r : m_ledger) {
         if (r.request_id != request_id) continue;
         if (r.generation != m_generation || r.phase == RequestPhase::COMMITTED ||
-            r.phase == RequestPhase::CANCELLED) {
+            r.phase == RequestPhase::CANCELLED || r.phase == RequestPhase::FAILED) {
             return;
         }
         r.phase = RequestPhase::FAILED;
