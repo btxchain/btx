@@ -508,7 +508,13 @@ fn run_stream(
         .cloned()
         .ok_or_else(|| err("LAB_RESULT", "Worker result missing"))
 }
-fn compact_review(action: &str, operation_id: &str, payload: &Value, pretty: &str) -> String {
+fn compact_review(
+    action: &str,
+    operation_id: &str,
+    payload: &Value,
+    pretty: &str,
+    operators: Option<&str>,
+) -> String {
     let preview: String = pretty.chars().take(400).collect();
     let digest = atlas_core::hash(pretty.as_bytes());
     let title = payload
@@ -516,9 +522,48 @@ fn compact_review(action: &str, operation_id: &str, payload: &Value, pretty: &st
         .and_then(Value::as_str)
         .map(|title| format!("Title: {title}\n"))
         .unwrap_or_default();
+    // The signed operators are what the human approves; a short dialog keeps
+    // their count, a preview and their digest instead of dropping them.
+    let operators = operators
+        .map(|ops| {
+            let parsed = serde_json::from_str::<Value>(ops).ok();
+            let count = parsed
+                .as_ref()
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            // One wrapped line, so the preview adds few lines to the dialog.
+            let line = parsed
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| ops.to_owned());
+            let mut preview: String = line.chars().take(300).collect();
+            if line.chars().count() > 300 {
+                preview.push_str(" ...");
+            }
+            let digest = atlas_core::hash(ops.as_bytes());
+            format!("\n\nSigned operators: {count}\n{preview}\nOperators SHA-256: {digest}")
+        })
+        .unwrap_or_default();
     format!(
-        "Research action: {action}\nOperation ID: {operation_id}\n{title}\n{preview}\n\nSHA-256: {digest}\n\nApproval still covers the exact payload and the dialog omitted the rest so the buttons stay on screen."
+        "Research action: {action}\nOperation ID: {operation_id}\n{title}\n{preview}\n\nSHA-256: {digest}{operators}\n\nApproval still covers the exact payload and the dialog omitted the rest so the buttons stay on screen."
     )
+}
+
+fn review_text(
+    action: &str,
+    operation_id: &str,
+    payload: &Value,
+    pretty: &str,
+    operators: Option<&str>,
+) -> String {
+    let mut review = format!("Research action: {action}\nOperation ID: {operation_id}\n\n{pretty}\n\nNo wallet/host-tool authority is added. Profile signatures do not certify model behavior.");
+    if let Some(ops) = operators {
+        review.push_str(&format!("\n\nExact signed operators:\n{ops}"));
+    }
+    if review.len() > 1200 {
+        review = compact_review(action, operation_id, payload, pretty, operators);
+    }
+    review
 }
 
 fn uri(p: &Value) -> Result<String> {
@@ -614,12 +659,12 @@ pub async fn atlas_neuronlab(
   if action=="export"{only_keys(&p,&["profile_id"])?;digest(string(&p,"profile_id")?)?;let path=pick(&app,true,"Save capsule to a NEW .safetensors file")?;p["path"]=json!(path.to_string_lossy());}
   if !READS.contains(&action.as_str()){
    let pretty=serde_json::to_string_pretty(&p).map_err(|_|err("LAB_JSON","Review serialization failed"))?;
-   let mut review=format!("Research action: {action}\nOperation ID: {operation_id}\n\n{pretty}\n\nNo wallet/host-tool authority is added. Profile signatures do not certify model behavior.");
+   let mut operators=None;
    if ["compare","generate","activate"].contains(&action.as_str()){
     if let Some(id)=p.get("profile_id").and_then(Value::as_str){let actual=run(&r,"profile",json!({"profile_id":id}),&format!("{operation_id}-inspect"))?;
-     review.push_str(&format!("\n\nExact signed operators:\n{}",serde_json::to_string_pretty(&actual.pointer("/profile/operations")).unwrap_or_default()));}
+     operators=Some(serde_json::to_string_pretty(&actual.pointer("/profile/operations")).unwrap_or_default());}
    }
-   if review.len()>1200{review=compact_review(&action,&operation_id,&p,&pretty);}
+   let review=review_text(&action,&operation_id,&p,&pretty,operators.as_deref());
    confirm(&app,"Review local model intervention",review)?;
    if action=="revoke"||action=="deactivate"{CANCEL.fetch_add(1,Ordering::SeqCst);}
    h.audit(&operation_id,&format!("neuronlab.{action}"),"SUBMITTED")?;
@@ -628,4 +673,34 @@ pub async fn atlas_neuronlab(
   if !READS.contains(&action.as_str()){h.audit(&operation_id,&format!("neuronlab.{action}"),"SUCCEEDED")?;}
   Ok(result)
  }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_review_keeps_the_signed_operators() {
+        let payload = json!({"profile_id": "ab".repeat(48)});
+        let pretty = serde_json::to_string_pretty(&payload).unwrap();
+        let ops: Vec<Value> = (0..20)
+            .map(|i| json!({"op": "scale", "layer": i, "neurons": [i, i + 1], "factor": "0.5"}))
+            .collect();
+        let operators = serde_json::to_string_pretty(&Value::Array(ops)).unwrap();
+        let review = review_text("activate", "op-1", &payload, &pretty, Some(&operators));
+        assert!(review.len() < 1400, "{}", review.len());
+        assert!(review.contains(" ...\nOperators SHA-256"), "{review}");
+        assert!(review.contains("Signed operators: 20"), "{review}");
+        assert!(
+            review.contains(&atlas_core::hash(operators.as_bytes())),
+            "{review}"
+        );
+        assert!(review.contains("\"op\":\"scale\""), "{review}");
+        let short = r#"[{"op": "scale"}]"#;
+        let review = review_text("activate", "op-1", &payload, &pretty, Some(short));
+        assert!(
+            review.contains(&format!("Exact signed operators:\n{short}")),
+            "{review}"
+        );
+    }
 }
