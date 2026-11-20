@@ -18,7 +18,7 @@ python3 contrib/swapnet/tools/restore_recovery.py \
   --confirm-node-stopped
 ```
 
-Run it from a source checkout with Python 3.11 or later and `cryptography` installed (`contrib/swapnet/pyproject.toml`). The command prompts for the passphrase. The genesis argument is the exact locally verified chain genesis, not a value obtained from a provider. Authentication, file allowlist, SQLite integrity, audit head, vault key and empty destination are checked before publication. Restore the corresponding native wallet backup, select/unlock it normally, bring both chain verifiers current, and restart the node. Inspect every funded swap before issuing new mandates.
+Run it from a source checkout with Python 3.11 or later and `cryptography` installed (`contrib/swapnet/pyproject.toml`). The command prompts for the passphrase. The genesis argument is the exact locally verified chain genesis, not a value obtained from a provider. Authentication, file allowlist, SQLite integrity, audit head, vault key and empty destination are checked before publication. Restore the corresponding native wallet backup, select/unlock it normally, bring both chain verifiers current, and restart the node. If that wallet restore has to happen first, start the node with `-swapnet=0` for that start. A default start creates `swapnet/`, and the restore requires an empty destination. Inspect every funded swap before issuing new mandates.
 
 ## Failure decisions
 

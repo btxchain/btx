@@ -75,7 +75,7 @@ service-profile, or release-publication workflow:
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
-This tree is **0.35.0rc1**. The last shipping tag remains **v0.34.15**.
+This tree is **0.34.17**. The last final shipping tag is **v0.34.16**.
 The process map is [modelnet/swarm/00_THIS_TREE.md](modelnet/swarm/00_THIS_TREE.md).
 Epoch A is live on mainnet at height 185000
 (Profile 1 ExactReplay authority, optional shadow proofs). EncDr stall recovery

@@ -1,6 +1,6 @@
 # BTX Node
 
-**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](doc/modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+**Candidate and evidence:** this source tree is **0.34.17** (`CLIENT_VERSION_MINOR=34`, `CLIENT_VERSION_BUILD=17`, `CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`); the last final shipping tag recorded here is **v0.34.16**. The `v0.34.17` tag on this branch is a prerelease. A release-build flag is not native qualification. See [native participation and release evidence](doc/modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
 
 BTX is **hard money** — MatMul proof of work, independently validated by
 **ExactReplay** — plus an isolated **Native Model Network**.
@@ -17,7 +17,7 @@ network-layer anonymity.
 **release campaigns**, **creation bounties**, and **preservation**. Later
 0.34 lines added origin-independent fetch, `.btx` / `btx://` retrieve,
 checkout, optional GPU **load**, and **local generate** when the replica
-matches this host. This branch is **0.35.0rc1**. The map of processes,
+matches this host. This branch is **0.34.17**. The map of processes,
 documents, and in-process records is
 [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
 A BTX node already has compute; the Native Model Network delivers models
@@ -81,14 +81,13 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.35.0rc1** (`CLIENT_VERSION_MINOR=35`,
-`CLIENT_VERSION_BUILD=0`, `CLIENT_VERSION_RC=1`,
-`CLIENT_VERSION_IS_RELEASE=true`). `btxd -version` prints `v0.35.0rc1`.
-P2P subversion is `/BTX:0.35.0/` (no rc). This is not the shipping tag
-`v0.35.0`. The last shipping tag remains **v0.34.15**. Do not recut
-`v0.34.15`, `v0.34.14`, `v0.34.13`, `v0.34.12`, or `v0.34.10`.
+This working tree is **0.34.17** (`CLIENT_VERSION_MINOR=34`,
+`CLIENT_VERSION_BUILD=17`, `CLIENT_VERSION_RC=0`,
+`CLIENT_VERSION_IS_RELEASE=true`). `btxd -version` prints `v0.34.17`.
+The last final shipping tag is **v0.34.16**. The `v0.34.17` tag on this
+branch is a prerelease. Do not recut `v0.34.16` or earlier final tags.
 
-Notes: [doc/release-notes/release-notes-0.35.0.md](doc/release-notes/release-notes-0.35.0.md).
+Notes: [doc/release-notes-0.34.17.md](doc/release-notes-0.34.17.md).
 Structure: [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
 
 ## Current delivery bounds
@@ -145,7 +144,7 @@ fabric stay in the passport's capability vector. Details:
 - [Later releases](#later-releases)
 - [Start here](#start-here)
 - [Pay With Compute](#pay-with-compute)
-- [This tree — 0.35.0rc1](#this-tree--0350rc1)
+- [This tree — 0.34.17](#this-tree--03417)
 - [Previous shipping release — v0.34.15](#previous-shipping-release--v03415)
 - [Previous release — v0.34.14](#previous-release--v03414)
 - [Earlier release — v0.34.13](#earlier-release--v03413)
@@ -181,10 +180,10 @@ fabric stay in the passport's capability vector. Details:
 
 ---
 
-## This tree — 0.35.0rc1
+## This tree — 0.34.17
 
-**This branch reports v0.35.0rc1.** It is the 0.35 release candidate, not
-the shipping tag `v0.35.0`. `btxd` is the monetary node and, by default, the
+**This branch reports v0.34.17.** The `v0.34.17` tag is a prerelease, not
+the final shipping tag. `btxd` is the monetary node and, by default, the
 swarm participant. With Modelnet compiled, `-modelnet` is on. `btxd` starts
 `btx-modeld` and the swarm observer thread. The observer supervises the
 packaged `btx-guardd` over private inherited stdio and records readiness in
@@ -197,7 +196,7 @@ required for that default. There is no separate `btx-swarmd` or
 The candidate is not release-qualified. Automatic spend stays 0. The
 process map, the public contract, and the in-process records are in
 [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
-Notes: [doc/release-notes/release-notes-0.35.0.md](doc/release-notes/release-notes-0.35.0.md).
+Notes: [doc/release-notes-0.34.17.md](doc/release-notes-0.34.17.md).
 
 ## Previous shipping release — v0.34.15
 

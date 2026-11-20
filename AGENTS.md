@@ -157,7 +157,7 @@ scanmodelwatch                   # filesystem -modelwatch=<dir>; not a publisher
 searchmodels | getmodel (FREE_ONLY) | exportmodelpath
 loadmodel | unloadmodel | generatemodel | getmodelhostprofile
 createbountydraft | listbountydrafts | getbountydraft | updatebountydraft | deletebountydraft | validatebountyterms
-# Helper RPCs (this tree is 0.35.0rc1; fail closed if an older helper lacks the method):
+# Helper RPCs (this tree is 0.34.17; fail closed if an older helper lacks the method):
 getcloudstorageinfo | testcloudstorage | setcloudstorage
 # catalog aliases (result.alias_of names the private method):
 addmodelstorage | listmodelstorage | getmodelcapabilities
@@ -264,10 +264,10 @@ do not advertise them in `getbountycapabilities` until execution is real.
 
 ## Release and session constraints
 
-This tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`,
-`CLIENT_VERSION_RC=1`). It is not the shipping tag `v0.35.0`. The last
-shipping tag remains **v0.34.15**. Do not recut `v0.34.15`, `v0.34.14`,
-`v0.34.13`, or `v0.34.12`.
+This tree is **0.34.17** (`CLIENT_VERSION_IS_RELEASE=true`,
+`CLIENT_VERSION_RC=0`). The last final shipping tag is **v0.34.16**.
+The `v0.34.17` tag is a prerelease. Do not recut `v0.34.16` or earlier
+final tags.
 
 - No unapproved git push, merge, or `CLIENT_VERSION` bump.
 - Do not compile (`cmake`, `ninja`, `cmake --build`) unless the operator asked.
