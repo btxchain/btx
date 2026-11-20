@@ -12154,10 +12154,7 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
         auto note_ok = [&](uint32_t idx, uint64_t useful, const std::string& winner = {}) {
             std::lock_guard<std::mutex> lock(rid_mu);
             auto it = piece_rid.find(idx);
-            if (it != piece_rid.end() && !it->second.empty()) {
-                xfer.NoteCommitted(it->second.front(), useful);
-                for (size_t i = 1; i < it->second.size(); ++i) xfer.NoteFailed(it->second[i]);
-            }
+            if (it != piece_rid.end()) xfer.NotePieceCommitted(it->second, useful);
             const auto cancels = CancelAfterCommit(xfer.Outstanding(), file_index, idx, winner);
             for (const auto& a : cancels) {
                 (void)a;

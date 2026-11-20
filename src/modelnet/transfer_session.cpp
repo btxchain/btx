@@ -185,6 +185,35 @@ void TransferSession::NoteFailed(uint64_t request_id)
     }
 }
 
+void TransferSession::NotePieceCommitted(const std::vector<uint64_t>& request_ids, uint64_t useful_bytes)
+{
+    if (request_ids.empty()) return;
+    // A piece asked again after a failure keeps its failed request ids: the
+    // bytes came on the request still in flight, not on the first one.
+    uint64_t winner = request_ids.front();
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        auto in_flight = [&](uint64_t id) {
+            for (const auto& r : m_ledger) {
+                if (r.request_id != id) continue;
+                return r.generation == m_generation && r.phase != RequestPhase::COMMITTED &&
+                       r.phase != RequestPhase::CANCELLED && r.phase != RequestPhase::FAILED;
+            }
+            return false;
+        };
+        for (uint64_t id : request_ids) {
+            if (in_flight(id)) {
+                winner = id;
+                break;
+            }
+        }
+    }
+    NoteCommitted(winner, useful_bytes);
+    for (uint64_t id : request_ids) {
+        if (id != winner) NoteFailed(id);
+    }
+}
+
 void TransferSession::ObservePeer(const std::string& endpoint, const PeerMetrics& sample)
 {
     std::lock_guard<std::mutex> lock(m_mu);
