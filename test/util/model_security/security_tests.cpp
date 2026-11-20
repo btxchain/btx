@@ -351,6 +351,18 @@ int main(int argc,char** argv) {
         Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round 0 not scheduled");
         f.Revoke(KeyId(f.owner.public_key));MeshTick(f.db,t0+2500);
         Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round scheduled for a revoked owner's campaign");});
+    // Epoch 2 enrolls a coordinator key of its own for this host; the owner key
+    // still signs the campaign. Once that coordinator key is revoked, MeshTick
+    // must skip the campaign instead of throwing from LoadLocalIdentity, which
+    // also kept Maintain from reaching Lifecycle::Tick.
+    h.Test("mesh-tick-skips-rounds-of-a-revoked-coordinator",[&]{Fixture f;const int64_t t0=NowMs();const auto campaign=coordinate(f,t0);
+        auto coord=GenerateKey();auto b=f.policy_record["body"];Json principals=b["principals"];auto c=Object();c.pushKV("public_key",Hex(coord.public_key));c.pushKV("roles",Strings({"coordinator"}));c.pushKV("domain","owner");c.pushKV("host","owner-host");c.pushKV("transport_pin","");principals.push_back(c);
+        const auto now=NowMs();b.pushKV("epoch",2);b.pushKV("issued_ms",now);b.pushKV("expires_ms",now+3600000);b.pushKV("principals",principals);InstallPolicy(f.db,Signed("policy",b,f.owner),now);
+        auto id=Object();id.pushKV("public_key",Hex(coord.public_key));id.pushKV("secret_file",(f.root/"coordinator2.key").string());WritePrivate(f.root/"coordinator2.key",Hex(coord.secret_key));f.local.pushKV("identity",id);f.SaveLocal();
+        MeshTick(f.db,NowMs());Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round 0 not scheduled by the enrolled coordinator");
+        auto rb=Common(f.realm,2,NowMs());rb.pushKV("subject",KeyId(coord.public_key));rb.pushKV("sequence",1);rb.pushKV("reason","test incident");ImportRecord(f.db,Policy::Load(f.db,NowMs()),Signed("revocation",rb,f.owner,&f.second),NowMs());
+        MeshTick(f.db,t0+2500);
+        Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round scheduled by a revoked coordinator");});
     h.Test("maintain-freezes-channel-after-owner-revocation",[&]{Fixture f;Lifecycle l(f.db);auto m=f.Import(f.FollowMandate());l.Follow(m,NowMs());const auto channel=f.Import(f.Channel(1,f.capsule));l.Stage(channel,NowMs());coordinate(f,NowMs());f.Revoke(m);f.Revoke(KeyId(f.owner.public_key));
         Service svc(f.root);for(int i=0;i<100&&f.db.Meta("maintenance_at").empty()&&f.db.Meta("maintenance_error").empty();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const auto error=f.db.Meta("maintenance_error");Check(error.empty(),error.c_str());Check(Text(Lifecycle(f.db).Status()[0],"phase")=="frozen","channel not frozen");});
