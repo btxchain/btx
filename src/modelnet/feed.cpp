@@ -9,6 +9,7 @@
 #include <util/strencodings.h>
 
 #include <algorithm>
+#include <limits>
 #include <exception>
 #include <fstream>
 #include <iostream>
@@ -392,15 +393,19 @@ std::vector<FeedEvent> FeedStore::Query(const FeedQuery& q, int64_t now_ms, std:
         if (q.mode == FeedMode::TRENDING) {
             if (a.sources_observed != b.sources_observed) return a.sources_observed > b.sources_observed;
         }
-        if (q.mode == FeedMode::NEARLY_FUNDED && a.has_campaign && b.has_campaign) {
-            auto rem = [](const ReleaseCampaign& c) {
-                if (c.target_atoms <= 0) return int64_t{0};
-                const int64_t funded = c.funded_atoms > 0 ? c.funded_atoms : 0;
-                return RemainingAtoms(c.target_atoms, funded);
+        if (q.mode == FeedMode::NEARLY_FUNDED) {
+            // Smallest remaining amount first. An event without a campaign or
+            // with nothing left to fund sorts after those, by the keys below;
+            // one key per event keeps the order a strict weak order for std::sort.
+            auto key = [](const FeedEvent& e) {
+                if (!e.has_campaign || e.campaign.target_atoms <= 0) return std::numeric_limits<int64_t>::max();
+                const int64_t funded = e.campaign.funded_atoms > 0 ? e.campaign.funded_atoms : 0;
+                const int64_t rem = RemainingAtoms(e.campaign.target_atoms, funded);
+                return rem > 0 ? rem : std::numeric_limits<int64_t>::max();
             };
-            const int64_t ra = rem(a.campaign);
-            const int64_t rb = rem(b.campaign);
-            if (ra != rb) return ra < rb && ra > 0;
+            const int64_t ka = key(a);
+            const int64_t kb = key(b);
+            if (ka != kb) return ka < kb;
         }
         if (a.published_at != b.published_at) return a.published_at > b.published_at;
         if (a.first_seen_at != b.first_seen_at) return a.first_seen_at > b.first_seen_at;
