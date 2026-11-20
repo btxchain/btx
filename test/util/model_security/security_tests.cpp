@@ -46,13 +46,13 @@ Json Common(const std::string& realm,uint64_t epoch,int64_t now,uint64_t ttl=600
 }
 struct Fixture {
     Temp temp;fs::path root;Database db;
-    KeyPair owner=GenerateKey(),publisher=GenerateKey(),second=GenerateKey(),alice=GenerateKey(),bob=GenerateKey();
+    KeyPair owner=GenerateKey(),publisher=GenerateKey(),second=GenerateKey(),alice=GenerateKey(),bob=GenerateKey(),carol=GenerateKey();
     std::string realm=Hash("test realm"),session=Hex(RandomBytes(32)),runtime=Hash("test runtime"),schema=Hash("tool schema");
     int64_t now=NowMs();Json policy_record,local;
     Policy policy;
     fs::path probe;
     std::string capsule,composition;std::vector<std::string> evaluations;
-    explicit Fixture(fs::path executable={},bool common_domain=false,bool evidence=true):root(temp.root/"security"),db(root),probe(std::move(executable)) {
+    explicit Fixture(fs::path executable={},bool common_domain=false,bool evidence=true,bool third_evaluator=false):root(temp.root/"security"),db(root),probe(std::move(executable)) {
         if(!probe.empty())runtime=Hash(ReadFile(probe,128*1024*1024));
         auto pins=Object();pins.pushKV("schema","BTX/SecurityRootPins/v1");pins.pushKV("keys",Strings({KeyId(owner.public_key)}));pins.pushKV("threshold",1);WritePrivate(root/"root-pins.json",Canonical(pins));
         Json b=Object();b.pushKV("realm",realm);b.pushKV("epoch",1);b.pushKV("issued_ms",now);b.pushKV("expires_ms",now+3600000);
@@ -65,6 +65,7 @@ struct Fixture {
         principal(publisher,{"publisher"},"author","publisher-host");principal(second,{"release","revoker"},"release","release-host");
         principal(alice,{"evaluator","worker","peer"},"eval-a","host-a",Hash("pin-a"));
         principal(bob,{"evaluator","worker","peer"},common_domain?"eval-a":"eval-b","host-b",Hash("pin-b"));
+        if(third_evaluator)principal(carol,{"evaluator","worker","peer"},"eval-c","host-c",Hash("pin-c"));
         b.pushKV("principals",principals);policy_record=Signed("policy",b,owner);InstallPolicy(db,policy_record,now);policy=Policy::Load(db,now);
         EnsurePrivateDirectory(temp.root/"workspace");WritePrivate(temp.root/"workspace"/"source.txt","hello safe workspace\n");
         WritePrivate(temp.root/"workspace"/".env","SYNTHETIC_DECOY=not-a-real-secret\n");
@@ -231,6 +232,14 @@ int main(int argc,char** argv) {
     h.Test("one-domain-sybil-identities-insufficient",[&]{Fixture f({},true);Reject([&]{AdmitCapsule(f.db,f.policy,f.capsule,f.now);},"SEC_INDEPENDENT_COVERAGE");});
     h.Test("missing-gate-blocks-admission",[&]{Fixture f;auto refs=f.evaluations;refs.resize(10);auto id=f.Capsule(f.composition,refs);Reject([&]{AdmitCapsule(f.db,f.policy,id,f.now);},"SEC_INDEPENDENT_COVERAGE");});
     h.Test("unreferenced-negative-result-blocks-admission",[&]{Fixture f;auto ch=f.Challenge(f.composition,"adversarial");f.Import(f.Evaluation(ch,f.alice,"host-a","FAIL"));Reject([&]{AdmitCapsule(f.db,f.policy,f.capsule,f.now);},"SEC_NEGATIVE_EVIDENCE");});
+    // A FAIL report blocks admission while its evaluator is enrolled; once that
+    // key is revoked it is no evidence either way. Policy::Check threw for the
+    // revoked key and kept the composition out for good. A FAIL that a current
+    // evaluator co-signed still blocks.
+    h.Test("revoked-evaluator-negative-result-does-not-block-admission",[&]{Fixture f({},false,true,true);auto ch=f.Challenge(f.composition,"adversarial");f.Import(f.Evaluation(ch,f.carol,"host-c","FAIL"));
+        Reject([&]{AdmitCapsule(f.db,f.policy,f.capsule,NowMs());},"SEC_NEGATIVE_EVIDENCE");f.Revoke(KeyId(f.carol.public_key));(void)AdmitCapsule(f.db,Policy::Load(f.db,NowMs()),f.capsule,NowMs());
+        Fixture g({},false,true,true);auto cosigned=g.Evaluation(g.Challenge(g.composition,"adversarial"),g.carol,"host-c","FAIL");AddSignature(cosigned,g.bob);g.Import(cosigned);g.Revoke(KeyId(g.carol.public_key));
+        Reject([&]{AdmitCapsule(g.db,Policy::Load(g.db,NowMs()),g.capsule,NowMs());},"SEC_NEGATIVE_EVIDENCE");});
     h.Test("dangling-execution-receipt-cannot-pass",[&]{Fixture f;auto e=f.db.Get(f.evaluations[0]);auto body=e["body"];body.pushKV("execution_receipt",Hash("absent receipt"));auto replacement=f.Import(Signed("evaluation",body,f.alice));auto refs=f.evaluations;refs[0]=replacement;auto cap=f.Capsule(f.composition,refs);Reject([&]{AdmitCapsule(f.db,f.policy,cap,f.now);},"SEC_OBJECT_ABSENT");});
     h.Test("modified-evaluation-signature-refused",[&]{Fixture f;auto e=f.db.Get(f.evaluations[0]);auto b=e["body"];b.pushKV("cases",999);e.pushKV("body",b);Reject([&]{f.Import(e);},"SEC_SIGNATURE");});
     h.Test("wrong-release-threshold-refused",[&]{Fixture f;auto e=f.db.Get(f.capsule);auto one=Envelope("capsule",e["body"]);AddSignature(one,f.owner);auto b=one["body"];b.pushKV("expires_ms",f.now+59000);one=Signed("capsule",b,f.owner);Reject([&]{f.Import(one);},"SEC_SIGNATURE_THRESHOLD");});
@@ -342,6 +351,18 @@ int main(int argc,char** argv) {
         Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round 0 not scheduled");
         f.Revoke(KeyId(f.owner.public_key));MeshTick(f.db,t0+2500);
         Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round scheduled for a revoked owner's campaign");});
+    // Epoch 2 enrolls a coordinator key of its own for this host; the owner key
+    // still signs the campaign. Once that coordinator key is revoked, MeshTick
+    // must skip the campaign instead of throwing from LoadLocalIdentity, which
+    // also kept Maintain from reaching Lifecycle::Tick.
+    h.Test("mesh-tick-skips-rounds-of-a-revoked-coordinator",[&]{Fixture f;const int64_t t0=NowMs();const auto campaign=coordinate(f,t0);
+        auto coord=GenerateKey();auto b=f.policy_record["body"];Json principals=b["principals"];auto c=Object();c.pushKV("public_key",Hex(coord.public_key));c.pushKV("roles",Strings({"coordinator"}));c.pushKV("domain","owner");c.pushKV("host","owner-host");c.pushKV("transport_pin","");principals.push_back(c);
+        const auto now=NowMs();b.pushKV("epoch",2);b.pushKV("issued_ms",now);b.pushKV("expires_ms",now+3600000);b.pushKV("principals",principals);InstallPolicy(f.db,Signed("policy",b,f.owner),now);
+        auto id=Object();id.pushKV("public_key",Hex(coord.public_key));id.pushKV("secret_file",(f.root/"coordinator2.key").string());WritePrivate(f.root/"coordinator2.key",Hex(coord.secret_key));f.local.pushKV("identity",id);f.SaveLocal();
+        MeshTick(f.db,NowMs());Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round 0 not scheduled by the enrolled coordinator");
+        auto rb=Common(f.realm,2,NowMs());rb.pushKV("subject",KeyId(coord.public_key));rb.pushKV("sequence",1);rb.pushKV("reason","test incident");ImportRecord(f.db,Policy::Load(f.db,NowMs()),Signed("revocation",rb,f.owner,&f.second),NowMs());
+        MeshTick(f.db,t0+2500);
+        Check(f.db.Query("SELECT count(*) FROM mesh_rounds WHERE campaign=?",{campaign})[0][0]=="1","round scheduled by a revoked coordinator");});
     h.Test("maintain-freezes-channel-after-owner-revocation",[&]{Fixture f;Lifecycle l(f.db);auto m=f.Import(f.FollowMandate());l.Follow(m,NowMs());const auto channel=f.Import(f.Channel(1,f.capsule));l.Stage(channel,NowMs());coordinate(f,NowMs());f.Revoke(m);f.Revoke(KeyId(f.owner.public_key));
         Service svc(f.root);for(int i=0;i<100&&f.db.Meta("maintenance_at").empty()&&f.db.Meta("maintenance_error").empty();++i)std::this_thread::sleep_for(std::chrono::milliseconds(50));
         const auto error=f.db.Meta("maintenance_error");Check(error.empty(),error.c_str());Check(Text(Lifecycle(f.db).Status()[0],"phase")=="frozen","channel not frozen");});

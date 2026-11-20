@@ -255,7 +255,10 @@ void MeshTick(Database& db,int64_t now){
     if(local["identity"].isObject()){
         const auto id=KeyId(Unhex(Text(local["identity"],"public_key",PK_BYTES*2),PK_BYTES));
         auto self=p.principals.find(id);
-        if(self!=p.principals.end()&&self->second.roles.contains("coordinator")){
+        // A revoked coordinator key schedules no rounds, as a revoked owner's
+        // campaign below: LoadLocalIdentity would throw, and that would also stop
+        // Lifecycle::Tick in Maintain.
+        if(self!=p.principals.end()&&self->second.roles.contains("coordinator")&&!db.Revoked(id,now)){
             for(const auto& campaign:allowed){
                 if(!db.Has(campaign))continue;
                 auto e=db.Get(campaign);if(Text(e,"kind")!="campaign")continue;

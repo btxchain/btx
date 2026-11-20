@@ -471,9 +471,19 @@ namespace modelnet::security {
             const auto& report=e["body"];
             if(report["composition"].isStr()&&report["composition"].get_str()==out.composition_id&&report["outcome"].isStr()&&report["outcome"].get_str()=="FAIL") {
                 // A signature valid under this policy is negative evidence even when
-                // the report's positive freshness window has elapsed.
-                auto keys=p.Check(e,"evaluator",db,now);
-                if(!keys.empty())throw Error("SEC_NEGATIVE_EVIDENCE");
+                // the report's positive freshness window has elapsed. The report
+                // counts while any evaluator signature on it is not revoked: a revoked
+                // key's signature is no evidence, as for positive reports, but a
+                // current co-signer keeps the report. A key no longer in the policy
+                // still blocks, as before.
+                VerifyEach(e);
+                for(const auto& s:e["signatures"].getValues()) {
+                    const auto key_id=KeyId(Unhex(Text(s,"public_key",PK_BYTES*2),PK_BYTES));
+                    if(db.Revoked(key_id,now))continue;
+                    const auto principal=p.principals.find(key_id);
+                    if(principal!=p.principals.end()&&!principal->second.roles.contains("evaluator"))continue;
+                    throw Error("SEC_NEGATIVE_EVIDENCE");
+                }
             }
         }
         struct Coverage {
