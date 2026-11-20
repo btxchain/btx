@@ -534,8 +534,14 @@ bool SendAll(int fd, SSL* ssl, const unsigned char* data, size_t n, std::string&
         if (ssl) {
             const int w = SSL_write(ssl, data + off, static_cast<int>(chunk));
             if (w <= 0) {
+                // The socket blocks with SO_SNDTIMEO: a write that wants to be
+                // retried has hit that timeout. Retrying waited forever on a
+                // server that stopped reading.
                 const int e = SSL_get_error(ssl, w);
-                if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) continue;
+                if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
+                    err = FailCloud("s3 https write timed out");
+                    return false;
+                }
                 err = FailCloud("s3 https write failed");
                 return false;
             }
@@ -566,7 +572,12 @@ bool RecvSome(int fd, SSL* ssl, unsigned char* data, size_t n, size_t& got, std:
         if (r == 0) return true;
         if (r < 0) {
             const int e = SSL_get_error(ssl, r);
-            if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return true;
+            // As for a write: a read past SO_RCVTIMEO is not the end of the
+            // body, which a response without Content-Length takes it for.
+            if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+                err = FailCloud("s3 https read timed out");
+                return false;
+            }
             if (e == SSL_ERROR_ZERO_RETURN) return true;
             err = FailCloud("s3 https read failed");
             return false;
