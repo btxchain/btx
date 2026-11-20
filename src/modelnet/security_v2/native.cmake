@@ -16,6 +16,9 @@ target_include_directories(bitcoin_model_security PUBLIC ${PROJECT_SOURCE_DIR}/s
 if(WIN32)
   target_link_libraries(bitcoin_model_security PUBLIC bcrypt advapi32)
 endif()
-add_executable(btx-security ${BTX_SECURITY_DIR}/main.cpp)
-target_link_libraries(btx-security PRIVATE bitcoin_model_security)
-install_binary_component(btx-security)
+# btx-security defines main(); see the BUILD_FOR_FUZZING note in src/modelnet/CMakeLists.txt.
+if(NOT BUILD_FOR_FUZZING)
+  add_executable(btx-security ${BTX_SECURITY_DIR}/main.cpp)
+  target_link_libraries(btx-security PRIVATE bitcoin_model_security)
+  install_binary_component(btx-security)
+endif()
