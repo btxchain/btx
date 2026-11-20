@@ -61,6 +61,7 @@
 #include <fstream>
 #include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -234,6 +235,43 @@ void CheckS3SocketCleanup(bool reject_tls)
         BOOST_CHECK(got == payload);
     }
     BOOST_CHECK(server.get());
+}
+
+// A loopback listener for one connection; every wait on it is bounded.
+std::unique_ptr<Sock> ListenLoopback(uint16_t& port)
+{
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (handle == INVALID_SOCKET) return nullptr;
+    auto listener = std::make_unique<Sock>(handle);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(addr);
+    if (listener->Bind(reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listener->Listen(1) != 0 ||
+        listener->GetSockName(reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        return nullptr;
+    }
+    port = ntohs(addr.sin_port);
+    return listener;
+}
+
+std::unique_ptr<Sock> AcceptWithin(const Sock& listener, std::chrono::milliseconds wait)
+{
+    Sock::Event occurred{0};
+    if (!listener.Wait(wait, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return nullptr;
+    return listener.Accept(nullptr, nullptr);
+}
+
+modelnet::S3ClientConfig LoopbackS3Config(const std::string& scheme, uint16_t port)
+{
+    modelnet::S3ClientConfig cfg;
+    cfg.endpoint = scheme + "://127.0.0.1:" + std::to_string(port);
+    cfg.bucket = "btx-models";
+    cfg.region = "auto";
+    cfg.use_fake = false;
+    cfg.allow_http_loopback = scheme == "http";
+    cfg.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_S3_SOCKET_CREDS"};
+    return cfg;
 }
 
 } // namespace
@@ -1502,6 +1540,53 @@ BOOST_AUTO_TEST_CASE(cloud_https_refuses_redirect)
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(200, {}));
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(404, {}));
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(206, {}));
+}
+
+// Without Content-Length the body ends at EOF. A body longer than the range
+// asked for was cut to the length of the range and returned as that range.
+BOOST_AUTO_TEST_CASE(cloud_unchunked_body_past_its_limit_is_refused)
+{
+    test::ScopedEnvVar credentials{"BTX_TEST_S3_SOCKET_CREDS", "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\n"};
+    for (const std::string body : {"0123456789", "0123"}) {
+        uint16_t port = 0;
+        auto listener = ListenLoopback(port);
+        BOOST_REQUIRE(listener);
+        auto server = std::async(std::launch::async, [&] {
+            auto peer = AcceptWithin(*listener, std::chrono::seconds{5});
+            if (!peer) return false;
+            std::string request;
+            char buf[4096];
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                Sock::Event occurred{0};
+                if (!peer->Wait(std::chrono::seconds{5}, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return false;
+                const auto n = peer->Recv(buf, sizeof(buf), 0);
+                if (n <= 0) return false;
+                request.append(buf, n);
+            }
+            // The body comes after the head, as from a real server: the bytes
+            // that arrive with the head were already checked.
+            CThreadInterrupt interrupt;
+            for (const std::string part : {std::string{"HTTP/1.1 206 Partial Content\r\nConnection: close\r\n\r\n"}, body}) {
+                peer->SendComplete(Span<const unsigned char>{reinterpret_cast<const unsigned char*>(part.data()), part.size()},
+                                   std::chrono::seconds{5}, interrupt);
+                std::this_thread::sleep_for(std::chrono::milliseconds{300});
+            }
+            return true;
+        });
+        modelnet::S3Client client;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(client.Init(LoopbackS3Config("http", port), err), err);
+        std::vector<unsigned char> got;
+        const bool ok = client.RangeGet("loopback-object", 0, 4, got, err);
+        if (body.size() > 4) {
+            BOOST_CHECK(!ok);
+            BOOST_CHECK_EQUAL(err, "s3 https object too large for unchunked GET");
+        } else {
+            BOOST_CHECK_MESSAGE(ok, err);
+            BOOST_CHECK(got == std::vector<unsigned char>(body.begin(), body.end()));
+        }
+        BOOST_CHECK(server.get());
+    }
 }
 
 // The cloud client and the source registry set a socket timeout as a timeval.

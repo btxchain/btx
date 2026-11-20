@@ -822,9 +822,11 @@ bool PerformS3Http(const S3ClientConfig& cfg, SigV4Request req, Span<const unsig
         return false;
     }
 
-    uint64_t remaining = res.has_content_length ? res.content_length : max_body;
+    // Without Content-Length the body ends at EOF: read one byte past the limit
+    // so a longer body is refused below instead of cut to the limit.
+    uint64_t remaining = res.has_content_length ? res.content_length : max_body + 1;
     if (!leftover.empty()) {
-        if (leftover.size() > remaining) {
+        if (leftover.size() > (res.has_content_length ? remaining : max_body)) {
             err = FailCloud("s3 https object too large for unchunked GET");
             cleanup();
             return false;
