@@ -2,6 +2,7 @@
 #include <modelnet/security_v2/lifecycle.h>
 #include <modelnet/security_v2/mesh.h>
 #include <algorithm>
+#include <map>
 namespace modelnet::security {
     namespace {
         bool Listed(const Json& array,const std::string& value) {
@@ -201,6 +202,18 @@ namespace modelnet::security {
     }
     void Lifecycle::Tick(int64_t now) {
         auto p=Policy::Load(m_db,now);
+        // The signed updates of every channel, read once per tick in pages: an
+        // update past the first 1024 channel records was never staged.
+        std::map<std::string,std::vector<std::string>> updates_by_name;
+        for(std::string after;;) {
+            const auto page=m_db.List("channel",1024,after);
+            for(const auto& id:page) {
+                auto e=m_db.Get(id);
+                if(e["body"]["name"].isStr())updates_by_name[e["body"]["name"].get_str()].push_back(id);
+            }
+            if(page.size()<1024)break;
+            after=page.back();
+        }
         for(const auto& row:m_db.Query("SELECT name,active,previous,candidate,phase,mandate_id FROM channels ORDER BY name LIMIT 128")) {
             const auto name=row[0],incident_key="channel-frozen-active/"+name;
             const auto binding=row[1].empty()?"none":row[1];
@@ -274,9 +287,8 @@ namespace modelnet::security {
             }
             // Process signed updates in sequence; a missing predecessor is not skipped.
             std::vector<std::pair<uint64_t,std::string>> updates;
-            for(const auto& id:m_db.List("channel",1024)) {
+            for(const auto& id:updates_by_name[name]) {
                 auto e=m_db.Get(id);
-                if(e["body"]["name"].isStr()&&e["body"]["name"].get_str()==name)
                 updates.emplace_back(UInt(e["body"],"sequence",INT64_MAX),id);
             }
             std::sort(updates.begin(),updates.end());
