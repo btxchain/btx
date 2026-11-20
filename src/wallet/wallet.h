@@ -36,6 +36,7 @@
 #include <wallet/walletutil.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -1352,6 +1353,8 @@ public:
     void SetupImportedPQWalletBundle(WalletBatch& batch, Span<const unsigned char> pq_seed, int64_t creation_time) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     //! Create PQ master seed and default PQ-native DescriptorScriptPubKeyMans
     void SetupOwnPQDescriptorScriptPubKeyMans(WalletBatch& batch) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    //! The P2MR descriptor seed already stored in this wallet, if there is exactly one.
+    std::optional<std::array<unsigned char, 32>> GetDescriptorPQMasterSeed() const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     //! Return the DescriptorScriptPubKeyMan for a WalletDescriptor if it is already in the wallet
     DescriptorScriptPubKeyMan* GetDescriptorScriptPubKeyMan(const WalletDescriptor& desc) const;

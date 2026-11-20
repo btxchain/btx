@@ -37,6 +37,7 @@ static inline size_t RecursiveDynamicUsage(const CTransaction& tx) {
     for (std::vector<CTxOut>::const_iterator it = tx.vout.begin(); it != tx.vout.end(); it++) {
         mem += RecursiveDynamicUsage(*it);
     }
+    if (tx.HasShieldedBundle()) mem += GetSerializeSize(tx.GetShieldedBundle());
     return mem;
 }
 
@@ -48,6 +49,7 @@ static inline size_t RecursiveDynamicUsage(const CMutableTransaction& tx) {
     for (std::vector<CTxOut>::const_iterator it = tx.vout.begin(); it != tx.vout.end(); it++) {
         mem += RecursiveDynamicUsage(*it);
     }
+    if (tx.HasShieldedBundle()) mem += GetSerializeSize(tx.shielded_bundle);
     return mem;
 }
 

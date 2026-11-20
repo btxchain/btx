@@ -15157,6 +15157,10 @@ std::optional<node::PackageToValidate> PeerManagerImpl::ProcessInvalidTx(NodeId 
 
     const auto& [add_extra_compact_tx, unique_parents, package_to_validate] = m_txdownloadman.MempoolRejectedTx(ptx, state, nodeid, first_time_failure);
 
+    if (peer && ptx->HasShieldedBundle() && state.GetRejectReason().find("bad-shielded-proof") != std::string::npos) {
+        Misbehaving(*peer, "invalid shielded proof");
+    }
+
     const size_t tx_dynamic_usage{RecursiveDynamicUsage(*ptx)};
     if (add_extra_compact_tx && tx_dynamic_usage < BLOCK_RECONSTRUCTION_EXTRA_TXN_PER_TXN_SIZE_LIMIT) {
         AddToCompactExtraTransactions(ptx, tx_dynamic_usage);

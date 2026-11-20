@@ -1445,6 +1445,10 @@ static WalletBundleArchivePayload DecryptWalletBundleArchivePayload(const Wallet
     if (envelope.salt.size() != WALLET_CRYPTO_SALT_SIZE) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Wallet bundle archive salt is invalid");
     }
+    if (envelope.derivation_iterations < 1 ||
+        envelope.derivation_iterations > WALLET_BUNDLE_ARCHIVE_DERIVATION_ITERATIONS) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Wallet bundle archive derivation work is outside the supported range");
+    }
 
     unsigned char key[WALLET_CRYPTO_KEY_SIZE];
     unsigned char iv[WALLET_CRYPTO_IV_SIZE];
@@ -1704,6 +1708,31 @@ static std::vector<unsigned char> ReadWalletPQMasterSeedForExport(CWallet& walle
 
     WalletBatch batch(wallet.GetDatabase());
 
+    std::optional<std::array<unsigned char, 32>> descriptor_seed;
+    for (const auto& spkm : wallet.GetAllScriptPubKeyMans()) {
+        const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
+        if (!desc_spkm) continue;
+
+        std::string desc_str;
+        if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
+
+        FlatSigningProvider keys;
+        std::string error;
+        auto parsed_descs = Parse(desc_str, keys, error, /*require_checksum=*/true);
+        for (const auto& desc : parsed_descs) {
+            for (const auto& entry : desc->ExtractAllPQSeeds()) {
+                if (!descriptor_seed) {
+                    descriptor_seed = entry.second;
+                } else if (*descriptor_seed != entry.second) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet contains multiple PQ master seeds; exportwalletbundle only supports single-seed browser wallet exports");
+                }
+            }
+        }
+    }
+    if (descriptor_seed) {
+        return std::vector<unsigned char>(descriptor_seed->begin(), descriptor_seed->end());
+    }
+
     uint256 iv;
     std::vector<unsigned char> encrypted_seed;
     if (batch.ReadCryptedPQMasterSeed(iv, encrypted_seed) && !encrypted_seed.empty()) {
@@ -1729,31 +1758,6 @@ static std::vector<unsigned char> ReadWalletPQMasterSeedForExport(CWallet& walle
             throw JSONRPCError(RPC_WALLET_ERROR, "Wallet PQ master seed has invalid length");
         }
         return seed;
-    }
-
-    std::optional<std::array<unsigned char, 32>> descriptor_seed;
-    for (const auto& spkm : wallet.GetAllScriptPubKeyMans()) {
-        const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
-        if (!desc_spkm) continue;
-
-        std::string desc_str;
-        if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
-
-        FlatSigningProvider keys;
-        std::string error;
-        auto parsed_descs = Parse(desc_str, keys, error, /*require_checksum=*/true);
-        for (const auto& desc : parsed_descs) {
-            for (const auto& entry : desc->ExtractAllPQSeeds()) {
-                if (!descriptor_seed) {
-                    descriptor_seed = entry.second;
-                } else if (*descriptor_seed != entry.second) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet contains multiple PQ master seeds; exportwalletbundle only supports single-seed browser wallet exports");
-                }
-            }
-        }
-    }
-    if (descriptor_seed) {
-        return std::vector<unsigned char>(descriptor_seed->begin(), descriptor_seed->end());
     }
 
     throw JSONRPCError(RPC_WALLET_ERROR, "Wallet does not contain an exportable PQ master seed");

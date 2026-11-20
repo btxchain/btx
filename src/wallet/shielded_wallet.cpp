@@ -6897,6 +6897,16 @@ std::vector<unsigned char> CShieldedWallet::GetMasterSeed() const
     }
 
     if (seed.empty()) {
+        if (const auto copied{m_parent_wallet.GetDescriptorPQMasterSeed()}) {
+            seed.assign(copied->begin(), copied->end());
+        }
+    }
+
+    if (seed.empty()) {
+        if (m_parent_wallet.GetScriptPubKeyMan(OutputType::P2MR, false) != nullptr ||
+            m_parent_wallet.GetScriptPubKeyMan(OutputType::P2MR, true) != nullptr) {
+            return {};
+        }
         std::array<unsigned char, 32> fallback_seed{};
         GetStrongRandBytes(fallback_seed);
         seed.assign(fallback_seed.begin(), fallback_seed.end());
@@ -6925,7 +6935,7 @@ std::vector<unsigned char> CShieldedWallet::GetMasterSeed() const
         }
     }
 
-    if (!persisted) {
+    if (!persisted && !m_parent_wallet.IsCrypted()) {
         if (!batch.WritePQMasterSeed(seed)) {
             LogPrintf("CShieldedWallet: failed to persist PQ master seed fallback\n");
         } else {
