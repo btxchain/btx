@@ -356,9 +356,12 @@ Notes: [doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-not
 
 ## Get a node
 
-1. **Install** an appropriate shipping archive (last shipping tag recorded here: v0.34.15) from
-   [GitHub releases](https://github.com/btxchain/btx/releases) (Linux CPU,
-   Linux CUDA 12/13, macOS arm64 Metal), or [build from source](#building-from-source).
+1. **Install** the [v0.34.16 stable archive](https://github.com/btxchain/btx/releases/tag/v0.34.16)
+   or choose the [v0.34.17 prerelease](https://github.com/btxchain/btx/releases/tag/v0.34.17)
+   for testing. Both uploads offer Linux x86-64 CPU and CUDA 13 archives.
+   See [Download-and-Go](doc/btx-download-and-go.md#download-and-verify-the-archive)
+   for compatibility and checksum verification, or [build from source](#building-from-source)
+   if you need a different platform or the Qt desktop.
 2. **Fast-start** on a **fresh** chainstate with the highest compiled
    assumeutxo pin, height **228000** since 0.34.12
    ([assumeutxo-228000](https://github.com/btxchain/btx/releases/tag/assumeutxo-228000),
@@ -374,9 +377,7 @@ Notes: [doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-not
    [doc/modelnet/README.md](doc/modelnet/README.md). Host, seed, search,
    share, watch folder, doctor, **load**, and **generate**:
    [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
-   [doc/modelnet/generate.md](doc/modelnet/generate.md)
-   (this candidate **0.35.0rc1**, `CLIENT_VERSION_IS_RELEASE=true`; last shipping tag
-   **v0.34.15**). CLI wrapper:
+   [doc/modelnet/generate.md](doc/modelnet/generate.md). CLI wrapper:
    [contrib/modelnet/btx-model](contrib/modelnet/btx-model)
    (people: stderr hints; agents: `--json`). Optional cloud / follow / events
    / profile **fail closed** if the helper lacks the method — not a PASS:
@@ -1501,21 +1502,14 @@ Fast-start support in the current tree:
 - `regtest`: supported for default-consensus development and CI flows
 - `testnet`, `testnet4`, and `signet`: snapshot tooling exists, but there are no compiled assumeutxo entries yet, so fast-start bootstrap is not currently supported there
 
-The shortest operator path is:
+For the current stable and prerelease archives, follow the
+[manual download and checksum steps](doc/btx-download-and-go.md#download-and-verify-the-archive)
+and the [fresh-chainstate snapshot steps](doc/btx-download-and-go.md#1-fast-sync-with-assumeutxo).
+The signed [one-shot installer](doc/btx-download-and-go.md#signed-final-releases-btx-agent-setuppy)
+requires a release that publishes its manifest, detached checksum signature and
+the matching snapshot manifest for bootstrap.
 
-```bash
-export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
-
-python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx \
-  --release-tag v0.33.4.2 \
-  --preset service \
-  --datadir="$HOME/.btx"
-```
-
-That installer consumes the published `btx-release-manifest.json`, selects the
-correct platform archive, verifies the advertised assets, and can immediately
-chain into the assumeutxo bootstrap flow. Use `--preset miner` for a pruned,
+On a signed release with those assets, use `--preset miner` for a pruned,
 mining-oriented setup, or `--preset service` for an RPC-oriented node that is
 ready to issue `easy` / `normal` / `hard` / `idle` MatMul service challenges
 through `listmatmulservicechallengeprofiles`,
