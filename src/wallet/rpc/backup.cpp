@@ -1708,29 +1708,39 @@ static std::vector<unsigned char> ReadWalletPQMasterSeedForExport(CWallet& walle
 
     WalletBatch batch(wallet.GetDatabase());
 
-    std::optional<std::array<unsigned char, 32>> descriptor_seed;
-    for (const auto& spkm : wallet.GetAllScriptPubKeyMans()) {
-        const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
-        if (!desc_spkm) continue;
+    const auto descriptor_seed = [](const auto& spkms) {
+        std::optional<std::array<unsigned char, 32>> seed;
+        for (const auto* spkm : spkms) {
+            const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
+            if (!desc_spkm) continue;
 
-        std::string desc_str;
-        if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
+            std::string desc_str;
+            if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
 
-        FlatSigningProvider keys;
-        std::string error;
-        auto parsed_descs = Parse(desc_str, keys, error, /*require_checksum=*/true);
-        for (const auto& desc : parsed_descs) {
-            for (const auto& entry : desc->ExtractAllPQSeeds()) {
-                if (!descriptor_seed) {
-                    descriptor_seed = entry.second;
-                } else if (*descriptor_seed != entry.second) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet contains multiple PQ master seeds; exportwalletbundle only supports single-seed browser wallet exports");
+            FlatSigningProvider keys;
+            std::string error;
+            auto parsed_descs = Parse(desc_str, keys, error, /*require_checksum=*/true);
+            for (const auto& desc : parsed_descs) {
+                for (const auto& entry : desc->ExtractAllPQSeeds()) {
+                    if (!seed) {
+                        seed = entry.second;
+                    } else if (*seed != entry.second) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Wallet contains multiple PQ master seeds; exportwalletbundle only supports single-seed browser wallet exports");
+                    }
                 }
             }
         }
+        return seed;
+    };
+
+    // The wallet's own seed is the one behind its active P2MR pair. A non-blank importwalletbundle keeps the
+    // previous pair as inactive descriptors, which must not make the export refuse the wallet.
+    std::vector<const ScriptPubKeyMan*> active_p2mr;
+    for (const bool internal : {false, true}) {
+        if (const auto* spkm = wallet.GetScriptPubKeyMan(OutputType::P2MR, internal)) active_p2mr.push_back(spkm);
     }
-    if (descriptor_seed) {
-        return std::vector<unsigned char>(descriptor_seed->begin(), descriptor_seed->end());
+    if (const auto seed = descriptor_seed(active_p2mr)) {
+        return std::vector<unsigned char>(seed->begin(), seed->end());
     }
 
     uint256 iv;
@@ -1758,6 +1768,11 @@ static std::vector<unsigned char> ReadWalletPQMasterSeedForExport(CWallet& walle
             throw JSONRPCError(RPC_WALLET_ERROR, "Wallet PQ master seed has invalid length");
         }
         return seed;
+    }
+
+    // As before cee61a97: with no active P2MR pair and no stored record, any single descriptor seed.
+    if (const auto any_seed = descriptor_seed(wallet.GetAllScriptPubKeyMans())) {
+        return std::vector<unsigned char>(any_seed->begin(), any_seed->end());
     }
 
     throw JSONRPCError(RPC_WALLET_ERROR, "Wallet does not contain an exportable PQ master seed");
