@@ -67,8 +67,9 @@ class WalletBtxWalletTest(BitcoinTestFramework):
         assert_equal(exported_bundle["first_receive_address"], restored["first_receive_address"])
         assert_equal(len(exported_bundle["descriptors"]), 2)
         fingerprint = hashlib.sha256(bytes.fromhex(exported_bundle["pq_master_seed"])).hexdigest()[:8]
-        assert f"pqhd({fingerprint}/" in exported_bundle["descriptors"][0]
-        assert f"pqhd({fingerprint}/" in exported_bundle["descriptors"][1]
+        # Public descriptors carry the fingerprint as a BIP380 key origin.
+        assert f"pqhd([{fingerprint}/87h/1h/0h/0]/*)" in exported_bundle["descriptors"][0]
+        assert f"pqhd([{fingerprint}/87h/1h/0h/1]/*)" in exported_bundle["descriptors"][1]
         assert exported_bundle["pq_master_seed"] not in exported_bundle["descriptors"][0]
         assert exported_bundle["pq_master_seed"] not in exported_bundle["descriptors"][1]
 
