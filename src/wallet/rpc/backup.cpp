@@ -886,6 +886,12 @@ public:
         return m_path;
     }
 
+    //! Keep the directory: the work that needed cleanup on failure is complete.
+    void Release()
+    {
+        m_path.clear();
+    }
+
     void CleanupNow()
     {
         if (m_path.empty()) return;
@@ -1113,6 +1119,10 @@ static WalletBundleExportArtifacts ExportWalletBundleToDirectory(CWallet& wallet
     WalletBundleUnlockSession unlock_session(wallet, wallet_passphrase, need_unlock, rpc_name);
 
     EnsureFreshDirectory(bundle_dir);
+    // A failed export removes the directory it just created, so a retry to the
+    // same destination is not refused as "already exists" and no partial
+    // bundle is left behind.
+    ScopedCleanupDirectory cleanup_on_failure(bundle_dir);
     const fs::path key_dir = bundle_dir / "shielded_viewing_keys";
     EnsureFreshDirectory(key_dir);
 
@@ -1223,6 +1233,7 @@ static WalletBundleExportArtifacts ExportWalletBundleToDirectory(CWallet& wallet
                                             artifacts.integrity, artifacts.warnings));
     note_file(manifest_path);
 
+    cleanup_on_failure.Release();
     return artifacts;
 }
 
