@@ -58,7 +58,7 @@ class Host:
         self.startup_errors={}
         policies=self.journal.setting('asset_policies',{})
         for asset,policy in policies.items():
-            try:self.drivers[asset]=self.configure_asset(policy)
+            try:self.drivers[asset]=self.configure_asset(policy,saved=True)
             except SwapError as e:self.startup_errors[asset]=e.code
         # Discover an already-running same-network Bitcoin node without new ports,
         # installers, downloaded binaries, seeds, or assumptions about liquidity.
@@ -134,7 +134,7 @@ class Host:
         if rpc:
             driver=self._bitcoin(rpc)
             if driver.asset.id not in self.drivers:self.drivers[driver.asset.id]=driver
-    def configure_asset(self,policy):
+    def configure_asset(self,policy,*,saved=False):
         require(type(policy) is dict,'ASSET_POLICY','Asset policy must be an object')
         allowed={'asset','rpc_url','cookie_path','wallet','watch_wallet','fee_rate','confirmations','contract','runtime_hash','deployment'}
         require(set(policy)<=allowed and {'asset','rpc_url'}<=set(policy),'ASSET_POLICY','Unsupported or missing asset policy fields')
@@ -142,14 +142,22 @@ class Host:
         rpc=LocalRPC(policy['rpc_url'],cookie_path=policy.get('cookie_path'))
         if asset.family=='btc':return self._bitcoin(rpc,policy)
         require('watch_wallet' not in policy,'ASSET_POLICY','Watch wallet is Bitcoin-only')
-        require({'contract','runtime_hash','deployment'}<=set(policy),'ASSET_POLICY','EVM requires the deployed address, runtime hash, and creation manifest')
-        manifest=policy['deployment']
-        require(type(manifest) is dict and manifest.get('creation_hash')==INIT_HASH,'DEPLOYMENT_CREATION','Creation bytecode must be the pinned init code')
-        if manifest.get('kind')=='create2':
-            require(policy['contract'].lower()==CONTRACT,'DEPLOYMENT_ADDRESS','CREATE2 trades use the pinned contract address')
-        driver=EVMDriver(asset.id,rpc,self.journal,self.vault,policy['contract'],policy['runtime_hash'])
-        contract=policy['contract']
-        driver.new_trade_ready=lambda:verify_deployment(rpc,contract,manifest)
+        require({'contract','runtime_hash'}<=set(policy),'ASSET_POLICY','EVM requires the deployed address and exact runtime code hash')
+        contract=policy['contract'];manifest=policy.get('deployment')
+        def pinned():
+            require('deployment' in policy,'DEPLOYMENT_REQUIRED','Install an owner-verified deployment manifest before new EVM trades')
+            require(type(manifest) is dict and manifest.get('creation_hash')==INIT_HASH,'DEPLOYMENT_CREATION','Creation bytecode must be the pinned init code')
+            if manifest.get('kind')=='create2':
+                require(contract.lower()==CONTRACT,'DEPLOYMENT_ADDRESS','CREATE2 trades use the pinned contract address')
+        # A newly set policy must carry the pinned creation manifest. A saved policy loads without one: v0.34.16
+        # cannot store it, and its existing obligations still need this driver. New trades check it either way.
+        if not saved:
+            require('deployment' in policy,'ASSET_POLICY','EVM requires the deployed address, runtime hash, and creation manifest')
+            pinned()
+        driver=EVMDriver(asset.id,rpc,self.journal,self.vault,contract,policy['runtime_hash'])
+        def new_trade_ready():
+            pinned();return verify_deployment(rpc,contract,manifest)
+        driver.new_trade_ready=new_trade_ready
         return driver
     def wallet_info(self):
         loaded=False;warning=None
