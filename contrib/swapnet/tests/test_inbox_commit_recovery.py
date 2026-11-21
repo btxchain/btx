@@ -76,8 +76,8 @@ def crash_reopen(apps,sid,command,raw,cut):
   bob=reopened(old,ledgers,time,wire);bob.peer_connected(1)
   if cut=='admission':
    orig=bob.journal.seen
-   def seen(*args):
-    duplicate=orig(*args);assert not duplicate;os._exit(73)
+   def seen(*args,**kwargs):
+    duplicate=orig(*args,**kwargs);assert not duplicate;os._exit(73)
    bob.journal.seen=seen
   elif cut in {'grant','session'}:
    orig=bob.coordinator._save
