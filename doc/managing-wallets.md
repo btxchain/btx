@@ -43,7 +43,7 @@ Wallet encryption may prevent unauthorized access. However, this significantly i
 
 Wallet encryption may also not protect against more sophisticated attacks. An attacker can, for example, obtain the password by installing a keylogger on the user's machine.
 
-After encrypting the wallet or changing the passphrase, a new backup needs to be created immediately. The reason is that the keypool is flushed and a new HD seed is generated after encryption. Any bitcoins received by the new seed cannot be recovered from the previous backups.
+After encrypting the wallet or changing the passphrase, a new backup needs to be created immediately. The keypool is flushed. A legacy HD wallet replaces its HD seed, so coins received by that new seed cannot be recovered from the previous backups. An existing P2MR descriptor seed is kept.
 
 The wallet's private key may be encrypted with the following command:
 

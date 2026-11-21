@@ -69,6 +69,7 @@ class Host:
             except SwapError as e:self.startup_errors['bitcoin_auto']=e.code
         self.app=MarketApplication(self.store,self.network,self.identity,self.vault,self.drivers,self.send,
                              configure_asset=self.configure_asset,wallet_info=self.wallet_info,
+                             clear_startup_error=lambda asset:self.startup_errors.pop(asset,None),
                              export_recovery=lambda passphrase:export_bundle(self.journal,self.directory,passphrase,self.network),
                              client_version=self.config.get('client_version'),
                              startup_mode=self.config.get('market_startup_mode') or None,

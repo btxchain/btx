@@ -69,7 +69,10 @@ def test_asset_failed_save_preserves_live_then_retry_reopens(apps,failures):
             assert app.drivers[B] is old and app.coordinator._driver(B) is old
             assert settings(app)==before and reopen(app,'asset_policies')[B]==policy(1)
             assert budgets(app)==balance and len(wire)==sent
+    cleared=[]
+    app.clear_startup_error=cleared.append
     assert asset(app,policy(2))['ready']
+    assert cleared==[B]
     assert app.drivers[B] is not old and app.coordinator._driver(B).policy==policy(2)
     assert reopen(app,'asset_policies')[B]==policy(2) and budgets(app)==balance
     assert not ledgers[A].records and not ledgers[B].records

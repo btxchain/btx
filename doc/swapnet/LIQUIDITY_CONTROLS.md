@@ -24,6 +24,6 @@ New methods are added to the same authenticated `swapnet` RPC category. Every ca
 
 `setupswapbitcoin` without consent returns a plan. With consent, it creates only a private-keys-disabled descriptor watch wallet if necessary and binds the local policy. It does not install Bitcoin, sync a blockchain, create funded inventory, import a seed or send a transaction. Multiple possible funding wallets require selection.
 
-A missing EVM `deployment_txid` prevents new EVM trades, but not existing recovery. For an existing approved deployment, add its verified creation transaction to the local asset policy after active obligations finish or use the reviewed migration workflow. Never point the driver at a different contract while obligations are active.
+A missing EVM `deployment` manifest prevents new EVM trades, but not existing recovery. The manifest's `creation_hash` must be the pinned init code. For an existing approved deployment, add that manifest to the local asset policy after active obligations finish or use the reviewed migration workflow. Never point the driver at a different contract while obligations are active.
 
 Distinct provider identities and configured reference names are not proof of economically independent owners. Price protection is opt-in owner policy, not consensus or an official exchange rate.
