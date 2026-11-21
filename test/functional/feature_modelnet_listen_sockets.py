@@ -17,16 +17,24 @@ loopback-only -bind) must leave the helper with no non-loopback listener
 and must send no mapping request. -natpmp=0 must send no mapping request
 either. A positive control shows the probe does catch a request, so a
 silent probe means the helper stayed quiet, not that the probe is blind.
+
+btxd's own PCP/NAT-PMP mapper asks the machine's real default gateway, and
+BTX_MODEL_PCP_GATEWAY only redirects the helper. So btxd itself never runs
+here with -natpmp=1: the positive control starts btx-modeld on its own, with
+the arguments btxd gave it.
 """
 
+import errno
 import os
 import socket
+import subprocess
+import tempfile
 import time
 from pathlib import Path
 
 from test_framework.authproxy import JSONRPCException
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
-from test_framework.util import PortSeed, assert_equal, p2p_port
+from test_framework.util import MAX_NODES, PortSeed, assert_equal, p2p_port
 
 MATMUL_OFF_ARGS = [
     "-regtestmatmulbindingheight=2147483647",
@@ -37,6 +45,14 @@ MATMUL_OFF_ARGS = [
 
 # PCP and NAT-PMP both use this server port; the helper has no option to change it.
 GATEWAY_PORT = 5351
+# Ports the helper refuses to map before it sends anything
+# (kForbidden in src/modelnet/model_nat.cpp). Keep in sync.
+FORBIDDEN_MAP_PORTS = {
+    8332, 18332, 18443, 18444, 28332, 28333, 8333, 18333, 38332, 38333,
+    18766, 18445, 8334, 28334,
+    19334, 19335, 19443, 19444,
+    29334, 29335, 48332, 48333,
+}
 TCP_LISTEN = "0A"
 
 
@@ -130,13 +146,49 @@ class ModelNetListenSocketsTest(BitcoinTestFramework):
     def non_loopback_listeners(self):
         return [(a, p) for a, p in proc_tcp_listeners(self.helper_pid()) if not is_loopback(a)]
 
-    def probe_socket(self):
-        # A loopback address of our own, so parallel runs never share the gateway port.
-        addr = f"127.77.{PortSeed.n % 250}.1"
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind((addr, GATEWAY_PORT))
-        sock.setblocking(False)
-        return addr, sock
+    def helper_argv(self):
+        return Path(f"/proc/{self.helper_pid()}/cmdline").read_bytes().rstrip(b"\0").decode().split("\0")
+
+    @staticmethod
+    def mapping_port():
+        """A harness port the helper is willing to map."""
+        for n in range(2, MAX_NODES + 1):
+            if p2p_port(n) not in FORBIDDEN_MAP_PORTS:
+                return p2p_port(n)
+        raise AssertionError("every candidate port is on the helper's denylist")
+
+    @staticmethod
+    def probe_socket():
+        """Bind the gateway port on a loopback address of our own.
+
+        Start from an address derived from the port seed and step on if
+        another run holds it, so parallel runs never share the probe.
+        """
+        span = 200 * 256 * 254
+        for i in range(1000):
+            k = (PortSeed.n + i) % span
+            addr = f"127.{20 + k // (256 * 254)}.{k // 254 % 256}.{1 + k % 254}"
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.bind((addr, GATEWAY_PORT))
+            except OSError as e:
+                sock.close()
+                if e.errno == errno.EADDRINUSE:
+                    continue
+                raise
+            sock.setblocking(False)
+            return addr, sock
+        raise AssertionError("no free loopback address for the probe")
+
+    def wait_for_datagrams(self, sock, timeout=30):
+        datagrams = []
+
+        def caught():
+            datagrams.extend(self.drain(sock))
+            return len(datagrams) > 0
+
+        self.wait_until(caught, timeout=timeout)
+        return datagrams
 
     @staticmethod
     def drain(sock):
@@ -160,6 +212,8 @@ class ModelNetListenSocketsTest(BitcoinTestFramework):
         listeners = proc_tcp_listeners(self.helper_pid())
         assert ("127.0.0.1", port) in listeners, listeners
         assert_equal(self.non_loopback_listeners(), [])
+        # btxd's own arguments for the helper, reused for the standalone positive control.
+        helper_argv = self.helper_argv()
 
         # Without modelbind in the config the helper would default to
         # 0.0.0.0:29447, so each soft-set below is what closes the port.
@@ -179,33 +233,32 @@ class ModelNetListenSocketsTest(BitcoinTestFramework):
 
         gateway, probe = self.probe_socket()
         # BTX_MODEL_PCP_LAB lets the helper map a loopback bind, and
-        # BTX_MODEL_PCP_GATEWAY points any request at our probe, so nothing
-        # here ever reaches the machine's real gateway.
+        # BTX_MODEL_PCP_GATEWAY points its requests at our probe.
         lab_env = {"BTX_MODEL_PCP_LAB": "1", "BTX_MODEL_PCP_GATEWAY": gateway}
+        map_port = self.mapping_port()
         try:
-            self.log.info("Control: with -natpmp=1 the probe catches the helper's mapping request")
+            self.log.info("Control: a standalone helper with NAT-PMP on sends the probe a mapping request")
+            # The node keeps running: its own helper has NAT-PMP off and no lab gateway.
             self.drain(probe)
-            info = self.start_with([*args, "-natpmp=1", f"-modelbind=127.0.0.1:{p2p_port(2)}"], env=lab_env)
-            assert_equal(info["nat_status"], "unmapped")  # nobody answers the probe
-            time.sleep(1)
-            assert len(self.drain(probe)) >= 1, "probe saw no PCP/NAT-PMP request, so the silent cases below would prove nothing"
+            with tempfile.TemporaryDirectory(prefix="btxmd") as tmp:
+                argv = [a for a in helper_argv if a != "-modelnatpmp=0"
+                        and not a.startswith(("-modeldir=", "-modelrpcsocket=", "-modelbind="))]
+                argv += [f"-modeldir={tmp}/d", f"-modelrpcsocket={tmp}/s", f"-modelbind=127.0.0.1:{map_port}"]
+                helper = subprocess.Popen(argv, env={**os.environ, **lab_env},
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                try:
+                    caught = self.wait_for_datagrams(probe)
+                finally:
+                    helper.terminate()
+                    helper.wait(timeout=30)
+            assert len(caught) >= 1, "probe saw no PCP/NAT-PMP request, so the silent case below would prove nothing"
 
             self.log.info("-natpmp=0: no mapping request leaves the helper")
             self.drain(probe)
-            info = self.start_with([*args, "-natpmp=0", f"-modelbind=127.0.0.1:{p2p_port(2)}"], env=lab_env)
+            info = self.start_with([*args, "-natpmp=0", f"-modelbind=127.0.0.1:{map_port}"], env=lab_env)
             assert_equal(info["nat_status"], "disabled")
             time.sleep(2)
             assert_equal(self.drain(probe), [])
-
-            self.log.info("-listen=0 with -natpmp=1: the soft-set also stops the mapping request")
-            node.replace_in_config([("modelbind=0", "#modelbind=0")])
-            self.drain(probe)
-            info = self.start_with([*args, "-natpmp=1", "-listen=0"], env=lab_env)
-            assert_equal(info["nat_status"], "disabled")
-            time.sleep(2)
-            assert_equal(self.drain(probe), [])
-            assert_equal(self.non_loopback_listeners(), [])
-            node.replace_in_config([("#modelbind=0", "modelbind=0")])
         finally:
             probe.close()
 
