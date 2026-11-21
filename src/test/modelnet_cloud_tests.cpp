@@ -44,6 +44,11 @@
 #include <util/fs.h>
 #include <util/sock.h>
 
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
+
 #include <boost/test/unit_test.hpp>
 #include <test/util/environment.h>
 
@@ -61,6 +66,7 @@
 #include <fstream>
 #include <future>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -234,6 +240,87 @@ void CheckS3SocketCleanup(bool reject_tls)
         BOOST_CHECK(got == payload);
     }
     BOOST_CHECK(server.get());
+}
+
+// A loopback listener for one connection; every wait on it is bounded.
+std::unique_ptr<Sock> ListenLoopback(uint16_t& port, SOCKET* raw = nullptr)
+{
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (handle == INVALID_SOCKET) return nullptr;
+    if (raw) *raw = handle;
+    auto listener = std::make_unique<Sock>(handle);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t len = sizeof(addr);
+    if (listener->Bind(reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listener->Listen(1) != 0 ||
+        listener->GetSockName(reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+        return nullptr;
+    }
+    port = ntohs(addr.sin_port);
+    return listener;
+}
+
+std::unique_ptr<Sock> AcceptWithin(const Sock& listener, std::chrono::milliseconds wait)
+{
+    Sock::Event occurred{0};
+    if (!listener.Wait(wait, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return nullptr;
+    return listener.Accept(nullptr, nullptr);
+}
+
+// A self-signed certificate for 127.0.0.1, written as the only CA the client
+// trusts, so the client's TLS checks pass against a loopback server.
+struct LoopbackTlsIdentity {
+    EVP_PKEY* key{nullptr};
+    X509* cert{nullptr};
+    ~LoopbackTlsIdentity()
+    {
+        X509_free(cert);
+        EVP_PKEY_free(key);
+    }
+};
+
+bool MakeLoopbackTlsIdentity(LoopbackTlsIdentity& id, const fs::path& ca_file)
+{
+    id.key = EVP_EC_gen("P-256");
+    id.cert = X509_new();
+    if (!id.key || !id.cert) return false;
+    X509_set_version(id.cert, 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(id.cert), 1);
+    X509_gmtime_adj(X509_getm_notBefore(id.cert), -60);
+    X509_gmtime_adj(X509_getm_notAfter(id.cert), 3600);
+    X509_set_pubkey(id.cert, id.key);
+    X509_NAME* name = X509_get_subject_name(id.cert);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("127.0.0.1"), -1, -1, 0);
+    X509_set_issuer_name(id.cert, name);
+    X509V3_CTX v3;
+    X509V3_set_ctx_nodb(&v3);
+    X509V3_set_ctx(&v3, id.cert, id.cert, nullptr, nullptr, 0);
+    for (const auto& [nid, value] : std::vector<std::pair<int, const char*>>{
+             {NID_basic_constraints, "critical,CA:TRUE"}, {NID_subject_alt_name, "IP:127.0.0.1"}}) {
+        X509_EXTENSION* ext = X509V3_EXT_conf_nid(nullptr, &v3, nid, value);
+        if (!ext) return false;
+        X509_add_ext(id.cert, ext, -1);
+        X509_EXTENSION_free(ext);
+    }
+    if (X509_sign(id.cert, id.key, EVP_sha256()) == 0) return false;
+    BIO* out = BIO_new_file(fs::PathToString(ca_file).c_str(), "w");
+    if (!out) return false;
+    const bool ok = PEM_write_bio_X509(out, id.cert) == 1;
+    BIO_free(out);
+    return ok;
+}
+
+modelnet::S3ClientConfig LoopbackS3Config(const std::string& scheme, uint16_t port)
+{
+    modelnet::S3ClientConfig cfg;
+    cfg.endpoint = scheme + "://127.0.0.1:" + std::to_string(port);
+    cfg.bucket = "btx-models";
+    cfg.region = "auto";
+    cfg.use_fake = false;
+    cfg.allow_http_loopback = scheme == "http";
+    cfg.creds = {modelnet::CredentialRefKind::ENV, "BTX_TEST_S3_SOCKET_CREDS"};
+    return cfg;
 }
 
 } // namespace
@@ -634,6 +721,113 @@ BOOST_AUTO_TEST_CASE(cloud_12_budget_refuse_when_exhausted)
     BOOST_REQUIRE(store.GetSourceFile(art, 0, got, err));
     BOOST_CHECK(!store.GetSourceFile(art, 0, got, err));
     BOOST_CHECK(err.find("budget") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_12f_calendar_rollback_preserves_exhausted_allowance)
+{
+    const ScopedCloudCredentials credentials;
+    const fs::path creds = m_path_root / "cloud_12f_calendar_rollback_preserves_exhausted_allowance-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    // 2026-03-01 01:00 UTC; the preceding day is in the preceding month.
+    constexpr int64_t day = 1772326800;
+    constexpr int64_t next_month = 1775005200;
+    for (int quota = 0; quota < 4; ++quota) {
+        BOOST_TEST_CONTEXT("quota=" << quota) {
+            auto cfg = credentials.Config(creds);
+            const auto suffix = fs::PathFromString("cloud_12f_calendar_rollback_preserves_exhausted_allowance-" + std::to_string(quota));
+            cfg.budget_state_path = m_path_root / suffix / "budget.json";
+            cfg.s3.fake_store_dir = m_path_root / suffix / "origin";
+            if (quota == 0) cfg.budget_gets_per_day = 1;
+            if (quota == 1) cfg.budget_bytes_per_day = 6;
+            if (quota == 2) cfg.budget_gets_per_month = 1;
+            if (quota == 3) cfg.budget_bytes_per_month = 6;
+            auto attempt = [&](int64_t clock, bool expected, bool seed = false) {
+                // Reopen both the actual saved budget and the persistent fake origin.
+                modelnet::S3PieceStore store{cfg};
+                store.SetClockForTests(clock);
+                std::string err;
+                BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+                if (seed) {
+                    std::istringstream input{"daycap"};
+                    BOOST_REQUIRE_MESSAGE(store.PutObject("calendar", input, 6, err), err);
+                }
+                uint64_t size{0};
+                BOOST_REQUIRE_MESSAGE(store.HeadObject("calendar", size, err), err);
+                BOOST_REQUIRE_EQUAL(size, 6);
+                const auto before = store.FakeForTests()->GetCount();
+                std::vector<unsigned char> got;
+                const bool allowed = store.GetObject("calendar", 0, 0, got, err);
+                BOOST_CHECK_EQUAL(allowed, expected);
+                BOOST_CHECK_EQUAL(store.FakeForTests()->GetCount() - before, expected ? 1 : 0);
+                if (allowed) {
+                    BOOST_CHECK_EQUAL(std::string(got.begin(), got.end()), "daycap");
+                } else {
+                    BOOST_CHECK(err.find("budget") != std::string::npos);
+                }
+            };
+            attempt(day, true, true);
+            attempt(day, false);
+            attempt(day - 86400, false);
+            attempt(day, false);
+            attempt(day, false);
+            attempt(quota < 2 ? day + 86400 : next_month, true);
+            attempt(quota < 2 ? day + 86400 : next_month, false);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_12g_calendar_rollback_preserves_remaining_allowance)
+{
+    const ScopedCloudCredentials credentials;
+    const fs::path creds = m_path_root / "cloud_12g_calendar_rollback_preserves_remaining_allowance-creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    // 2026-03-01 01:00 UTC; the preceding day is in the preceding month.
+    constexpr int64_t day = 1772326800;
+    constexpr int64_t next_month = 1775005200;
+    for (int quota = 0; quota < 4; ++quota) {
+        BOOST_TEST_CONTEXT("quota=" << quota) {
+            auto cfg = credentials.Config(creds);
+            const auto suffix = fs::PathFromString("cloud_12g_calendar_rollback_preserves_remaining_allowance-" + std::to_string(quota));
+            cfg.budget_state_path = m_path_root / suffix / "budget.json";
+            cfg.s3.fake_store_dir = m_path_root / suffix / "origin";
+            if (quota == 0) cfg.budget_gets_per_day = 2;
+            if (quota == 1) cfg.budget_bytes_per_day = 12;
+            if (quota == 2) cfg.budget_gets_per_month = 2;
+            if (quota == 3) cfg.budget_bytes_per_month = 12;
+            auto attempt = [&](int64_t clock, bool expected, bool seed = false) {
+                // Reopen both the actual saved budget and the persistent fake origin.
+                modelnet::S3PieceStore store{cfg};
+                store.SetClockForTests(clock);
+                std::string err;
+                BOOST_REQUIRE_MESSAGE(store.Init(err), err);
+                if (seed) {
+                    std::istringstream input{"daycap"};
+                    BOOST_REQUIRE_MESSAGE(store.PutObject("calendar", input, 6, err), err);
+                }
+                uint64_t size{0};
+                BOOST_REQUIRE_MESSAGE(store.HeadObject("calendar", size, err), err);
+                BOOST_REQUIRE_EQUAL(size, 6);
+                const auto before = store.FakeForTests()->GetCount();
+                std::vector<unsigned char> got;
+                const bool allowed = store.GetObject("calendar", 0, 0, got, err);
+                BOOST_CHECK_EQUAL(allowed, expected);
+                BOOST_CHECK_EQUAL(store.FakeForTests()->GetCount() - before, expected ? 1 : 0);
+                if (allowed) {
+                    BOOST_CHECK_EQUAL(std::string(got.begin(), got.end()), "daycap");
+                } else {
+                    BOOST_CHECK(err.find("budget") != std::string::npos);
+                }
+            };
+            attempt(day, true, true);
+            attempt(day - 86400, true); // The remaining allowance stays usable.
+            attempt(day - 86400, false);
+            attempt(day, false);
+            const auto forward = quota < 2 ? day + 86400 : next_month;
+            attempt(forward, true);
+            attempt(forward, true);
+            attempt(forward, false);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(cloud_12b_calendar_day_budget_persists)
@@ -1225,6 +1419,9 @@ BOOST_AUTO_TEST_CASE(cloud_rpc_set_hostmodel_events_no_secrets)
     UniValue imported;
     BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, ireq, imported, code, err), err);
     BOOST_CHECK(imported["cloud_uploaded"].get_bool());
+    Digest48 uploaded_model;
+    BOOST_REQUIRE(Digest48::FromHex(imported["model_id"].get_str(), uploaded_model, err));
+    BOOST_CHECK(!cat.TransferActive(uploaded_model));
     BOOST_CHECK_EQUAL(imported["cloud_layout"].get_str(), "SOURCE_FILES");
     BOOST_REQUIRE(imported["cloud_files"].isArray());
     BOOST_REQUIRE_GE(imported["cloud_files"].size(), 1U);
@@ -1394,6 +1591,173 @@ BOOST_AUTO_TEST_CASE(cloud_https_refuses_redirect)
     BOOST_CHECK(!modelnet::S3HttpResponseForbiddenRedirect(206, {}));
 }
 
+// Without Content-Length the body ends at EOF. A body longer than the range
+// asked for was cut to the length of the range and returned as that range.
+BOOST_AUTO_TEST_CASE(cloud_unchunked_body_past_its_limit_is_refused)
+{
+    test::ScopedEnvVar credentials{"BTX_TEST_S3_SOCKET_CREDS", "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\n"};
+    for (const std::string body : {"0123456789", "0123"}) {
+        uint16_t port = 0;
+        auto listener = ListenLoopback(port);
+        BOOST_REQUIRE(listener);
+        auto server = std::async(std::launch::async, [&] {
+            auto peer = AcceptWithin(*listener, std::chrono::seconds{5});
+            if (!peer) return false;
+            std::string request;
+            char buf[4096];
+            while (request.find("\r\n\r\n") == std::string::npos) {
+                Sock::Event occurred{0};
+                if (!peer->Wait(std::chrono::seconds{5}, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return false;
+                const auto n = peer->Recv(buf, sizeof(buf), 0);
+                if (n <= 0) return false;
+                request.append(buf, n);
+            }
+            // The body comes after the head, as from a real server: the bytes
+            // that arrive with the head were already checked.
+            CThreadInterrupt interrupt;
+            for (const std::string part : {std::string{"HTTP/1.1 206 Partial Content\r\nConnection: close\r\n\r\n"}, body}) {
+                peer->SendComplete(Span<const unsigned char>{reinterpret_cast<const unsigned char*>(part.data()), part.size()},
+                                   std::chrono::seconds{5}, interrupt);
+                std::this_thread::sleep_for(std::chrono::milliseconds{300});
+            }
+            return true;
+        });
+        modelnet::S3Client client;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(client.Init(LoopbackS3Config("http", port), err), err);
+        std::vector<unsigned char> got;
+        const bool ok = client.RangeGet("loopback-object", 0, 4, got, err);
+        if (body.size() > 4) {
+            BOOST_CHECK(!ok);
+            BOOST_CHECK_EQUAL(err, "s3 https object too large for unchunked GET");
+        } else {
+            BOOST_CHECK_MESSAGE(ok, err);
+            BOOST_CHECK(got == std::vector<unsigned char>(body.begin(), body.end()));
+        }
+        BOOST_CHECK(server.get());
+    }
+}
+
+// The client's socket blocks with a 5 s timeout. A TLS read or write that
+// hits it comes back as SSL_ERROR_WANT_READ or SSL_ERROR_WANT_WRITE: the write
+// retried it forever while the server read nothing, and the read took it for
+// the end of a body without Content-Length.
+BOOST_AUTO_TEST_CASE(cloud_tls_read_and_write_end_at_the_socket_timeout)
+{
+    LoopbackTlsIdentity id;
+    const fs::path ca_file = m_path_root / "loopback-ca.pem";
+    BOOST_REQUIRE(MakeLoopbackTlsIdentity(id, ca_file));
+    const std::string ca_path = fs::PathToString(ca_file);
+    test::ScopedEnvVar ca{"SSL_CERT_FILE", ca_path.c_str()};
+    test::ScopedEnvVar credentials{"BTX_TEST_S3_SOCKET_CREDS", "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\n"};
+    std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> server_ctx{SSL_CTX_new(TLS_server_method()), SSL_CTX_free};
+    BOOST_REQUIRE(server_ctx);
+    BOOST_REQUIRE_EQUAL(SSL_CTX_use_certificate(server_ctx.get(), id.cert), 1);
+    BOOST_REQUIRE_EQUAL(SSL_CTX_use_PrivateKey(server_ctx.get(), id.key), 1);
+#ifndef WIN32
+    // Without the fix the stalled write only ends when the server closes.
+    struct IgnorePipe {
+        void (*previous)(int){std::signal(SIGPIPE, SIG_IGN)};
+        ~IgnorePipe() { std::signal(SIGPIPE, previous); }
+    } ignore_pipe;
+#endif
+    for (const bool write_stalls : {false, true}) {
+        uint16_t port = 0;
+        SOCKET listen_handle = INVALID_SOCKET;
+        auto listener = ListenLoopback(port, &listen_handle);
+        BOOST_REQUIRE(listener);
+        std::promise<void> client_returned;
+        std::shared_future<void> returned = client_returned.get_future().share();
+        // Release the server however this iteration ends.
+        struct Release {
+            std::promise<void>& p;
+            bool done{false};
+            void operator()()
+            {
+                if (!done) p.set_value();
+                done = true;
+            }
+            ~Release() { (*this)(); }
+        } release_server{client_returned};
+        auto server = std::async(std::launch::async, [&, returned] {
+            Sock::Event occurred{0};
+            if (!listener->Wait(std::chrono::seconds{5}, Sock::RECV, &occurred) || !(occurred & Sock::RECV)) return false;
+            const SOCKET fd = ::accept(listen_handle, nullptr, nullptr);
+            if (fd == INVALID_SOCKET) return false;
+            Sock peer{fd};
+            std::unique_ptr<SSL, decltype(&SSL_free)> ssl{SSL_new(server_ctx.get()), SSL_free};
+            if (!ssl || SSL_set_fd(ssl.get(), static_cast<int>(fd)) != 1 || SSL_accept(ssl.get()) != 1) return false;
+            if (!write_stalls) {
+                std::string request;
+                char buf[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const int n = SSL_read(ssl.get(), buf, sizeof(buf));
+                    if (n <= 0) return false;
+                    request.append(buf, n);
+                }
+                const std::string head = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nabc";
+                if (SSL_write(ssl.get(), head.data(), static_cast<int>(head.size())) <= 0) return false;
+            }
+            // Neither read on nor close until the client has returned.
+            return returned.wait_for(std::chrono::seconds{90}) == std::future_status::ready;
+        });
+        modelnet::S3Client client;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(client.Init(LoopbackS3Config("https", port), err), err);
+        const auto start = std::chrono::steady_clock::now();
+        auto call = std::async(std::launch::async, [&] {
+            if (write_stalls) {
+                // More than the socket buffers of both ends hold.
+                const std::vector<unsigned char> body(size_t{64} << 20, 'x');
+                return client.Put("loopback-object", body, err);
+            }
+            std::vector<unsigned char> got;
+            return client.Get("loopback-object", got, err);
+        });
+        // A few socket timeouts at most; without the fix the write never ends.
+        BOOST_CHECK_MESSAGE(call.wait_for(std::chrono::seconds{60}) == std::future_status::ready,
+                            (write_stalls ? "write" : "read") << " still waiting on a stalled server");
+        BOOST_TEST_MESSAGE((write_stalls ? "write" : "read") << " returned after "
+                           << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() << " ms");
+        release_server();
+        BOOST_CHECK(!call.get());
+#ifndef WIN32
+        BOOST_CHECK_EQUAL(err, write_stalls ? "s3 https write timed out" : "s3 https read timed out");
+#else
+        // Winsock reports the timeout as an error of its own, which OpenSSL
+        // passes on as SSL_ERROR_SYSCALL: the call fails, under another name.
+        BOOST_CHECK(!err.empty());
+#endif
+        BOOST_CHECK(server.get());
+    }
+}
+
+// The cloud client and the source registry set a socket timeout as a timeval.
+// Winsock reads SO_RCVTIMEO and SO_SNDTIMEO as a DWORD of milliseconds, so on
+// Windows 5 s became 5 ms (and the registry's 15 s became 15 ms): a remote
+// endpoint timed out on its first reply.
+BOOST_AUTO_TEST_CASE(cloud_socket_timeouts_read_back_as_set)
+{
+    const SOCKET handle = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    BOOST_REQUIRE(handle != INVALID_SOCKET);
+    Sock sock{handle};
+    modelnet::SetSocketTimeoutsMs(static_cast<int>(handle), 5000);
+    for (const int option : {SO_RCVTIMEO, SO_SNDTIMEO}) {
+#ifdef WIN32
+        DWORD ms = 0;
+        int length = sizeof(ms);
+        BOOST_REQUIRE_EQUAL(::getsockopt(handle, SOL_SOCKET, option, reinterpret_cast<char*>(&ms), &length), 0);
+        BOOST_CHECK_EQUAL(ms, 5000U);
+#else
+        timeval tv{};
+        socklen_t length = sizeof(tv);
+        BOOST_REQUIRE_EQUAL(::getsockopt(handle, SOL_SOCKET, option, &tv, &length), 0);
+        BOOST_CHECK_EQUAL(tv.tv_sec, 5);
+        BOOST_CHECK_EQUAL(tv.tv_usec, 0);
+#endif
+    }
+}
+
 BOOST_AUTO_TEST_CASE(cloud_https_not_stub_error)
 {
     const ScopedCloudCredentials credentials;
@@ -1449,6 +1813,269 @@ BOOST_AUTO_TEST_CASE(cloud_real_http_socket_cleanup)
 BOOST_AUTO_TEST_CASE(cloud_tls_handshake_socket_cleanup)
 {
     CheckS3SocketCleanup(true);
+}
+
+BOOST_AUTO_TEST_CASE(s3_multipart_completion_requires_success_envelope)
+{
+    using modelnet::S3MultipartCompletionSucceeded;
+    const char* valid[] = {
+        "<CompleteMultipartUploadResult><ETag>ok</ETag></CompleteMultipartUploadResult>",
+        " \r\n\t<?xml version=\"1.0\"?>\n<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><ETag>ok</ETag></CompleteMultipartUploadResult>\n",
+        "<s3:CompleteMultipartUploadResult xmlns:s3=\"http://s3.amazonaws.com/doc/2006-03-01/\"><s3:ETag>ok</s3:ETag></s3:CompleteMultipartUploadResult>",
+        "\xef\xbb\xbf<?xml version=\"1.0\"?><!-- progress --><CompleteMultipartUploadResult><ETag>ok</ETag></CompleteMultipartUploadResult><!-- done -->",
+    };
+    for (const auto* xml : valid) BOOST_CHECK_MESSAGE(S3MultipartCompletionSucceeded(xml), xml);
+    const char* refused[] = {
+        "<Error><Code>InternalError</Code></Error>",
+        "<s3:Error xmlns:s3=\"http://s3.amazonaws.com/doc/2006-03-01/\"><s3:Code>InternalError</s3:Code></s3:Error>",
+        "<Error><Message><![CDATA[<CompleteMultipartUploadResult></CompleteMultipartUploadResult>]]></Message></Error>",
+        "", " \r\n", "<Unknown></Unknown>", "<CompleteMultipartUploadResult>",
+        "<CompleteMultipartUploadResult/>", "<CompleteMultipartUploadResultOther></CompleteMultipartUploadResultOther>",
+        "<CompleteMultipartUploadResult></other:CompleteMultipartUploadResult>",
+        "<CompleteMultipartUploadResult></CompleteMultipartUploadResultExtra>",
+        "<CompleteMultipartUploadResult></CompleteMultipartUploadResult><Error></Error>",
+        "<!-- incomplete", "<?xml version=\"1.0\"",
+    };
+    for (const auto* xml : refused) BOOST_CHECK_MESSAGE(!S3MultipartCompletionSucceeded(xml), xml);
+}
+
+
+BOOST_AUTO_TEST_CASE(cloud_rpc_detach_removal_failure_preserves_origin_and_retry)
+{
+    const ScopedCloudCredentials credentials;
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "cloud-detach-failure";
+    fs::create_directories(dir);
+    const fs::path creds = dir / "creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    ModelCatalog cat{dir, 8 << 20};
+    auto call = [&](const char* method, const UniValue& options, UniValue& result,
+                    std::string& code, std::string& err) {
+        UniValue params(UniValue::VARR), req(UniValue::VOBJ);
+        params.push_back(options);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        code.clear();
+        err.clear();
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    UniValue cfg(UniValue::VOBJ), result;
+    cfg.pushKV("endpoint", "https://detach-fixture.invalid");
+    cfg.pushKV("bucket", "models");
+    cfg.pushKV("provider", "GENERIC_S3");
+    cfg.pushKV("credential_ref", credentials.RpcRef(creds));
+    cfg.pushKV("use_fake", true);
+    cfg.pushKV("idempotency_key", "detach-failure-config");
+    std::string code, err;
+    BOOST_REQUIRE_MESSAGE(call("setcloudstorage", cfg, result, code, err), err);
+    BOOST_REQUIRE(result["applied"].get_bool());
+    const fs::path cloud = dir / "cloud.json", saved = dir / "cloud-fixture-backup.json";
+    // Real portable remove failure: an occupied directory cannot be removed.
+    // Preserve the original file and restore it even if a later assertion throws.
+    fs::rename(cloud, saved);
+    struct RestoreConfig {
+        fs::path cloud, saved;
+        void Restore() {
+            std::error_code ec;
+            if (!std::filesystem::exists(saved, ec)) return;
+            fs::remove(cloud / "fixture-blocker", ec);
+            fs::remove(cloud, ec);
+            fs::rename(saved, cloud, ec);
+        }
+        ~RestoreConfig() { Restore(); }
+    } restore{cloud, saved};
+    BOOST_REQUIRE(fs::create_directory(cloud));
+    { std::ofstream out(cloud / "fixture-blocker"); out << "keep"; BOOST_REQUIRE(out.good()); }
+    UniValue detach(UniValue::VOBJ);
+    detach.pushKV("mode", "DETACH");
+    BOOST_CHECK(!call("removemodelstorage", detach, result, code, err));
+    BOOST_CHECK_EQUAL(code, "IO_ERROR");
+    BOOST_CHECK(!err.empty());
+    BOOST_CHECK(fs::exists(saved));
+    // A refused detach must not clear the current origin. The obstacle remains
+    // while this status is queried, so reload cannot mask a cleared live handle.
+    UniValue empty(UniValue::VOBJ);
+    BOOST_REQUIRE_MESSAGE(call("getcloudstorageinfo", empty, result, code, err), err);
+    BOOST_CHECK(result["configured"].get_bool());
+    BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    restore.Restore();
+    BOOST_REQUIRE(fs::is_regular_file(cloud));
+    BOOST_REQUIRE_MESSAGE(call("removemodelstorage", detach, result, code, err), err);
+    BOOST_CHECK(result["detached"].get_bool());
+    BOOST_CHECK(!result["remote_objects_deleted"].get_bool());
+    BOOST_CHECK(!fs::exists(cloud));
+    BOOST_REQUIRE_MESSAGE(call("getcloudstorageinfo", empty, result, code, err), err);
+    BOOST_CHECK(!result["configured"].get_bool());
+    BOOST_REQUIRE_MESSAGE(call("removemodelstorage", detach, result, code, err), err);
+    BOOST_CHECK(result["detached"].get_bool());
+    BOOST_CHECK(!result["remote_objects_deleted"].get_bool());
+}
+
+namespace {
+std::vector<unsigned char> UploadModelBytes(size_t size)
+{
+    const size_t data_bytes = size - 128;
+    const std::string header = "{\"w\":{\"dtype\":\"U8\",\"shape\":[" + std::to_string(data_bytes) +
+        "],\"data_offsets\":[0," + std::to_string(data_bytes) + "]}}";
+    std::vector<unsigned char> bytes(size, 'A');
+    WriteLE64(bytes.data(), 120);
+    std::fill(bytes.begin() + 8, bytes.begin() + 128, ' ');
+    std::copy(header.begin(), header.end(), bytes.begin() + 8);
+    return bytes;
+}
+void WriteUploadBytes(const fs::path& path, const std::vector<unsigned char>& bytes)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    BOOST_REQUIRE(out.good());
+}
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_upload_ignores_external_source_changes)
+{
+    using namespace modelnet;
+    const ScopedCloudCredentials credentials;
+    const fs::path dir = m_path_root / "verified-upload";
+    fs::create_directories(dir);
+    const fs::path creds = dir / "creds";
+    WriteCreds(creds, kAccess, kSecret, true);
+    const auto original = UploadModelBytes(2 * PIECE_SIZE + 137);
+    const fs::path source = dir / "model.safetensors";
+    WriteUploadBytes(source, original);
+    ModelCatalog cat{dir / "catalog", 32 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(source), false, entry, err), err);
+    auto changed = original;
+    changed.back() ^= 1;
+    WriteUploadBytes(source, changed);
+    for (const auto layout : {CloudObjectLayout::SOURCE_FILES, CloudObjectLayout::PIECE_OBJECTS}) {
+        auto cfg = credentials.Config(creds, "https://s3.example.invalid");
+        cfg.provider = CloudProvider::GENERIC_S3;
+        cfg.layout = layout;
+        S3PieceStore cloud{cfg};
+        BOOST_REQUIRE_MESSAGE(cloud.Init(err), err);
+        CatalogFileStream input{cat, entry.artifact_id, 0, entry.core.files[0]};
+        BOOST_REQUIRE(input.Error().empty());
+        if (layout == CloudObjectLayout::SOURCE_FILES) {
+            BOOST_REQUIRE_MESSAGE(cloud.PutSourceFile(entry.artifact_id, 0, input, original.size(), 3, err), err);
+        } else {
+            BOOST_REQUIRE_MESSAGE(cloud.PutPieceObjects(entry.artifact_id, 0, input, original.size(), err), err);
+        }
+        BOOST_CHECK(input.Error().empty());
+        BOOST_CHECK_LE(input.MaxBufferBytes(), PIECE_SIZE);
+        BOOST_CHECK_LE(cloud.LastPutMaxBufferBytes(), kCloudStreamChunkBytes);
+        std::vector<unsigned char> got;
+        if (layout == CloudObjectLayout::SOURCE_FILES) {
+            BOOST_REQUIRE_MESSAGE(cloud.GetSourceFile(entry.artifact_id, 0, got, err), err);
+        } else {
+            for (uint32_t i = 0; i < 3; ++i) {
+                std::vector<unsigned char> piece;
+                BOOST_REQUIRE_MESSAGE(cloud.GetPieceObject(entry.artifact_id, 0, i, piece, err), err);
+                got.insert(got.end(), piece.begin(), piece.end());
+            }
+        }
+        BOOST_CHECK(got == original);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_reader_withholds_invalid_last_piece_and_retries)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "verified-read-errors";
+    fs::create_directories(dir);
+    const auto bytes = UploadModelBytes(PIECE_SIZE + 137);
+    const fs::path source = dir / "model.safetensors";
+    WriteUploadBytes(source, bytes);
+    ModelCatalog cat{dir / "catalog", 16 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(source), false, entry, err), err);
+    auto wrong = entry.core.files[0];
+    wrong.sha384.data[0] ^= 1;
+    CatalogFileStream invalid{cat, entry.artifact_id, 0, wrong};
+    std::vector<char> out(bytes.size());
+    invalid.read(out.data(), out.size());
+    BOOST_CHECK_EQUAL(invalid.gcount(), PIECE_SIZE);
+    BOOST_CHECK_EQUAL(invalid.Error(), "upload file sha384 mismatch");
+    for (const bool wrong_root : {false, true}) {
+        wrong = entry.core.files[0];
+        if (wrong_root) wrong.pieces_root.data[0] ^= 1;
+        else ++wrong.size;
+        CatalogFileStream mismatch{cat, entry.artifact_id, 0, wrong};
+        char first;
+        mismatch.read(&first, 1);
+        BOOST_CHECK_EQUAL(mismatch.gcount(), 0);
+        BOOST_CHECK(!mismatch.Error().empty());
+    }
+    BOOST_REQUIRE(cat.Store().DeletePiece(entry.artifact_id, 0, 1, err));
+    CatalogFileStream missing{cat, entry.artifact_id, 0, entry.core.files[0]};
+    missing.read(out.data(), out.size());
+    BOOST_CHECK_EQUAL(missing.gcount(), PIECE_SIZE);
+    BOOST_CHECK(!missing.Error().empty());
+    const Span<const unsigned char> last{bytes.data() + PIECE_SIZE, bytes.size() - PIECE_SIZE};
+    BOOST_REQUIRE_MESSAGE(cat.Store().PutVerifiedPiece(entry.artifact_id, 0, 1, last, ChunkLeaf(1, last), err), err);
+    CatalogFileStream retry{cat, entry.artifact_id, 0, entry.core.files[0]};
+    retry.read(out.data(), out.size());
+    BOOST_CHECK_EQUAL(retry.gcount(), bytes.size());
+    BOOST_CHECK(retry.Error().empty());
+    BOOST_CHECK(std::equal(bytes.begin(), bytes.end(), reinterpret_cast<unsigned char*>(out.data())));
+    BOOST_CHECK_LE(retry.MaxBufferBytes(), PIECE_SIZE);
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_reader_exact_lengths_and_corrupt_piece)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "verified-lengths";
+    fs::create_directories(dir);
+    for (const size_t size : {size_t{4096}, size_t{PIECE_SIZE}, size_t{PIECE_SIZE + 137}}) {
+        const auto bytes = UploadModelBytes(size);
+        const fs::path source = dir / "model.safetensors";
+        WriteUploadBytes(source, bytes);
+        ModelCatalog cat{dir / fs::PathFromString(std::to_string(size)), 16 << 20};
+        CatalogEntry entry;
+        std::string err;
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(source), false, entry, err), err);
+        CatalogFileStream good{cat, entry.artifact_id, 0, entry.core.files[0]};
+        std::vector<char> got(size);
+        good.read(got.data(), got.size());
+        BOOST_CHECK_EQUAL(good.gcount(), size);
+        BOOST_CHECK(good.Error().empty()); // No extra EOF read is needed.
+        BOOST_CHECK(std::equal(bytes.begin(), bytes.end(), reinterpret_cast<unsigned char*>(got.data())));
+        // Only this disposable catalog's payload is changed for the integrity control.
+        auto corrupt = bytes;
+        corrupt.resize(std::min<size_t>(size, PIECE_SIZE));
+        corrupt[0] ^= 1;
+        const fs::path piece = cat.Store().Root() / "artifacts" / fs::PathFromString(entry.artifact_id.Hex()) / "0" / "0.piece";
+        WriteUploadBytes(piece, corrupt);
+        CatalogFileStream bad{cat, entry.artifact_id, 0, entry.core.files[0]};
+        char first;
+        bad.read(&first, 1);
+        BOOST_CHECK_EQUAL(bad.gcount(), 0);
+        BOOST_CHECK(!bad.Error().empty());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(cloud_verified_reader_empty_identity)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "verified-empty";
+    ModelCatalog cat{dir, 8 << 20};
+    CoreFile empty;
+    empty.pieces_root = EmptyFileRoot();
+    CSHA384().Finalize(empty.sha384.data.data());
+    const auto artifact = ArtifactFill(0x73);
+    CatalogFileStream good{cat, artifact, 0, empty};
+    BOOST_CHECK(good.Error().empty());
+    BOOST_CHECK_EQUAL(good.peek(), std::char_traits<char>::eof());
+    auto wrong_root = empty;
+    wrong_root.pieces_root.data[0] ^= 1;
+    CatalogFileStream bad_root{cat, artifact, 0, wrong_root};
+    BOOST_CHECK(!bad_root.Error().empty());
+    empty.sha384.data[0] ^= 1;
+    CatalogFileStream bad{cat, artifact, 0, empty};
+    BOOST_CHECK(!bad.Error().empty());
+
 }
 
 BOOST_AUTO_TEST_SUITE_END()

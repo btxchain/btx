@@ -19,6 +19,8 @@
 
 #include <atomic>
 #include <fstream>
+#include <functional>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -779,6 +781,113 @@ BOOST_AUTO_TEST_CASE(peer_and_restricted_feeds_omit_local_wallet_observation)
     }
 }
 
+// searchmodels leaves out a model the operator hid and every model of a
+// publisher the operator muted. The feed, local and on the ext/feed peer route,
+// listed both.
+BOOST_AUTO_TEST_CASE(feed_leaves_out_hidden_models_and_muted_publishers)
+{
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "feed-hide-mute";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+    const std::string uri = hosted["uri"].get_str();
+    const std::string model_id = hosted["model_id"].get_str();
+    UniValue rec_params(UniValue::VARR);
+    rec_params.push_back(model_id);
+    const std::string publisher = HelperDispatch(cat, "getmodelsearchrecord", rec_params)["publisher_identity"].get_str();
+    BOOST_REQUIRE(!publisher.empty());
+
+    UniValue feed_query(UniValue::VOBJ);
+    feed_query.pushKV("scope", "LOCAL");
+    feed_query.pushKV("limit", 50);
+    UniValue feed_args(UniValue::VARR);
+    feed_args.push_back(feed_query);
+    const auto lists_model = [&] {
+        const bool local = HelperDispatch(cat, "getmodelfeed", feed_args).write().find(model_id) != std::string::npos;
+        NativeRequest req;
+        req.method = "POST";
+        req.path = "/btx-model/2/ext/feed";
+        req.body = R"({"limit":50})";
+        NativeResponse resp;
+        BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+        BOOST_REQUIRE_EQUAL(resp.status, 200);
+        const bool peer = resp.body.find(model_id) != std::string::npos;
+        BOOST_CHECK_EQUAL(local, peer);
+        return local && peer;
+    };
+    BOOST_REQUIRE(lists_model());
+
+    UniValue hide(UniValue::VARR);
+    hide.push_back(uri);
+    HelperDispatch(cat, "hidesearchmodel", hide);
+    BOOST_CHECK_MESSAGE(!lists_model(), "the feed lists a hidden model");
+    HelperDispatch(cat, "unhidesearchmodel", hide);
+    BOOST_CHECK(lists_model());
+
+    UniValue mute(UniValue::VARR);
+    mute.push_back(publisher);
+    HelperDispatch(cat, "mutesearchpublisher", mute);
+    BOOST_CHECK_MESSAGE(!lists_model(), "the feed lists a muted publisher's model");
+    HelperDispatch(cat, "unmutesearchpublisher", mute);
+    BOOST_CHECK(lists_model());
+}
+
+// removemodelsearchrecord replaces a signed record with a signed tombstone,
+// which searchmodels skips. The feed kept the record it had noted: getmodelfeed
+// listed the model and ext/feed served the record to peers for the feed's
+// whole lifetime.
+BOOST_AUTO_TEST_CASE(feed_leaves_out_a_removed_search_record)
+{
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "feed-removed";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const std::string model_id = HelperDispatch(cat, "hostmodel", host_params)["model_id"].get_str();
+
+    UniValue feed_query(UniValue::VOBJ);
+    feed_query.pushKV("scope", "LOCAL");
+    feed_query.pushKV("limit", 50);
+    UniValue feed_args(UniValue::VARR);
+    feed_args.push_back(feed_query);
+    const auto lists_model = [&] {
+        const bool local = HelperDispatch(cat, "getmodelfeed", feed_args).write().find(model_id) != std::string::npos;
+        NativeRequest req;
+        req.method = "POST";
+        req.path = "/btx-model/2/ext/feed";
+        req.body = R"({"limit":50})";
+        NativeResponse resp;
+        BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+        BOOST_REQUIRE_EQUAL(resp.status, 200);
+        const bool peer = resp.body.find(model_id) != std::string::npos;
+        BOOST_CHECK_EQUAL(local, peer);
+        return local && peer;
+    };
+    BOOST_REQUIRE(lists_model());
+
+    UniValue rec_params(UniValue::VARR);
+    rec_params.push_back(model_id);
+    const UniValue removed = HelperDispatch(cat, "removemodelsearchrecord", rec_params);
+    BOOST_REQUIRE(removed["tombstone"].get_bool());
+    BOOST_CHECK_MESSAGE(!lists_model(), "the feed lists a model whose search record was removed");
+}
+
 BOOST_AUTO_TEST_CASE(recent_releases_local_scope_applies_query)
 {
     // The NETWORK scope passes limit and filters to getmodelfeed; the LOCAL
@@ -831,6 +940,89 @@ BOOST_AUTO_TEST_CASE(recent_releases_local_scope_applies_query)
     UniValue fp(UniValue::VARR);
     fp.push_back(all);
     BOOST_CHECK_EQUAL(HelperDispatch(cat, "getrecentreleases", fp)["results"].size(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(peer_and_restricted_views_omit_local_funding_outpoints)
+{
+    // preparemodelfunding and submitmodelfunding record the HTLC output script
+    // and the funding outpoint of a local wallet in the release campaign. The
+    // owner sees them. The peer route ext/feed and the restricted view btxd uses
+    // for a wallet-restricted RPC user must not show them, while they still
+    // list the release.
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "funding-outpoints";
+    const fs::path model = root / "toy.safetensors.dir";
+    fs::create_directories(model);
+    const auto st = TinySafeTensors();
+    {
+        std::ofstream out(model / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    ModelCatalog cat{root, 8 << 20};
+    UniValue host_params(UniValue::VARR);
+    host_params.push_back(fs::PathToString(model));
+    const UniValue hosted = HelperDispatch(cat, "hostmodel", host_params);
+    BOOST_REQUIRE(hosted.exists("uri"));
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("uri", hosted["uri"].get_str());
+    body.pushKV("secret32_hex", std::string(64, 'c'));
+    body.pushKV("refund_height", 100000);
+    body.pushKV("target_atoms", 5'000'000);
+    body.pushKV("display_name", "Funding Outpoints");
+    UniValue create_params(UniValue::VARR);
+    create_params.push_back(body);
+    const UniValue rel = HelperDispatch(cat, "createmodelrelease", create_params);
+    const std::string rid = rel["release_id"].get_str();
+
+    const std::string script{"5120" + std::string(64, 'e')};
+    const std::string txid{std::string(60, 'd') + "f00d"};
+    UniValue so(UniValue::VOBJ);
+    so.pushKV("release_id", rid);
+    so.pushKV("output_script", script);
+    UniValue so_params(UniValue::VARR);
+    so_params.push_back(so);
+    BOOST_REQUIRE(HelperDispatch(cat, "setreleaseoutputscript", so_params)["accepted"].isTrue());
+    UniValue fo(UniValue::VOBJ);
+    fo.pushKV("release_id", rid);
+    fo.pushKV("txid", txid);
+    fo.pushKV("vout", 1);
+    fo.pushKV("output_script", script);
+    fo.pushKV("amount_atoms", 2'000'000);
+    UniValue fo_params(UniValue::VARR);
+    fo_params.push_back(fo);
+    BOOST_REQUIRE(HelperDispatch(cat, "recordmodelfundingoutpoint", fo_params)["accepted"].isTrue());
+
+    UniValue rid_params(UniValue::VARR);
+    rid_params.push_back(rid);
+    const std::string owner = HelperDispatch(cat, "getmodelrelease", rid_params).write();
+    BOOST_CHECK(owner.find(txid) != std::string::npos);
+    BOOST_CHECK(owner.find(script) != std::string::npos);
+
+    const UniValue none(UniValue::VARR);
+    const std::vector<std::pair<std::string, UniValue>> reads{
+        {"getmodelrelease", rid_params}, {"getmodelreleaseeconomics", rid_params}, {"getfundablemodels", none},
+        {"getmodelfeed", none}, {"getreleasefeed", none}, {"getrecentreleases", none}, {"searchmodels", none},
+        {"getmodeldirectory", none}, {"browsemodels", none}, {"getnewmodels", none}};
+    for (const auto& [method, params] : reads) {
+        UniValue scoped(UniValue::VARR);
+        scoped.push_back(method);
+        scoped.push_back(params);
+        const std::string restricted = HelperDispatch(cat, "getrestrictedmodelview", scoped).write();
+        BOOST_CHECK_MESSAGE(restricted.find(rid) != std::string::npos, method);
+        BOOST_CHECK_MESSAGE(restricted.find(txid) == std::string::npos, method);
+        BOOST_CHECK_MESSAGE(restricted.find(script) == std::string::npos, method);
+    }
+
+    NativeRequest req;
+    req.method = "POST";
+    req.path = "/btx-model/2/ext/feed";
+    req.body = R"({"limit":50})";
+    NativeResponse resp;
+    BOOST_REQUIRE(HandleNativeRequest(cat, req, resp));
+    BOOST_REQUIRE_EQUAL(resp.status, 200);
+    BOOST_CHECK(resp.body.find(rid) != std::string::npos);
+    BOOST_CHECK(resp.body.find(txid) == std::string::npos);
+    BOOST_CHECK(resp.body.find(script) == std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(verifycomputereceipt_does_not_persist)
@@ -1021,6 +1213,99 @@ BOOST_AUTO_TEST_CASE(malformed_search_query_is_refused)
     refused("getmodelfeed", R"({"filters":{"family":7}})");
     // The same input is refused by browsemodels already (with its own code).
     refused("browsemodels", R"({"sort":"nearly-funded"})", "INVALID_PARAMS");
+}
+
+// Release-list wrappers must apply the same local display policy as the feed.
+// Direct campaign lookup remains available for an operator inspecting a hidden item.
+BOOST_AUTO_TEST_CASE(release_lists_respect_local_hide_without_changing_campaigns)
+{
+    using namespace modelnet;
+    const fs::path root = m_args.GetDataDirBase() / "release-list-visibility";
+    ModelCatalog cat{root, 64 << 20};
+    std::vector<std::string> ids, uris, releases;
+    for (int i = 0; i < 4; ++i) {
+        const fs::path file = root / fs::PathFromString("model" + std::to_string(i) + ".safetensors");
+        fs::create_directories(root);
+        const std::string header = "{\"__metadata__\":{\"case\":\"" + std::to_string(i) + "\"}}";
+        std::vector<unsigned char> bytes(8 + header.size());
+        WriteLE64(bytes.data(), header.size());
+        std::copy(header.begin(), header.end(), bytes.begin() + 8);
+        { std::ofstream out(file, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
+        UniValue host(UniValue::VARR);
+        host.push_back(fs::PathToString(file));
+        const auto model = HelperDispatch(cat, "hostmodel", host);
+        ids.push_back(model["model_id"].get_str());
+        uris.push_back(model["uri"].get_str());
+        const std::string secret(64, static_cast<char>('a' + i));
+        UniValue body(UniValue::VOBJ);
+        body.pushKV("uri", uris.back());
+        body.pushKV("secret32_hex", secret);
+        body.pushKV("refund_height", 100000);
+        body.pushKV("target_atoms", 5'000'000);
+        body.pushKV("display_name", "Visibility " + std::to_string(i));
+        UniValue create(UniValue::VARR);
+        create.push_back(body);
+        releases.push_back(HelperDispatch(cat, "createmodelrelease", create)["release_id"].get_str());
+        if (i >= 2) {
+            UniValue claim(UniValue::VARR);
+            claim.push_back(releases.back());
+            claim.push_back(secret);
+            BOOST_REQUIRE(HelperDispatch(cat, "claimmodelrelease", claim)["secret_disclosed"].get_bool());
+        }
+    }
+    const auto campaigns = [&] {
+        std::ifstream in(root / "campaigns.json", std::ios::binary);
+        BOOST_REQUIRE(in.good());
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string original = campaigns();
+    std::function<bool(const UniValue&, const std::string&)> contains;
+    contains = [&](const UniValue& v, const std::string& id) {
+        if (v.isStr()) return v.get_str() == id || v.get_str() == "btx://" + id;
+        if (v.isArray() || v.isObject()) {
+            for (const auto& child : v.getValues()) if (contains(child, id)) return true;
+        }
+        return false;
+    };
+    const auto check = [&](bool hidden) {
+        for (const std::string method : {"getrecentreleases", "getfundablemodels", "getrecentlyunlockedmodels"}) {
+            UniValue q(UniValue::VOBJ);
+            q.pushKV("scope", "LOCAL");
+            q.pushKV("limit", 100);
+            UniValue args(UniValue::VARR);
+            args.push_back(q);
+            const UniValue page = HelperDispatch(cat, method, args);
+            BOOST_REQUIRE(page["results"].isArray());
+            for (int i = 0; i < 4; ++i) {
+                const bool applies = method == "getrecentreleases" ||
+                    (method == "getfundablemodels" ? i < 2 : i >= 2);
+                if (applies) {
+                    const bool want = !hidden || i % 2 == 1;
+                    BOOST_CHECK_MESSAGE(contains(page["results"], ids[i]) == want,
+                                        method << ": model " << i << ", hidden=" << (hidden ? 1 : 0));
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            UniValue id(UniValue::VARR);
+            id.push_back(releases[i]);
+            BOOST_CHECK(contains(HelperDispatch(cat, "getmodelrelease", id), ids[i]));
+        }
+        BOOST_CHECK_EQUAL(campaigns(), original);
+    };
+    check(false);
+    for (const int i : {0, 2}) {
+        UniValue args(UniValue::VARR);
+        args.push_back(uris[i]);
+        BOOST_REQUIRE(HelperDispatch(cat, "hidesearchmodel", args)["hidden"].get_bool());
+    }
+    check(true);
+    for (const int i : {0, 2}) {
+        UniValue args(UniValue::VARR);
+        args.push_back(uris[i]);
+        BOOST_CHECK(!HelperDispatch(cat, "unhidesearchmodel", args)["hidden"].get_bool());
+    }
+    check(false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

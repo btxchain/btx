@@ -10,6 +10,7 @@
 // - DecomposeIndex/TensorProduct edge cases
 // - Cross-module consistency (VerifyMembership vs VerifyCT)
 
+#include <compat/wide128.h>
 #include <shielded/smile2/bdlop.h>
 #include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/membership.h>
@@ -95,7 +96,7 @@ BOOST_AUTO_TEST_CASE(r1_mul_mod_q_near_boundaries)
     BOOST_CHECK_GE(result, 0);
     BOOST_CHECK_LT(result, Q);
 
-    // Specific values that stress __int128 path
+    // Specific values that stress btx::I128 path
     int64_t half_q = Q / 2;
     int64_t r = mul_mod_q(half_q, 2);
     BOOST_CHECK_EQUAL(r, mod_q(Q - 1)); // (Q/2)*2 = Q-1 (since Q is odd)
@@ -118,9 +119,9 @@ BOOST_AUTO_TEST_CASE(r1_add_sub_mod_q_boundaries)
 BOOST_AUTO_TEST_CASE(r1_mod_q_and_neg_mod_q_accept_arbitrary_signed_inputs)
 {
     const auto exact_mod = [](int64_t x) {
-        const __int128 wide = static_cast<__int128>(x);
-        const __int128 q = static_cast<__int128>(Q);
-        const __int128 reduced = ((wide % q) + q) % q;
+        const btx::I128 wide = static_cast<btx::I128>(x);
+        const btx::I128 q = static_cast<btx::I128>(Q);
+        const btx::I128 reduced = ((wide % q) + q) % q;
         return static_cast<int64_t>(reduced);
     };
 
@@ -163,9 +164,9 @@ BOOST_AUTO_TEST_CASE(r1_mod_q_and_neg_mod_q_accept_arbitrary_signed_inputs)
 BOOST_AUTO_TEST_CASE(r1_mul_mod_q_handles_extreme_signed_inputs)
 {
     const auto exact_mul = [](int64_t a, int64_t b) {
-        const __int128 lhs = static_cast<__int128>(mod_q(a));
-        const __int128 rhs = static_cast<__int128>(mod_q(b));
-        return static_cast<int64_t>((lhs * rhs) % static_cast<__int128>(Q));
+        const btx::I128 lhs = static_cast<btx::I128>(mod_q(a));
+        const btx::I128 rhs = static_cast<btx::I128>(mod_q(b));
+        return static_cast<int64_t>((lhs * rhs) % static_cast<btx::I128>(Q));
     };
 
     const std::array<std::pair<int64_t, int64_t>, 10> cases{{

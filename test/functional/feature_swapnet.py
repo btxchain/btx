@@ -9,13 +9,15 @@ from test_framework.util import assert_equal,assert_raises_rpc_error
 class SwapNetTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes=2;self.setup_clean_chain=True
-        self.extra_args=[['-modelbind=off','-swapnet=1'],['-modelbind=off','-swapnet=1']]
+        self.extra_args=[['-modelbind=off'],['-modelbind=off']]
     def run_test(self):
         a,b=self.nodes
         self.wait_until(lambda:a.getswapbootstrapinfo()['admitted_peers']>=1 and b.getswapbootstrapinfo()['admitted_peers']>=1)
         info=a.getswapnetworkinfo();assert_equal(info['protocol'],2);assert_equal(info['in_process'],True)
         assert_equal(info['automatic_spend_atoms'],'0');assert_equal(info['network'],a.getblockhash(0))
-        caps=a.getswapcapabilities();assert_equal(len(caps['methods']),33)
+        caps=a.getswapcapabilities();assert_equal(len(caps['methods']),56)
+        assert_equal(any(m['name']=='inspectswapinvite' and m['scope']=='read' for m in caps['methods']), True)
+        assert_equal(any(m['name']=='getswaptradepreview' and m['scope']=='owner' for m in caps['methods']), True)
         assert_equal(a.getswapbootstrapinfo()['separate_seeds'],False)
         assert_equal(a.getswapbootstrapinfo()['fabricated_liquidity'],False)
         assert_equal(a.listswaps()['swaps'],[])

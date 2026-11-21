@@ -67,6 +67,7 @@ int PrintErrorJson(const std::string& code, const std::string& message)
     o.pushKV("automatic_spend_atoms", 0);
     o.pushKV("agents_md_write", false);
     std::cout << o.write() << "\n";
+    std::cerr << message << "\n";
     return 1;
 }
 

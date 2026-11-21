@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/dt_distill/dt_distill.h>
 
 #include <limits>
@@ -11,9 +12,9 @@ namespace {
 
 bool AddReward(int64_t weight, int64_t reward, int64_t& next)
 {
-    const __int128 sum = static_cast<__int128>(weight) + static_cast<__int128>(reward);
-    if (sum > static_cast<__int128>(std::numeric_limits<int64_t>::max()) ||
-        sum < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
+    const btx::I128 sum = static_cast<btx::I128>(weight) + static_cast<btx::I128>(reward);
+    if (sum > static_cast<btx::I128>(std::numeric_limits<int64_t>::max()) ||
+        sum < static_cast<btx::I128>(std::numeric_limits<int64_t>::min())) {
         return false;
     }
     next = static_cast<int64_t>(sum);

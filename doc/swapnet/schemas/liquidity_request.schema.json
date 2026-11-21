@@ -1,0 +1,353 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SwapNet liquidity extension local requests",
+  "$comment": "Schema validity grants no authority. Native principal, wallet, mode, mandate, chain and signature checks remain mandatory.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "getswapmode"
+        },
+        "request": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "setswapmode"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "observe",
+                "trade",
+                "maker",
+                "recovery"
+              ]
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "getswaponboarding"
+        },
+        "request": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "getswapexecutionpolicy"
+        },
+        "request": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "setswapexecutionpolicy"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "policy"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "previewswapquote"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "quote_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "max_local_fee_atoms": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 78
+            },
+            "refund_fee_atoms": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 78
+            },
+            "claim_fee_atoms": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$",
+              "maxLength": 78
+            }
+          },
+          "required": [
+            "quote_id",
+            "max_local_fee_atoms"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "confirmswapquote"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "preview_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "consent": {
+              "const": true
+            },
+            "mandate_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "create_single_trade_mandate": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "preview_id",
+            "consent"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "setswapmakerpolicy"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "sell_asset": {
+              "type": "string"
+            },
+            "buy_asset": {
+              "type": "string"
+            },
+            "policy": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "sell_asset",
+            "buy_asset",
+            "policy"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "getswapmakerpolicies"
+        },
+        "request": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "getswapmarkethealth"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "after": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "exportswapreceipt"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "swap_id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "consent": {
+              "const": true
+            }
+          },
+          "required": [
+            "swap_id",
+            "consent"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "getswappeercoreinfo"
+        },
+        "request": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "method": {
+          "const": "setupswapbitcoin"
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "wallet": {
+              "type": "string"
+            },
+            "consent": {
+              "type": "boolean"
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "method",
+        "request"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

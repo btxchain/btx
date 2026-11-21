@@ -32,12 +32,9 @@ The journal (when present) is an append-only local sequence:
 `source`, `verification_state`, `old_state`, `new_state`, `model_id`,
 `release_id`, `bounty_id`, `terms_id`, `funding`, `provenance`, `dedupe_key`.
 
-Missing fields stay **JSON null**. `automatic_spend_atoms` is **0**. Events
-never spend.
+Empty `collection_id`, `model_id`, `release_id`, `bounty_id`, `terms_id`, and an empty `funding` object are omitted. They are not JSON null. `automatic_spend_atoms` is **0**. Events never spend.
 
-One logical occurrence has one `dedupe_key`. Reorgs emit **corrective**
-events (`*_REVERTED`, `FUNDING_CHANGED`). They do not silently delete the
-original.
+One logical occurrence has one `dedupe_key`. The helper does not write reorg corrections. `getmodelevents` returns the journal as stored.
 
 Untrusted event text is never a shell command, wallet instruction, path, or
 mandate.

@@ -24,6 +24,12 @@ export function demoReply(method,params=[]){const now=Date.now();switch(method){
  case 'getmodelfeed':case 'getrecentreleases':case 'getfundablemodels':case 'searchbounties':return{items:[],coverage:{complete:false}};
  case 'getmemoryinfo':return{note:'No measured native process memory in demo mode'};
  case 'getmodelwatchstatus':return{configured:false};
+ case 'getswapnetworkinfo':case 'getswapbootstrapinfo':case 'getswaphealth':return{enabled:false,awaiting_compatible_peer:true,automatic_spend_atoms:'0',source:'SYNTHETIC',note:'Demo mode invents no route, quote, or peer.'};
+ case 'getswapvalidationinfo':return{source_version:'2.0.0',client_version:null,runtime_observations_are_not_release_certification:true,automatic_spend_atoms:'0',source:'SYNTHETIC'};
+ case 'getnetworkmodelstats':case 'getmodelfeedstatus':return{coverage:{complete:false},source:'SYNTHETIC'};
+ case 'getmodellandiscovery':return{lan:false,automatic_spend_atoms:0,source:'SYNTHETIC',note:'No invented LAN peer.'};
+ case 'getsearchpeers':return{peers:[],source:'SYNTHETIC'};
+ case 'listmodelsearchrecords':return{records:[],coverage:{complete:false},source:'SYNTHETIC'};
  default:return{unavailable:true,source:'SYNTHETIC',note:'This fixture deliberately contains no fabricated result for this method.'};
 }}
 export function demoGraphSources(){return Object.fromEntries(['getblockchaininfo','getnetworkinfo','getmodelnetworkinfo','getpeerinfo','listmodels','getmodeltransfers','getmodelhostprofile','getmininginfo','getmempoolinfo','getsetupstatus','getnettotals'].map(m=>[m,{ok:true,observed_at:Date.now(),synthetic:true,result:demoReply(m)}]));}

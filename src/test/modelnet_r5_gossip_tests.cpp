@@ -135,8 +135,8 @@ BOOST_AUTO_TEST_CASE(r5_repeat_transition_same_sequence_is_swallowed)
     BOOST_CHECK_EQUAL(j.Size(), 2U);
 }
 
-// F-5: once compaction evicts an event its dedupe key is gone, so re-observing
-// it appends a second entry carrying the SAME event_id and re-fires the watch.
+// F-5 (fixed): compaction keeps the dedupe keys of the events it evicts, so
+// re-observing one is a duplicate and does not re-fire the watch.
 BOOST_AUTO_TEST_CASE(r5_recycled_event_after_compaction_refires_watch)
 {
     using namespace modelnet;
@@ -160,12 +160,12 @@ BOOST_AUTO_TEST_CASE(r5_recycled_event_after_compaction_refires_watch)
 
     ObserveResult again;
     BOOST_REQUIRE(JournalObserve(MakeEv(ModelEventType::MODEL_PUBLISHED, "mid-0", 1), again, err));
-    BOOST_CHECK(!again.duplicate);
-    BOOST_CHECK_EQUAL(again.event_id, first.event_id); // same id, second entry
-    BOOST_CHECK(again.local_sequence > first.local_sequence);
+    BOOST_CHECK(again.duplicate);
+    BOOST_CHECK_EQUAL(again.event_id, first.event_id);
+    BOOST_CHECK_EQUAL(BoundModelEventJournal()->Size(), 3U);
 
     const auto acts = BoundModelWatchStore()->DrainActions();
-    BOOST_CHECK_EQUAL(acts.size(), 2U); // fire-once violated across compaction
+    BOOST_CHECK_EQUAL(acts.size(), 1U); // fire-once holds across compaction
     for (const auto& a : acts) {
         BOOST_CHECK_EQUAL(a.object_id, "mid-0");
         BOOST_CHECK(!a.spends);
@@ -188,7 +188,7 @@ BOOST_AUTO_TEST_CASE(r5_replay_past_retention_floor_is_silent)
     const auto page = j.ReplayAfter(1, 100); // client last saw local_sequence 1
     BOOST_REQUIRE_EQUAL(page.size(), 3U);
     BOOST_CHECK_EQUAL(page.front().object_id, "obj-3"); // obj-1, obj-2 lost
-    BOOST_CHECK(page.front().local_sequence > 2);       // no gap signal anywhere
+    BOOST_CHECK(page.front().local_sequence > 2);       // getmodelevents reports gap
 }
 
 // F-7: queued actions are memory-only; nothing replays the journal into the

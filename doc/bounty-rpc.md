@@ -18,6 +18,8 @@ read-only allowlisted views; never wallet, evaluation-run, recovery import, or
 mandate writes. **Money:** new amounts are canonical decimal strings (atoms).
 `prepare`, `approve`, `sign`, and `submit` are distinct authorities.
 
+**This build.** `preparebountyaward` and `preparebountyrefund` take a plan with a destination, a funding outpoint, heights, keys, and `fee_atoms`. They return an unsigned spend (`complete=false`). `signbountyaward` and `signbountyrefund` rebuild that spend and finish it only when this wallet holds the required keys; otherwise the RPC errors. They do not read challenges or policy approvals. `secret_ref` is only on the claim calls. `exportbountyrecovery` is helper state: it lists observed lots and does not check ownership. `createagentmandate` stores a helper budget when `owner_approval_ref` is present; `revokeagentmandate` blocks later `reservemandate` calls. Wallet signing does not read mandates. `resolvebountychallenge` returns a signed envelope for that call and does not store it. `cancelbountyevaluation` does not change the job id `runbountyevaluation` returns.
+
 Overview: [bounties.md](bounties.md). Model-plane baseline RPCs:
 [modelnet/rpc.md](modelnet/rpc.md).
 
@@ -325,7 +327,7 @@ Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **LOCAL_REA
 | `lot_ids` | owned lots |
 
 Result: `RecoveryManifest`.
-No seed/private keys. Lists the lots the helper has observed (`lot_id`, `outpoint`, `amount_atoms`); it holds no scripts, control data or keys. Keep the funding plan (the `preparebountyfunding` result with descriptor, keys and heights) to rebuild a refund.
+Helper state, not a wallet export. `lot_ids` filters observed lots; it does not check that this wallet owns them. No seed or private keys. Each lot is `lot_id`, `outpoint`, and `amount_atoms`. Keep the funding plan (the `preparebountyfunding` result with descriptor, keys and heights) to rebuild a refund.
 
 ## `commitbountysubmission`
 Role: **CREATOR** · Process boundary: **MODEL_SIGNER** · Effect: **PUBLICATION**
@@ -491,8 +493,8 @@ Role: **COUNCIL_POLICY_APPROVER** · Process boundary: **MODEL_SIGNER** · Effec
 | `resolution` | precommitted-policy result/evidence |
 | `idempotency_key` | caller-scoped |
 
-Result: `ChallengeResolution`.
-Cannot revoke a released transaction signature or confirmed payment.
+Result: a signed envelope for this call, with `revokes_released_signature: false`.
+The resolution is not stored. A later `listbountychallenges` still lists only challenges created with `createbountychallenge`. It cannot revoke a released transaction signature or a confirmed payment.
 
 ## `proposebountyaward`
 Role: **COUNCIL_POLICY_APPROVER** · Process boundary: **WALLET+MODEL** · Effect: **PREPARE**
@@ -556,8 +558,8 @@ Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **SIGN**
 |---|---|
 | `options` | the same object as `preparebountyaward`; the wallet builds the spend again and signs it |
 
-Result: `CouncilTransactionSignature`.
-Refuse before challenge/deadline/approval gates; fixed key order, actual threshold witness policy.
+Result: the signed CLTV spend when this wallet holds the required keys; otherwise the RPC errors.
+The call does not read challenges or `approvebountyaward`. The only height check is the CLTV height against the tip.
 
 ## `submitbountyaward`
 Role: **COUNCIL_TX_SIGNER** · Process boundary: **WALLET** · Effect: **BROADCAST**
@@ -626,14 +628,10 @@ Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **PREPARE**
 
 | Argument | Contract |
 |---|---|
-| `lot_ids` | contributor-owned outputs |
-| `secret_ref` | claim only: restricted local preimage handle |
-| `fee_ceiling_atoms` | decimal maximum |
-| `idempotency_key` | caller-scoped |
+| `options` | the same plan shape as `preparebountyaward`: destination, funding outpoint, `refund_height`, keys, and `fee_atoms` |
 
-Result: `SpendPlan`.
-Spends the funded `refund()` leaf after `refund_height`. Council and helper
-may be offline. Does not create a new funding transaction.
+Result: unsigned refund-leaf spend (`unsigned_hex`, `complete=false`).
+`secret_ref` is not an argument here; it belongs to the claim calls. Council and helper may be offline. Does not create a new funding transaction.
 
 ## `signbountyrefund`
 Role: **RECOVERY_SIGNER** · Process boundary: **WALLET** · Effect: **SIGN**
@@ -712,7 +710,7 @@ Role: **OPERATOR** · Process boundary: **WALLET** · Effect: **AUTHORIZE**
 | `idempotency_key` | caller-scoped |
 
 Result: `MandateView`.
-No unbounded/all-recipient mandate by default.
+Stored on the helper. Any present `owner_approval_ref` is enough. A missing finite budget is rejected, and `all_recipients: true` is rejected. Wallet signing does not read this record.
 
 ## `revokeagentmandate`
 Role: **OPERATOR** · Process boundary: **WALLET** · Effect: **AUTHORIZE**

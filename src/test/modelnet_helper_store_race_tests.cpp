@@ -19,6 +19,41 @@
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_helper_store_race_tests, BasicTestingSetup)
 
+// setmodelmirror keeps its selectors in mirror.json, which every call reads
+// and writes again whole: a selector field over 4096 bytes is refused before
+// the file is written.
+BOOST_AUTO_TEST_CASE(mirror_selector_fields_are_bounded)
+{
+    const fs::path dir = m_path_root / "mirror-selector-bound";
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto mirror = [&](const std::string& field, const std::string& value) {
+        UniValue sel(UniValue::VOBJ);
+        sel.pushKV(field, value);
+        sel.pushKV("idempotency_key", "mirror-" + field + "-" + std::to_string(value.size()));
+        UniValue params(UniValue::VARR);
+        params.push_back(sel);
+        return call("setmodelmirror", params);
+    };
+    BOOST_REQUIRE_MESSAGE(mirror("query", std::string(4096, 'q')), err);
+    for (const std::string field : {"publisher_id", "collection_id", "query"}) {
+        BOOST_CHECK(!mirror(field, std::string(4097, 'x')));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    BOOST_REQUIRE_MESSAGE(call("getmodelmirror", UniValue(UniValue::VARR)), err);
+    BOOST_CHECK_EQUAL(result["selectors"].size(), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(concurrent_store_rpcs_keep_every_change)
 {
     // createmodelidentity, setmodelmirror and setmodelrule read
@@ -104,6 +139,57 @@ BOOST_AUTO_TEST_CASE(concurrent_store_rpcs_keep_every_change)
     const size_t listed_selectors{mirror["selectors"].isArray() ? mirror["selectors"].size() : 0};
     BOOST_CHECK_MESSAGE(listed_selectors == size_t{THREADS * CALLS},
                         "mirror selectors listed " + std::to_string(listed_selectors) + " of " + std::to_string(THREADS * CALLS));
+}
+
+// setmodelrule adds a rule to acl.json, which every rule call reads and
+// writes again whole: the same rule is kept once, and the rules are bounded
+// in number and size.
+BOOST_AUTO_TEST_CASE(model_rules_are_bounded)
+{
+    const fs::path dir = m_path_root / "helper-rules-bound";
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto rule = [](const std::string& name) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("name", name);
+        r.pushKV("action", "deny");
+        UniValue params(UniValue::VARR);
+        params.push_back(r);
+        return params;
+    };
+    const auto count = [&] {
+        BOOST_REQUIRE_MESSAGE(call("listmodelrules", UniValue(UniValue::VARR)), err);
+        return result["rules"].isArray() ? result["rules"].size() : size_t{0};
+    };
+    BOOST_REQUIRE_MESSAGE(call("setmodelrule", rule("rule-0")), err);
+    BOOST_REQUIRE_MESSAGE(call("setmodelrule", rule("rule-0")), err);
+    BOOST_CHECK_EQUAL(count(), 1U);
+    BOOST_CHECK(!call("setmodelrule", rule(std::string(16384, 'x'))));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    for (int i = 1; i < 256; ++i) {
+        BOOST_REQUIRE_MESSAGE(call("setmodelrule", rule("rule-" + std::to_string(i))), err);
+    }
+    BOOST_CHECK(!call("setmodelrule", rule("rule-256")));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A rule already there is still answered at the limit.
+    BOOST_CHECK_MESSAGE(call("setmodelrule", rule("rule-0")), err);
+    BOOST_CHECK_EQUAL(count(), 256U);
+    // Removing a rule makes room for another.
+    UniValue first(UniValue::VARR);
+    first.push_back(0);
+    BOOST_REQUIRE_MESSAGE(call("removemodelrule", first), err);
+    BOOST_CHECK_MESSAGE(call("setmodelrule", rule("rule-256")), err);
+    BOOST_CHECK_EQUAL(count(), 256U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

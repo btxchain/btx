@@ -20,6 +20,7 @@
 //     accumulator boundary vectors (exact-2^t limb-pair pins, odd-step 2^14
 //     crossings, E8M0 scale-exactness) so a rounding device fails loudly.
 
+#include <compat/wide128.h>
 #include <cuda/matmul_v4_bmx4_cutlass_mxfp4.h>
 #include <cuda/matmul_v4_bmx4_fp8_five_limb.h>
 #include <ascend/matmul_v4_lt_accel.h>
@@ -344,7 +345,7 @@ BOOST_AUTO_TEST_CASE(karatsuba9_combine_matches_limb_and_direct)
 
 BOOST_AUTO_TEST_CASE(deferred_combine_matches_classical_max_dim_adversarial)
 {
-    // Deferred __int128 ComputeCombineModQ must stay BYTE-IDENTICAL to the
+    // Deferred btx::I128 ComputeCombineModQ must stay BYTE-IDENTICAL to the
     // classical per-MAC Fq path at max-magnitude entries and at the largest
     // BMX4C-legal projection envelope exercised in unit tests (n=512, m=16
     // keeps runtime small while |P|,|Q| hit 288*n).

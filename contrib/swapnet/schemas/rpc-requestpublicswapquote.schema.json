@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-requestpublicswapquote",
+  "type": "object",
+  "properties": {
+    "provider": {
+      "type": "string"
+    },
+    "offer_id": {
+      "type": "string"
+    },
+    "tier": {
+      "type": "integer",
+      "default": 0
+    }
+  },
+  "required": [
+    "provider",
+    "offer_id"
+  ],
+  "additionalProperties": false
+}

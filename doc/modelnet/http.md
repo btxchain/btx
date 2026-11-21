@@ -8,6 +8,8 @@ endpoint, no classical HTTPS downgrade, and no inference URL.
 the peer protocol. Both surfaces share the same catalog and capabilities
 object (`getmodelnetworkinfo` → `capabilities.http`).
 
+**This build.** Peer PQ1 serves hello, query, records, manifests, availability, piece GET, and the `/ext` routes that are implemented. `POST /quotes`, `POST /transfers/{id}/payment`, and the release pledge, round, and signature posts return 403 `OWNER_ONLY`. Extension routes are dispatched on the path; a completed hello is not required.
+
 Automatic spend is **0**. A field named `price=0` supplied by a requester
 cannot bypass verification of an accepted paid quote.
 

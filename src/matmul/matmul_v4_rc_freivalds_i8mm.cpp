@@ -186,7 +186,7 @@ bool Avx512StateEnabledLocal()
     GetCPUID(1, 0, eax, ebx, ecx, edx);
     if (((ecx >> 27) & 1u) == 0) return false; // OSXSAVE
     uint32_t a = 0, d = 0;
-    __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
+    GetXGETBV(a, d);
     // XMM (bit1) | YMM (bit2) | Opmask/ZMM_hi (bits 5..7)
     return (a & 0xe6u) == 0xe6u;
 }
@@ -335,7 +335,7 @@ bool AvxStateEnabledLocal()
     GetCPUID(1, 0, eax, ebx, ecx, edx);
     if (((ecx >> 27) & 1u) == 0) return false; // OSXSAVE
     uint32_t a = 0, d = 0;
-    __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
+    GetXGETBV(a, d);
     // XMM (bit1) | YMM (bit2) enabled by the OS.
     return (a & 0x6u) == 0x6u;
 }

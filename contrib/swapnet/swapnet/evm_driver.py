@@ -32,6 +32,11 @@ class EVMDriver:
         key=self.vault.key(kid,family='evm',genesis=self.asset.genesis,role='funding')
         return kid,key,address_from_key(key)
     def ready(self):self.adapter.check_chain();self._account();return True
+    def claim_account_can_cover(self,cap_atoms):
+        cap=atoms(cap_atoms,positive=True)
+        _,_,sender=self._account()
+        balance=int(self.rpc('eth_getBalance',sender,'pending'),16)
+        require(balance>=cap,'INSUFFICIENT_GAS','Claim account cannot cover the signed claim cap')
     def inventory(self):
         # Quotes reserve against the local latest balance. A freshly funded
         # account is still 0 at finalized, which is not the same as a reservation.
@@ -46,6 +51,13 @@ class EVMDriver:
         require(b and b.get('hash'),'CHAIN_SYNC','EVM chain tip unavailable')
         now=self.now();timestamp=int(b['timestamp'],16)
         return ChainClock('evm',int(b['number'],16),timestamp,now,1,24,now-timestamp>7200)
+    def finality_lag(self):
+        # How far the finalized block, which settlement reads, trails the tip.
+        latest=self.rpc('eth_getBlockByNumber','latest',False)
+        finalized=self.rpc('eth_getBlockByNumber','finalized',False)
+        require(latest and latest.get('hash'),'CHAIN_SYNC','EVM chain tip unavailable')
+        require(finalized and finalized.get('hash'),'FINALITY_UNAVAILABLE','Finalized tag required; no silent latest fallback')
+        return max(0,int(latest['timestamp'],16)-int(finalized['timestamp'],16))
     def commitment(self,h,claim,refund,deadline):
         address_bytes(claim);address_bytes(refund);hex32(h)
         return digest('BTX/SWAPNET/EVM-CONTRACT/2',{'asset':self.asset.id,'contract':self.contract,'runtime_hash':self.runtime_hash,
@@ -162,7 +174,11 @@ class EVMDriver:
         return Prepared(txid,'0x'+raw.hex(),m.get('reference',{}),str(m['gas']*maximum),metadata)
     def has_transaction(self,txid):
         tx=self.rpc('eth_getTransactionByHash',txid)
-        return bool(tx and tx.get('hash')==txid)
+        if tx is None:
+            return False
+        require(isinstance(tx, dict) and tx.get('hash') == txid,
+                'CHAIN_RESPONSE', 'Unexpected EVM transaction lookup result')
+        return True
     def broadcast(self,raw):return self.adapter.broadcast(bytes.fromhex(raw.removeprefix('0x')))
     def observe(self,t,ref):
         clock=self.clock();now=self.now();self.verify_terms(t)

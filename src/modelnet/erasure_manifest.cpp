@@ -277,7 +277,9 @@ bool GeometryOk(const ErasureManifest& m, std::string& err)
     }
     // A file_size_bytes needing more stripes than the parser will ever hold is
     // not a bound on anything. Reject it rather than carry it forward.
-    if ((m.file_size_bytes + payload - 1) / payload > kMaxStripes) {
+    // Rounded up without m.file_size_bytes + payload - 1, which wraps near
+    // UINT64_MAX and lets any size through.
+    if (m.file_size_bytes / payload + (m.file_size_bytes % payload != 0 ? 1 : 0) > kMaxStripes) {
         err = "file_size_bytes";
         return false;
     }
@@ -301,8 +303,10 @@ bool ErasureGeometryConsistent(const ErasureManifest& m)
     if (m.stripe_count > std::numeric_limits<uint64_t>::max() / payload) return false;
     const uint64_t cap = m.stripe_count * payload;
     // Cauchy 400 GiB manifests address more than the listed stripe array.
+    // The file goes on past every listed stripe, so each of them is full:
+    // the last one has no tail to pad.
     if (m.profile == ERASURE_PROFILE_CAUCHY_16_20_V1 && m.file_size_bytes > cap) {
-        return m.final_real_piece_count >= 1 && m.final_real_piece_count <= m.data_shards;
+        return m.final_real_piece_count == m.data_shards;
     }
     const uint64_t full = (m.stripe_count - 1) * payload;
     // Tail empty: stripe_count claims more stripes than the file has.

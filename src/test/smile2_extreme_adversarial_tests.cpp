@@ -30,6 +30,7 @@
 //   J1-J4:  ALGEBRAIC STRUCTURE ATTACKS
 //           Exploit the ring R_q = Z_q[X]/(X^128+1) structure.
 
+#include <compat/wide128.h>
 #include <shielded/smile2/bdlop.h>
 #include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/membership.h>
@@ -950,16 +951,16 @@ BOOST_AUTO_TEST_CASE(k1_z0_at_norm_boundary)
     BOOST_REQUIRE(ctx.Verify());
 
     // Check the actual norm of the valid z0
-    __int128 z0_norm_sq = 0;
+    btx::I128 z0_norm_sq = 0;
     int64_t half_q = Q / 2;
     for (size_t j = 0; j < ctx.proof.z0[0].size(); ++j) {
         for (size_t c = 0; c < POLY_DEGREE; ++c) {
             int64_t val = mod_q(ctx.proof.z0[0][j].coeffs[c]);
             if (val > half_q) val -= Q;
-            z0_norm_sq += static_cast<__int128>(val) * val;
+            z0_norm_sq += static_cast<btx::I128>(val) * val;
         }
     }
-    __int128 beta0_sq = static_cast<__int128>(SIGMA_KEY) * SIGMA_KEY * 2 * KEY_COLS * POLY_DEGREE;
+    btx::I128 beta0_sq = static_cast<btx::I128>(SIGMA_KEY) * SIGMA_KEY * 2 * KEY_COLS * POLY_DEGREE;
 
     BOOST_TEST_MESSAGE("K1: Valid z0 norm^2 = " << static_cast<int64_t>(z0_norm_sq)
                        << ", beta0^2 = " << static_cast<int64_t>(beta0_sq)
@@ -985,8 +986,8 @@ BOOST_AUTO_TEST_CASE(k2_z0_all_max_coefficients)
     }
 
     // Compute norm: KEY_COLS * POLY_DEGREE * SIGMA_KEY^2
-    __int128 norm_sq = static_cast<__int128>(KEY_COLS) * POLY_DEGREE * SIGMA_KEY * SIGMA_KEY;
-    __int128 beta0_sq = static_cast<__int128>(SIGMA_KEY) * SIGMA_KEY * 2 * KEY_COLS * POLY_DEGREE;
+    btx::I128 norm_sq = static_cast<btx::I128>(KEY_COLS) * POLY_DEGREE * SIGMA_KEY * SIGMA_KEY;
+    btx::I128 beta0_sq = static_cast<btx::I128>(SIGMA_KEY) * SIGMA_KEY * 2 * KEY_COLS * POLY_DEGREE;
 
     BOOST_TEST_MESSAGE("K2: All-max z0 norm^2 = " << static_cast<int64_t>(norm_sq)
                        << ", beta0^2 = " << static_cast<int64_t>(beta0_sq)
@@ -1006,18 +1007,18 @@ BOOST_AUTO_TEST_CASE(k3_z_norm_exact_boundary)
     BOOST_REQUIRE(ctx.Verify());
 
     // Compute the actual z norm to verify it's well under the bound
-    __int128 z_norm_sq = 0;
+    btx::I128 z_norm_sq = 0;
     int64_t half_q = Q / 2;
     for (size_t j = 0; j < ctx.proof.z.size(); ++j) {
         for (size_t c = 0; c < POLY_DEGREE; ++c) {
             int64_t val = mod_q(ctx.proof.z[j].coeffs[c]);
             if (val > half_q) val -= Q;
-            z_norm_sq += static_cast<__int128>(val) * val;
+            z_norm_sq += static_cast<btx::I128>(val) * val;
         }
     }
 
     size_t rdim = ctx.proof.z.size();
-    __int128 beta_sq = static_cast<__int128>(SIGMA_MASK) * SIGMA_MASK * 2 * rdim * POLY_DEGREE;
+    btx::I128 beta_sq = static_cast<btx::I128>(SIGMA_MASK) * SIGMA_MASK * 2 * rdim * POLY_DEGREE;
 
     double ratio = static_cast<double>(z_norm_sq) / static_cast<double>(beta_sq);
     BOOST_TEST_MESSAGE("K3: Valid z norm ratio: " << ratio);

@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_H
 #define BTX_MATMUL_MATMUL_V4_H
 
+#include <compat/wide128.h>
 #include <matmul/int8_field.h>
 #include <uint256.h>
 
@@ -200,7 +201,7 @@ enum class Operand : uint8_t { A = 0x41, B = 0x42 };
  *  Row-major m*m canonical F_q output. This is the consensus semantics of the
  *  combine; ComputeCombineLimbTensor MUST match it byte-for-byte.
  *
- *  Implementation: signed INT64/__int128 deferred accumulation with one
+ *  Implementation: signed INT64/btx::I128 deferred accumulation with one
  *  canonical FqReduce per output (not a per-MAC FqMul). BYTE-IDENTICAL to
  *  ComputeCombineModQClassical under every production-valid (n,m) and under
  *  the max-magnitude adversarial vectors in matmul_v4_bmx4_tests /

@@ -21,6 +21,9 @@
 
 #include <ctime>
 #include <fstream>
+#ifndef WIN32
+#include <unistd.h>
+#endif
 #include <iterator>
 #include <string>
 #include <vector>
@@ -174,6 +177,85 @@ BOOST_AUTO_TEST_CASE(failed_advisory_rename_removes_temp_file)
 }
 #endif
 
+namespace {
+std::string ReadAll(const fs::path& p)
+{
+    std::ifstream in(p, std::ios::binary);
+    return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+void WriteAll(const fs::path& p, const std::string& s)
+{
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    out << s;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(unreadable_advisory_file_is_kept)
+{
+    // A safety_advisories.json that cannot be read at start (for example cut
+    // short by a crash) loaded as an empty list, and the next report saved
+    // that list over it: every earlier takedown was gone for good.
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-unreadable-advisories";
+    modelnet::GlobalSafety().Bind(tmp);
+    const std::string first(96, 'a');
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(first, modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    BOOST_REQUIRE(modelnet::GlobalSafety().SubjectQuarantined(first));
+    const fs::path ads = tmp / "safety_advisories.json";
+    const std::string saved{ReadAll(ads)};
+    BOOST_REQUIRE(saved.find(first) != std::string::npos);
+
+    const std::string cut{saved.substr(0, saved.size() / 2)};
+    WriteAll(ads, cut);
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+
+    BOOST_CHECK(!modelnet::GlobalSafety().LocalReport(std::string(96, 'b'), modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "second", 0, err));
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    BOOST_CHECK(ReadAll(ads) == cut);
+
+    // Once the file is repaired, the first report is back after a restart.
+    WriteAll(ads, saved);
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectQuarantined(first));
+}
+
+BOOST_AUTO_TEST_CASE(unreadable_publisher_file_is_kept)
+{
+    // The same for the pin list: an unreadable safety_publishers.json is kept,
+    // and a pin that would save over it is refused.
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-unreadable-publishers";
+    modelnet::GlobalSafety().Bind(tmp);
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string pub = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub, "vendor", err));
+    BOOST_REQUIRE(modelnet::GlobalSafety().PublisherPinned(pub));
+    const fs::path pubs = tmp / "safety_publishers.json";
+    const std::string saved{ReadAll(pubs)};
+    BOOST_REQUIRE(saved.find(pub) != std::string::npos);
+
+    const std::string cut{saved.substr(0, saved.size() / 2)};
+    WriteAll(pubs, cut);
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string other = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_CHECK(!modelnet::GlobalSafety().PinPublisher(other, "other", err));
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    BOOST_CHECK(ReadAll(pubs) == cut);
+
+    WriteAll(pubs, saved);
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(pub));
+}
+
 BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)
 {
     SafetyReset reset;
@@ -214,6 +296,40 @@ BOOST_AUTO_TEST_CASE(pinned_publisher_advisory_blocks_and_unseeds)
     std::string serr;
     BOOST_CHECK(!cat.Seed(imported.model_id, true, serr));
 }
+
+#ifndef WIN32
+BOOST_AUTO_TEST_CASE(unopenable_publisher_file_is_kept)
+{
+    // A safety_publishers.json that is there but cannot be opened (here: no
+    // read permission) is kept like an unparsable one, not read as missing.
+    if (::geteuid() == 0) return; // root opens it anyway
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-unopenable-publishers";
+    modelnet::GlobalSafety().Bind(tmp);
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string pub = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(pub, "vendor", err));
+    const fs::path pubs = tmp / "safety_publishers.json";
+    const std::string saved{ReadAll(pubs)};
+    BOOST_REQUIRE(saved.find(pub) != std::string::npos);
+
+    fs::permissions(pubs, fs::perms::none);
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const std::string other = modelnet::ResearchIdentityId(pk).Hex();
+    BOOST_CHECK(!modelnet::GlobalSafety().PinPublisher(other, "other", err));
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    fs::permissions(pubs, fs::perms::owner_read | fs::perms::owner_write);
+    BOOST_CHECK(ReadAll(pubs) == saved);
+
+    modelnet::GlobalSafety().ResetForTests();
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(pub));
+}
+#endif
 
 BOOST_AUTO_TEST_CASE(full_record_cache_does_not_stop_pinned_takedown)
 {
@@ -600,6 +716,69 @@ BOOST_AUTO_TEST_CASE(addpeer_refuses_endpoint_that_cannot_be_dialed)
     }
     modelnet::ModelCatalog reloaded{tmp / "cat", 1 << 20};
     BOOST_CHECK(reloaded.Peers() == std::vector<std::string>{"192.0.2.1:29447"});
+}
+
+// A pin label is cut to 96 bytes and an operator note to 192. A cut inside a
+// multi-byte character wrote invalid UTF-8, the next load could not parse the
+// file and started from an empty list: every pin or advisory was gone.
+BOOST_AUTO_TEST_CASE(non_ascii_pin_label_survives_restart)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-utf8-pin";
+    modelnet::GlobalSafety().Bind(tmp);
+    const std::string plain(96, 'e');
+    const std::string cut(96, 'd');
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(plain, "vendor", err));
+    // Byte 96 is the first byte of a two-byte character.
+    BOOST_REQUIRE(modelnet::GlobalSafety().PinPublisher(cut, std::string(95, 'a') + "\xc3\xa4", err));
+    std::ifstream in{tmp / "safety_publishers.json"};
+    UniValue saved;
+    const bool parsed{saved.read(std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()})};
+    BOOST_CHECK(parsed);
+    bool found{false};
+    for (const auto& p : parsed ? saved["publishers"].getValues() : std::vector<UniValue>{}) {
+        if (p["id"].get_str() != cut) continue;
+        found = true;
+        BOOST_CHECK_EQUAL(p["label"].get_str(), std::string(95, 'a'));
+    }
+    BOOST_CHECK(found);
+
+    modelnet::GlobalSafety().ResetForTests();
+    BOOST_REQUIRE(!modelnet::GlobalSafety().PublisherPinned(plain));
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(plain));
+    BOOST_CHECK(modelnet::GlobalSafety().PublisherPinned(cut));
+}
+
+BOOST_AUTO_TEST_CASE(non_ascii_operator_note_survives_restart)
+{
+    SafetyReset reset;
+    const fs::path tmp = m_path_root / "safety-utf8-note";
+    modelnet::GlobalSafety().Bind(tmp);
+    const std::string first(96, 'a');
+    const std::string second(96, 'b');
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(first, modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, "first", 0, err));
+    // Byte 192 is the first byte of a two-byte character.
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(second, modelnet::SAFETY_TARGET_MODEL, modelnet::SAFETY_MALWARE, std::string(191, 'n') + "\xc3\xa4", 0, err));
+    std::ifstream in{tmp / "safety_advisories.json"};
+    UniValue saved;
+    const bool parsed{saved.read(std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()})};
+    BOOST_CHECK(parsed);
+    bool found{false};
+    for (const auto& a : parsed ? saved["advisories"].getValues() : std::vector<UniValue>{}) {
+        if (a["target_id"].get_str() != second) continue;
+        found = true;
+        BOOST_CHECK_EQUAL(a["note"].get_str(), std::string(191, 'n'));
+    }
+    BOOST_CHECK(found);
+
+    modelnet::GlobalSafety().ResetForTests();
+    BOOST_REQUIRE(!modelnet::GlobalSafety().SubjectBlocked(first));
+    modelnet::GlobalSafety().Bind(tmp);
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(first));
+    BOOST_CHECK(modelnet::GlobalSafety().SubjectBlocked(second));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

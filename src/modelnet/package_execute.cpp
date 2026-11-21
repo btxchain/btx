@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <iterator>
 #include <set>
@@ -104,9 +105,21 @@ bool ReadAll(const std::string& path, std::string& bytes, std::string& err)
         err = "source open";
         return false;
     }
-    bytes.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (bytes.size() > ACQ_EXECUTE_MAX_FILE_BYTES) {
-        err = "file too large";
+    // Read at most one chunk past the limit: a model file of many gigabytes
+    // at the destination, or a source that never ends, was read whole first.
+    char buf[1 << 16];
+    while (in) {
+        in.read(buf, sizeof(buf));
+        bytes.append(buf, static_cast<size_t>(in.gcount()));
+        if (bytes.size() > ACQ_EXECUTE_MAX_FILE_BYTES) {
+            bytes.clear();
+            err = "file too large";
+            return false;
+        }
+    }
+    if (in.bad()) {
+        bytes.clear();
+        err = "source read";
         return false;
     }
     return true;
@@ -156,6 +169,47 @@ bool ExclusiveNofollowWrite(const fs::path& root, const std::string& dest_path, 
     }
     return true;
 }
+
+
+namespace {
+// Keep the old destination until a complete, verified sibling can replace it.
+bool ReplaceStaleVerified(const fs::path& root, const fs::path& dest, const std::string& relative_path,
+                          const std::string& bytes, const std::string& expected,
+                          std::string& err_code, std::string& err)
+{
+    static std::atomic<uint64_t> sequence{0};
+    fs::path staged;
+    bool created{false};
+    for (unsigned attempt = 0; attempt < 16; ++attempt) {
+        staged = dest.parent_path() / fs::PathFromString(".btx-acq-" + NowMsString() + "-" + std::to_string(sequence++));
+        if (ExclusiveNofollowWrite(root, fs::PathToString(staged), bytes, err_code, err)) {
+            created = true;
+            break;
+        }
+        if (err_code != "OVERWRITE_REFUSED") return false;
+    }
+    if (!created) return Fail(err_code, err, "IO_ERROR", "staging name unavailable");
+    const auto discard = [&] { std::error_code ignored; std::filesystem::remove(staged, ignored); };
+    std::string digest, read_err;
+    if (!Sha384Path(fs::PathToString(staged), digest, read_err) || digest != expected) {
+        discard();
+        return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "staged hash");
+    }
+    if (HasSymlinkBelow(root, relative_path)) {
+        discard();
+        return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
+    }
+    std::error_code ec;
+    std::filesystem::rename(staged, dest, ec);
+    if (ec) {
+        discard();
+        return Fail(err_code, err, "IO_ERROR", "staged replacement failed");
+    }
+    err_code.clear();
+    err.clear();
+    return true;
+}
+} // namespace
 
 CreditBroker& GlobalAcquisitionCredits()
 {
@@ -284,6 +338,7 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
             release_on_fail();
             return Fail(err_code, err, "SYMLINK_REFUSED", "output path component is a symlink");
         }
+        bool stale{false};
         if (fs::exists(dest) && !std::filesystem::is_directory(dest)) {
             std::string have, herr;
             const std::string expect = StoredDigestFor(req, f.relative_path);
@@ -291,12 +346,8 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
                 paths.push_back(dest_s);
                 continue;
             }
-            std::error_code ec;
-            std::filesystem::remove(dest, ec);
-            if (ec || std::filesystem::is_symlink(dest) || fs::exists(dest)) {
-                release_on_fail();
-                return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "stale cache not replaced");
-            }
+            // Replace it only once verified bytes are at hand (below).
+            stale = true;
         }
         if (f.source_path.empty()) {
             release_on_fail();
@@ -316,6 +367,14 @@ bool ExecuteBtxAcquisition(const ExecuteAcquisitionRequest& req, AcquisitionRece
         if (got != expect) {
             release_on_fail();
             return Fail(err_code, err, "MODEL_BYTES_UNVERIFIED", "source hash mismatch");
+        }
+        if (stale) {
+            if (!ReplaceStaleVerified(dest_root, dest, f.relative_path, bytes, expect, err_code, err)) {
+                release_on_fail();
+                return false;
+            }
+            paths.push_back(dest_s);
+            continue;
         }
         if (!ExclusiveNofollowWrite(dest_root, dest_s, bytes, err_code, err)) {
             release_on_fail();

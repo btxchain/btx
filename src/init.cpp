@@ -4527,6 +4527,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             if (args.IsArgSet("-modelpreserverare")) ov.preserve_rare = hcfg.preserve_rare;
             if (args.IsArgSet("-modelseed")) ov.seed = hcfg.seed;
 
+            hcfg.profile_overrides = ov;
             modelnet::OperatorProfile prof = modelnet::OperatorProfile::CUSTOM;
             modelnet::ProfilePolicy policy;
             std::string profile_err;
@@ -4539,6 +4540,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 if (!modelnet::ParseOperatorProfile(args.GetArg("-modelprofile", "custom"), prof)) {
                     return InitError(_("Invalid -modelprofile (allowed: personal, infrastructure, mirror, custom)"));
                 }
+                hcfg.explicit_profile = prof;
                 policy = modelnet::ResolveProfile(prof, ov);
                 apply_profile = true;
                 std::string serr;
@@ -4645,8 +4647,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 #ifdef SWAPNET_WITH_WALLET
     swapnet::InstallWalletBridge();
 #endif
-    // SwapNet is off unless -swapnet is set. An explicit enable that fails to
-    // start stops the node; StartNode has already logged the reason.
+    // SwapNet starts unless -swapnet=0. A start that fails stops the node;
+    // StartNode has already logged the reason. Startup authorizes no spend.
     if (!swapnet::StartNode(node)) return false;
     SetRPCWarmupFinished();
     return true;

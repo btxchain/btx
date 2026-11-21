@@ -758,19 +758,67 @@ UniValue AppliedFiltersJson(const SearchFilters& f)
     return a;
 }
 
+namespace {
+struct PieceSourceCounts {
+    int min_sources{0};
+    uint32_t with_0{0};
+    uint32_t with_1{0};
+    uint32_t with_2{0};
+};
+
+// Pieces of the model by how many providers cover them. A provider counts once
+// for a piece, however many of its ranges cover it. The ranges come from peer
+// records and may span far past the model, so each one is cut to the model's
+// pieces and the work follows the number of ranges, not their span.
+PieceSourceCounts CountPieceSources(uint32_t pieces_total, const std::vector<std::vector<PieceRange>>& providers)
+{
+    std::vector<std::pair<uint32_t, int>> edges;
+    std::vector<std::pair<uint32_t, uint32_t>> spans;
+    for (const auto& ranges : providers) {
+        spans.clear();
+        for (const auto& r : ranges) {
+            // As RangeCovers: an empty or wrapping range covers nothing.
+            if (r.count == 0 || r.first >= pieces_total ||
+                r.first > std::numeric_limits<uint32_t>::max() - r.count) {
+                continue;
+            }
+            spans.emplace_back(r.first, std::min(r.first + r.count, pieces_total));
+        }
+        std::sort(spans.begin(), spans.end());
+        for (size_t i = 0; i < spans.size();) {
+            const uint32_t begin = spans[i].first;
+            uint32_t end = spans[i].second;
+            for (++i; i < spans.size() && spans[i].first <= end; ++i) end = std::max(end, spans[i].second);
+            edges.emplace_back(begin, 1);
+            edges.emplace_back(end, -1);
+        }
+    }
+    edges.emplace_back(pieces_total, 0);
+    std::sort(edges.begin(), edges.end());
+    PieceSourceCounts out;
+    out.min_sources = std::numeric_limits<int>::max();
+    uint32_t at = 0;
+    int sources = 0;
+    for (const auto& [index, step] : edges) {
+        if (index > at) {
+            const uint32_t pieces = index - at;
+            if (sources == 0) out.with_0 += pieces;
+            else if (sources == 1) out.with_1 += pieces;
+            else if (sources == 2) out.with_2 += pieces;
+            out.min_sources = std::min(out.min_sources, sources);
+            at = index;
+        }
+        sources += step;
+    }
+    if (pieces_total == 0) out.min_sources = 0;
+    return out;
+}
+} // namespace
+
 bool UnionCoversAll(uint32_t pieces_total, const std::vector<std::vector<PieceRange>>& providers)
 {
     if (pieces_total == 0) return true;
-    std::vector<uint8_t> have(pieces_total, 0);
-    for (const auto& ranges : providers) {
-        for (const auto& r : ranges) {
-            for (uint32_t i = 0; i < r.count; ++i) {
-                const uint32_t idx = r.first + i;
-                if (idx < pieces_total) have[idx] = 1;
-            }
-        }
-    }
-    return std::all_of(have.begin(), have.end(), [](uint8_t x) { return x != 0; });
+    return CountPieceSources(pieces_total, providers).with_0 == 0;
 }
 
 SwarmHealth ComputeSwarmHealth(uint32_t pieces_total, uint32_t pieces_local,
@@ -781,8 +829,6 @@ SwarmHealth ComputeSwarmHealth(uint32_t pieces_total, uint32_t pieces_local,
     h.pieces_local = pieces_local;
     std::set<std::string> ids;
     std::vector<std::vector<PieceRange>> ranges;
-    int min_src = pieces_total == 0 ? 0 : 1000000;
-    int z0 = 0, z1 = 0, z2 = 0;
     for (const auto& o : obs) {
         const std::string k = o.provider_id.empty() ? o.endpoint : o.provider_id;
         if (!ids.insert(k).second) continue;
@@ -794,41 +840,32 @@ SwarmHealth ComputeSwarmHealth(uint32_t pieces_total, uint32_t pieces_local,
         ranges.push_back(o.ranges);
     }
     if (pieces_total > 0) {
+        const PieceSourceCounts counts = CountPieceSources(pieces_total, ranges);
         h.reconstructable_known = true;
-        h.reconstructable = UnionCoversAll(pieces_total, ranges);
-        uint32_t missing = 0;
-        for (uint32_t i = 0; i < pieces_total; ++i) {
-            int src = 0;
-            for (const auto& ranges_i : ranges) {
-                for (const auto& r : ranges_i) {
-                    if (RangeCovers(r, i)) {
-                        ++src;
-                        break;
-                    }
-                }
-            }
-            if (src == 0) ++z0;
-            else if (src == 1) ++z1;
-            else if (src == 2) ++z2;
-            if (src < min_src) min_src = src;
-            if (src == 0) ++missing;
-        }
-        h.min_piece_sources = min_src == 1000000 ? 0 : min_src;
-        h.pieces_with_0_sources = z0;
-        h.pieces_with_1_source = z1;
-        h.pieces_with_2_sources = z2;
-        h.missing_piece_count = missing;
-        h.fragile = z1 > 0;
+        h.reconstructable = counts.with_0 == 0;
+        const auto as_int = [](uint32_t n) { return static_cast<int>(std::min<uint32_t>(n, std::numeric_limits<int>::max())); };
+        h.min_piece_sources = counts.min_sources;
+        h.pieces_with_0_sources = as_int(counts.with_0);
+        h.pieces_with_1_source = as_int(counts.with_1);
+        h.pieces_with_2_sources = as_int(counts.with_2);
+        h.missing_piece_count = counts.with_0;
+        h.fragile = counts.with_1 > 0;
         if (obs.empty()) h.klass = AvailabilityClass::UNKNOWN;
         else if (!h.reconstructable) h.klass = AvailabilityClass::DEGRADED;
         else if (h.fragile) h.klass = AvailabilityClass::FRAGILE;
         else if (h.providers_complete >= 3 && h.min_piece_sources >= 3) h.klass = AvailabilityClass::EXCELLENT;
         else if (h.providers_complete >= 1) h.klass = AvailabilityClass::HIGH;
         else h.klass = AvailabilityClass::MEDIUM;
-    } else {
+    } else if (h.providers_observed == 0) {
         h.klass = AvailabilityClass::UNKNOWN;
         h.reconstructable = false;
         h.reconstructable_known = false;
+    } else {
+        // Piece count is not on the search record. A provider observation is
+        // still evidence: HIGH, and reconstructable only when one is complete.
+        h.klass = AvailabilityClass::HIGH;
+        h.reconstructable = h.providers_complete > 0;
+        h.reconstructable_known = true;
     }
     return h;
 }
@@ -1007,15 +1044,6 @@ UniValue DirectoryEntryJson(const SearchHit& h)
 
 namespace {
 
-void PruneExpiredSearch(std::map<std::string, ModelSearchRecord>& by_model, int64_t now_ms)
-{
-    for (auto it = by_model.begin(); it != by_model.end();) {
-        const int64_t exp = it->second.expires_at;
-        if (exp > 0 && exp <= now_ms) it = by_model.erase(it);
-        else ++it;
-    }
-}
-
 std::string PublisherQuotaKey(const ModelSearchRecord& r, const std::string& transport_endpoint)
 {
     // Charge the key that signed the record (Put() has verified it by now).
@@ -1056,9 +1084,40 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
             return false;
         }
     }
-    PruneExpiredSearch(m_by_model, now_ms);
+    // A peer record counts against its publisher quota while it is in the
+    // index. One that expired is pruned here and gives its place back, or 64
+    // records seen since the start block every new one of that key.
+    const auto release = [this](const std::string& model_key) {
+        const auto c = m_pub_charge.find(model_key);
+        if (c == m_pub_charge.end()) return;
+        const auto w = m_pub_window.find(c->second);
+        if (w != m_pub_window.end() && --w->second <= 0) m_pub_window.erase(w);
+        m_pub_charge.erase(c);
+    };
+    for (auto pit = m_by_model.begin(); pit != m_by_model.end();) {
+        const int64_t exp = pit->second.expires_at;
+        if (exp > 0 && exp <= now_ms) {
+            if (pit->second.signed_ok) {
+                NoteSequenceFloor(pit->second.model_id, pit->second.signer_id, pit->second.metadata_sequence,
+                                  pit->second.local_catalog);
+            }
+            release(pit->first);
+            pit = m_by_model.erase(pit);
+        } else {
+            ++pit;
+        }
+    }
     const std::string key = r.model_id.Hex();
     auto it = m_by_model.find(key);
+    // A record of this signer up to this sequence expired and was pruned,
+    // also when this node's unsigned catalog stub came back in its place.
+    // One with the same sequence is that record or another one under its
+    // number; either way not taken.
+    const auto floor = verified ? m_seq_floor.find({r.model_id, r.signer_id}) : m_seq_floor.end();
+    if (floor != m_seq_floor.end() && r.metadata_sequence <= floor->second.seq) {
+        err = "sequence rollback";
+        return false;
+    }
     if (it != m_by_model.end()) {
         if (it->second.signed_ok) {
             if (!verified) {
@@ -1097,6 +1156,12 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
             return false;
         }
         m_pub_window[qk] += 1;
+        m_pub_charge[key] = qk;
+    }
+    if (floor != m_seq_floor.end()) {
+        // The record in the index holds the sequence from here on.
+        if (!floor->second.own) m_seq_floor_order.erase(floor->second.stamp);
+        m_seq_floor.erase(floor);
     }
     ModelSearchRecord stored = r;
     stored.signed_ok = verified;
@@ -1108,6 +1173,34 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
     m_by_model[key] = std::move(stored);
     ++m_seq;
     return true;
+}
+
+void SearchIndex::NoteSequenceFloor(const Digest48& model_id, const Digest48& signer, uint64_t seq, bool own)
+{
+    // Nothing is older than sequence 0; SequenceFloor() reads 0 as none.
+    if (seq == 0) return;
+    const SeqFloorKey k{model_id, signer};
+    auto [it, added] = m_seq_floor.try_emplace(k);
+    SeqFloor& f = it->second;
+    if (!added && seq <= f.seq && (f.own || !own)) return;
+    f.seq = std::max(f.seq, seq);
+    if (!added && !f.own) m_seq_floor_order.erase(f.stamp);
+    f.own = f.own || own;
+    if (f.own) return;
+    // Peers can make floors with new keys; their number is bounded like the
+    // index, the oldest go first. Floors of this node's own records stay.
+    f.stamp = m_seq_floor_stamp++;
+    m_seq_floor_order.emplace(f.stamp, k);
+    while (m_seq_floor_order.size() > m_cap) {
+        m_seq_floor.erase(m_seq_floor_order.begin()->second);
+        m_seq_floor_order.erase(m_seq_floor_order.begin());
+    }
+}
+
+uint64_t SearchIndex::SequenceFloor(const Digest48& model_id, const Digest48& signer) const
+{
+    const auto it = m_seq_floor.find({model_id, signer});
+    return it == m_seq_floor.end() ? 0 : it->second.seq;
 }
 
 bool SearchIndex::Tombstone(const Digest48& model_id, uint64_t seq, int64_t now_ms, std::string& err)
@@ -1126,19 +1219,54 @@ const ModelSearchRecord* SearchIndex::Get(const Digest48& model_id) const
     return &it->second;
 }
 
-const ModelSearchRecord* SearchIndex::FindByAlias(const std::string& alias) const
+const ModelSearchRecord* SearchIndex::FindByAlias(const std::string& alias, int64_t now_ms, bool* ambiguous) const
 {
+    if (ambiguous) *ambiguous = false;
     if (alias.empty()) return nullptr;
     const std::string needle = ToLower(alias);
-    const ModelSearchRecord* ci = nullptr;
+    // Any key may sign a record that names any alias, and the index is ordered
+    // by model id, so the first match used to be whichever record sorted first.
+    // This node's own records answer first (also one the operator hid), then
+    // a peer record search would show (live, not hidden, not muted). Two such
+    // peer records that name the alias resolve to neither: a peer can make a
+    // peer alias ambiguous, but not take it.
+    const ModelSearchRecord* found[2][2]{}; // [own][exact]
+    bool clash[2]{false, false};            // peer records, [exact]
     for (const auto& kv : m_by_model) {
-        if (kv.second.tombstone) continue;
-        for (const auto& a : kv.second.aliases) {
-            if (a == alias) return &kv.second;
-            if (!ci && ToLower(a) == needle) ci = &kv.second;
+        const ModelSearchRecord& r = kv.second;
+        if (r.tombstone) continue;
+        if (now_ms > 0 && r.expires_at > 0 && r.expires_at <= now_ms) continue;
+        if (!r.local_catalog &&
+            (m_hidden.count(r.model_id.Hex()) || m_muted_publishers.count(r.publisher_identity.Hex()))) {
+            continue;
+        }
+        int exact = -1;
+        for (const auto& a : r.aliases) {
+            if (a == alias) {
+                exact = 1;
+                break;
+            }
+            if (ToLower(a) == needle) exact = 0;
+        }
+        if (exact < 0) continue;
+        const int own = r.local_catalog ? 1 : 0;
+        if (!found[own][exact]) {
+            found[own][exact] = &r;
+        } else if (!own) {
+            clash[exact] = true;
         }
     }
-    return ci;
+    if (found[1][1]) return found[1][1];
+    if (found[1][0]) return found[1][0];
+    for (const int exact : {1, 0}) {
+        if (!found[0][exact]) continue;
+        if (clash[exact]) {
+            if (ambiguous) *ambiguous = true;
+            return nullptr;
+        }
+        return found[0][exact];
+    }
+    return nullptr;
 }
 
 std::vector<ModelSearchRecord> SearchIndex::List(int64_t updated_after, const std::string& cursor, int limit) const
@@ -1307,6 +1435,13 @@ UniValue SearchIndex::StatusJson() const
 
 bool SearchIndex::Save(const fs::path& path, std::string& err) const
 {
+    // The file also holds the operator's search policy (hidden models, muted
+    // publishers). Feed reads, publishing and moderation save it, so an index
+    // that could not be read must not be written over until it is repaired.
+    if (m_unreadable) {
+        err = "search-index.json cannot be read; repair it before the search index is saved";
+        return false;
+    }
     UniValue arr(UniValue::VARR);
     for (const auto& kv : m_by_model) {
         const ModelSearchRecord& rec = kv.second;
@@ -1327,6 +1462,20 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
     snap.pushKV("muted_publishers", muted);
     snap.pushKV("sequence", static_cast<int64_t>(m_seq));
     snap.pushKV("records", arr);
+    UniValue floors(UniValue::VARR);
+    const auto push_floor = [&](const SeqFloorKey& k, const SeqFloor& fl) {
+        UniValue f(UniValue::VOBJ);
+        f.pushKV("model_id", k.first.Hex());
+        f.pushKV("signer_id", k.second.Hex());
+        f.pushKV("metadata_sequence", static_cast<int64_t>(fl.seq));
+        if (fl.own) f.pushKV("own", true);
+        floors.push_back(std::move(f));
+    };
+    for (const auto& [k, fl] : m_seq_floor) {
+        if (fl.own) push_floor(k, fl);
+    }
+    for (const auto& [stamp, k] : m_seq_floor_order) push_floor(k, m_seq_floor.at(k)); // oldest first, as Load adds them
+    snap.pushKV("sequence_floors", floors);
     fs::create_directories(path.parent_path());
     // Write a temp file, check it after close and rename it over the index, so
     // a write that a full disk cuts short keeps the previous file.
@@ -1355,17 +1504,45 @@ bool SearchIndex::Save(const fs::path& path, std::string& err) const
 
 bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
 {
-    if (!fs::exists(path)) return true;
+    m_unreadable = false;
+    std::error_code ec;
+    const bool present{std::filesystem::exists(path, ec) || (ec && ec != std::errc::no_such_file_or_directory)};
+    if (!present) return true;
+    const auto keep_unreadable = [&](const std::string& why) {
+        m_unreadable = true;
+        std::cerr << "btx-modeld: search-index.json cannot be read (" << why
+                  << "); keeping it and not saving the search index until it is repaired\n";
+        return true;
+    };
     try {
         std::ifstream in(path);
+        if (!in) return keep_unreadable("open");
         std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         UniValue o;
-        if (!o.read(raw) || !o.isObject() || !o.exists("records")) return true;
-        if (!o["records"].isArray()) {
-            LogSkippedJson("records type");
-            return true;
+        if (!o.read(raw) || !o.isObject()) return keep_unreadable("parse");
+        if (o.exists("records") && !o["records"].isArray()) return keep_unreadable("records type");
+        // Floors first: a record below one is not taken back from the file.
+        if (o.exists("sequence_floors") && o["sequence_floors"].isArray()) {
+            for (const auto& f : o["sequence_floors"].getValues()) {
+                Digest48 model_id, signer;
+                std::string ferr;
+                if (!f.isObject() || !f["model_id"].isStr() || !f["signer_id"].isStr() || !f["metadata_sequence"].isNum() ||
+                    !Digest48::FromHex(f["model_id"].get_str(), model_id, ferr) ||
+                    !Digest48::FromHex(f["signer_id"].get_str(), signer, ferr)) {
+                    LogSkippedJson("sequence floor");
+                    continue;
+                }
+                try {
+                    const int64_t seq = f["metadata_sequence"].getInt<int64_t>();
+                    const bool own = f.exists("own") && f["own"].isBool() && f["own"].get_bool();
+                    if (seq > 0) NoteSequenceFloor(model_id, signer, static_cast<uint64_t>(seq), own);
+                } catch (const std::exception& ex) {
+                    LogSkippedJson(std::string("sequence floor ") + ex.what());
+                }
+            }
         }
-        for (const auto& recj : o["records"].getValues()) {
+        const UniValue no_records(UniValue::VARR);
+        for (const auto& recj : (o.exists("records") ? o["records"] : no_records).getValues()) {
             ModelSearchRecord rec;
             std::string ierr;
             try {
@@ -1381,22 +1558,28 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
                 LogSkippedJson("record");
                 continue;
             }
+            // Put refuses a record that expired while the helper was down; its
+            // sequence still counts for the key that signed it. (This file is
+            // the one this node wrote; Put verified the record when it came.)
+            if (!rec.sig.empty() && rec.pubkey.size() == MLDSA44_PK && rec.expires_at > 0 && rec.expires_at <= now_ms) {
+                NoteSequenceFloor(rec.model_id, ResearchIdentityId(Span<const unsigned char>{rec.pubkey.data(), rec.pubkey.size()}),
+                                  rec.metadata_sequence, rec.local_catalog);
+            }
             (void)Put(rec, now_ms, err);
         }
+        // The operator's policy: a list that cannot be read keeps the file.
         const auto load_ids = [&](const char* key, std::set<std::string>& dest) {
-            if (!o.exists(key)) return;
-            if (!o[key].isArray()) {
-                LogSkippedJson(std::string(key) + " type");
-                return;
-            }
+            if (!o.exists(key)) return true;
+            if (!o[key].isArray()) return false;
             for (const auto& v : o[key].getValues()) {
                 if (!v.isStr()) continue;
                 const std::string id = ToLower(v.get_str());
                 if (id.size() == 96 && IsHex(id)) dest.insert(id);
             }
+            return true;
         };
-        load_ids("hidden", m_hidden);
-        load_ids("muted_publishers", m_muted_publishers);
+        if (!load_ids("hidden", m_hidden)) return keep_unreadable("hidden type");
+        if (!load_ids("muted_publishers", m_muted_publishers)) return keep_unreadable("muted_publishers type");
         if (o.exists("sequence")) {
             if (!o["sequence"].isNum()) {
                 LogSkippedJson("sequence type");
@@ -1412,21 +1595,24 @@ bool SearchIndex::Load(const fs::path& path, int64_t now_ms, std::string& err)
         return true;
     } catch (const std::exception& ex) {
         err = ex.what();
-        LogSkippedJson(err);
-        return true;
+        return keep_unreadable(err);
     } catch (...) {
         err = "search index";
-        LogSkippedJson(err);
-        return true;
+        return keep_unreadable(err);
     }
 }
 
 void SearchIndex::Clear()
 {
+    m_unreadable = false;
     m_by_model.clear();
     m_hidden.clear();
     m_muted_publishers.clear();
     m_pub_window.clear();
+    m_pub_charge.clear();
+    m_seq_floor.clear();
+    m_seq_floor_order.clear();
+    m_seq_floor_stamp = 0;
     m_seq = 0;
 }
 
@@ -1677,7 +1863,7 @@ SearchJob SearchRuntime::Start(const SearchQuery& q, const std::vector<SearchInd
     job.state = (q.scope == SearchScope::LOCAL && extras.empty()) ? SearchJobState::COMPLETE : SearchJobState::RUNNING;
     job.elapsed_ms = 0;
     job.coverage.complete = false;
-    m_jobs[job.query_id] = job;
+    Keep(job);
     if (job.state == SearchJobState::COMPLETE) ++m_completed;
     else ++m_running;
     (void)seen;
@@ -1695,6 +1881,7 @@ bool SearchRuntime::Cancel(const std::string& query_id)
 {
     auto it = m_jobs.find(query_id);
     if (it == m_jobs.end()) return false;
+    if (it->second.state == SearchJobState::RUNNING) m_cancelled_running.insert(query_id);
     if (it->second.state == SearchJobState::RUNNING && m_running > 0) --m_running;
     it->second.state = SearchJobState::CANCELLED;
     return true;
@@ -1706,12 +1893,50 @@ bool SearchRuntime::IsCancelled(const std::string& query_id) const
     return it != m_jobs.end() && it->second.state == SearchJobState::CANCELLED;
 }
 
+void SearchRuntime::Keep(const SearchJob& job)
+{
+    // Every search keeps its job with up to SEARCH_PAGE_MAX hits for
+    // getsearchstatus and cancelmodelsearch; SEARCH_JOBS_KEPT jobs are kept.
+    // Past that the oldest other job that is neither running nor cancelled
+    // goes, so a running search can still be cancelled and a cancelled one
+    // still stops; the oldest other one when there is no such job.
+    if (m_jobs.insert_or_assign(job.query_id, job).second) m_order.push_back(job.query_id);
+    while (m_jobs.size() > SEARCH_JOBS_KEPT) {
+        auto drop = m_order.end();
+        for (auto it = m_order.begin(); it != m_order.end(); ++it) {
+            if (*it == job.query_id) continue;
+            if (drop == m_order.end()) drop = it;
+            const SearchJobState state = m_jobs.at(*it).state;
+            if (state != SearchJobState::RUNNING && state != SearchJobState::CANCELLED) {
+                drop = it;
+                break;
+            }
+        }
+        if (drop == m_order.end()) break;
+        m_jobs.erase(*drop);
+        m_order.erase(drop);
+    }
+}
+
 void SearchRuntime::Finish(SearchJob& job)
 {
-    if (job.state == SearchJobState::RUNNING) job.state = SearchJobState::COMPLETE;
-    m_jobs[job.query_id] = job;
-    if (m_running > 0) --m_running;
-    ++m_completed;
+    // Start already counted a LOCAL search as complete, and Cancel already took
+    // a cancelled one off the running count: count each search once, and keep
+    // a cancellation that came while the search ran.
+    const auto it = m_jobs.find(job.query_id);
+    const bool cancelled = (it != m_jobs.end() && it->second.state == SearchJobState::CANCELLED) ||
+                           m_cancelled_running.erase(job.query_id) > 0;
+    const bool was_running = job.state == SearchJobState::RUNNING;
+    if (cancelled) {
+        job.state = SearchJobState::CANCELLED;
+    } else if (was_running) {
+        job.state = SearchJobState::COMPLETE;
+    }
+    Keep(job);
+    if (was_running && !cancelled) {
+        if (m_running > 0) --m_running;
+        ++m_completed;
+    }
 }
 
 bool UnsignedCannotOverrideSigned()

@@ -10,8 +10,11 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <set>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace modelnet {
 namespace {
@@ -430,14 +433,57 @@ std::vector<uint32_t> EndangeredPieces(uint32_t file_index,
                                     const std::map<std::string, PeerMetrics>& metrics,
                                     const PickConfig& cfg)
 {
+    // Counts what PieceRarity counts for every piece, but from the ranges the
+    // sources give: asking PieceRarity piece by piece cost piece_count times
+    // every source and every range, all of which the caller sets.
+    // Spans [lo, hi) below piece_count that each usable source covers, by key.
+    std::map<std::string, std::vector<std::pair<uint32_t, uint32_t>>> spans_by_key;
+    for (const auto& src : sources) {
+        if (!SourceIsFresh(src, cfg)) continue;
+        if (MetricsFailed(metrics, src.peer.endpoint)) continue;
+        if (src.file_index != file_index) continue;
+        auto& spans = spans_by_key[DiversityKey(src.peer)];
+        const auto add = [&](uint32_t lo, uint32_t hi) {
+            hi = std::min(hi, piece_count);
+            if (lo < hi) spans.emplace_back(lo, hi);
+        };
+        if (!src.ranges.empty()) {
+            for (const auto& r : src.ranges) {
+                // As RangeCovers: a range whose end wraps covers nothing.
+                const uint32_t end = r.first + r.count;
+                if (end > r.first) add(r.first, end);
+            }
+        } else {
+            add(0, src.piece_count == 0 ? piece_count : src.piece_count);
+        }
+    }
+    // One key counts once per piece, so merge its spans first.
+    std::vector<std::pair<uint32_t, int>> edges;
+    for (auto& [key, spans] : spans_by_key) {
+        std::sort(spans.begin(), spans.end());
+        size_t i = 0;
+        while (i < spans.size()) {
+            const uint32_t lo = spans[i].first;
+            uint32_t hi = spans[i].second;
+            for (++i; i < spans.size() && spans[i].first <= hi; ++i) hi = std::max(hi, spans[i].second);
+            edges.emplace_back(lo, 1);
+            edges.emplace_back(hi, -1);
+        }
+    }
+    std::sort(edges.begin(), edges.end());
     std::set<uint32_t> have(local_have.begin(), local_have.end());
     std::vector<uint32_t> rare1;
     std::vector<uint32_t> rare2;
-    for (uint32_t p = 0; p < piece_count; ++p) {
-        if (have.count(p)) continue;
-        const int r = PieceRarity(file_index, p, sources, metrics, cfg);
-        if (r == 1) rare1.push_back(p);
-        else if (r == 2) rare2.push_back(p);
+    int keys = 0;
+    for (size_t i = 0; i < edges.size();) {
+        const uint32_t at = edges[i].first;
+        for (; i < edges.size() && edges[i].first == at; ++i) keys += edges[i].second;
+        if (keys != 1 && keys != 2) continue;
+        const uint32_t next = edges[i].first; // keys > 0, so an end follows
+        auto& out = keys == 1 ? rare1 : rare2;
+        for (uint32_t p = at; p < next; ++p) {
+            if (!have.count(p)) out.push_back(p);
+        }
     }
     rare1.insert(rare1.end(), rare2.begin(), rare2.end());
     return rare1;
@@ -516,6 +562,30 @@ bool ParseAvailabilitySources(const UniValue& availability_json,
         }
     }
     return true;
+}
+
+void TakePeerAvailability(const UniValue& availability_json,
+                          const PeerId& peer,
+                          const Digest48& artifact,
+                          uint32_t file_index,
+                          int64_t observed_at_ms,
+                          std::vector<SourceAvailability>& out)
+{
+    // One source per endpoint: the retrieve may ask the same endpoint more
+    // than once, and each answer may name another service_id.
+    for (const auto& have : out) {
+        if (have.peer.endpoint == peer.endpoint) return;
+    }
+    std::vector<SourceAvailability> parsed;
+    std::string err;
+    // A malformed entry ends the parse; what was read before it is used, as before.
+    (void)ParseAvailabilitySources(availability_json, peer.endpoint, peer, artifact, parsed, err, observed_at_ms);
+    for (auto& src : parsed) {
+        if (src.file_index != file_index) continue;
+        src.peer = peer;
+        out.push_back(std::move(src));
+        return;
+    }
 }
 
 UniValue SwarmSnapshotJson(const SwarmSnapshot& snap)

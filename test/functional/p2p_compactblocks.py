@@ -105,6 +105,10 @@ class TestP2PConn(P2PInterface):
             self.last_message.pop("inv", None)
             self.last_message.pop("headers", None)
             self.last_message.pop("cmpctblock", None)
+            # BTX catch-up relay pushes a full block alongside headers. Drop it
+            # with the other announcement messages so the next check is not
+            # looking at a previous body.
+            self.last_message.pop("block", None)
 
     def clear_getblocktxn(self):
         with p2p_lock:
@@ -206,23 +210,38 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         tip = int(node.getbestblockhash(), 16)
 
-        def check_announcement_of_new_block(node, peer, predicate):
+        def check_announcement_of_new_block(node, peer, predicate, *, wait_for_block=False):
             peer.clear_block_announcement()
             block_hash = int(self.generate(node, 1)[0], 16)
             peer.wait_for_block_announcement(block_hash, timeout=30)
             assert peer.block_announced
+            if wait_for_block:
+                # HEADERS and BLOCK are separate messages and the announcement
+                # wait returns on the first one, so wait for the body too.
+                peer.wait_until(lambda: "block" in peer.last_message, timeout=30)
 
             with p2p_lock:
                 assert predicate(peer), (
-                    "block_hash={!r}, cmpctblock={!r}, inv={!r}".format(
-                        block_hash, peer.last_message.get("cmpctblock", None), peer.last_message.get("inv", None)))
+                    "block_hash={!r}, cmpctblock={!r}, inv={!r}, headers={!r}, block={!r}".format(
+                        block_hash,
+                        peer.last_message.get("cmpctblock", None),
+                        peer.last_message.get("inv", None),
+                        "headers" in peer.last_message,
+                        "block" in peer.last_message))
 
         # We shouldn't get any block announcements via cmpctblock yet.
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" not in p.last_message)
 
         # Try one more time, this time after requesting headers.
         test_node.request_headers_and_sync(locator=[tip])
-        check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" not in p.last_message and "inv" in p.last_message)
+        # Bitcoin would still INV this block: getheaders does not select
+        # header announcements. BTX's GETHEADERS handler records
+        # pindexBestHeaderSent (net_processing.cpp), so the next tip takes
+        # NewPoWValidBlock's catch-up path and FlushDeferredFastBodies
+        # pushes HEADERS then BLOCK. That marks the header sent and
+        # suppresses the INV. Compact blocks stay off until
+        # sendcmpct(announce=true, version=2).
+        check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" not in p.last_message and "headers" in p.last_message and "block" in p.last_message, wait_for_block=True)
 
         # Test a few ways of using sendcmpct that should NOT
         # result in compact block announcements.
@@ -279,6 +298,14 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.generate(self.nodes[0], COINBASE_MATURITY + 1)
         block = self.build_block_on_tip(self.nodes[0])
 
+        # Reconnect leaves a peer that has not sent SENDCMPCT. BTX drops a
+        # cmpctblock in that case (net_processing.cpp: "without negotiating
+        # SENDCMPCT") and also drops one that was neither requested nor from
+        # a high-bandwidth peer. Negotiate version 2 so the header announce
+        # is answered with MSG_CMPCT_BLOCK and the too-high prefilled index
+        # is validated.
+        self.segwit_node.send_and_ping(msg_sendcmpct(announce=False, version=2))
+
         cmpct_block = P2PHeaderAndShortIDs()
         cmpct_block.header = CBlockHeader(block)
         cmpct_block.prefilled_txn_length = 1
@@ -289,6 +316,7 @@ class CompactBlocksTest(BitcoinTestFramework):
             msg_headers(headers=[CBlockHeader(block)])
         )
         self.segwit_node.wait_for_getdata([block.sha256])
+        assert_equal(self.segwit_node.last_message["getdata"].inv[0].type, MSG_CMPCT_BLOCK)
         self.segwit_node.send_await_disconnect(msg_cmpctblock(cmpct_block))
         assert_equal(int(self.nodes[0].getbestblockhash(), 16), block.hashPrevBlock)
 

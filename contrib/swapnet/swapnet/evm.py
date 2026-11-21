@@ -6,6 +6,7 @@ public-point arithmetic below is used solely for recovering/verifying a sender.
 """
 from dataclasses import dataclass
 import hashlib
+import time
 from .canonical import hex32,integer
 from .errors import require,SwapError
 from .machine import LegObservation
@@ -178,24 +179,45 @@ class Eip1559Transaction:
         return '0x'+keccak256(raw).hex()
 
 class EVMAdapter:
-    def __init__(self,rpc,genesis,chain_id,contract,runtime_hash,token_code_hashes=None):
+    # Chain ID, genesis and the pinned contract's runtime do not change under a running node. Re-reading them on
+    # every call cost a node pair about 1,900 RPCs a minute after one finished swap. They are re-checked on an
+    # interval, after any failure (nothing is cached then), and always in full before a broadcast.
+    IDENTITY_TTL=300;SYNC_TTL=30
+    def __init__(self,rpc,genesis,chain_id,contract,runtime_hash,token_code_hashes=None,*,monotonic=None):
         self.rpc=rpc;self.genesis=hex32(genesis);integer(chain_id,lo=1)
         self.chain_id=chain_id;address_bytes(contract);self.contract=contract
         self.runtime_hash=hex32(runtime_hash);self.token_code_hashes=token_code_hashes or {}
-    def check_chain(self):
-        require(int(self.rpc('eth_chainId'),16)==self.chain_id,'CHAIN_ID','Wrong EVM chain ID')
-        require(self.rpc('eth_getBlockByNumber','0x0',False)['hash'][2:]==self.genesis,'GENESIS_MISMATCH','Wrong EVM genesis')
-        require(self.rpc('eth_syncing') is False,'CHAIN_SYNC','EVM client still syncing')
-        raw=bytes.fromhex(self.rpc('eth_getCode',self.contract,'latest')[2:])
-        require(raw and keccak256(raw).hex()==self.runtime_hash,'CONTRACT_CODE','Unrecognized contract runtime')
+        self._monotonic=monotonic or time.monotonic;self._identity_until=self._sync_until=0.0;self._code_at=set()
+    def check_chain(self,force=False):
+        now=self._monotonic()
+        # A forced check that fails must not leave the previous success in force.
+        if force:self._identity_until=self._sync_until=0.0
+        if force or now>=self._identity_until:
+            require(int(self.rpc('eth_chainId'),16)==self.chain_id,'CHAIN_ID','Wrong EVM chain ID')
+            require(self.rpc('eth_getBlockByNumber','0x0',False)['hash'][2:]==self.genesis,'GENESIS_MISMATCH','Wrong EVM genesis')
+            raw=bytes.fromhex(self.rpc('eth_getCode',self.contract,'latest')[2:])
+            require(raw and keccak256(raw).hex()==self.runtime_hash,'CONTRACT_CODE','Unrecognized contract runtime')
+            self._identity_until=now+self.IDENTITY_TTL
+        if force or now>=self._sync_until:
+            require(self.rpc('eth_syncing') is False,'CHAIN_SYNC','EVM client still syncing')
+            self._sync_until=now+self.SYNC_TTL
+    def _runtime_at_block(self,tag,block_hash):
+        # The code of a block hash does not change. The block at a number can, so the
+        # cache key is the hash, and only after the number still names that hash.
+        if block_hash in self._code_at:return
+        if self.rpc('eth_getBlockByNumber',tag,False)['hash']!=block_hash:return
+        code=bytes.fromhex(self.rpc('eth_getCode',self.contract,tag)[2:])
+        require(keccak256(code).hex()==self.runtime_hash,'CONTRACT_CODE','Historical runtime differs')
+        if self.rpc('eth_getBlockByNumber',tag,False)['hash']!=block_hash:return
+        if len(self._code_at)>=256:self._code_at.clear()
+        self._code_at.add(block_hash)
     def observe(self,swap_id,expected,now):
         self.check_chain();hex32(swap_id)
         finalized=self.rpc('eth_getBlockByNumber','finalized',False)
         require(finalized and 'hash' in finalized,'FINALITY_UNAVAILABLE','Finalized tag required; no silent latest fallback')
         tag=finalized['number']
         call={'to':self.contract,'data':'0x'+calldata('getSwap(bytes32)',bytes.fromhex(swap_id)).hex()}
-        code=bytes.fromhex(self.rpc('eth_getCode',self.contract,tag)[2:])
-        require(keccak256(code).hex()==self.runtime_hash,'CONTRACT_CODE','Historical runtime differs')
+        self._runtime_at_block(tag,finalized['hash'])
         raw=bytes.fromhex(self.rpc('eth_call',call,tag)[2:])
         require(len(raw)==7*32,'CONTRACT_ABI','Unexpected HTLC view layout')
         words=[raw[i:i+32] for i in range(0,len(raw),32)]
@@ -218,7 +240,7 @@ class EVMAdapter:
         require(keccak256(code).hex()==self.token_code_hashes[token],'TOKEN_CODE','Token code changed')
         return calldata('lockToken(bytes32,bytes32,address,uint64,address,uint256)',bytes.fromhex(swap_id),bytes.fromhex(hash_hex),address_bytes(claim_to),refund_at,address_bytes(token),amount)
     def broadcast(self,raw):
-        self.check_chain()
+        self.check_chain(force=True)
         require(type(raw) is bytes,'EVM_TX','Expected raw bytes')
         txid='0x'+keccak256(raw).hex()
         require(self.rpc('eth_sendRawTransaction','0x'+raw.hex())==txid,'TXID_MISMATCH','Unexpected EVM transaction hash')

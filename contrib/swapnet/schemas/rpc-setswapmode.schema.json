@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-setswapmode",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "mode"
+  ],
+  "additionalProperties": false
+}

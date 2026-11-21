@@ -75,12 +75,14 @@ void S3PieceStore::RollWindowsLocked(int64_t now_s)
     const time_t t = static_cast<time_t>(now_s);
     gmtime_r(&t, &utc);
     const int64_t month = static_cast<int64_t>(utc.tm_year) * 12 + utc.tm_mon;
-    if (day != m_day_utc) {
+    // Keep the latest observed window: a backward clock correction must not
+    // renew an allowance already consumed in that window.
+    if (day > m_day_utc) {
         m_day_utc = day;
         m_day_gets = 0;
         m_day_bytes = 0;
     }
-    if (month != m_month_utc) {
+    if (month > m_month_utc) {
         m_month_utc = month;
         m_month_gets = 0;
         m_month_bytes = 0;
@@ -421,6 +423,16 @@ bool S3PieceStore::PutSourceFile(const Digest48& artifact, uint32_t file_index, 
         err = "failed to open source file";
         return false;
     }
+    return PutSourceFile(artifact, file_index, in, expected_bytes, logical_piece_count, err);
+}
+
+bool S3PieceStore::PutSourceFile(const Digest48& artifact, uint32_t file_index, std::istream& in,
+                                 uint64_t expected_bytes, uint64_t logical_piece_count, std::string& err)
+{
+    if (m_layout != CloudObjectLayout::SOURCE_FILES) {
+        err = "PutSourceFile requires SOURCE_FILES layout";
+        return false;
+    }
     const std::string key = ObjectKeySourceFile(m_prefix, artifact.Hex(), file_index);
     if (!PutObject(key, in, expected_bytes, err)) return false;
     if (auto* fake = m_client.Fake()) {
@@ -450,6 +462,16 @@ bool S3PieceStore::PutPieceObjects(const Digest48& artifact, uint32_t file_index
     std::ifstream in{src, std::ios::binary};
     if (!in) {
         err = "failed to open source file";
+        return false;
+    }
+    return PutPieceObjects(artifact, file_index, in, expected_bytes, err);
+}
+
+bool S3PieceStore::PutPieceObjects(const Digest48& artifact, uint32_t file_index, std::istream& in,
+                                  uint64_t expected_bytes, std::string& err)
+{
+    if (m_layout != CloudObjectLayout::PIECE_OBJECTS) {
+        err = "PutPieceObjects requires PIECE_OBJECTS layout";
         return false;
     }
     const uint64_t n = expected_bytes == 0 ? 1 : ((expected_bytes + PIECE_SIZE - 1) / PIECE_SIZE);

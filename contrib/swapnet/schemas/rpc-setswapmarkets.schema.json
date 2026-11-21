@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-setswapmarkets",
+  "type": "object",
+  "properties": {
+    "markets": {
+      "type": "array"
+    }
+  },
+  "required": [
+    "markets"
+  ],
+  "additionalProperties": false
+}

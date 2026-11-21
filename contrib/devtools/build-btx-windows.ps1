@@ -18,7 +18,9 @@ param(
     [string]$VcpkgInstalledDir = "C:\btx-deps\vcpkg_installed\btx-node",
     [string]$VcpkgBuildtreesRoot = "C:\btx-deps\vcpkg-buildtrees",
     [string]$CudaToolkitRoot = "",
-    [string]$CudaArchitectures = "120"
+    [string]$CudaArchitectures = "120",
+    [string]$OpenSSLRoot = "",
+    [switch]$WithoutModelNet
 )
 
 $ErrorActionPreference = "Stop"
@@ -175,7 +177,7 @@ function Ensure-CoreDependencies {
         $python = Get-CommandPath -Name "py.exe" -Fallbacks @("C:\Windows\py.exe")
     }
     if ($NeedPython -and -not $python) {
-        Fail "Python 3.10+ is required for the requested test flow. Install it or rerun with -InstallDependencies."
+        Fail "Python 3.11 is required to configure SwapNet. Install it or rerun with -InstallDependencies."
     }
 
     return [pscustomobject]@{
@@ -432,7 +434,24 @@ if ($SourceDir.Contains(" ")) {
     Write-Step "Source path contains spaces. The wrapper will keep vcpkg state on short paths, but cloning to a short path like C:\src\btx-node is still recommended."
 }
 
-$tools = Ensure-CoreDependencies -NeedPython:$BuildTests
+# SwapNet's CMake check imports Python and cryptography for every node build.
+$tools = Ensure-CoreDependencies -NeedPython:$true
+if ($InstallDependencies) {
+    if (-not $tools.PythonLauncher) {
+        Fail "Python 3.11 is required to install the SwapNet runtime. Install it or rerun with -InstallDependencies."
+    }
+    $requirements = Join-Path $SourceDir "contrib\swapnet\requirements-tested-runtime.txt"
+    Write-Step "Installing the pinned SwapNet Python runtime"
+    & $tools.PythonLauncher -3.11 -m pip install --disable-pip-version-check -r $requirements
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Could not install contrib/swapnet/requirements-tested-runtime.txt"
+    }
+}
+if ($WithoutModelNet) {
+    Write-Step "ModelNet is off for this build (-WithoutModelNet)."
+} elseif ([string]::IsNullOrWhiteSpace($OpenSSLRoot)) {
+    Write-Step "ModelNet needs OpenSSL 3.5 or newer. The pinned vcpkg baseline does not ship it. Pass -OpenSSLRoot, or rerun with -WithoutModelNet."
+}
 $vcpkg = Ensure-Vcpkg -Git $tools.Git -Root $VcpkgRoot
 
 $triplet = if ($UseStaticTriplet) { "x64-windows-static" } else { "x64-windows" }
@@ -495,6 +514,12 @@ if ($EnableCudaExperimental) {
     $cmakeArgs += "-DBTX_CUDA_ARCHITECTURES=$CudaArchitectures"
     $cmakeArgs += "-DCUDAToolkit_ROOT=`"$cudaRoot`""
     $cmakeArgs += "-DCMAKE_CUDA_COMPILER=`"$nvcc`""
+}
+if ($WithoutModelNet) {
+    $cmakeArgs += "-DWITH_MODELNET=OFF"
+} elseif (-not [string]::IsNullOrWhiteSpace($OpenSSLRoot)) {
+    $OpenSSLRoot = Resolve-NormalPath -Path $OpenSSLRoot
+    $cmakeArgs += "-DOPENSSL_ROOT_DIR=`"$OpenSSLRoot`""
 }
 
 $cmakeBin = Split-Path -Parent $tools.CMake

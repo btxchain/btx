@@ -127,8 +127,21 @@ std::vector<std::string> SanitizeHelperEnv(char** envp)
     return out;
 }
 
-std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& cfg)
+std::vector<std::string> BuildHelperArgv(const HelperLaunchConfig& launch)
 {
+    // The supervisor survives child replacement; live profile changes do not.
+    // Reapply the same explicit-option precedence used by node initialization.
+    HelperLaunchConfig cfg = launch;
+    OperatorProfile profile;
+    ProfilePolicy policy;
+    std::string profile_err;
+    if (launch.explicit_profile) {
+        policy = ResolveProfile(*launch.explicit_profile, launch.profile_overrides);
+        ApplyProfileToLaunchConfig(policy, cfg);
+    } else if (LoadOperatorProfile(OperatorProfilePath(launch.modeldir), profile, policy, profile_err)) {
+        policy = ApplyProfileOverrides(policy, launch.profile_overrides);
+        ApplyProfileToLaunchConfig(policy, cfg);
+    }
     std::vector<std::string> argv;
     argv.push_back(fs::PathToString(cfg.helper_exe));
     argv.push_back("-modeldir=" + fs::PathToString(cfg.modeldir));

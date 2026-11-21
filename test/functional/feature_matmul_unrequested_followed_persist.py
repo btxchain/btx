@@ -30,10 +30,8 @@ Core unrequested anti-DoS; this file is the followed-chain exception.
 import collections
 import re
 import shutil
-import time
 from shutil import rmtree
 
-from test_framework.blocktools import create_block, create_coinbase
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -242,6 +240,17 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
         except Exception:
             pass
         self.stop_node(1, expected_stderr=TRUST_WARNING.format(1))
+        # Mine a valid low-work competitor while the mirror is offline.
+        # The mirror must see its body for the first time in the unsolicited push.
+        first_block = archive.getblockhash(1)
+        archive.invalidateblock(first_block)
+        competing_hash = self.generatetoaddress(
+            archive, 1, mirror.get_deterministic_priv_key().address, sync_fun=self.no_op
+        )[0]
+        competing = from_hex(CBlock(), archive.getblock(competing_hash, False))
+        archive.reconsiderblock(first_block)
+        assert_equal(archive.getbestblockhash(), snapshot_hash)
+
         rmtree(mirror.chain_path)
         self.start_node(1, extra_args=self.mirror_args)
         mirror = self.nodes[1]
@@ -277,11 +286,24 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
         for blockhash in pre_snapshot_hashes:
             assert not body_available(mirror, blockhash), blockhash
 
+        self.log.info("Refuse an unrequested body from an ordinary inbound archive")
+        inbound = mirror.add_p2p_connection(P2PInterface(), services=ARCHIVE_SERVICES)
+        first_hash = pre_snapshot_hashes[0]
+        first_body = from_hex(CBlock(), archive.getblock(first_hash, False))
+        with mirror.assert_debug_log([f"Ignoring non-authority block {first_hash}"]):
+            inbound.send_and_ping(msg_block(first_body))
+        assert_raises_rpc_error(
+            -1, "Block not available (not fully downloaded)", mirror.getblock, first_hash
+        )
+        mirror.disconnect_p2ps()
+
         self.log.info(
-            "Deliver unrequested followed-chain bodies; they must persist HAVE_DATA"
+            "Deliver unrequested followed-chain bodies from an authorized archive"
         )
         log_start = mirror.debug_log_size(encoding="utf-8")
-        peer = mirror.add_p2p_connection(P2PInterface(), services=ARCHIVE_SERVICES)
+        peer = mirror.add_manual_p2p_connection(
+            P2PInterface(), p2p_idx=0, services=ARCHIVE_SERVICES
+        )
         for blockhash in pre_snapshot_hashes:
             raw = archive.getblock(blockhash, False)
             block = from_hex(CBlock(), raw)
@@ -290,16 +312,21 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
                 f"unrequested followed-chain body {blockhash} was not persisted"
             )
 
+        with open(mirror.debug_log_path, encoding="utf-8", errors="replace") as dl:
+            dl.seek(log_start)
+            assert_equal(self._count_requesting_block(dl.read(), pre_snapshot_hashes), {})
+
         self.log.info("Unrequested low-work competing fork must not persist")
-        genesis = int("0x" + archive.getblockhash(0), 0)
-        competing = create_block(genesis, create_coinbase(1), int(time.time()) + 50)
-        competing.solve()
-        peer.send_and_ping(msg_block(competing))
+        with mirror.assert_debug_log(
+            [f"Skipping full block processing for hash={competing_hash}"],
+            unexpected_msgs=[f"Ignoring non-authority block {competing_hash}"],
+        ):
+            peer.send_and_ping(msg_block(competing))
         assert_raises_rpc_error(
             -1,
             "Block not available (not fully downloaded)",
             mirror.getblock,
-            competing.hash,
+            competing_hash,
         )
 
         peer.peer_disconnect()

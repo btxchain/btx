@@ -23,6 +23,8 @@ PUBLIC btx:// MODEL
 FREE SWARM REPLICATION.
 ```
 
+**This build.** `createmodelrelease` records the campaign against the model already in the catalog and stores only the SHA-256 of the secret. A wrapped `.btxenc` file is not imported. `ciphertext_artifact_id` stays the existing artifact.
+
 Lifecycle labels (`PUBLIC`, `FUNDING`, `FUNDED_AWAITING_RELEASE`,
 `SECRET_DISCLOSED`, `PUBLIC_RELEASED`, `REFUND_AVAILABLE`, …) are **model-plane
 UI/API states**. They are not consensus, not fork choice, and not a global

@@ -13,11 +13,12 @@
 // by |delta| < 2^32 < q and therefore can never alias.
 //
 // These tests pin the *normative arithmetic* with a self-contained,
-// portable reference implementation (no __int128, no vendor paths) so
+// portable reference implementation (no btx::I128, no vendor paths) so
 // that any conforming backend can be cross-checked against the exact
 // same numbers. The pure-integer CPU semantics tested here are the
 // consensus definition (§N.3-v).
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/pow_v4.h>
 

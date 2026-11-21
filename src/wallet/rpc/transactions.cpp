@@ -243,12 +243,17 @@ static UniValue ListReceived(const CWallet& wallet, const UniValue& params, cons
     UniValue ret(UniValue::VARR);
     std::map<std::string, tallyitem> label_tally;
 
-    const auto& func = [&](const CTxDestination& address, const std::string& label, bool is_change, const std::optional<AddressPurpose>& purpose) {
+    const auto& func = [&](const CTxDestination& address, const std::string& label, bool is_change,
+                            const std::optional<AddressPurpose>& purpose) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet) {
         if (is_change) return; // no change addresses
 
+        // Entries in mapTally are only ever added for wallet.IsMine() addresses (see the tally
+        // loop above), so it's only addresses missing from mapTally that need the IsMine() check.
         auto it = mapTally.find(address);
-        if (it == mapTally.end() && !fIncludeEmpty)
-            return;
+        if (it == mapTally.end()) {
+            if (!fIncludeEmpty) return;
+            if (!wallet.IsMine(address)) return; // exclude addresses not owned by the wallet (e.g. "send" purpose)
+        }
 
         CAmount nAmount = 0;
         int nConf = std::numeric_limits<int>::max();
@@ -589,6 +594,26 @@ static std::vector<RPCResult> TransactionDescriptionString()
            {RPCResult::Type::NUM_TIME, "time", "The transaction time expressed in " + UNIX_EPOCH_TIME + "."},
            {RPCResult::Type::NUM_TIME, "timereceived", "The time received expressed in " + UNIX_EPOCH_TIME + "."},
            {RPCResult::Type::STR, "comment", /*optional=*/true, "If a comment is associated with the transaction, only present if not empty."},
+           {RPCResult::Type::STR, "modelnet", /*optional=*/true, "Model funding: transaction purpose."},
+           {RPCResult::Type::STR, "model_output_script", /*optional=*/true, "Model funding: the HTLC output script."},
+           {RPCResult::Type::STR, "model_output_vout", /*optional=*/true, "Model funding: the HTLC output index."},
+           {RPCResult::Type::STR, "model_key_hash", /*optional=*/true, "Model funding: the SHA-256 key hash."},
+           {RPCResult::Type::STR, "model_release_id", /*optional=*/true, "Model funding: the release id, when supplied."},
+           {RPCResult::Type::STR, "model_descriptor", /*optional=*/true, "Model funding: the HTLC recovery descriptor."},
+           {RPCResult::Type::STR, "model_refund_pubkey", /*optional=*/true, "Model funding: the refund public key."},
+           {RPCResult::Type::STR, "model_refund_height", /*optional=*/true, "Model funding: the refund height."},
+           {RPCResult::Type::STR, "model_claimant", /*optional=*/true, "Model funding: the claimant public key."},
+           {RPCResult::Type::STR, "bounty_descriptor", /*optional=*/true, "Bounty funding submitted with its plan: the escrow descriptor."},
+           {RPCResult::Type::STR, "bounty_output_vout", /*optional=*/true, "Bounty funding: the escrow output index."},
+           {RPCResult::Type::STR, "bounty_refund_pubkey", /*optional=*/true, "Bounty funding: the refund key."},
+           {RPCResult::Type::STR, "bounty_refund_height", /*optional=*/true, "Bounty funding: the refund height."},
+           {RPCResult::Type::STR, "bounty_award_height", /*optional=*/true, "Bounty funding, council escrow: the award height."},
+           {RPCResult::Type::STR, "bounty_threshold", /*optional=*/true, "Bounty funding, council escrow: the council threshold."},
+           {RPCResult::Type::STR, "bounty_council_keys", /*optional=*/true, "Bounty funding, council escrow: the council keys, comma-separated."},
+           {RPCResult::Type::STR, "bounty_hashlock", /*optional=*/true, "Bounty funding, staged escrow: the sha256 hashlock."},
+           {RPCResult::Type::STR, "bounty_claimant", /*optional=*/true, "Bounty funding, staged escrow: the claimant key."},
+           {RPCResult::Type::STR, "bounty_id", /*optional=*/true, "Bounty funding: the bounty id from the plan."},
+           {RPCResult::Type::STR, "bounty_lot_id", /*optional=*/true, "Bounty funding: the lot id from the plan."},
            {RPCResult::Type::STR, "bip125-replaceable", "(\"yes|no|unknown\") Whether this transaction signals BIP125 replaceability or has an unconfirmed ancestor signaling BIP125 replaceability.\n"
                "May be unknown for unconfirmed transactions not in the mempool because their unconfirmed ancestors are unknown."},
            {RPCResult::Type::ARR, "parent_descs", /*optional=*/true, "Only if 'category' is 'received'. List of parent descriptors for the output script of this coin.", {

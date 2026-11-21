@@ -1878,6 +1878,33 @@ UniValue CallWalletCommand(const std::string& name, const JSONRPCRequest& req)
     return UniValue::VNULL;
 }
 
+// A backupwalletbundle that fails part way removes the directory it created,
+// so the same destination can be used again.
+BOOST_AUTO_TEST_CASE(failed_bundle_backup_leaves_no_directory)
+{
+    const std::shared_ptr<CWallet> wallet = CreateP2MRDescriptorWallet(*this);
+    WalletContext context;
+    context.args = &m_args;
+    context.chain = m_node.chain.get();
+    AddWallet(context, wallet);
+    const fs::path bundle_dir = m_args.GetDataDirBase() / "failed_bundle";
+    UniValue params(UniValue::VARR);
+    params.push_back(fs::PathToString(bundle_dir));
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool threw{false};
+        try {
+            CallWalletCommand("backupwalletbundle", WalletRpc(context, params));
+        } catch (const UniValue& e) {
+            threw = true;
+            BOOST_TEST_MESSAGE("backupwalletbundle failed: " << e.write());
+            BOOST_CHECK(e["message"].get_str().find("already exists") == std::string::npos);
+        }
+        BOOST_REQUIRE_MESSAGE(threw, "backupwalletbundle was expected to fail for this wallet");
+        BOOST_CHECK(!fs::exists(bundle_dir));
+    }
+    RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
+}
+
 BOOST_AUTO_TEST_CASE(gethdkeys_and_createwalletdescriptor_p2mr)
 {
     const std::shared_ptr<CWallet> wallet = CreateP2MRDescriptorWallet(*this, /*include_internal=*/false);

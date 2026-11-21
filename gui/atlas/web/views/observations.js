@@ -8,7 +8,7 @@ import {feeBins} from '../core/mempool.js';
 import {banSubnet} from '../core/network.js';
 export function observationView(app,view){
  const definitions={
-  swarms:['Swarms & communities','Following a model family is not a grant to train, seed, spend or route private prompts.',['getmodelnetworkinfo','getmodelpeers','listmodels'],'Models'],
+  swarms:['Swarms & communities','Following a model family is not a grant to train, seed, spend or route private prompts.',['getmodelnetworkinfo','getmodelpeers','listmodels','getnetworkmodelstats','getmodellandiscovery','getmodelfeedstatus','getsearchpeers','listmodelsearchrecords'],'Models'],
   economy:['Economy & funding','Targets, pledges, confirmed backing, reservations, enforceable claims and settled transactions remain separate.',['getmodelfeed','getfundablemodels','getrecentreleases','searchbounties'],'Economy'],
   compute:['Local compute','Capabilities are reported by the native helper; missing engines and unqualified hardware stay explicit.',['getmodelhostprofile','getsetupstatus','getmodelnetworkinfo','getmemoryinfo'],'Compute'],
   mining:['Mining & monetary node','Native MatMul/ExactReplay status. No synthetic throughput or invented earnings.',['getmininginfo','getblockchaininfo','getmempoolinfo','getnettotals'],'Node']

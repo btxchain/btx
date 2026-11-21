@@ -82,6 +82,8 @@ TEST_EXIT_SKIPPED = 77
 TEST_FRAMEWORK_UNIT_TESTS = 'feature_framework_unit_tests.py'
 
 EXTENDED_SCRIPTS = [
+    # Explicit verified previous BTX path required; otherwise skips.
+    'wallet_release_transition.py --descriptors',
     # Native Qt/X11 recovery; explicitly skips without --qt-binary and pyatspi.
     'feature_qt_wallet_recovery.py --descriptors',
     # These tests are not run by default.
@@ -100,13 +102,17 @@ EXTENDED_SCRIPTS = [
     # (DoS 100). Keep it categorized, out of the base suite, until it is ported
     # to node-built MatMul blocks.
     'p2p_unrequested_blocks.py',
+    # Race against blocks being disconnected; whether it hits depends on load.
+    'wallet_shielded_rebuild_chain_shrink.py --descriptors',
 ]
 
 BASE_SCRIPTS = [
     # SWAPNET-FUNCTIONAL-TEST
     "feature_swapnet.py",
+    "feature_swapnet_market.py --descriptors",
     "rpc_swapnet_principal.py --descriptors",
     "p2p_swapnet_frames.py",
+    "wallet_swapnet_relock.py --descriptors",
     # Scripts that are run by default.
     # Longest test should go first, to favor running tests in parallel
     # vv Tests less than 5m vv
@@ -186,6 +192,8 @@ BASE_SCRIPTS = [
     'wallet_shielded_restart_persistence.py',
     'wallet_shielded_view_spend_restart.py --descriptors',
     'wallet_bundle_restore_shielded.py --descriptors',
+    'wallet_seed_pruned_recovery.py --descriptors',
+    'wallet_importbundle_shielded.py --descriptors',
     'wallet_shielded_rehydrate_issued.py --descriptors',
     'wallet_shielded_reorg_recovery.py',
     'feature_shielded_prune_reorg.py',
@@ -194,6 +202,7 @@ BASE_SCRIPTS = [
     'wallet_shielded_send_fee_bucket.py --descriptors',
     'wallet_shielded_chunking.py',
     'wallet_shielded_cross_wallet.py',
+    'wallet_shielded_restore_gap_window.py',
     'wallet_shielded_longhaul_sim.py',
     'wallet_shielded_topology_sim.py',
     'wallet_shielded_send_flow.py',
@@ -248,6 +257,7 @@ BASE_SCRIPTS = [
     'p2p_feefilter.py',
     'feature_csv_activation.py',
     'p2p_sendheaders.py',
+    'p2p_outbound_unconnecting_headers.py',
     'p2p_shielded_relay.py',
     'feature_config_args.py',
     'feature_io_errors.py --descriptors',
@@ -260,6 +270,7 @@ BASE_SCRIPTS = [
     'p2p_headers_nonzero_txcount.py',
     'p2p_trailing_block_headers_data.py',
     'p2p_block_chunk_transport.py',
+    'p2p_block_chunk_request_race.py',
     'p2p_large_block_transport.py',
     'p2p_inv_announcement_bounds.py',
     'rpc_createmultisig.py',
@@ -319,6 +330,7 @@ BASE_SCRIPTS = [
     'interface_rest.py',
     'mempool_spend_coinbase.py',
     'wallet_avoid_mixing_output_types.py --descriptors',
+    'wallet_sendall_amount_sum.py --descriptors',
     'mempool_reorg.py',
     'mempool_reorg_bip68_stale_lockpoints.py',
     'p2p_block_sync.py --v1transport',
@@ -545,6 +557,7 @@ BASE_SCRIPTS = [
     'rpc_scanblocks.py',
     'p2p_sendtxrcncl.py',
     'rpc_scantxoutset.py',
+    'rpc_scantxoutset_range_end.py',
     'feature_unsupported_utxo_db.py',
     'feature_logging.py',
     'feature_anchors.py',
@@ -590,6 +603,7 @@ BASE_SCRIPTS = [
     'feature_modelnet_cr12_stage_chunk.py',
     'feature_modelnet_firstrun.py',
     'feature_modelnet_listen.py',
+    'feature_modelnet_listen_sockets.py',
     'feature_modelbind_privacy.py',
     'feature_modelnet_events.py',
     'feature_modelnet_proxy.py',
@@ -605,6 +619,7 @@ BASE_SCRIPTS = [
     'feature_modelnet_packages.py',
     'feature_modelnet_search_lock.py',
     'feature_modelnet_release_cards.py --descriptors',
+    'rpc_modelnet_restricted_campaign_funding.py --descriptors',
     'rpc_bounty_secret_ref_wallet_restriction.py --descriptors',
     'rpc_wallet_file_rpc_restriction.py --descriptors',
     'rpc_modelnet_wallet_restriction.py --descriptors',
@@ -627,7 +642,9 @@ BASE_SCRIPTS = [
     'feature_modelnet_security_r10.py',
     'feature_modelnet_lab_peer_auth.py',
     'wallet_modelnet_funding.py --descriptors',
+    'feature_modelnet_funding_refund_recovery.py --descriptors',
     'wallet_bounty_funding_fee_bound.py --descriptors',
+    'wallet_bounty_funding_refund_terms.py --descriptors',
     'wallet_migration.py',
     'p2p_ibd_txrelay.py',
     'p2p_seednode.py',
@@ -639,10 +656,12 @@ BASE_SCRIPTS = [
 # P2MR-only chain. Use --extended (or BTX_RUN_UPSTREAM_BASE_SUITE=1) to run the
 # broad upstream-style matrix.
 BTX_BASE_SCRIPTS = [
+    'wallet_send_psbt_preview.py --descriptors',
     'wallet_encrypted_backup_recovery.py --descriptors',
     'feature_bcp1.py --descriptors',
     'wallet_bcp1_object_form.py --descriptors',
     'wallet_bcp1_lock_unspents.py --descriptors',
+    'wallet_custody_recovery.py --descriptors',
     'feature_p2mr_end_to_end.py',
     'p2mr_end_to_end.py',
     'rpc_pq_wallet.py',
@@ -656,6 +675,8 @@ BTX_BASE_SCRIPTS = [
     'wallet_shielded_restart_persistence.py',
     'wallet_shielded_view_spend_restart.py --descriptors',
     'wallet_bundle_restore_shielded.py --descriptors',
+    'wallet_seed_pruned_recovery.py --descriptors',
+    'wallet_importbundle_shielded.py --descriptors',
     'wallet_shielded_reorg_recovery.py',
     'wallet_bcp1_deposit_notify_conflicted.py --descriptors',
     'wallet_bcp1_deposit_notify_spent.py --descriptors',
@@ -664,8 +685,10 @@ BTX_BASE_SCRIPTS = [
     'wallet_bcp1_prepare_package.py --descriptors',
     'wallet_shielded_ring_size_policy.py',
     'wallet_bcp1_depositpool_rescan.py --descriptors',
+    'wallet_bcp1_recovery.py --descriptors',
     'wallet_shielded_chunking.py',
     'wallet_shielded_cross_wallet.py',
+    'wallet_shielded_restore_gap_window.py',
     'wallet_bcp1_consolidation_target.py --descriptors',
     'wallet_shielded_longhaul_sim.py',
     'wallet_bcp1_pool_change_branch.py --descriptors',
@@ -703,6 +726,7 @@ BTX_BASE_SCRIPTS = [
     'wallet_p2mr_multiparty_psbt.py --descriptors',
     'wallet_p2mr_external_parent.py --descriptors',
     'wallet_sendall_pq.py',
+    'wallet_sendall.py --descriptors',
     'wallet_bcp1_pool_slot_unique.py --descriptors',
     'wallet_pq_sigop_fee.py',
     'wallet_p2mr_locked_key_lookup.py --descriptors',
@@ -797,6 +821,7 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_cr12_stage_chunk.py',
     'feature_modelnet_firstrun.py',
     'feature_modelnet_listen.py',
+    'feature_modelnet_listen_sockets.py',
     'feature_modelbind_privacy.py',
     'feature_modelnet_events.py',
     'feature_modelnet_proxy.py',
@@ -812,6 +837,7 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_packages.py',
     'feature_modelnet_search_lock.py',
     'feature_modelnet_release_cards.py --descriptors',
+    'rpc_modelnet_restricted_campaign_funding.py --descriptors',
     'rpc_bounty_secret_ref_wallet_restriction.py --descriptors',
     'rpc_wallet_file_rpc_restriction.py --descriptors',
     'rpc_modelnet_wallet_restriction.py --descriptors',
@@ -834,7 +860,9 @@ BTX_BASE_SCRIPTS = [
     'feature_modelnet_security_r10.py',
     'feature_modelnet_lab_peer_auth.py',
     'wallet_modelnet_funding.py --descriptors',
+    'feature_modelnet_funding_refund_recovery.py --descriptors',
     'wallet_bounty_funding_fee_bound.py --descriptors',
+    'wallet_bounty_funding_refund_terms.py --descriptors',
     'mining_basic.py',
     'mining_mainnet.py',
     'mining_matmul_basic.py',

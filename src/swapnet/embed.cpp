@@ -68,6 +68,7 @@ PyObject* CoreCallback(PyObject* capsule,PyObject* args) {
     auto* cb=static_cast<Callbacks*>(PyCapsule_GetPointer(capsule,"swapnet.callbacks"));
     if(!cb)return nullptr;
     try { auto result=cb->core(wallet,method,params);return PyUnicode_FromStringAndSize(result.data(),result.size()); }
+    catch(const NativeAbsent&){PyErr_SetString(PyExc_LookupError,"native-absent");return nullptr;}
     catch(...) {PyErr_SetString(PyExc_RuntimeError,"Native operation rejected");return nullptr;}
 }
 PyObject* SendCallback(PyObject* capsule,PyObject* args) {

@@ -1095,6 +1095,25 @@ class BundlePythonRuntimeTest(unittest.TestCase):
             "cryptography": site / "cryptography",
             "_cffi_backend": site / "_cffi_backend.cpython-312-x86_64-linux-gnu.so"})
 
+    def test_third_party_roots_include_packages_nested_below_stdlib(self):
+        stdlib = self.root / "opt/python/lib/python3.12"
+        dynload = stdlib / "lib-dynload"
+        for directory in ("site-packages", "dist-packages"):
+            with self.subTest(directory=directory):
+                site = stdlib / directory
+                info = {"stdlib": str(stdlib), "lib_dynload": str(dynload), "modules": {
+                    "os": str(stdlib / "os.py"),
+                    "json": str(stdlib / "json/__init__.py"),
+                    "json.data": str(stdlib / "json/site-packages/data.py"),
+                    "_ssl": str(dynload / "_ssl.cpython-312-x86_64-linux-gnu.so"),
+                    "dynload_data": str(dynload / "site-packages/data.py"),
+                    "cryptography.hazmat.primitives": str(site / "cryptography/hazmat/primitives/__init__.py"),
+                    "cryptography": str(site / "cryptography/__init__.py"),
+                    "_cffi_backend": str(site / "_cffi_backend.cpython-312-x86_64-linux-gnu.so")}}
+                self.assertEqual(self.module._third_party_roots(info), {
+                    "cryptography": site / "cryptography",
+                    "_cffi_backend": site / "_cffi_backend.cpython-312-x86_64-linux-gnu.so"})
+
     def test_startup_sonames_leave_out_what_only_libpython_pulls_in(self):
         host = self.root / "host"
         libs = {name: self._elf(host / name, needed=needed, executable=False) for name, needed in (

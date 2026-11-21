@@ -2,12 +2,14 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/bounty.h>
 
 #include <modelnet/catalog.h>
 #include <modelnet/event_journal.h>
 #include <modelnet/identity.h>
 #include <modelnet/search.h>
+#include <crypto/sha256.h>
 #include <crypto/sha384.h>
 #include <random.h>
 #include <util/fs_helpers.h>
@@ -15,12 +17,14 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <set>
 #include <sstream>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace modelnet {
@@ -31,6 +35,39 @@ std::string RandHex(size_t nbytes)
     std::vector<unsigned char> b(nbytes);
     GetStrongRandBytes(Span<unsigned char>{b.data(), b.size()});
     return HexStr(b);
+}
+
+UniValue MakeBountyEvent(const std::string& kind, const std::string& bounty_id, const UniValue& payload,
+                        uint64_t& seq, uint64_t epoch)
+{
+    UniValue e(UniValue::VOBJ);
+    e.pushKV("event_id", RandHex(16));
+    e.pushKV("kind", kind);
+    e.pushKV("bounty_id", bounty_id);
+    e.pushKV("seq", static_cast<int64_t>(++seq));
+    e.pushKV("epoch", static_cast<int64_t>(epoch));
+    e.pushKV("payload", payload);
+    e.pushKV("authority", "local_signed_or_chain");
+    return e;
+}
+
+void PublishBountyEvent(const UniValue& event)
+{
+    if (BoundModelEventJournal()) {
+        ObserveResult observed;
+        std::string journal_err;
+        (void)JournalObserveBounty(event, observed, journal_err);
+    }
+}
+
+//! Size of the drafts as JSON, without the one named `skip`.
+size_t DraftBytes(const std::map<std::string, UniValue>& drafts, const std::string& skip)
+{
+    size_t bytes{0};
+    for (const auto& [id, draft] : drafts) {
+        if (id != skip) bytes += draft.write().size();
+    }
+    return bytes;
 }
 
 const std::set<std::string>& HelperMethods()
@@ -131,10 +168,10 @@ int64_t AtomsToBps(int64_t atoms, int64_t total)
 {
     if (total <= 0 || atoms <= 0) return 0;
     if (atoms >= total) return 10000;
-    const unsigned __int128 num =
-        static_cast<unsigned __int128>(static_cast<uint64_t>(atoms)) * 10000u;
+    const btx::U128 num =
+        static_cast<btx::U128>(static_cast<uint64_t>(atoms)) * 10000u;
     const int64_t bps =
-        static_cast<int64_t>(num / static_cast<unsigned __int128>(static_cast<uint64_t>(total)));
+        static_cast<int64_t>(num / static_cast<btx::U128>(static_cast<uint64_t>(total)));
     return bps > 10000 ? 10000 : bps;
 }
 
@@ -175,14 +212,11 @@ std::string IdemFingerprint(const UniValue& params)
     return out.write();
 }
 
-//! Whether `key` already answered some request to `method`. Remembered results
-//! are stored under method|key<US>fingerprint.
-bool IdemKeyUsed(const std::map<std::string, UniValue>& idem, const std::string& method, const std::string& key)
+std::string IdemHash(const std::string& text)
 {
-    if (key.empty()) return false;
-    const std::string prefix = method + "|" + key + '\x1f';
-    const auto it = idem.lower_bound(prefix);
-    return it != idem.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+    unsigned char hash[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(text.data()), text.size()).Finalize(hash);
+    return HexStr(hash);
 }
 
 std::string IdemKey(const UniValue& params)
@@ -579,10 +613,10 @@ bool EligibleBps(const std::string& principal, const std::string& frozen_total, 
         err = "eligibility range";
         return false;
     }
-    const unsigned __int128 lhs =
-        static_cast<unsigned __int128>(static_cast<uint64_t>(p)) * 10000u;
-    const unsigned __int128 rhs = static_cast<unsigned __int128>(static_cast<uint64_t>(t)) *
-                                  static_cast<unsigned __int128>(static_cast<uint32_t>(min_bps));
+    const btx::U128 lhs =
+        static_cast<btx::U128>(static_cast<uint64_t>(p)) * 10000u;
+    const btx::U128 rhs = static_cast<btx::U128>(static_cast<uint64_t>(t)) *
+                                  static_cast<btx::U128>(static_cast<uint32_t>(min_bps));
     return lhs >= rhs;
 }
 
@@ -873,19 +907,55 @@ bool MandateBudget::LoadState(const UniValue& state, std::string& err)
 
 void BountyChainIndex::Observe(const BountyChainFact& f)
 {
-    m_undo.push_back(m_facts);
+    // Keep only what this step changes. A copy of every fact per step made an
+    // N-lot importbountyrecovery hold N*(N-1)/2 facts until restart.
+    UndoStep step{f.outpoint, std::nullopt};
+    if (const auto it{m_facts.find(f.outpoint)}; it != m_facts.end()) step.previous = it->second;
+    m_undo_bytes += StepBytes(step);
+    m_undo.push_back(std::move(step));
+    while (!m_undo.empty() && (m_undo.size() > MAX_UNDO_STEPS || m_undo_bytes > MAX_UNDO_BYTES)) {
+        DropOldestUndo();
+    }
     m_facts[f.outpoint] = f;
     if (f.height > m_height) m_height = f.height;
     ++m_epoch;
 }
 
+size_t BountyChainIndex::StepBytes(const UndoStep& step)
+{
+    size_t bytes{sizeof(UndoStep) + step.outpoint.size()};
+    if (step.previous) {
+        bytes += step.previous->outpoint.size() + step.previous->lot_id.size() + step.previous->bounty_id.size();
+    }
+    return bytes;
+}
+
+void BountyChainIndex::DropOldestUndo()
+{
+    m_undo_bytes -= StepBytes(m_undo.front());
+    m_undo.pop_front();
+}
+
 void BountyChainIndex::DisconnectTip()
 {
     if (!m_undo.empty()) {
-        m_facts = m_undo.back();
+        UndoStep step{std::move(m_undo.back())};
         m_undo.pop_back();
+        m_undo_bytes -= StepBytes(step);
+        if (step.previous) {
+            m_facts[step.outpoint] = std::move(*step.previous);
+        } else {
+            m_facts.erase(step.outpoint);
+        }
         ++m_epoch;
     }
+}
+
+size_t BountyChainIndex::UndoFactsHeld() const
+{
+    size_t held{0};
+    for (const auto& step : m_undo) held += step.previous ? 1 : 0;
+    return held;
 }
 
 const BountyChainFact* BountyChainIndex::Get(const std::string& outpoint) const
@@ -1015,6 +1085,7 @@ bool BountyChainIndex::LoadState(const UniValue& state, std::string& err)
     }
     m_facts = std::move(facts);
     m_undo.clear();
+    m_undo_bytes = 0;
     m_height = height;
     ++m_epoch;
     return true;
@@ -1024,8 +1095,22 @@ void BountyChainIndex::Clear()
 {
     m_facts.clear();
     m_undo.clear();
+    m_undo_bytes = 0;
     m_height = 0;
     ++m_epoch;
+}
+
+//! Facts are saved with the store and held in the undo history: the strings
+//! a caller gives a fact have a size bound.
+static bool ChainFactFieldsOk(const BountyChainFact& f, std::string& err)
+{
+    constexpr size_t CHAIN_FACT_FIELD_MAX{256};
+    if (f.outpoint.size() > CHAIN_FACT_FIELD_MAX || f.bounty_id.size() > CHAIN_FACT_FIELD_MAX ||
+        f.lot_id.size() > CHAIN_FACT_FIELD_MAX) {
+        err = "outpoint, bounty_id or lot_id too long";
+        return false;
+    }
+    return true;
 }
 
 bool BountyChainIndex::ImportManifest(const UniValue& manifest, std::string& err)
@@ -1046,6 +1131,7 @@ bool BountyChainIndex::ImportManifest(const UniValue& manifest, std::string& err
         f.outpoint = lot["outpoint"].get_str();
         f.lot_id = lot.exists("lot_id") ? lot["lot_id"].get_str() : "";
         f.bounty_id = manifest.exists("bounty_id") ? manifest["bounty_id"].get_str() : "";
+        if (!ChainFactFieldsOk(f, err)) return false;
         if (lot.exists("amount_atoms")) {
             if (!CanonicalAtomsField(lot["amount_atoms"], f.amount_atoms, err)) return false;
         }
@@ -1076,8 +1162,19 @@ bool BountyStore::Load(std::string& err)
     m_chain_dir = m_dir;
     // Facts of another directory must not be saved into this one.
     if (load_chain) m_chain.Clear();
+    // A missing file is an empty store. One that is there but cannot be read
+    // or is not an object may hold bounties, mandates and spent budgets: keep
+    // it, and refuse to save over it (PersistLocked) until it is repaired. A
+    // status error counts as present.
+    const fs::path path = m_dir / "bounty-store.json";
+    std::error_code ec;
+    const auto st = std::filesystem::status(path, ec);
+    const bool present = ec ? ec != std::errc::no_such_file_or_directory : fs::exists(st);
     UniValue o;
-    if (!ReadJson(m_dir / "bounty-store.json", o) || !o.isObject()) return true;
+    m_unreadable = present && (!ReadJson(path, o) || !o.isObject());
+    // Read the chain facts once the file is repaired, or the next save drops them.
+    if (m_unreadable) m_chain_dir.clear();
+    if (!present || m_unreadable) return true;
     if (o.exists("epoch")) m_epoch = o["epoch"].getInt<int64_t>();
     if (o.exists("seq")) m_seq = o["seq"].getInt<int64_t>();
     auto load_map = [&](const char* k, auto& dst) {
@@ -1146,6 +1243,10 @@ bool BountyStore::Load(std::string& err)
 
 bool BountyStore::PersistLocked(std::string& err) const
 {
+    if (m_unreadable) {
+        err = "bounty-store.json cannot be read; repair it before changing bounties";
+        return false;
+    }
     UniValue o(UniValue::VOBJ);
     o.pushKV("seq", static_cast<int64_t>(m_seq));
     o.pushKV("epoch", static_cast<int64_t>(m_epoch));
@@ -1204,55 +1305,113 @@ bool BountyStore::Save(std::string& err) const
 bool BountyStore::LoadIdentity(std::vector<unsigned char>& pk, std::vector<unsigned char>& sk, Digest48& id,
                               std::string& err)
 {
-    UniValue store;
-    ReadJson(m_dir / "research_identity.json", store);
-    if (store.exists("pk_hex") && store.exists("sk_hex")) {
-        pk = ParseHex(store["pk_hex"].get_str());
-        sk = ParseHex(store["sk_hex"].get_str());
-        if (pk.size() == MLDSA44_PK && sk.size() == MLDSA44_SK) {
-            id = ResearchIdentityId(pk);
-            return true;
+    const fs::path path = m_dir / "research_identity.json";
+    // Only a missing file gets a new key. A file that is there but cannot be
+    // read or parsed still holds the key this node signed its bounties with;
+    // writing a new one over it would lose that key for good.
+    std::error_code ec;
+    const auto st = std::filesystem::status(path, ec);
+    const bool present = ec ? ec != std::errc::no_such_file_or_directory : fs::exists(st);
+    if (present) {
+        UniValue store;
+        if (ReadJson(path, store) && store["pk_hex"].isStr() && store["sk_hex"].isStr()) {
+            pk = ParseHex(store["pk_hex"].get_str());
+            sk = ParseHex(store["sk_hex"].get_str());
+            if (pk.size() == MLDSA44_PK && sk.size() == MLDSA44_SK) {
+                id = ResearchIdentityId(pk);
+                return true;
+            }
         }
+        err = "research identity unreadable";
+        return false;
     }
     if (!GenerateMlDsa44(pk, sk, err)) return false;
     id = ResearchIdentityId(pk);
-    store.setObject();
+    UniValue store(UniValue::VOBJ);
     store.pushKV("pk_hex", HexStr(pk));
     store.pushKV("sk_hex", HexStr(sk));
-    return WriteJson(m_dir / "research_identity.json", store, err);
+    return WriteJson(path, store, err);
 }
 
-bool BountyStore::Idem(const std::string& method, const std::string& key, UniValue& out) const
+const BountyStore::KeptIdem* BountyStore::FindIdemLocked(const std::string& method, const std::string& key) const
 {
-    if (key.empty()) return false;
-    auto it = m_idem.find(method + "|" + key);
-    if (it == m_idem.end()) return false;
-    out = it->second;
-    return true;
+    if (key.empty()) return nullptr;
+    const auto it = m_idem.find(IdemHash(method + "|" + key));
+    return it == m_idem.end() ? nullptr : &it->second;
 }
 
-void BountyStore::Remember(const std::string& method, const std::string& key, const UniValue& result)
+void BountyStore::Remember(const std::string& method, const std::string& key, const std::string& request,
+                           const UniValue& result)
 {
-    if (!key.empty()) m_idem[method + "|" + key] = result;
+    if (key.empty()) return;
+    const std::string id = IdemHash(method + "|" + key);
+    if (m_idem.count(id)) return;
+    KeptIdem kept;
+    kept.request = IdemHash(request);
+    kept.reply = result.write();
+    kept.reply.shrink_to_fit();
+    // A reply larger than the whole budget is not kept; its key still is.
+    if (kept.reply.capacity() > IDEM_REPLY_BYTES_MAX) std::string{}.swap(kept.reply);
+    const size_t bytes = kept.reply.empty() ? 0 : kept.reply.capacity();
+    // Make room first: the oldest keys go beyond IDEM_KEYS_MAX (a request
+    // under such a key runs again, as after a restart), and the oldest replies
+    // go beyond the budget (their key stays and answers that the write was done).
+    while (m_idem.size() >= IDEM_KEYS_MAX && !m_idem_order.empty()) {
+        const auto it = m_idem.find(m_idem_order.front());
+        if (it != m_idem.end()) {
+            // The oldest key with a reply is the first one in m_idem_replies.
+            if (!it->second.reply.empty() && !m_idem_replies.empty() && m_idem_replies.front() == it->first) {
+                m_idem_reply_bytes -= it->second.reply.capacity();
+                m_idem_replies.pop_front();
+            }
+            m_idem.erase(it);
+        }
+        m_idem_order.pop_front();
+    }
+    while (bytes > 0 && m_idem_reply_bytes + bytes > IDEM_REPLY_BYTES_MAX && !m_idem_replies.empty()) {
+        const auto it = m_idem.find(m_idem_replies.front());
+        if (it != m_idem.end() && !it->second.reply.empty()) {
+            m_idem_reply_bytes -= it->second.reply.capacity();
+            std::string{}.swap(it->second.reply);
+        }
+        m_idem_replies.pop_front();
+    }
+    const auto it = m_idem.emplace(id, std::move(kept)).first;
+    try {
+        m_idem_order.push_back(id);
+        if (bytes > 0) m_idem_replies.push_back(id);
+    } catch (...) {
+        if (!m_idem_order.empty() && m_idem_order.back() == id) m_idem_order.pop_back();
+        m_idem.erase(it);
+        throw;
+    }
+    m_idem_reply_bytes += bytes;
 }
 
 UniValue BountyStore::Event(const std::string& kind, const std::string& bounty_id, const UniValue& payload)
 {
-    UniValue e(UniValue::VOBJ);
-    e.pushKV("event_id", RandHex(16));
-    e.pushKV("kind", kind);
-    e.pushKV("bounty_id", bounty_id);
-    e.pushKV("seq", static_cast<int64_t>(++m_seq));
-    e.pushKV("epoch", static_cast<int64_t>(m_epoch));
-    e.pushKV("payload", payload);
-    e.pushKV("authority", "local_signed_or_chain");
-    m_events.push_back(e);
-    if (BoundModelEventJournal()) {
-        ObserveResult ores;
-        std::string jerr;
-        (void)JournalObserveBounty(e, ores, jerr);
-    }
+    UniValue e = MakeBountyEvent(kind, bounty_id, payload, m_seq, m_epoch);
+    AppendEventLocked(e);
+    PublishBountyEvent(e);
     return e;
+}
+
+void BountyStore::AppendEventLocked(const UniValue& event)
+{
+    const size_t bytes = event.write().size();
+    m_events.push_back(event);
+    m_event_bytes += bytes;
+    TrimEventsLocked();
+}
+
+void BountyStore::TrimEventsLocked()
+{
+    // Oldest out first; a reader whose cursor is behind the oldest event kept
+    // gets a gap (getbountyevents).
+    while ((m_events.size() > BOUNTY_EVENTS_MAX || m_event_bytes > BOUNTY_EVENT_BYTES_MAX) && m_events.size() > 1) {
+        m_event_bytes -= std::min(m_event_bytes, m_events.front().write().size());
+        m_events.erase(m_events.begin());
+    }
 }
 
 UniValue BountyStore::BountyEntryLocked(const std::string& bounty_id) const
@@ -1339,13 +1498,21 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
     // same request again is a replay; another request under a used key is a
     // conflict, as for NETWORK-02 writes and mandate reservations.
     const std::string idem_key = IdemKey(params);
-    const std::string idem = idem_key.empty() ? std::string{} : idem_key + '\x1f' + IdemFingerprint(params);
+    const std::string idem_request = idem_key.empty() ? std::string{} : IdemFingerprint(params);
     const bool skip_idem = (method == "reservemandate");
-    if (!skip_idem && Idem(method, idem, result)) return true;
-    if (!skip_idem && IdemKeyUsed(m_idem, method, idem_key)) {
-        err_code = "IDEMPOTENCY_CONFLICT";
-        err = "idempotency conflict";
-        return false;
+    if (!skip_idem) {
+        if (const KeptIdem* kept = FindIdemLocked(method, idem_key)) {
+            if (kept->request != IdemHash(idem_request)) {
+                err_code = "IDEMPOTENCY_CONFLICT";
+                err = "idempotency conflict";
+                return false;
+            }
+            if (!kept->reply.empty() && result.read(kept->reply)) return true;
+            result.setNull();
+            err_code = "IDEMPOTENCY_REPLAY_UNAVAILABLE";
+            err = "the write under this idempotency_key was done; its reply is no longer kept";
+            return false;
+        }
     }
 
     auto fail = [&](const char* code, const std::string& e) {
@@ -1357,7 +1524,7 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         // Report a failed save. Remember the result only once it is saved, so
         // a retry with the same request saves again.
         if (!PersistLocked(err)) return fail("IO", err);
-        Remember(method, idem, result);
+        if (!skip_idem) Remember(method, idem_key, idem_request, result);
         return true;
     };
 
@@ -1381,6 +1548,14 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             }
             err.clear();
             err_code.clear();
+        }
+        // Drafts are saved with the store, which every bounty write writes
+        // again: their number and their size in all are bounded.
+        if (m_drafts.size() >= BOUNTY_DRAFTS_MAX) {
+            return fail("REJECTED", "too many bounty drafts; delete one with deletebountydraft");
+        }
+        if (DraftBytes(m_drafts, {}) + terms.write().size() > BOUNTY_DRAFT_BYTES_MAX) {
+            return fail("REJECTED", "bounty drafts would exceed 16 MiB; delete one with deletebountydraft");
         }
         const std::string id = RandHex(16);
         m_drafts[id] = terms;
@@ -1475,6 +1650,9 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         for (const std::string& k : it->second.getKeys()) {
             if (overlay.count(k)) continue;
             merged.pushKV(k, it->second[k]);
+        }
+        if (DraftBytes(m_drafts, id) + merged.write().size() > BOUNTY_DRAFT_BYTES_MAX) {
+            return fail("REJECTED", "bounty drafts would exceed 16 MiB; delete one with deletebountydraft");
         }
         it->second = merged;
         const bool complete = ValidateBountyTerms(it->second, m_network, err);
@@ -1692,6 +1870,27 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         const UniValue a = ObjArg(params, 0);
         const std::string bounty_id = a["bounty_id"].get_str();
         if (!m_bounties.count(bounty_id)) return fail("NOT_FOUND", "bounty");
+        // A nomination is a signed record saved with the store, which every
+        // bounty write writes again: the same nominee keeps its nomination,
+        // the nominee fields are bounded, and so is the number per bounty.
+        constexpr size_t NOMINATIONS_MAX{64};
+        constexpr size_t NOMINEE_FIELD_MAX{4096};
+        const std::string nominee_identity = a["nominee_identity"].write();
+        const std::string nominee_key = a["nominee_key"].write();
+        if (nominee_identity.size() > NOMINEE_FIELD_MAX || nominee_key.size() > NOMINEE_FIELD_MAX) {
+            return fail("INVALID_PARAMETER", "nominee_identity or nominee_key too long");
+        }
+        auto& nominations = m_noms[bounty_id];
+        for (const auto& kept : nominations) {
+            if (!kept.body.exists("payload")) continue;
+            const UniValue& kp = kept.body["payload"];
+            if (kp["nominee_identity"].write() == nominee_identity && kp["nominee_key"].write() == nominee_key) {
+                result = EnvelopeToJson(kept);
+                result.pushKV("nomination_only", true);
+                return ok();
+            }
+        }
+        if (nominations.size() >= NOMINATIONS_MAX) return fail("REJECTED", "too many nominations for this bounty");
         UniValue p(UniValue::VOBJ);
         p.pushKV("bounty_id", bounty_id);
         p.pushKV("nominee_identity", a["nominee_identity"]);
@@ -1712,6 +1911,15 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         // As nominatebountyevaluator: only for terms this store published.
         const std::string terms_id = a.exists("terms_id") && a["terms_id"].isStr() ? a["terms_id"].get_str() : "";
         if (!m_terms.count(terms_id)) return fail("NOT_FOUND", "terms");
+        // Saved with the store like the nominations, and bounded the same way.
+        constexpr size_t APPOINTMENTS_MAX{64};
+        constexpr size_t APPOINTMENT_BYTES_MAX{16384};
+        if (const auto it = m_appointments.find(terms_id); it != m_appointments.end() && it->second.size() >= APPOINTMENTS_MAX) {
+            return fail("REJECTED", "too many appointments for these terms");
+        }
+        if ((a.exists("appointment") ? a["appointment"] : a).write().size() > APPOINTMENT_BYTES_MAX) {
+            return fail("INVALID_PARAMETER", "appointment too large");
+        }
         SignedEnvelope env;
         if (!sign_payload("CouncilAppointment", a.exists("appointment") ? a["appointment"] : a, env))
             return fail("REJECTED", err);
@@ -1724,8 +1932,14 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
     if (method == "listbountyevaluators") {
         const std::string bounty_id = StrArg(params, 0, "bounty_id");
         UniValue arr(UniValue::VARR);
-        for (const auto& e : m_noms[bounty_id]) arr.push_back(EnvelopeToJson(e));
-        for (const auto& e : m_appointments[bounty_id]) arr.push_back(EnvelopeToJson(e));
+        // Look up without adding: an unknown id must not leave an empty entry
+        // behind that the next save keeps.
+        if (const auto it = m_noms.find(bounty_id); it != m_noms.end()) {
+            for (const auto& e : it->second) arr.push_back(EnvelopeToJson(e));
+        }
+        if (const auto it = m_appointments.find(bounty_id); it != m_appointments.end()) {
+            for (const auto& e : it->second) arr.push_back(EnvelopeToJson(e));
+        }
         result.setObject();
         result.pushKV("evaluators", arr);
         return true;
@@ -1743,6 +1957,17 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         p.pushKV("binding", false);
         SignedEnvelope env;
         if (!sign_payload("FundingRound", p, env)) return fail("REJECTED", err);
+        // Pledges are saved with the store, which every bounty write writes
+        // again: a bounty takes at most PLEDGES_MAX of them.
+        constexpr size_t PLEDGES_MAX{64};
+        if (!m_pledges.count(env.record_id.Hex())) {
+            size_t kept{0};
+            for (const auto& kv : m_pledges) {
+                const UniValue& payload = kv.second.body["payload"];
+                if (payload["bounty_id"].isStr() && payload["bounty_id"].get_str() == bounty_id) ++kept;
+            }
+            if (kept >= PLEDGES_MAX) return fail("REJECTED", "too many pledges for this bounty");
+        }
         m_pledges[env.record_id.Hex()] = env;
         result = EnvelopeToJson(env);
         result.pushKV("confirmed", false);
@@ -1785,7 +2010,8 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             int64_t p = 0;
             if (!lot.exists("principal_atoms") || !CanonicalAtoms(lot["principal_atoms"].get_str(), p, err2))
                 return fail("INVALID_PARAMETER", "principal");
-            frozen += p;
+            // Each lot is in MoneyRange; the round's total must be too.
+            if (!AddMoneyAtoms(frozen, p, err2)) return fail("INVALID_PARAMETER", "frozen total MoneyRange");
             UniValue L = lot;
             const std::string rid_placeholder = "pending";
             (void)rid_placeholder;
@@ -1842,8 +2068,28 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         }
         UniValue p = a.exists("commitment") ? a["commitment"] : a;
         p.pushKV("bounty_id", a["bounty_id"]);
+        // Commitments are saved with the store, which every bounty write
+        // writes again: a commitment has a size bound, a bounty takes at most
+        // COMMITMENTS_MAX of them, and the same commitment again returns the
+        // one there instead of making it unrevealed.
+        constexpr size_t COMMITMENTS_MAX{256};
+        constexpr size_t COMMITMENT_BYTES_MAX{65536};
+        if (p.write().size() > COMMITMENT_BYTES_MAX) return fail("INVALID_PARAMETER", "commitment too large");
         SignedEnvelope env;
         if (!sign_payload("SubmissionCommitment", p, env)) return fail("REJECTED", err);
+        if (m_submissions.count(env.record_id.Hex())) {
+            result = EnvelopeToJson(env);
+            result.pushKV("commitment_id", env.record_id.Hex());
+            return ok();
+        }
+        size_t commitments{0};
+        for (const auto& [id, kept] : m_submissions) {
+            if (kept["commitment_id"].isStr() && kept["commitment_id"].get_str() == id && kept["bounty_id"].isStr() &&
+                kept["bounty_id"].get_str() == a["bounty_id"].get_str()) {
+                ++commitments;
+            }
+        }
+        if (commitments >= COMMITMENTS_MAX) return fail("REJECTED", "too many commitments for this bounty");
         UniValue s(UniValue::VOBJ);
         s.pushKV("commitment_id", env.record_id.Hex());
         s.pushKV("bounty_id", a["bounty_id"]);
@@ -1863,8 +2109,21 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (it == m_submissions.end()) return fail("NOT_FOUND", "commitment");
         UniValue sub = a.exists("submission") ? a["submission"] : a;
         if (sub.exists("secret") || sub.exists("preimage")) return fail("REJECTED", "public secret forbidden");
+        // Saved with the store like the commitment: a submission has a size
+        // bound, and a commitment is revealed once; the same reveal again
+        // returns it.
+        constexpr size_t SUBMISSION_BYTES_MAX{65536};
+        if (sub.write().size() > SUBMISSION_BYTES_MAX) return fail("INVALID_PARAMETER", "submission too large");
         SignedEnvelope env;
         if (!sign_payload("Submission", sub, env)) return fail("REJECTED", err);
+        if (it->second["revealed"].isTrue()) {
+            if (!it->second["submission_id"].isStr() || it->second["submission_id"].get_str() != env.record_id.Hex()) {
+                return fail("REJECTED", "commitment already revealed");
+            }
+            result = EnvelopeToJson(env);
+            result.pushKV("submission_id", env.record_id.Hex());
+            return ok();
+        }
         it->second.pushKV("revealed", true);
         it->second.pushKV("submission_id", env.record_id.Hex());
         it->second.pushKV("submission", sub);
@@ -2020,8 +2279,22 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
             !m_bounties.count(challenge["bounty_id"].get_str())) {
             return fail("NOT_FOUND", "bounty");
         }
+        // Challenges are saved with the store, which every bounty write
+        // writes again: a challenge has a size bound, and a bounty takes at
+        // most CHALLENGES_MAX of them.
+        constexpr size_t CHALLENGES_MAX{64};
+        constexpr size_t CHALLENGE_BYTES_MAX{16384};
+        if (challenge.write().size() > CHALLENGE_BYTES_MAX) return fail("INVALID_PARAMETER", "challenge too large");
         SignedEnvelope env;
         if (!sign_payload("Challenge", challenge, env)) return fail("REJECTED", err);
+        if (!m_challenges.count(env.record_id.Hex())) {
+            size_t kept{0};
+            for (const auto& kv : m_challenges) {
+                const UniValue& payload = kv.second.body["payload"];
+                if (payload["bounty_id"].isStr() && payload["bounty_id"].get_str() == challenge["bounty_id"].get_str()) ++kept;
+            }
+            if (kept >= CHALLENGES_MAX) return fail("REJECTED", "too many challenges for this bounty");
+        }
         m_challenges[env.record_id.Hex()] = env;
         result = EnvelopeToJson(env);
         result.pushKV("challenge_id", env.record_id.Hex());
@@ -2080,18 +2353,45 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (withdrawn(submission_id) || (!commitment_id.empty() && withdrawn(commitment_id))) {
             return fail("REJECTED", "submission withdrawn");
         }
+        // A commitment that was never revealed has nothing to award, and an
+        // award named by the commitment id counts its revealed submission too.
+        if (!sub->second["revealed"].isTrue()) return fail("REJECTED", "submission not revealed");
+        if (sub->second["submission_id"].isStr() && withdrawn(sub->second["submission_id"].get_str())) {
+            return fail("REJECTED", "submission withdrawn");
+        }
         const UniValue mode = a.exists("mode") ? a["mode"] : UniValue("PUBLIC_PAYOUT");
         if (!mode.isStr() || (mode.get_str() != "PUBLIC_PAYOUT" && mode.get_str() != "STAGED_RELEASE")) {
             return fail("INVALID_PARAMETER", "mode must be PUBLIC_PAYOUT or STAGED_RELEASE");
         }
+        // Awards are saved with the store, which every bounty write writes
+        // again: lot_ids has a size bound, and a bounty takes at most
+        // AWARDS_MAX awards.
+        constexpr size_t AWARDS_MAX{64};
+        constexpr size_t AWARD_LOT_IDS_MAX{16384};
+        const UniValue lot_ids = a.exists("lot_ids") ? a["lot_ids"] : UniValue(UniValue::VARR);
+        if (lot_ids.write().size() > AWARD_LOT_IDS_MAX) return fail("INVALID_PARAMETER", "lot_ids too large");
         UniValue p(UniValue::VOBJ);
         p.pushKV("bounty_id", bounty_id);
         p.pushKV("submission_id", submission_id);
-        p.pushKV("lot_ids", a.exists("lot_ids") ? a["lot_ids"] : UniValue(UniValue::VARR));
+        p.pushKV("lot_ids", lot_ids);
         p.pushKV("mode", mode);
         p.pushKV("paid", false);
         SignedEnvelope env;
         if (!sign_payload("AwardProposal", p, env)) return fail("REJECTED", err);
+        // The same proposal again has the same id: answer the award there, and
+        // keep its approval or its rejection.
+        if (m_awards.count(env.record_id.Hex())) {
+            result = EnvelopeToJson(env);
+            result.pushKV("award_id", env.record_id.Hex());
+            result.pushKV("paid", false);
+            return ok();
+        }
+        size_t awards{0};
+        for (const auto& [id, kept] : m_awards) {
+            const UniValue& kp = kept["proposal"];
+            if (kp["bounty_id"].isStr() && kp["bounty_id"].get_str() == bounty_id) ++awards;
+        }
+        if (awards >= AWARDS_MAX) return fail("REJECTED", "too many awards for this bounty");
         UniValue aw(UniValue::VOBJ);
         aw.pushKV("award_id", env.record_id.Hex());
         aw.pushKV("proposal", p);
@@ -2120,9 +2420,37 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (decision == "APPROVE" && it->second.exists("rejected") && it->second["rejected"].isTrue()) {
             return fail("REJECTED", "award was rejected");
         }
+        if (decision == "APPROVE") {
+            // The submission, or the commitment it revealed, may have been
+            // withdrawn since the award was proposed.
+            const auto withdrawn = [&](const std::string& id) {
+                const auto w = m_submissions.find(id);
+                return w == m_submissions.end() || w->second["withdrawn"].isTrue();
+            };
+            const UniValue& proposal = it->second["proposal"];
+            const std::string sid = proposal["submission_id"].isStr() ? proposal["submission_id"].get_str() : std::string{};
+            const auto sit = m_submissions.find(sid);
+            const std::string cid = sit != m_submissions.end() && sit->second["commitment_id"].isStr()
+                                        ? sit->second["commitment_id"].get_str()
+                                        : std::string{};
+            const std::string rid = sit != m_submissions.end() && sit->second["submission_id"].isStr()
+                                        ? sit->second["submission_id"].get_str()
+                                        : std::string{};
+            if (withdrawn(sid) || (!cid.empty() && withdrawn(cid)) || (!rid.empty() && withdrawn(rid))) {
+                return fail("REJECTED", "submission withdrawn");
+            }
+        }
         if (decision == "REJECT") {
             it->second.pushKV("rejected", true);
             result = it->second;
+            result.pushKV("transaction_signature", false);
+            return ok();
+        }
+        UniValue apps = it->second.exists("policy_approvals") ? it->second["policy_approvals"] : UniValue(UniValue::VARR);
+        // The store signs every approval with its one research key: an award
+        // keeps one approval, and approving it again returns that one.
+        if (!apps.empty() && apps[0].isObject()) {
+            result = apps[0];
             result.pushKV("transaction_signature", false);
             return ok();
         }
@@ -2132,7 +2460,6 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         p.pushKV("decision", "APPROVE");
         p.pushKV("transaction_signature", false);
         if (!sign_payload("AwardPolicyApproval", p, env)) return fail("REJECTED", err);
-        UniValue apps = it->second.exists("policy_approvals") ? it->second["policy_approvals"] : UniValue(UniValue::VARR);
         apps.push_back(EnvelopeToJson(env));
         it->second.pushKV("policy_approvals", apps);
         result = EnvelopeToJson(env);
@@ -2160,6 +2487,11 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         int limit = a.exists("limit") ? a["limit"].getInt<int>() : 50;
         if (limit < 1) return fail("INVALID_PARAMETER", "limit");
         if (limit > BOUNTY_PAGE_MAX) limit = BOUNTY_PAGE_MAX;
+        // The log keeps only the newest events, and none across a restart: a
+        // cursor behind the oldest event kept missed the events in between.
+        const uint64_t oldest = m_events.empty() ? m_seq + 1
+                                                 : static_cast<uint64_t>(m_events.front()["seq"].getInt<int64_t>());
+        const uint64_t gap_end = oldest > 0 && since < oldest - 1 ? oldest - 1 : 0;
         UniValue arr(UniValue::VARR);
         // A full page continues after its last event; m_seq would skip the
         // events between the page and the newest one.
@@ -2178,12 +2510,29 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         result.pushKV("events", arr);
         result.pushKV("epoch", static_cast<int64_t>(m_epoch));
         result.pushKV("cursor", std::to_string(next));
-        result.pushKV("gap", false);
+        result.pushKV("gap", gap_end != 0);
+        if (gap_end != 0) {
+            result.pushKV("gap_begin", std::to_string(since + 1));
+            result.pushKV("gap_end", std::to_string(gap_end));
+        }
         return true;
     }
 
     if (method == "watchbounty") {
         const std::string id = StrArg(params, 0, "bounty_id");
+        if (id.empty() || id.size() > BOUNTY_WATCH_ID_MAX) return fail("INVALID_PARAMETER", "bounty_id");
+        // Watches are saved with the store and written again with each bounty
+        // write: a bounty already watched keeps its one watch, and the number
+        // of watches is bounded.
+        for (const auto& [watch_id, watch] : m_watches) {
+            if (watch.exists("bounty_id") && watch["bounty_id"].isStr() && watch["bounty_id"].get_str() == id) {
+                result = watch;
+                return ok();
+            }
+        }
+        if (m_watches.size() >= BOUNTY_WATCHES_MAX) {
+            return fail("REJECTED", "too many bounty watches; remove one with unwatchbounty");
+        }
         const std::string wid = RandHex(8);
         UniValue w(UniValue::VOBJ);
         w.pushKV("watch_id", wid);
@@ -2210,6 +2559,10 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (!a.exists("owner_approval_ref") && !(a.exists("mandate") && a["mandate"].exists("owner_approval_ref")))
             return fail("REJECTED", "owner approval required");
         UniValue m = a.exists("mandate") ? a["mandate"] : a;
+        // A mandate is kept as the caller sends it and saved with the store,
+        // which every bounty write writes again: it has a size bound.
+        constexpr size_t AGENT_MANDATE_BYTES_MAX{16384};
+        if (m.write().size() > AGENT_MANDATE_BYTES_MAX) return fail("INVALID_PARAMETER", "mandate too large");
         if (!m.exists("total_atoms") || !m.exists("per_action_atoms")) return fail("INVALID_PARAMETER", "finite budget required");
         int64_t total = 0, per = 0;
         if (!CanonicalAtoms(m["total_atoms"].isStr() ? m["total_atoms"].get_str() : std::to_string(m["total_atoms"].getInt<int64_t>()),
@@ -2284,6 +2637,15 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         if (mit->second.exists("revoked") && mit->second["revoked"].get_bool()) return fail("REJECTED", "revoked");
         auto bit = m_budgets.find(mid);
         if (bit == m_budgets.end()) return fail("NOT_FOUND", "mandate");
+        // The budget keeps each reservation's key and refund key, saved with
+        // the store: they have a size bound.
+        // A refund key is an ML-DSA-44 public key in hex (2624 characters).
+        constexpr size_t AGENT_RESERVATION_KEY_MAX{256};
+        constexpr size_t AGENT_REFUND_KEY_MAX{4096};
+        if ((a["idempotency_key"].isStr() && a["idempotency_key"].get_str().size() > AGENT_RESERVATION_KEY_MAX) ||
+            (a["refund_key"].isStr() && a["refund_key"].get_str().size() > AGENT_REFUND_KEY_MAX)) {
+            return fail("INVALID_PARAMETER", "idempotency_key or refund_key too long");
+        }
         if (!bit->second->Reserve(a["idempotency_key"].get_str(), amount,
                                   a.exists("refund_key") ? a["refund_key"].get_str() : "", err))
             return fail("REJECTED", err);
@@ -2304,6 +2666,7 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
         f.outpoint = a["outpoint"].get_str();
         f.bounty_id = a.exists("bounty_id") ? a["bounty_id"].get_str() : "";
         f.lot_id = a.exists("lot_id") ? a["lot_id"].get_str() : "";
+        if (!ChainFactFieldsOk(f, err)) return fail("INVALID_PARAMETER", err);
         if (a.exists("amount_atoms")) {
             if (!CanonicalAtomsField(a["amount_atoms"], f.amount_atoms, err))
                 return fail("INVALID_PARAMETER", err.empty() ? "amount_atoms" : err);
@@ -2335,14 +2698,48 @@ bool BountyStore::Dispatch(const std::string& method, const UniValue& params, Un
 
     if (method == "reorgbountychain") {
         const std::string bounty_id = StrArg(params, 0, "bounty_id");
-        m_chain.DisconnectTip();
-        result = m_chain.Snapshot(bounty_id);
-        UniValue payload(UniValue::VOBJ);
-        payload.pushKV("corrective", true);
-        payload.pushKV("silent_delete", false);
-        result.pushKV("reorg", true);
-        result.pushKV("event", Event("REORG", bounty_id, payload));
-        return ok();
+        if (m_chain.UndoSteps() == 0) {
+            return fail("UNDO_UNAVAILABLE", "No observed tip to undo; re-observe verified chain facts or import a known-correct recovery manifest");
+        }
+        // Unlike a new observation, an undo cannot safely be applied twice after IO.
+        BountyChainIndex previous_chain = m_chain;
+        const uint64_t previous_seq = m_seq;
+        const size_t previous_events = m_events.size();
+        const size_t previous_event_bytes = m_event_bytes;
+        bool rollback_needed{true};
+        const auto rollback = [&] {
+            if (!rollback_needed) return;
+            rollback_needed = false;
+            m_chain = std::move(previous_chain);
+            m_seq = previous_seq;
+            while (m_events.size() > previous_events) m_events.pop_back();
+            m_event_bytes = previous_event_bytes;
+            result.setNull();
+        };
+        try {
+            m_chain.DisconnectTip();
+            result = m_chain.Snapshot(bounty_id);
+            UniValue payload(UniValue::VOBJ);
+            payload.pushKV("corrective", true);
+            payload.pushKV("silent_delete", false);
+            const UniValue event = MakeBountyEvent("REORG", bounty_id, payload, m_seq, m_epoch);
+            m_events.push_back(event);
+            m_event_bytes += event.write().size();
+            result.pushKV("reorg", true);
+            result.pushKV("event", event);
+            if (!PersistLocked(err)) {
+                rollback();
+                return fail("IO", err);
+            }
+            rollback_needed = false;
+            Remember(method, idem_key, idem_request, result);
+            PublishBountyEvent(event);
+            TrimEventsLocked();
+            return true;
+        } catch (...) {
+            rollback();
+            throw;
+        }
     }
 
     if (method == "exportbountyrecovery") {

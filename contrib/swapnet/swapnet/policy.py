@@ -49,10 +49,19 @@ class SafetyPolicy:
     quote_ttl_seconds: int = 120
     planning_headroom_seconds: int = 600
     require_evm_finalized: bool = True
+    # EVM legs settle on the finalized tag. While finality trails the tip by
+    # more than this, no new swap is quoted, proposed or accepted.
+    max_evm_finality_lag_seconds: int = 3600
+    # Finished swaps stay watched for deep reorgs; one of them is re-observed at most this often (0 = every tick).
+    terminal_recheck_seconds: int = 60
+    # A swap whose chain call failed waits 1, 2, 4 ... up to this many seconds before its next tick (0 = every tick).
+    rpc_retry_max_seconds: int = 60
 
     def __post_init__(self):
-        for name in ("btx_confirmations", "btc_confirmations", "settlement_margin_seconds", "reveal_margin_seconds", "max_observation_age_seconds", "quote_ttl_seconds", "planning_headroom_seconds"):
+        for name in ("btx_confirmations", "btc_confirmations", "settlement_margin_seconds", "reveal_margin_seconds", "max_observation_age_seconds", "quote_ttl_seconds", "planning_headroom_seconds", "max_evm_finality_lag_seconds"):
             integer(getattr(self, name), lo=1)
+        integer(self.terminal_recheck_seconds, lo=0)
+        integer(self.rpc_retry_max_seconds, lo=0, hi=3600)
         require(type(self.require_evm_finalized) is bool, "POLICY", "Invalid finality policy")
 
     def confirmations(self, family):
@@ -71,7 +80,8 @@ class SafetyPolicy:
         a_min, _ = long.remaining(clock_a)
         _, b_max = short.remaining(clock_b)
         require(a_min >= b_max + self.settlement_margin_seconds, "UNSAFE_TIMEOUT", "Long leg does not conservatively outlive short leg")
-        require(short.remaining(clock_b)[0] > self.reveal_margin_seconds, "LATE_REVEAL", "Short leg is too close to expiry")
+        confirm_wait=self.confirmations(clock_b.family)*clock_b.fastest_block_seconds
+        require(short.remaining(clock_b)[0] > self.reveal_margin_seconds+confirm_wait, "LATE_REVEAL", "Short leg is too close to expiry")
         return True
 
 @dataclass(frozen=True)

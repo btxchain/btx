@@ -1,0 +1,21 @@
+{
+  "status": "PASS_NATIVE_BTX_PRESENCE_AND_REBROADCAST",
+  "source_profile": "Saved949a98e3 packaged native daemon; exact previous CPU wallet regtest flags. Current PR777 Python UTXODriver, archived native BTX daemon. Not current-release qualification.",
+  "native_sha256": "ac96c05d6a83a09dbb902f0d89fd04049897a0ac659660c228926a1ed31b9e6f",
+  "confirmed_coinbase_presence": true,
+  "fundable_height": 101,
+  "mempool_presence": true,
+  "mempool_duplicate_suppressed": true,
+  "confirmed_duplicate_suppressed": true,
+  "wallet_known_dropped_absent": true,
+  "dropped_absent_after_restart": true,
+  "native_refusal": "non-final",
+  "original_inputs_consumed": true,
+  "outputs_unchanged": true,
+  "new_fund_operations": 0,
+  "txid": "c74afd1103b34492cf94f67e4add65edf525744fe2dbb8bb0bf3b4826710c1ea",
+  "deadline": 104,
+  "confirmed": 1,
+  "journal_operations": 1,
+  "node_stopped": true
+}

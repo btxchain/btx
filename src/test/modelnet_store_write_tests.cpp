@@ -6,16 +6,20 @@
 #include <modelnet/feed.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
+#include <modelnet/protocol.h>
+#include <modelnet/records.h>
 #include <modelnet/search.h>
 #include <span.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -24,6 +28,7 @@
 #ifndef WIN32
 #include <csignal>
 #include <sys/resource.h>
+#include <unistd.h>
 #endif
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_store_write_tests, BasicTestingSetup)
@@ -126,6 +131,151 @@ BOOST_AUTO_TEST_CASE(helper_json_store_cut_short_keeps_the_old_file)
                         "identities.json lost its identities: " + result.write());
 }
 
+// A helper JSON store that is there but cannot be read (not parsable, or a
+// regular file that cannot be opened) is kept: the calls that write it refuse
+// instead of replacing it, as for the safety files and bounty-store.json.
+BOOST_AUTO_TEST_CASE(unreadable_helper_stores_are_kept)
+{
+    const fs::path dir = m_path_root / "helper-unreadable-stores";
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto one = [](const UniValue& v) {
+        UniValue params(UniValue::VARR);
+        params.push_back(v);
+        return params;
+    };
+    const std::string garbage = "{\"entries\":[";
+    const auto plant = [&](const std::string& name) {
+        std::ofstream out(dir / fs::PathFromString(name), std::ios::binary | std::ios::trunc);
+        out << garbage;
+    };
+
+    plant("identities.json");
+    BOOST_CHECK(!call("createmodelidentity", one(UniValue("label"))));
+    BOOST_CHECK_EQUAL(ReadAll(dir / "identities.json"), garbage);
+
+    plant("acl.json");
+    UniValue rule(UniValue::VOBJ);
+    rule.pushKV("name", "r");
+    rule.pushKV("action", "deny");
+    BOOST_CHECK(!call("setmodelrule", one(rule)));
+    BOOST_CHECK_EQUAL(ReadAll(dir / "acl.json"), garbage);
+    BOOST_CHECK(call("listmodelrules", UniValue(UniValue::VARR)));
+    {
+        std::ofstream out(dir / "acl.json", std::ios::binary | std::ios::trunc);
+        out << "42";
+    }
+    BOOST_CHECK(!call("setmodelrule", one(rule)));
+    BOOST_CHECK_EQUAL(ReadAll(dir / "acl.json"), "42");
+
+    plant("community.json");
+    BOOST_CHECK(!call("joinmodelcircle", one(UniValue("circle-1"))));
+    BOOST_CHECK(!call("leavemodelcircle", one(UniValue("circle-1"))));
+    BOOST_CHECK_EQUAL(ReadAll(dir / "community.json"), garbage);
+
+    plant("mirror.json");
+    UniValue sel(UniValue::VOBJ);
+    sel.pushKV("query", "q");
+    sel.pushKV("idempotency_key", "unreadable-mirror");
+    BOOST_CHECK(!call("setmodelmirror", one(sel)));
+    BOOST_CHECK_EQUAL(ReadAll(dir / "mirror.json"), garbage);
+
+    // A regular file that cannot be opened counts as unreadable as well.
+    if (::geteuid() != 0) {
+        const std::string kept = "{\"circles\":[\"kept\"]}";
+        {
+            std::ofstream out(dir / "community.json", std::ios::binary | std::ios::trunc);
+            out << kept;
+        }
+        fs::permissions(dir / "community.json", fs::perms::none);
+        BOOST_CHECK(!call("joinmodelcircle", one(UniValue("circle-2"))));
+        fs::permissions(dir / "community.json", fs::perms::owner_read | fs::perms::owner_write);
+        BOOST_CHECK_EQUAL(ReadAll(dir / "community.json"), kept);
+    }
+
+    // records.json, the signed record cache, is kept too: a join issues a
+    // signed record, which then stays in memory only.
+    {
+        std::ofstream out(dir / "community.json", std::ios::binary | std::ios::trunc);
+        out << "{}";
+    }
+    plant("records.json");
+    BOOST_CHECK_MESSAGE(call("joinmodelcircle", one(UniValue("circle-3"))), err);
+    BOOST_CHECK_EQUAL(ReadAll(dir / "records.json"), garbage);
+
+    // catalog.json is kept as well: the catalog refuses to save over it.
+    {
+        const fs::path cdir = m_path_root / "catalog-unreadable";
+        fs::create_directories(cdir);
+        {
+            std::ofstream out(cdir / "catalog.json", std::ios::binary | std::ios::trunc);
+            out << garbage;
+        }
+        modelnet::ModelCatalog unreadable{cdir, 1 << 20};
+        unreadable.AddPeer("192.0.2.10:29447");
+        BOOST_CHECK_EQUAL(ReadAll(cdir / "catalog.json"), garbage);
+        // A catalog.json with one entry it cannot load is kept too.
+        const fs::path bdir = m_path_root / "catalog-bad-entry";
+        fs::create_directories(bdir);
+        const std::string bad = "{\"models\":[{\"model_id\":\"zz\"}],\"peers\":[]}";
+        {
+            std::ofstream out(bdir / "catalog.json", std::ios::binary | std::ios::trunc);
+            out << bad;
+        }
+        modelnet::ModelCatalog partial{bdir, 1 << 20};
+        partial.AddPeer("192.0.2.11:29447");
+        BOOST_CHECK_EQUAL(ReadAll(bdir / "catalog.json"), bad);
+    }
+
+    // A peer's ServiceReceipt goes to receipts.json; an unreadable one is kept.
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(modelnet::GenerateMlDsa44(pk, sk, err));
+    const auto receipt = [&](const std::string& transfer) {
+        UniValue body(UniValue::VOBJ);
+        modelnet::FillRecordCommon(body, 0, modelnet::ProviderId(pk), static_cast<int64_t>(std::time(nullptr)), 3600);
+        body.pushKV("receipt_kind", 1);
+        body.pushKV("transfer_id", transfer);
+        body.pushKV("provider_id", modelnet::ProviderId(pk).Hex());
+        body.pushKV("buyer_id", std::string(96, 'b'));
+        body.pushKV("model_id", std::string(96, 'c'));
+        body.pushKV("artifact_id", std::string(96, 'd'));
+        body.pushKV("file_index", 0);
+        body.pushKV("first_piece", 0);
+        body.pushKV("piece_count", 1);
+        body.pushKV("verified_bytes", 1);
+        body.pushKV("outcome", 0);
+        body.pushKV("previous_receipt_id", std::string(96, '0'));
+        std::vector<unsigned char> payload, sig;
+        modelnet::Digest48 rid;
+        BOOST_REQUIRE_MESSAGE(modelnet::SignTypedRecord(modelnet::RECORD_SERVICE_RECEIPT, body, sk, payload, sig, rid, err), err);
+        UniValue post(UniValue::VOBJ);
+        post.pushKV("payload_hex", HexStr(payload));
+        post.pushKV("sig_hex", HexStr(sig));
+        post.pushKV("pubkey_hex", HexStr(pk));
+        modelnet::NativeRequest req;
+        req.method = "POST";
+        req.path = std::string(modelnet::MODEL_HTTP_ROOT) + "ext/receipts";
+        req.body = post.write();
+        modelnet::NativeResponse resp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, req, resp));
+        return resp.status;
+    };
+    BOOST_REQUIRE_EQUAL(receipt(std::string(64, 'a')), 200);
+    plant("receipts.json");
+    BOOST_CHECK_EQUAL(receipt(std::string(64, 'e')), 500);
+    BOOST_CHECK_EQUAL(ReadAll(dir / "receipts.json"), garbage);
+}
+
 BOOST_AUTO_TEST_CASE(catalog_write_cut_short_keeps_catalog_json)
 {
     // ModelCatalog::PersistLocked writes catalog.json.tmp and renames it over
@@ -217,5 +367,35 @@ BOOST_AUTO_TEST_CASE(feed_and_search_index_cut_short_keep_the_old_file)
     BOOST_CHECK_MESSAGE(reloaded.Get(rec_a.model_id) != nullptr, "search-index.json lost its records");
 }
 #endif // WIN32
+
+// createmodelidentity adds an identity to identities.json, which every new
+// identity writes again whole and listmodelidentities returns: a label is at
+// most 256 bytes.
+BOOST_AUTO_TEST_CASE(model_identity_label_is_bounded)
+{
+    const fs::path dir = m_path_root / "identity-label-bound";
+    modelnet::ModelCatalog cat{dir, 8 << 20};
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& params) {
+        UniValue rpc(UniValue::VOBJ);
+        rpc.pushKV("method", method);
+        rpc.pushKV("params", params);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, rpc, result, code, err);
+    };
+    const auto create = [&](const std::string& label) {
+        UniValue params(UniValue::VARR);
+        params.push_back(label);
+        return call("createmodelidentity", params);
+    };
+    BOOST_REQUIRE_MESSAGE(create(std::string(256, 'l')), err);
+    BOOST_CHECK(!create(std::string(257, 'l')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(call("listmodelidentities", UniValue(UniValue::VARR)), err);
+    BOOST_CHECK_EQUAL(result["identities"].size(), 1U);
+}
 
 BOOST_AUTO_TEST_SUITE_END()

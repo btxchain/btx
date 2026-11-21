@@ -17,16 +17,36 @@ def bump(coordinator,ctx,swap_id,kind,new_fee_atoms):
     own_name,own,in_name,incoming=coordinator._own(s,agr)
     leg=own if kind=='refund' else incoming;name=own_name if kind=='refund' else in_name
     key=s['keys']['refund' if kind=='refund' else 'claim'];driver=coordinator._driver(leg.asset)
-    oid=s.get(kind+'_op');require(oid,'OPERATION_MISSING','No previously prepared spending operation')
-    old=coordinator.journal.operation(oid);new=atoms(new_fee_atoms,positive=True)
+    new=atoms(new_fee_atoms,positive=True)
     cap=atoms(leg.max_refund_fee_atoms if kind=='refund' else leg.max_claim_fee_atoms)
+    oid=s.get(kind+'_op')
+    if not oid:
+        require(kind=='claim' and driver.family=='evm' and s.get('secret_exposed'),
+                'OPERATION_MISSING','No previously prepared spending operation')
+        require(new<=cap,'FEE_CAP','Replacement must stay within the signed cap')
+        template=s.get('claim_template') or driver.prepare_claim_template(swap_id,leg,s['refs'][name],key)
+        prepared=driver.finish_claim(leg,s['refs'][name],template,coordinator.vault.secret(swap_id,leg.hashlock))
+        require(atoms(prepared.fee_atoms)<=cap,'FEE_CAP','Claim exceeds the signed fee cap')
+        metadata={**prepared.metadata,'reference':s['refs'][name],'fee_atoms':prepared.fee_atoms}
+        new_id=coordinator.journal.prepare(swap_id,leg.asset,kind,prepared.txid,prepared.raw,metadata)
+        s[kind+'_op']=new_id;s['claim_template']=template;s['updated_at']=coordinator.now();coordinator.journal.save(swap_id,s,rev)
+        coordinator.journal.checkpoint();coordinator.journal.broadcast(new_id,driver)
+        return {'swap_id':swap_id,'kind':kind,'txid':prepared.txid,'replacement_of':None,
+                'fee_atoms':prepared.fee_atoms,'beneficiary_changed':False}
+    old=coordinator.journal.operation(oid)
     require(atoms(old['metadata']['fee_atoms'])<new<=cap,'FEE_CAP','Replacement must increase fee within the signed cap')
     report=driver.observe(leg,s['refs'][name]);require(not report.observation.conflicting,'CHAIN_CONFLICT','Reconcile chain conflict first')
     if kind=='refund':
         now=report.clock.height if leg.lock_domain=='height' else report.clock.timestamp
         require(now>=leg.lock_value,'REFUND_EARLY','Refund is not mature')
-        funding=coordinator.journal.operation(s['fund_op'])
-        require(new+atoms(funding['metadata']['fee_atoms'])<=atoms(s['max_local_fee_atoms']),
+        funding=coordinator.journal.operation(s['fund_op']) if s.get('fund_op') else None
+        if funding is not None and not funding['metadata'].get('adopted_output'):
+            funding_fee=atoms(funding['metadata']['fee_atoms'])
+        else:
+            # Adoption's zero is a placeholder, not proof of a free transaction.
+            require(driver.family in {'btc','btx'},'FUNDING_FEE_UNKNOWN','Original funding fee is unavailable')
+            funding_fee=atoms(driver.historical_funding_fee(leg,s['refs'][name]))
+        require(new+funding_fee<=atoms(s['max_local_fee_atoms']),
                 'FEE_CAP','Funding plus replacement refund exceeds local authorization')
     else:
         require(s['secret_exposed'],'SECRET_NOT_EXPOSED','Do not disclose a secret through a fee replacement')

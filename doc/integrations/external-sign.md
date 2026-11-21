@@ -27,8 +27,8 @@ createpsbt
 | Step | Who | Notes |
 |---|---|---|
 | `createpsbt` (or `walletcreatefundedpsbt` / `createexchangebatch` / `createconsolidationtx`) | Coordinator | Unsigned BIP174 PSBT. Watch-only. |
-| `prepareexternalsign` | Coordinator | Builds **BTXPSBT** JSON from the PSBT + prevouts. No broadcast. No secrets. |
-| `getsigningdigests` | Coordinator | One canonical digest per input the signer must cover. |
+| `prepareexternalsign` | Coordinator | Accepts a package, a PSBT, or `{recipients\|outputs}`. Returns the encoded package, including `inputs[].digest` and top-level `digests`. No broadcast. No secrets. |
+| `getsigningdigests` | Coordinator | Repeats that fill on a package you already hold. |
 | `SignDigest` | External signer | ML-DSA-44 (or SLH-DSA-128s) over the digest. Keys never enter `btxd`. |
 | `finalizeexternalsign` | Coordinator | Inserts signatures; **validates** witness/digest binding locally; returns hex. **Does not send.** |
 | `testmempoolaccept` | Coordinator | Second validation: policy + consensus before broadcast. |
@@ -124,6 +124,8 @@ BTXPSBT is a **JSON container**, not a new consensus type. It carries everything
 | `inputs[].digest` | 32-byte hex; this is what `SignDigest` signs |
 | `inputs[].signatures` | Filled by the signer / `finalizeexternalsign` |
 | `outputs[].role` | `withdrawal` or `change` |
+
+The encoder in this tree emits `format`, `version`, `profile`, `chain`, `network`, a package-level `sighash` of `DEFAULT`, `unsigned_tx`, `inputs[]` (`txid`, `vout`, `amount_atoms`, `scriptPubKey`, optional `p2mr.leaf_script`, `p2mr.control_block`, `p2mr.leaf_version`, `path`, `fingerprint`, `pubkey`, `algo`, `digest`, `signature`), top-level `digests[]` and `signatures[]`, and `change[]`. The result object also carries `selected_utxos`, `outputs` (`n`, `amount_atoms`, `amount`, `address`), `recipients`, `unsigned_tx_hex`, `fee_atoms` when the sums work, `broadcast: false`, and `in_process_sign: false`. It does not emit a package `txid`, `weight`, `locktime`, `outputs[].role`, `p2mr.merkle_root`, or `p2mr.leaf_hash`. Sign `inputs[].digest`.
 
 `prepareexternalsign` must fail if prevouts, amounts, or P2MR leaf data are missing. `finalizeexternalsign` must fail closed on a corrupt signature, pubkey mismatch, digest mismatch, or modified unsigned tx (same rule as `ExternalSigner::SignTransaction`: signer must not rewrite the transaction).
 

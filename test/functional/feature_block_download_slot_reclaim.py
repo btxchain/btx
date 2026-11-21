@@ -39,8 +39,35 @@ RECLAIM_SLACK_SECONDS = 20
 NUM_BLOCKS = 32
 
 
-class SilentStaller(P2PDataStore):
+class RawHeaderPeer(P2PDataStore):
+    """Block source whose VERSION advertises a start height.
+
+    btxd will not GETDATA from a peer that left nStartingHeight at the
+    framework default of -1: TrustedMirrorGpuMayServeBlocks treats that as
+    an incomplete handshake (src/node/matmul_trusted_attestations.h).
+    block_store holds SerializedBlock payloads, which have no sha256, so
+    P2PDataStore.on_getheaders (test_framework/p2p.py) must not walk it.
+    """
+
+    def __init__(self, starting_height):
+        super().__init__()
+        self.starting_height = starting_height
+        self.announced_headers = []
+
+    def peer_connect_send_version(self, services):
+        super().peer_connect_send_version(services)
+        self.on_connection_send_msg.nStartingHeight = self.starting_height
+
+    def on_getheaders(self, message):
+        if self.announced_headers:
+            self.send_message(msg_headers(self.announced_headers))
+
+
+class SilentStaller(RawHeaderPeer):
     """Accepts getdata for blocks and never delivers bodies."""
+
+    def __init__(self):
+        super().__init__(NUM_BLOCKS)
 
     def on_getdata(self, message):
         for inv in message.inv:
@@ -98,6 +125,7 @@ class BlockDownloadSlotReclaimTest(BitcoinTestFramework):
         staller = target.add_outbound_p2p_connection(
             SilentStaller(), p2p_idx=0, connection_type="outbound-full-relay")
         staller.block_store = block_dict
+        staller.announced_headers = headers.headers
         staller.send_message(headers)
 
         self.wait_until(lambda: len(staller.getdata_requests) >= 1)
@@ -137,8 +165,9 @@ class BlockDownloadSlotReclaimTest(BitcoinTestFramework):
         # them out before responses are processed.
         self.log.info("Connect an honest peer after reclaim and expect tip catch-up")
         honest = target.add_outbound_p2p_connection(
-            P2PDataStore(), p2p_idx=1, connection_type="outbound-full-relay")
+            RawHeaderPeer(NUM_BLOCKS), p2p_idx=1, connection_type="outbound-full-relay")
         honest.block_store = block_dict
+        honest.announced_headers = headers.headers
         honest.send_message(headers)
 
         self.wait_until(lambda: target.getblockcount() == NUM_BLOCKS, timeout=60)

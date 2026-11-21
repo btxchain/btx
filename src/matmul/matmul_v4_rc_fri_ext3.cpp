@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_fri_ext3.h>
 
 #include <crypto/common.h>
@@ -98,7 +99,8 @@ bool ReadBytesChecked(const unsigned char*& p, const unsigned char* end, unsigne
                       size_t n)
 {
     if (static_cast<size_t>(end - p) < n) return false;
-    std::memcpy(dst, p, n);
+    // A zero-length read is success. memcpy rejects a null source even when n is 0.
+    if (n != 0) std::memcpy(dst, p, n);
     p += n;
     return true;
 }
@@ -270,8 +272,8 @@ struct Fri3Fs {
         if (modulus == 0) return 0;
         const Fp3 ch = ChallengeFp3(label, idx);
         // Use full 128-bit-ish entropy via (c0 || c1) mod modulus.
-        const unsigned __int128 wide =
-            (static_cast<unsigned __int128>(Canonical(ch.c1)) << 64) | Canonical(ch.c0);
+        const btx::U128 wide =
+            (static_cast<btx::U128>(Canonical(ch.c1)) << 64) | Canonical(ch.c0);
         return static_cast<uint32_t>(wide % modulus);
     }
 };

@@ -62,7 +62,7 @@ test('a typed passphrase never reaches the exact JSON editor', () => {
 
 test('exact JSON mode is not offered for any operation that takes a passphrase', () => {
   const methods = OPERATIONS.filter((o) => o.args.some((a) => a.kind === 'secret')).map((o) => o.method);
-  assert.deepEqual(methods.toSorted(), ['createwallet', 'encryptwallet', 'migratewallet', 'walletpassphrase', 'walletpassphrasechange']);
+  assert.deepEqual(methods.toSorted(), ['createwallet', 'encryptwallet', 'exportswaprecovery', 'migratewallet', 'walletpassphrase', 'walletpassphrasechange']);
   for (const method of methods) {
     const d = operationDialog(fakeApp(), method, [], 'test');
     assert.equal(fieldInput(d.element, 'Use exact JSON array/object').disabled, true, method);

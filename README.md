@@ -1,6 +1,6 @@
 # BTX Node
 
-**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](doc/modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+**Candidate and evidence:** this source tree is **0.34.17** (`CLIENT_VERSION_MINOR=34`, `CLIENT_VERSION_BUILD=17`, `CLIENT_VERSION_RC=0`, `CLIENT_VERSION_IS_RELEASE=true`); the last final shipping tag recorded here is **v0.34.16**. The `v0.34.17` tag on this branch is a prerelease. A release-build flag is not native qualification. See [native participation and release evidence](doc/modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
 
 BTX is **hard money** — MatMul proof of work, independently validated by
 **ExactReplay** — plus an isolated **Native Model Network**.
@@ -17,7 +17,7 @@ network-layer anonymity.
 **release campaigns**, **creation bounties**, and **preservation**. Later
 0.34 lines added origin-independent fetch, `.btx` / `btx://` retrieve,
 checkout, optional GPU **load**, and **local generate** when the replica
-matches this host. This branch is **0.35.0rc1**. The map of processes,
+matches this host. This branch is **0.34.17**. The map of processes,
 documents, and in-process records is
 [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
 A BTX node already has compute; the Native Model Network delivers models
@@ -81,14 +81,13 @@ shielded state. Do not read this tree as shipping a live shielded pool.
 This repository contains the full node implementation, wallet, mining
 infrastructure, Native Model Network helper, and test suites.
 
-This working tree is **0.35.0rc1** (`CLIENT_VERSION_MINOR=35`,
-`CLIENT_VERSION_BUILD=0`, `CLIENT_VERSION_RC=1`,
-`CLIENT_VERSION_IS_RELEASE=true`). `btxd -version` prints `v0.35.0rc1`.
-P2P subversion is `/BTX:0.35.0/` (no rc). This is not the shipping tag
-`v0.35.0`. The last shipping tag remains **v0.34.15**. Do not recut
-`v0.34.15`, `v0.34.14`, `v0.34.13`, `v0.34.12`, or `v0.34.10`.
+This working tree is **0.34.17** (`CLIENT_VERSION_MINOR=34`,
+`CLIENT_VERSION_BUILD=17`, `CLIENT_VERSION_RC=0`,
+`CLIENT_VERSION_IS_RELEASE=true`). `btxd -version` prints `v0.34.17`.
+The last final shipping tag is **v0.34.16**. The `v0.34.17` tag on this
+branch is a prerelease. Do not recut `v0.34.16` or earlier final tags.
 
-Notes: [doc/release-notes/release-notes-0.35.0.md](doc/release-notes/release-notes-0.35.0.md).
+Notes: [doc/release-notes-0.34.17.md](doc/release-notes-0.34.17.md).
 Structure: [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
 
 ## Current delivery bounds
@@ -145,7 +144,7 @@ fabric stay in the passport's capability vector. Details:
 - [Later releases](#later-releases)
 - [Start here](#start-here)
 - [Pay With Compute](#pay-with-compute)
-- [This tree — 0.35.0rc1](#this-tree--0350rc1)
+- [This tree — 0.34.17](#this-tree--03417)
 - [Previous shipping release — v0.34.15](#previous-shipping-release--v03415)
 - [Previous release — v0.34.14](#previous-release--v03414)
 - [Earlier release — v0.34.13](#earlier-release--v03413)
@@ -181,10 +180,10 @@ fabric stay in the passport's capability vector. Details:
 
 ---
 
-## This tree — 0.35.0rc1
+## This tree — 0.34.17
 
-**This branch reports v0.35.0rc1.** It is the 0.35 release candidate, not
-the shipping tag `v0.35.0`. `btxd` is the monetary node and, by default, the
+**This branch reports v0.34.17.** The `v0.34.17` tag is a prerelease, not
+the final shipping tag. `btxd` is the monetary node and, by default, the
 swarm participant. With Modelnet compiled, `-modelnet` is on. `btxd` starts
 `btx-modeld` and the swarm observer thread. The observer supervises the
 packaged `btx-guardd` over private inherited stdio and records readiness in
@@ -197,7 +196,7 @@ required for that default. There is no separate `btx-swarmd` or
 The candidate is not release-qualified. Automatic spend stays 0. The
 process map, the public contract, and the in-process records are in
 [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
-Notes: [doc/release-notes/release-notes-0.35.0.md](doc/release-notes/release-notes-0.35.0.md).
+Notes: [doc/release-notes-0.34.17.md](doc/release-notes-0.34.17.md).
 
 ## Previous shipping release — v0.34.15
 
@@ -357,9 +356,12 @@ Notes: [doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-not
 
 ## Get a node
 
-1. **Install** an appropriate shipping archive (last shipping tag recorded here: v0.34.15) from
-   [GitHub releases](https://github.com/btxchain/btx/releases) (Linux CPU,
-   Linux CUDA 12/13, macOS arm64 Metal), or [build from source](#building-from-source).
+1. **Install** the [v0.34.16 stable archive](https://github.com/btxchain/btx/releases/tag/v0.34.16)
+   or choose the [v0.34.17 prerelease](https://github.com/btxchain/btx/releases/tag/v0.34.17)
+   for testing. Both uploads offer Linux x86-64 CPU and CUDA 13 archives.
+   See [Download-and-Go](doc/btx-download-and-go.md#download-and-verify-the-archive)
+   for compatibility and checksum verification, or [build from source](#building-from-source)
+   if you need a different platform or the Qt desktop.
 2. **Fast-start** on a **fresh** chainstate with the highest compiled
    assumeutxo pin, height **228000** since 0.34.12
    ([assumeutxo-228000](https://github.com/btxchain/btx/releases/tag/assumeutxo-228000),
@@ -375,9 +377,7 @@ Notes: [doc/release-notes/release-notes-0.34.9.md](doc/release-notes/release-not
    [doc/modelnet/README.md](doc/modelnet/README.md). Host, seed, search,
    share, watch folder, doctor, **load**, and **generate**:
    [doc/modelnet/first-run.md](doc/modelnet/first-run.md),
-   [doc/modelnet/generate.md](doc/modelnet/generate.md)
-   (this candidate **0.35.0rc1**, `CLIENT_VERSION_IS_RELEASE=true`; last shipping tag
-   **v0.34.15**). CLI wrapper:
+   [doc/modelnet/generate.md](doc/modelnet/generate.md). CLI wrapper:
    [contrib/modelnet/btx-model](contrib/modelnet/btx-model)
    (people: stderr hints; agents: `--json`). Optional cloud / follow / events
    / profile **fail closed** if the helper lacks the method — not a PASS:
@@ -1502,21 +1502,14 @@ Fast-start support in the current tree:
 - `regtest`: supported for default-consensus development and CI flows
 - `testnet`, `testnet4`, and `signet`: snapshot tooling exists, but there are no compiled assumeutxo entries yet, so fast-start bootstrap is not currently supported there
 
-The shortest operator path is:
+For the current stable and prerelease archives, follow the
+[manual download and checksum steps](doc/btx-download-and-go.md#download-and-verify-the-archive)
+and the [fresh-chainstate snapshot steps](doc/btx-download-and-go.md#1-fast-sync-with-assumeutxo).
+The signed [one-shot installer](doc/btx-download-and-go.md#signed-final-releases-btx-agent-setuppy)
+requires a release that publishes its manifest, detached checksum signature and
+the matching snapshot manifest for bootstrap.
 
-```bash
-export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
-
-python3 contrib/faststart/btx-agent-setup.py \
-  --repo btxchain/btx \
-  --release-tag v0.33.4.2 \
-  --preset service \
-  --datadir="$HOME/.btx"
-```
-
-That installer consumes the published `btx-release-manifest.json`, selects the
-correct platform archive, verifies the advertised assets, and can immediately
-chain into the assumeutxo bootstrap flow. Use `--preset miner` for a pruned,
+On a signed release with those assets, use `--preset miner` for a pruned,
 mining-oriented setup, or `--preset service` for an RPC-oriented node that is
 ready to issue `easy` / `normal` / `hard` / `idle` MatMul service challenges
 through `listmatmulservicechallengeprofiles`,
@@ -2170,7 +2163,7 @@ Copyright (c) 2026 The BTX developers
 <!-- SWAPNET-INTEGRATION-BEGIN -->
 ## SwapNet: native peer-to-peer asset exchange
 
-SwapNet discovers signed swap providers over existing BTX peers and coordinates bilateral SHA-256 HTLC exchanges using separate native and external-chain wallets. Enable it with `-swapnet=1`. No separate SwapNet daemon or hosted exchange account is required. Spending requires explicit owner-issued budget mandates and exact signed terms.
+SwapNet discovers signed swap providers over existing BTX peers and coordinates bilateral SHA-256 HTLC exchanges using separate native and external-chain wallets. It starts with the node so a normal launch dogfoods discovery. A new journal participates as a taker. Set `-swapnetmode=maker` to publish a market, or `-swapnet=0` to leave the engine stopped. No separate SwapNet daemon or hosted exchange account is required. Spending requires explicit owner-issued budget mandates and exact signed terms.
 
 Start with `btx-cli getswapnetworkinfo`, `getswapbootstrapinfo`, and `listswapassets`. Read [the specification](doc/swapnet/SPECIFICATION.md), [operations](doc/swapnet/OPERATIONS.md), [RPC reference](doc/swapnet/RPC.md), and [release qualification](doc/swapnet/TESTING_AND_RELEASE.md) before authorizing funds. Provider advertisements do not certify reserves. A local source build is not automatically a mainnet-qualified release.
 <!-- SWAPNET-INTEGRATION-END -->

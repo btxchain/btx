@@ -1,0 +1,34 @@
+{
+  "utc": "2026-11-16T11:00:28.823102+00:00",
+  "status": "PASS_NATIVE_BTX_PRESENCE_AND_REBROADCAST",
+  "binary_source": "949a98e34222cc4cdb5b1d5bd650aa3b7bcbff72",
+  "native_binary_sha256": "ac96c05d6a83a09dbb902f0d89fd04049897a0ac659660c228926a1ed31b9e6f",
+  "artifact": 14147748488,
+  "artifact_zip_sha256": "e31cfbe3d7e9952fca0a74f97e518e494a13ea0e81e334dc59766628d28643ce",
+  "inner_archive_sha256": "22ee49b866f7d1539387d7e30bc82b38174b0925e84a103f590d92485569de73",
+  "python_source": "PR777 d700105f product bytes",
+  "raw_sha256": "a583ff27bf09de0e9bcfd0944852972ebf24a639d317d6e010e29f01604ca6c5",
+  "journal_states": [
+    [
+      "7777777777777777777777777777777777777777777777777777777777777777",
+      "broadcast"
+    ],
+    [
+      "8888888888888888888888888888888888888888888888888888888888888888",
+      "prepared"
+    ]
+  ],
+  "free_bytes_after": 1595154432,
+  "rebuilds": 0,
+  "posts": 0,
+  "files": {
+    "qualified949.py": "b30bd1ee3debe5a97bcbdcf398077ddcd4421fd3cb38f9c320d65bafe318a1d5",
+    "qualified949-result.json": "e1abcf0f9fabd6d941f47e2464030eb1c7e5f51d4d6275fb5b0205100ca2f972"
+  },
+  "limitations": [
+    "Saved949native daemon, not current1e2native",
+    "Ordinary timelocked P2MR wallet spend, not HTLC; journal refund kind is fixture label",
+    "Candidate-only native BTX controls; matched before/after remains native BTC",
+    "No embedded coordinator/bilateral/default MatMul/release qualification"
+  ]
+}

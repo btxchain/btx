@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-setswapmarket",
+  "type": "object",
+  "properties": {
+    "market": {
+      "type": "object"
+    },
+    "mandate_id": {
+      "type": "string"
+    },
+    "max_local_fee_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "refund_fee_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "claim_fee_atoms": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,77})$"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "required": [
+    "market",
+    "mandate_id",
+    "max_local_fee_atoms",
+    "refund_fee_atoms",
+    "claim_fee_atoms"
+  ],
+  "additionalProperties": false
+}

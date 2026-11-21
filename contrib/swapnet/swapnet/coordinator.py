@@ -10,10 +10,10 @@ import secrets
 import time
 from .authorization import Principal,Grant
 from .assets import Asset
-from .canonical import atoms,hex32,hashlock,digest,exact_fields,integer
-from .errors import require,SwapError
+from .canonical import atoms,hex32,hashlock,digest,exact_fields,integer,loads
+from .errors import require,SwapError,RPCConnectionRefused,RPCTransportTimeout
 from .machine import Session,decide
-from .policy import SafetyPolicy,Deadline
+from .policy import SafetyPolicy,Deadline,Mandate
 from .quote import Quote,SignedQuote
 from .terms import Agreement,LegTerms
 
@@ -22,10 +22,23 @@ TERMINAL={'complete','refunded','cancelled','rejected'}
 class Coordinator:
     def __init__(self,journal,authority,drivers,identity,vault,emit,*,clock=None,policy=None):
         self.journal,self.authority,self.drivers,self.identity,self.vault,self.emit=journal,authority,drivers,identity,vault,emit
-        self.now=clock or (lambda:int(time.time()));self.policy=policy or SafetyPolicy();self._cursor=0;self._terminal_cursor=0
+        self.now=clock or (lambda:int(time.time()));self.policy=policy or SafetyPolicy();self._cursor='';self._terminal_cursor=''
+        self._terminal_due=0;self._retry={}
     def _driver(self,asset):
         require(asset in self.drivers,'ASSET_UNAVAILABLE','No qualified local chain driver for this asset')
         return self.drivers[asset]
+    def check_finality(self,*assets):
+        # Claims and refunds on an EVM leg are seen at the finalized tag. A lag
+        # near the settlement margin lets a deadline pass before they are seen.
+        limit=self.policy.max_evm_finality_lag_seconds
+        for asset in assets:
+            driver=self.drivers.get(asset)
+            if driver is not None:
+                guard=getattr(driver,'new_trade_ready',None)
+                if guard is not None:guard()
+            if driver is not None and driver.family=='evm':
+                lag=driver.finality_lag()
+                require(lag<=limit,'FINALITY_LAG','EVM finality is %d s behind the tip; the limit is %d s'%(lag,limit))
     def _save(self,sid,s,rev):return self.journal.save(sid,s,rev)
     def _save_new(self,sid,body,ctx,budget_quote,mandate_id,maxfee):
         # Driver and vault setup has finished. Keep the debit, quote claim and
@@ -79,12 +92,16 @@ class Coordinator:
         SignedQuote(q,envelope['signature']).verify(self.identity.verify,q.network,requester,now)
         require(q.network==self.identity.network,'NETWORK','Quote targets a different BTX network')
         sid=digest('BTX/SWAPNET/SWAP/2',{'quote_id':q.id,'initiator':identity})
-        try:return self.get(ctx,sid)
+        try:_,existing=self._owned(ctx,sid)
         except SwapError as e:
             if e.code!='NOT_FOUND':raise
+        else:
+            self._retry_proposal(sid,existing,(rfq,mandate_id,max_local_fee_atoms,refund_fee_atoms,
+                                             claim_fee_atoms or q.max_receive_network_fee_atoms))
+            return self._safe_view(sid,existing)
         self.journal.ensure_capacity()
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset)
-        a.ready();b.ready()
+        a.ready();b.ready();self.check_finality(q.sell_asset,q.buy_asset)
         self.authority.reserve(ctx,q,mandate_id,max_local_fee_atoms,check_only=True)
         long,short=self._deadlines(a,b)
         ak=a.new_key('refund');bk=b.new_key('claim')
@@ -109,6 +126,49 @@ class Coordinator:
         self._save_new(sid,s,ctx,q,mandate_id,max_local_fee_atoms)
         self.emit(q.provider,'proposal',sid,proposal)
         return self._safe_view(sid,s)
+    def _retry_proposal(self,sid,s,requested=None):
+        if s['role']!='initiator' or s['stage']!='proposed':return
+        p=s['proposal'];now=self.now()
+        if self.journal.has_proposal(sid,s['peer'],p,now):return
+        require(not self.journal.setting('restored_session:'+sid,False) and not s.get('recovery_facts'),
+                'RECOVERY_READ_ONLY','Restored initial intent requires separate recovery')
+        require(not any(s.get(k) for k in ('agreement','grant_id','fund_op','refund_op','claim_op',
+                    'funding_prepared','funding_broadcast','recovery_ready','secret_exposed','refs'))
+                and not self.journal.operations(sid),
+                'RECOVERY_CONFLICT','Initial proposal has financial recovery state')
+        q=Quote.parse(s['quote']['quote']);rfq=p['rfq']
+        requester=digest('BTX/SWAPNET/REQUESTER/2',{'identity':self.identity.address(),'nonce':rfq['nonce']})
+        SignedQuote(q,s['quote']['signature']).verify(self.identity.verify,self.identity.network,requester,now)
+        require(q.id==s['quote_id'] and q.provider==s['peer'] and p['quote']==s['quote']
+                and (rfq['network'],rfq['sell_asset'],rfq['buy_asset'],rfq['sell_atoms'])==
+                    (q.network,q.sell_asset,q.buy_asset,q.sell_atoms),
+                'RECOVERY_CONFLICT','Saved proposal no longer matches its quote')
+        with self.journal.store.lock:
+            r=self.journal.store.db.execute(
+                'SELECT r.principal,r.quote_id,r.cost,r.state,r.mandate_id,m.body,m.revoked,m.held,m.used '
+                'FROM reservations r JOIN mandates m ON m.id=r.mandate_id WHERE r.id=?',
+                (s['reservation_id'],)).fetchone()
+            grant=self.journal.store.db.execute('SELECT 1 FROM sn_grants WHERE swap_id=?',(sid,)).fetchone()
+        require(r and r[0]==s['principal'] and r[1]==q.id and r[3]=='held' and not grant,
+                'RESERVATION','Original held reservation is unavailable')
+        if requested is not None:
+            require(requested==(rfq,r[4],s['max_local_fee_atoms'],p['long_refund_fee_atoms'],p['short_claim_fee_atoms']),
+                    'IDEMPOTENCY_CONFLICT','Retry cannot replace the original proposal parameters')
+        mandate=Mandate(**loads(r[5]));cost=atoms(q.sell_atoms)+atoms(s['max_local_fee_atoms'])
+        require(mandate.id==r[4] and mandate.principal==s['principal'] and mandate.asset==q.sell_asset,
+                'MANDATE_SCOPE','Original mandate scope changed')
+        require(not r[6] and self.now()<mandate.expires_at,'MANDATE_EXPIRED','Original mandate expired or revoked')
+        require(atoms(r[2])==cost and atoms(r[7])>=cost
+                and atoms(r[7])+atoms(r[8])<=atoms(mandate.max_total_atoms)
+                and atoms(q.sell_atoms)<=atoms(mandate.max_trade_atoms)
+                and atoms(s['max_local_fee_atoms'])<=atoms(mandate.max_fee_atoms),
+                'BUDGET_LIMIT','Original reservation no longer covers the proposal')
+        a,b=self._driver(q.sell_asset),self._driver(q.buy_asset);a.ready();b.ready()
+        self.policy.validate_deadlines(Deadline(**p['long_deadline']),Deadline(**p['short_deadline']),
+                                       a.clock(),b.clock(),self.now())
+        require(q.live(self.now()),'QUOTE_EXPIRED','Original quote expired during retry')
+        require(self.now()<mandate.expires_at,'MANDATE_EXPIRED','Original mandate expired during retry')
+        self.emit(s['peer'],'proposal',sid,p)
     def receive_proposal(self,sender,sid,p,market):
         exact_fields(p,{'quote','rfq','hashlock','nonce','long_refund_key','long_refund_payout',
                         'short_claim_key','short_claim_payout','long_deadline','short_deadline',
@@ -143,8 +203,11 @@ class Coordinator:
                       q.buy_asset,q.sell_asset,str(atoms(q.buy_atoms)-atoms(q.maker_fee_atoms)),q.sell_atoms,'0','0',q.issued_at,q.expires_at)
         self.authority.reserve(ctx,reverse,market['mandate_id'],maxfee,check_only=True)
         a,b=self._driver(q.sell_asset),self._driver(q.buy_asset);a.ready();b.ready()
+        self.check_finality(q.sell_asset,q.buy_asset)
         long,short=Deadline(**p['long_deadline']),Deadline(**p['short_deadline'])
-        self.policy.validate_deadlines(long,short,a.clock(),b.clock(),now)
+        # ready() and clock() are RPCs. Their observed_at is after the now
+        # captured for the quote, so the deadline check has to read the clock again.
+        self.policy.validate_deadlines(long,short,a.clock(),b.clock(),self.now())
         ak=a.new_key('claim');bk=b.new_key('refund')
         long_fee=market['claim_fee_atoms'];short_fee=market['refund_fee_atoms']
         h=hex32(p['hashlock'])
@@ -219,6 +282,9 @@ class Coordinator:
         else:
             exact_fields(ref,{'txid','lock_id','salt'});hex32(ref['txid'].removeprefix('0x'));hex32(ref['lock_id']);hex32(ref['salt'])
             self._driver(leg.asset).verify_reference(sid,leg,ref)
+        report=self._driver(leg.asset).observe(leg,ref)
+        require(report.observation.present and report.observation.exact_terms and not report.observation.conflicting,
+                'FUNDING_UNVERIFIED','Funding receipt does not match the agreed output')
         if expected in s['refs']:
             require(s['refs'][expected]==ref,'FUNDING_REPLACED','Counterparty attempted to change funding reference');return
         s['refs'][expected]=ref;s['updated_at']=self.now();self._save(sid,s,rev)
@@ -227,8 +293,8 @@ class Coordinator:
         require(not self._imported_unknown(sid,s),'RECOVERY_READ_ONLY','Imported payment state is unresolved')
         require(not s['funding_prepared'] and not s['funding_broadcast'],'FUNDS_LOCKED','Prepared/funded swaps require refund recovery')
         if s['stage']=='cancelled':return self._safe_view(sid,s)
-        self.journal.store.settle_reservation(s['reservation_id'],'0')
-        s['stage']='cancelled';s['updated_at']=self.now();self._save(sid,s,rev)
+        s['stage']='cancelled';s['updated_at']=self.now()
+        self.journal.close_unfunded_terminal(sid,s,rev)
         self.emit(s['peer'],'cancel',sid,{'quote_id':s['quote_id']})
         return self._safe_view(sid,s)
     def receive_cancel(self,sender,sid,body):
@@ -238,9 +304,9 @@ class Coordinator:
         try:rev,s=self.journal.load(sid)
         except SwapError:return
         if s['peer']!=sender or s['funding_prepared'] or s['funding_broadcast'] or s['stage'] in TERMINAL:return
-        if s.get('reservation_id'):self.journal.store.settle_reservation(s['reservation_id'],'0')
+        if self._imported_unknown(sid,s):return
         s['stage']='rejected';s['decline']={'code':body['code'],'message':body['message']}
-        s['updated_at']=self.now();self._save(sid,s,rev)
+        s['updated_at']=self.now();self.journal.close_unfunded_terminal(sid,s,rev)
     def _persist_prepared(self,sid,asset,kind,prepared):
         return self.journal.prepare(sid,asset,kind,prepared.txid,prepared.raw,
                                     {**prepared.metadata,'reference':prepared.reference,'fee_atoms':prepared.fee_atoms})
@@ -250,6 +316,8 @@ class Coordinator:
         self._require_effect(sid,s)
         own_name,own,incoming_name,incoming=self._own(s,agr)
         driver=self._driver(own.asset);incoming_driver=self._driver(incoming.asset)
+        if incoming_driver.family=='evm' and hasattr(incoming_driver,'claim_account_can_cover'):
+            incoming_driver.claim_account_can_cover(incoming.max_claim_fee_atoms)
         if s['role']=='responder' and 'claim_template' not in s:
             s['claim_template']=incoming_driver.prepare_claim_template(sid,incoming,s['refs'][incoming_name],s['keys']['claim'])
             rev=self._save(sid,s,rev)
@@ -435,7 +503,8 @@ class Coordinator:
         try:
             rb=self._observe(b,agr.short_leg,s['refs'].get('b'),required=s['role']=='responder')
         except SwapError as error:
-            unavailable=error.code=='RPC_COOKIE' and error.message=='RPC cookie unavailable'
+            unavailable=(isinstance(error,(RPCConnectionRefused,RPCTransportTimeout))
+                         or (error.code=='RPC_COOKIE' and error.message=='RPC cookie unavailable'))
             if not unavailable or not self._refund_without_bitcoin(sid,s,rev,agr,a,ra):
                 raise
             return
@@ -447,7 +516,13 @@ class Coordinator:
                 require(hashlock(secret)==agr.long_leg.hashlock,'PREIMAGE','Chain preimage does not match agreement')
                 key='secret_'+sid
                 if key not in self.vault.entries:
-                    self.vault.entries[key]={'swap_id':sid,'preimage':secret.hex()};self.vault.save()
+                    self.vault.entries[key]={'swap_id':sid,'preimage':secret.hex()}
+                    try:self.vault.save()
+                    except Exception:
+                        # An unsaved cache entry must not let retry publish exposure.
+                        # This is a newly observed public preimage, not a new key.
+                        self.vault.entries.pop(key,None)
+                        raise
                 if not s['secret_exposed']:s['secret_exposed']=True;s['stage']='secret_exposed';rev=self._save(sid,s,rev)
         state=Session(sid,s['role'],s['stage'],True,s['secret_exposed'],s['funding_prepared'],s['funding_broadcast'],s['recovery_ready'])
         action=decide(state,ra.observation,rb.observation,ra.clock,rb.clock,
@@ -554,25 +629,34 @@ class Coordinator:
             return Report(LegObservation(observed_at=self.now()),driver.clock())
     def tick(self):
         # Bounded work per pass; terminal sessions remain monitored for deep reorgs.
-        rows=self.journal.all(limit=4096)
-        if not rows:return
-        active=[r for r in rows if r[2]['stage'] not in TERMINAL]
-        terminal=[r for r in rows if r[2]['stage'] in {'complete','refunded'}]
-        selected=[]
-        if active:
-            start=self._cursor % len(active);selected=(active+active)[start:start+min(4,len(active))]
-            self._cursor=(start+len(selected)) % len(active)
-        if terminal:
-            selected.append(terminal[self._terminal_cursor % len(terminal)])
-            self._terminal_cursor+=1
+        selected=self.journal.scheduled(terminal=False,after=self._cursor,limit=4)
+        if selected:self._cursor=selected[-1][0]
+        # Closed unsigned history must not hide live work or terminal reorg watch.
+        if self.now()>=self._terminal_due:
+            terminal=self.journal.scheduled(terminal=True,after=self._terminal_cursor,limit=1)
+            if terminal:
+                selected+=terminal
+                self._terminal_cursor=terminal[-1][0]
+                self._terminal_due=self.now()+self.policy.terminal_recheck_seconds
         for sid,_,s in selected:
-            try:self.tick_one(sid)
+            # A swap whose endpoint keeps failing is not retried on every tick, so a rate-limited provider can
+            # recover. The delay is per swap: one failing swap never holds up the others.
+            retry=self._retry.get(sid);cap=self.policy.rpc_retry_max_seconds
+            if retry and 0<retry[1]-self.now()<=cap:continue
+            try:
+                self.tick_one(sid);self._retry.pop(sid,None)
             except SwapError as e:
+                if cap and e.code in ('RPC_UNAVAILABLE','CHAIN_RPC'):
+                    n=retry[0] if retry else 0;self._retry[sid]=(n+1,self.now()+min(cap,2**min(n,12)))
+                else:self._retry.pop(sid,None)
                 rev,current=self.journal.load(sid)
                 current['last_error']={'code':e.code,'message':e.message};current['updated_at']=self.now()
                 self._save(sid,current,rev)
     def resume(self,ctx,sid):
-        self._owned(ctx,sid);self.tick_one(sid);return self.get(ctx,sid)
+        self._owned(ctx,sid);self.tick_one(sid);_,s=self._owned(ctx,sid)
+        if s['stage']=='proposed' and Quote.parse(s['quote']['quote']).live(self.now()):
+            self._retry_proposal(sid,s)
+        return self._safe_view(sid,s)
     def request_refund(self,ctx,sid):
         _,s=self._owned(ctx,sid)
         self._require_effect(sid,s)

@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_scale.h>
 
 #include <consensus/params.h>
@@ -29,8 +30,8 @@ uint64_t MulQ16Round32(uint64_t w, int64_t g_q16)
 {
     if (g_q16 <= 0) return w;
     // Use 128-bit intermediate: w can approach hard-cap × ~1.1.
-    const unsigned __int128 prod =
-        static_cast<unsigned __int128>(w) * static_cast<uint64_t>(g_q16) + (1ull << 15);
+    const btx::U128 prod =
+        static_cast<btx::U128>(w) * static_cast<uint64_t>(g_q16) + (1ull << 15);
     const uint64_t scaled = static_cast<uint64_t>(prod >> 16);
     return RoundBytesToMultipleOf32(scaled);
 }

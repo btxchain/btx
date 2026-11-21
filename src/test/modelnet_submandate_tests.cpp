@@ -433,6 +433,31 @@ BOOST_AUTO_TEST_CASE(mandate_sub_09_fees_count_separately)
     BOOST_CHECK_EQUAL(budget.UsedFees(), 4);
 }
 
+// A restriction field of the wrong type or out of range is refused, not dropped.
+BOOST_AUTO_TEST_CASE(mandate_scope_fields_are_checked)
+{
+    using namespace modelnet;
+    std::string err;
+    SubscriptionMandate m;
+    UniValue bad_collection = BaseMandateJson();
+    bad_collection.pushKV("collection_id", 42);
+    BOOST_CHECK(!MandateFromJson(bad_collection, m, err));
+    BOOST_CHECK_EQUAL(err, "collection_id");
+    UniValue bad_query = BaseMandateJson();
+    UniValue query(UniValue::VARR);
+    query.push_back("x");
+    bad_query.pushKV("query_filter", query);
+    BOOST_CHECK(!MandateFromJson(bad_query, m, err));
+    BOOST_CHECK_EQUAL(err, "query_filter");
+    UniValue bad_confirmations = BaseMandateJson();
+    bad_confirmations.pushKV("minimum_confirmations", int64_t{4294967296});
+    BOOST_CHECK(!MandateFromJson(bad_confirmations, m, err));
+    BOOST_CHECK_EQUAL(err, "minimum_confirmations");
+    bad_confirmations.pushKV("minimum_confirmations", int64_t{-4294967295});
+    BOOST_CHECK(!MandateFromJson(bad_confirmations, m, err));
+    BOOST_CHECK_EQUAL(err, "minimum_confirmations");
+}
+
 BOOST_AUTO_TEST_CASE(mandate_sub_10_helper_never_receives_wallet_key)
 {
     using namespace modelnet;
@@ -494,6 +519,43 @@ BOOST_AUTO_TEST_CASE(mandate_sub_10_helper_never_receives_wallet_key)
     BOOST_CHECK_EQUAL(plan["automatic_spend_atoms"].getInt<int64_t>(), 0);
 }
 
+// Every create, revoke and reserve saves all mandates again: the strings and
+// lists of a new mandate have a size bound.
+BOOST_AUTO_TEST_CASE(mandate_fields_are_bounded)
+{
+    using namespace modelnet;
+    SubscriptionStore store;
+    UniValue result;
+    std::string code, err;
+    const auto create = [&](const std::string& field, const UniValue& value) {
+        UniValue m = BaseMandateJson();
+        m.pushKV(field, value);
+        result = UniValue(UniValue::VOBJ);
+        err.clear();
+        return store.Dispatch("createsubscriptionmandate", Arr(m), result, code, err, kNow);
+    };
+    BOOST_REQUIRE_MESSAGE(create("mandate_id", std::string(256, 'm')), err);
+    BOOST_REQUIRE_MESSAGE(create("query_filter", std::string(4096, 'q')), err);
+    BOOST_CHECK(!create("mandate_id", std::string(257, 'n')));
+    BOOST_CHECK_EQUAL(err, "mandate_id or collection_id too long");
+    BOOST_CHECK(!create("collection_id", std::string(257, 'c')));
+    BOOST_CHECK_EQUAL(err, "mandate_id or collection_id too long");
+    BOOST_CHECK(!create("query_filter", std::string(4097, 'q')));
+    BOOST_CHECK_EQUAL(err, "query_filter too long");
+    UniValue kinds(UniValue::VARR);
+    for (int i = 0; i < 33; ++i) kinds.push_back("MODEL");
+    BOOST_CHECK(!create("allowed_kinds", kinds));
+    BOOST_CHECK_EQUAL(err, "too many entries in a mandate list");
+    UniValue modes(UniValue::VARR);
+    for (int i = 0; i < 33; ++i) modes.push_back("mode-" + std::to_string(i));
+    BOOST_CHECK(!create("assurance_mode_restrictions", modes));
+    BOOST_CHECK_EQUAL(err, "too many entries in a mandate list");
+    UniValue long_mode(UniValue::VARR);
+    long_mode.push_back(std::string(257, 'a'));
+    BOOST_CHECK(!create("assurance_mode_restrictions", long_mode));
+    BOOST_CHECK_EQUAL(err, "assurance_mode_restrictions entry too long");
+}
+
 BOOST_AUTO_TEST_CASE(mandate_sub_11_model_card_cannot_expand_mandate)
 {
     using namespace modelnet;
@@ -512,6 +574,51 @@ BOOST_AUTO_TEST_CASE(mandate_sub_11_model_card_cannot_expand_mandate)
     m.mandate_id = "mid-1";
     BOOST_CHECK(!Evaluate(ev, KnownTerms(HexN(96, 'c'), 10, 1), m, kNow, err));
     BOOST_CHECK_EQUAL(err, "publisher binding");
+}
+
+// A reservation keeps its event_id, object_id and terms_id, and every reserve
+// saves all mandates again: each is at most 256 bytes.
+BOOST_AUTO_TEST_CASE(reservation_ids_are_bounded)
+{
+    using namespace modelnet;
+    SubscriptionStore store;
+    UniValue result;
+    std::string code, err;
+    BOOST_REQUIRE(store.Dispatch("createsubscriptionmandate", Arr(BaseMandateJson()), result, code, err, kNow));
+    const std::string mid = result["mandate_id"].get_str();
+    const auto reserve = [&](const std::string& event_id, const std::string& object_id, const std::string& terms_id) {
+        UniValue rsv(UniValue::VOBJ);
+        rsv.pushKV("mandate_id", mid);
+        rsv.pushKV("event_id", event_id);
+        rsv.pushKV("object_id", object_id);
+        rsv.pushKV("publisher_id", HexN(96, 'b'));
+        rsv.pushKV("object_kind", "RELEASE");
+        rsv.pushKV("action", "FUND_WITH_MANDATE");
+        UniValue terms(UniValue::VOBJ);
+        terms.pushKV("terms_id", terms_id);
+        terms.pushKV("publisher_id", HexN(96, 'b'));
+        terms.pushKV("network_id", HexN(64, '0'));
+        terms.pushKV("principal_atoms", "10");
+        terms.pushKV("fee_atoms", "1");
+        terms.pushKV("object_kind", "RELEASE");
+        terms.pushKV("confirmations", 1);
+        rsv.pushKV("signed_terms", terms);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch("reservesubscriptionmandate", Arr(rsv), result, code, err, kNow);
+    };
+    BOOST_CHECK(!reserve(std::string(257, 'e'), "object", HexN(96, 'd')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!reserve("e-object", std::string(257, 'o'), HexN(96, 'd')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!reserve("e-terms", "object", std::string(257, 't')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(reserve(std::string(256, 'e'), std::string(256, 'o'), HexN(96, 'd')), err);
+    UniValue get(UniValue::VARR);
+    get.push_back(mid);
+    BOOST_REQUIRE(store.Dispatch("getsubscriptionmandate", get, result, code, err, kNow));
+    BOOST_CHECK_EQUAL(result["action_count"].getInt<int64_t>(), 1);
 }
 
 BOOST_AUTO_TEST_CASE(mandate_sub_12_http_explorer_cannot_mutate_mandates)

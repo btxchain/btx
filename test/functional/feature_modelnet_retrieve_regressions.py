@@ -15,6 +15,8 @@ Loopback helpers and one regtest btxd only. CPU only. Nothing spends.
   failed with 403 "grant identity".
 - #230: a host with -modeluploadlimit serves a whole fetch, paced at its cap.
   0.34.15 refused with 429 and the fetch failed ("missing FreeGrant").
+- progress / progress_multi: per-download byte scope with unrelated stored data,
+  retained pieces, clean helper restart and single/multiple files.
 - #232: removemodel through btxd deletes the pieces and the checkout, and
   `btx-model rm` does the same through the helper socket. `btx-model rm`
   refuses a name that two local models share.
@@ -45,7 +47,7 @@ PACED_BYTES = 16 << 20  # #230: about 10 s at the cap below
 UPLOAD_LIMIT = "2MiB"
 UPLOAD_LIMIT_BPS = 2 << 20
 REMOVE_BYTES = 8 << 20
-ALL_CASES = ("228", "229", "230", "232")
+ALL_CASES = ("228", "229", "230", "232", "progress", "progress_multi")
 
 # Where OpensslBin() (src/modelnet/pq1_runtime.cpp) looks before PATH.
 FIXED_OPENSSL_PATHS = (
@@ -309,6 +311,146 @@ class ModelNetRetrieveRegressionsTest(BitcoinTestFramework):
         assert rate <= 1.5 * UPLOAD_LIMIT_BPS, f"{rate:.0f} B/s is over the {UPLOAD_LIMIT} cap"
         for name in ("fp", "hp"):
             self._stop_helper(name)
+
+    def _progress_piece_state(self, name, artifact):
+        root = self.helpers[name]["dir"] / "store" / "artifacts" / artifact
+        return {str(p.relative_to(root)): (p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest())
+                for p in root.glob("*/*.piece")}
+
+    def _progress_contents(self, name, uri, source):
+        manifest = self._rpc(name, "getmodelmanifest", [uri])
+        assert manifest["complete"], manifest
+        total = 0
+        for fi, entry in enumerate(manifest["files"]):
+            pieces = self.helpers[name]["dir"] / "store" / "artifacts" / manifest["artifact_id"] / str(fi)
+            digest = hashlib.sha384()
+            for i in range((entry["size"] + PIECE_SIZE - 1) // PIECE_SIZE):
+                raw = (pieces / f"{i}.piece").read_bytes()
+                digest.update(raw)
+                total += len(raw)
+            original = source / entry["path"] if source.is_dir() else source
+            assert_equal(digest.hexdigest(), hashlib.sha384(original.read_bytes()).hexdigest())
+            assert_equal(digest.hexdigest(), entry["sha384"])
+        return total
+
+    def _progress_stop(self, name):
+        helper = self.helpers[name]
+        self._stop_helper(name)
+        assert_equal(helper["proc"].returncode, 0)
+        assert not helper["sock"].exists(), helper["sock"]
+
+    def _case_progress(self, multi_file):
+        """Keep stored A out of B's counter, including retained data after restart."""
+        tag = "multi" if multi_file else "single"
+        host, fetcher = f"ph-{tag}", f"pf-{tag}"
+        flags = ["-modellandiscovery=0", "-modelnatpmp=0", "-pwcchain=regtest"]
+        port = p2p_port(4)
+        self._host(host, port, [*flags, "-modeluploadlimit=512KiB"])
+        self._start_helper(fetcher, [*flags, f"-modelpeer=127.0.0.1:{port}"])
+        source_a = self._write_model(f"progress-a-{tag}", 32 << 20)
+        a = self._import(fetcher, source_a)
+        before_a = self._progress_piece_state(fetcher, a["artifact_id"])
+        self._progress_contents(fetcher, a["uri"], source_a)
+        if multi_file:
+            source_b = Path(self.options.tmpdir) / "progress-bundle"
+            source_b.mkdir()
+            for label, size in (("first", 16 << 20), ("second", 4 << 20)):
+                shutil.copyfile(self._write_model(f"progress-{label}", size), source_b / f"{label}.safetensors")
+        else:
+            source_b = self._write_model("progress-b", PACED_BYTES)
+        b = self._import(host, source_b)
+        initial = self._rpc(host, "getmodelmanifest", [b["uri"]])
+        total = sum(f["size"] for f in initial["files"])
+        if multi_file:
+            assert_equal(len(initial["files"]), 2)
+        requested = self._rpc(fetcher, "getmodel", [b["uri"], "FREE_ONLY"])
+        jid = requested.get("job_id")
+        assert jid, requested
+        observation = {"multi_file": multi_file, "job_id": jid, "total": total,
+                       "a_bytes": source_a.stat().st_size, "file_count": len(initial["files"])}
+        self.progress_observation = observation
+        deadline = time.monotonic() + 120 * self.options.timeout_factor
+        while time.monotonic() < deadline:
+            pieces = self._progress_piece_state(fetcher, b["artifact_id"])
+            actual = sum(v[0] for v in pieces.values())
+            raw = self._rpc(fetcher, "getmodeljob", [jid])
+            job = next((j for j in raw.get("jobs", []) if j["job_id"] == jid), {})
+            rows = self._rpc(fetcher, "getmodeltransfers").get("transfers", [])
+            row = next((x for x in rows if x.get("job_id") == jid), {})
+            manifest = self._rpc(fetcher, "getmodelmanifest", [b["uri"]]) if pieces else {}
+            # A live stream can expose a copied piece before its progress
+            # callback runs. Sample only after completed piece bookkeeping.
+            if (0 < actual < total and job.get("status") == "running" and job.get("pieces_committed", 0) == len(pieces)
+                    and not manifest.get("complete")
+                    and pieces == self._progress_piece_state(fetcher, b["artifact_id"])
+                    and row.get("bytes_committed") == job.get("bytes_committed")):
+                observation.update(actual=actual, reported=job["bytes_committed"], percent=row.get("percent"),
+                                   eta_present="eta_s" in row, pieces_before_restart=pieces,
+                                   stream_attempted=(self.helpers[fetcher]["dir"] / "peer-hydrate-q").is_dir())
+                break
+            assert job.get("status") not in ("done", "failed", "cancelled"), job
+            time.sleep(0.1)
+        else:
+            raise AssertionError(f"no stable partial progress snapshot: {observation}")
+        assert observation["stream_attempted"], observation
+        assert_equal(self._progress_piece_state(fetcher, a["artifact_id"]), before_a)
+        # A real clean helper restart must retain B's pieces and the same job.
+        self._progress_stop(fetcher)
+        retained = self._progress_piece_state_after_stop(fetcher, b["artifact_id"])
+        assert retained and all(retained.get(k) == v for k, v in pieces.items()), (pieces, retained)
+        self._start_helper(fetcher, [*flags, f"-modelpeer=127.0.0.1:{port}"])
+        deadline = time.monotonic() + 240 * self.options.timeout_factor
+        while time.monotonic() < deadline:
+            raw = self._rpc(fetcher, "getmodeljob", [jid])
+            job = next((j for j in raw.get("jobs", []) if j["job_id"] == jid), {})
+            if job.get("status") in ("done", "failed", "cancelled"):
+                break
+            # See resumed accounting after the cached-piece scan, while actual
+            # piece requests are active; final installation must not hide it.
+            if not multi_file and "resumed" not in observation and job.get("inflight", 0) > 0:
+                current = self._progress_piece_state(fetcher, b["artifact_id"])
+                actual = sum(v[0] for v in current.values())
+                rows = self._rpc(fetcher, "getmodeltransfers").get("transfers", [])
+                row = next((x for x in rows if x.get("job_id") == jid), {})
+                if (0 < actual < total and job.get("pieces_committed", 0) == len(current)
+                        and current == self._progress_piece_state(fetcher, b["artifact_id"])
+                        and row.get("bytes_committed") == job.get("bytes_committed")):
+                    observation["resumed"] = {"actual": actual, "reported": job["bytes_committed"],
+                                               "percent": row.get("percent"), "inflight": job["inflight"]}
+            time.sleep(0.2)
+        assert_equal(job.get("status"), "done")
+        if not multi_file:
+            assert "resumed" in observation, observation
+        observation["final_reported"] = job["bytes_committed"]
+        after = self._progress_piece_state(fetcher, b["artifact_id"])
+        assert all(after.get(k) == v for k, v in retained.items()), (retained, after)
+        observation["b_exact"] = self._progress_contents(fetcher, b["uri"], source_b) == total
+        self._progress_contents(fetcher, a["uri"], source_a)
+        observation["a_unchanged"] = self._progress_piece_state(fetcher, a["artifact_id"]) == before_a
+        observation["restart_preserved_pieces"] = True
+        self._progress_stop(fetcher)
+        self._progress_stop(host)
+        assert observation["b_exact"] and observation["a_unchanged"], observation
+        # Defer the reporting assertions until completion/integrity controls ran,
+        # so a fail-before result cannot hide a broken legitimate transfer.
+        assert_equal(observation["reported"], observation["actual"])
+        assert_equal(observation["percent"], observation["actual"] * 100 // total)
+        assert observation["eta_present"], observation
+        assert_equal(observation["final_reported"], total)
+        if not multi_file:
+            assert_equal(observation["resumed"]["reported"], observation["resumed"]["actual"])
+            assert_equal(observation["resumed"]["percent"], observation["resumed"]["actual"] * 100 // total)
+
+    def _progress_piece_state_after_stop(self, name, artifact):
+        root = Path(self.options.tmpdir) / f"modeldir-{name}" / "store" / "artifacts" / artifact
+        return {str(p.relative_to(root)): (p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest())
+                for p in root.glob("*/*.piece")}
+
+    def case_progress(self):
+        self._case_progress(False)
+
+    def case_progress_multi(self):
+        self._case_progress(True)
 
     def case_232(self):
         self.log.info("#232: removemodel through btxd and `btx-model rm` free the model's bytes")

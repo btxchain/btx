@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4.h>
 
 #include <matmul/matmul_pow.h>
@@ -302,7 +303,7 @@ std::vector<Fq> ComputeCombineModQClassical(const std::vector<int32_t>& P,
                                             uint32_t n, uint32_t m)
 {
     // Per-MAC FqFromInt32/FqMul/FqAdd path (pre-deferred reference). Kept as a
-    // public oracle so ComputeCombineModQ's deferred __int128 reduction can be
+    // public oracle so ComputeCombineModQ's deferred btx::I128 reduction can be
     // proven byte-identical under adversarial max-magnitude inputs.
     std::vector<Fq> Chat(static_cast<size_t>(m) * m, 0);
     for (uint32_t a = 0; a < m; ++a) {
@@ -329,10 +330,10 @@ std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,
     // Deferred signed accumulation then one canonical reduction per output.
     // Equivalent to per-MAC FqFromInt32/FqMul/FqAdd because production
     // dimensions keep |sum_k P[a,k]*Q[k,c]| well below q = 2^61-1 (and inside
-    // signed __int128). Avoids unnecessary per-MAC modular reductions.
+    // btx::I128). Avoids unnecessary per-MAC modular reductions.
     // BYTE-IDENTICAL to ComputeCombineModQClassical (pinned by unit tests).
     std::vector<Fq> Chat(static_cast<size_t>(m) * m, 0);
-    std::vector<__int128> acc(m, 0);
+    std::vector<btx::I128> acc(m, 0);
     for (uint32_t a = 0; a < m; ++a) {
         const int32_t* p_row = &P[static_cast<size_t>(a) * n];
         std::fill(acc.begin(), acc.end(), 0);
@@ -341,16 +342,16 @@ std::vector<Fq> ComputeCombineModQ(const std::vector<int32_t>& P,
             if (p_ak == 0) continue;
             const int32_t* q_row = &Q[static_cast<size_t>(k) * m];
             for (uint32_t c = 0; c < m; ++c) {
-                acc[c] += static_cast<__int128>(p_ak) * static_cast<__int128>(q_row[c]);
+                acc[c] += static_cast<btx::I128>(p_ak) * static_cast<btx::I128>(q_row[c]);
             }
         }
         Fq* chat_row = &Chat[static_cast<size_t>(a) * m];
         for (uint32_t c = 0; c < m; ++c) {
             if (acc[c] >= 0) {
-                chat_row[c] = int8_field::FqReduce(static_cast<unsigned __int128>(acc[c]));
+                chat_row[c] = int8_field::FqReduce(static_cast<btx::U128>(acc[c]));
             } else {
                 chat_row[c] = int8_field::FqNeg(
-                    int8_field::FqReduce(static_cast<unsigned __int128>(-acc[c])));
+                    int8_field::FqReduce(static_cast<btx::U128>(-acc[c])));
             }
         }
     }

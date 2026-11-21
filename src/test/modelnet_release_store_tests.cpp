@@ -285,6 +285,61 @@ BOOST_AUTO_TEST_CASE(feed_reads_do_not_save_an_older_pledge)
     BOOST_CHECK_EQUAL(on_disk[0].pledged_atoms, pledged.load());
 }
 
+// createmodelrelease imports a BtxEnc2 ciphertext of the model so that a
+// distinct ciphertext object can be seeded while the plaintext is withheld. The
+// import refused .btxenc ("no weight files"), so every campaign named the
+// plaintext object instead. The ciphertext was also written to one fixed file
+// that the two helper RPC workers shared; whatever holds that old name must not
+// change which ciphertext a campaign gets.
+BOOST_AUTO_TEST_CASE(createmodelrelease_stores_its_ciphertext_in_a_directory_of_its_own)
+{
+    const fs::path root = m_path_root / "release-temp-file";
+    WriteTinySafeTensors(root / "a.dir", "{}");
+    ModelCatalog cat{root, 8 << 20};
+    const fs::path helper_dir = cat.Store().Root().parent_path();
+    UniValue res;
+    std::string code;
+    BOOST_REQUIRE(CallHelper(cat, "hostmodel", OneParam(fs::PathToString(root / "a.dir")), res, code));
+    const std::string uri = res["uri"].get_str();
+    const auto model_count = [&] {
+        UniValue listed;
+        cat.List(listed);
+        return listed["models"].size();
+    };
+    const size_t hosted = model_count();
+
+    // A refused campaign leaves no ciphertext behind.
+    UniValue low = CreateParams(uri, 'a')[0];
+    low.pushKV("refund_height", 3);
+    BOOST_CHECK(!CallHelper(cat, "createmodelrelease", OneParam(low), res, code));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK_EQUAL(model_count(), hosted);
+
+    // Another call still busy with the old name, here as a directory.
+    fs::create_directories(helper_dir / "tmp-cipher.btxenc");
+    BOOST_REQUIRE_MESSAGE(CallHelper(cat, "createmodelrelease", CreateParams(uri, 'a'), res, code), code);
+    BOOST_REQUIRE(CallHelper(cat, "getmodelrelease", UniValue(UniValue::VARR), res, code));
+    BOOST_REQUIRE_EQUAL(res["campaigns"].size(), 1U);
+    const UniValue& campaign = res["campaigns"][0];
+    BOOST_CHECK_MESSAGE(campaign["ciphertext_artifact_id"].get_str() != campaign["artifact_id"].get_str(),
+                        "campaign names the plaintext object as its ciphertext: " + campaign.write());
+    BOOST_CHECK(fs::is_directory(helper_dir / "tmp-cipher.btxenc"));
+    BOOST_CHECK_EQUAL(model_count(), hosted + 1);
+    // The stored file keeps its usual name, which is part of its identity.
+    Digest48 cid;
+    std::string err;
+    BOOST_REQUIRE(Digest48::FromHex(campaign["ciphertext_artifact_id"].get_str(), cid, err));
+    CatalogEntry enc;
+    BOOST_REQUIRE(cat.Find(cid, enc));
+    BOOST_REQUIRE_EQUAL(enc.core.files.size(), 1U);
+    BOOST_CHECK_EQUAL(enc.core.files[0].path, "tmp-cipher.btxenc");
+    // And the directory it was written to is gone.
+    for (const auto& ent : fs::directory_iterator(helper_dir)) {
+        BOOST_CHECK_MESSAGE(fs::PathToString(ent.path().filename()).rfind("tmp-cipher-", 0) != 0,
+                            "left behind: " + fs::PathToString(ent.path()));
+    }
+}
+
 // createmodelrelease read refund_height as int64 and cast it to uint32 with no
 // range check: -1 became 4294967295 and 2^32 + 100 became 100. A height from
 // 500000000 on was stored and signed, although the funding path refuses it.

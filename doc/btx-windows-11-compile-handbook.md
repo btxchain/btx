@@ -19,11 +19,9 @@ version, see [build-windows-msvc.md](./build-windows-msvc.md).
 
 ## Precompiled Archive on This Branch
 
-If you only want a generic precompiled Windows x64 CLI archive from this
-branch, use:
-
-- `contrib\prebuilt\windows\btx-29.4.0-generic-win64-x86_64-w64-mingw32.zip`
-- `contrib\prebuilt\windows\btx-29.4.0-generic-win64-x86_64-w64-mingw32.zip.sha256`
+This branch does not ship a MinGW archive under `contrib\prebuilt\windows`.
+Build with `contrib\devtools\build-btx-windows.ps1`. Pass `-WithoutModelNet`
+when OpenSSL 3.5 is not installed. ModelNet stays on unless that switch is set.
 
 ## What This Handbook Recommends
 

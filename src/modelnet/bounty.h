@@ -13,9 +13,11 @@
 #include <util/fs.h>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -28,6 +30,9 @@ constexpr int64_t BOUNTY_MAX_HEIGHT = 499999999;
 constexpr int BOUNTY_PAGE_MAX = 100;
 constexpr int BOUNTY_COUNCIL_MAX = 8;
 constexpr int BOUNTY_LOTS_MAX = 16;
+//! Bounty watches kept (and saved) at most, and the longest bounty_id a watch takes.
+constexpr size_t BOUNTY_WATCHES_MAX{1024};
+constexpr size_t BOUNTY_WATCH_ID_MAX{128};
 constexpr const char* BOUNTY_TRUST_LABEL = "COUNCIL_CUSTODIAL_AUTHORITY_WITH_INDIVIDUAL_REFUND_PATHS";
 
 struct SignedEnvelope {
@@ -87,14 +92,34 @@ struct BountyChainFact {
 };
 
 class BountyChainIndex {
+    //! What one Observe() changed: the outpoint and the fact it replaced
+    //! (none if the outpoint was new). Not a copy of every fact.
+    struct UndoStep {
+        std::string outpoint;
+        std::optional<BountyChainFact> previous;
+    };
     std::map<std::string, BountyChainFact> m_facts;
-    std::vector<std::map<std::string, BountyChainFact>> m_undo;
+    std::deque<UndoStep> m_undo;
+    size_t m_undo_bytes{0};
     uint32_t m_height{0};
     uint64_t m_epoch{1};
 
+    static size_t StepBytes(const UndoStep& step);
+    void DropOldestUndo();
+
 public:
+    //! Observe() steps that DisconnectTip() can take back. The oldest steps
+    //! are dropped beyond either limit, so the history stays bounded in steps
+    //! and in the bytes of the strings it holds.
+    static constexpr size_t MAX_UNDO_STEPS{10'000};
+    static constexpr size_t MAX_UNDO_BYTES{8 << 20};
+
     void Observe(const BountyChainFact& f);
     void DisconnectTip();
+    //! Undo steps held, the facts and the bytes they hold (for tests).
+    size_t UndoSteps() const { return m_undo.size(); }
+    size_t UndoFactsHeld() const;
+    size_t UndoBytes() const { return m_undo_bytes; }
     void SetHeight(uint32_t h) { m_height = h; }
     uint32_t Height() const { return m_height; }
     uint64_t Epoch() const { return m_epoch; }
@@ -110,6 +135,11 @@ public:
     //! Drop all facts, the undo stack and the height.
     void Clear();
 };
+
+//! Bounty events kept in memory for getbountyevents: the newest ones, within
+//! both bounds; the newest event is always kept.
+constexpr size_t BOUNTY_EVENTS_MAX{4096};
+constexpr size_t BOUNTY_EVENT_BYTES_MAX{4 << 20};
 
 class BountyStore {
     NetworkId m_network{};
@@ -130,24 +160,45 @@ class BountyStore {
     std::map<std::string, UniValue> m_watches;
     std::map<std::string, UniValue> m_mandates;
     std::vector<UniValue> m_events;
-    std::map<std::string, UniValue> m_idem;
+    //! What an idempotency key keeps: a hash of the request it answered and the
+    //! reply as JSON text, which goes first when the reply budget is used up.
+    struct KeptIdem {
+        std::string request;
+        std::string reply;
+    };
+    //! Idempotency keys the store keeps, and the reply text they keep in all.
+    static constexpr size_t IDEM_KEYS_MAX{4096};
+    static constexpr size_t IDEM_REPLY_BYTES_MAX{4 << 20};
+    //! By hash of method and key; the keys in m_idem_order oldest first, and
+    //! the keys whose reply is still kept in m_idem_replies, oldest first.
+    std::map<std::string, KeptIdem> m_idem;
+    std::deque<std::string> m_idem_order;
+    std::deque<std::string> m_idem_replies;
+    size_t m_idem_reply_bytes{0};
     std::map<std::string, UniValue> m_activity;
     std::set<std::string> m_revoked_delegations;
     uint64_t m_seq{0};
     uint64_t m_epoch{1};
+    //! Size of the events in m_events as JSON text.
+    size_t m_event_bytes{0};
     mutable std::mutex m_mu;
     BountyChainIndex m_chain;
     //! The directory whose chain facts are in m_chain (see Load()).
     fs::path m_chain_dir;
+    //! True while bounty-store.json is there but cannot be read (see Load()):
+    //! saving would replace it with the part of the store that is in memory.
+    bool m_unreadable{false};
     MandateBudget m_budget;
     std::map<std::string, std::unique_ptr<MandateBudget>> m_budgets;
 
     UniValue Event(const std::string& kind, const std::string& bounty_id, const UniValue& payload);
-    bool Idem(const std::string& method, const std::string& key, UniValue& out) const;
-    void Remember(const std::string& method, const std::string& key, const UniValue& result);
+    const KeptIdem* FindIdemLocked(const std::string& method, const std::string& key) const;
+    void Remember(const std::string& method, const std::string& key, const std::string& request, const UniValue& result);
     bool LoadIdentity(std::vector<unsigned char>& pk, std::vector<unsigned char>& sk, Digest48& id, std::string& err);
     bool PersistLocked(std::string& err) const;
     UniValue BountyEntryLocked(const std::string& bounty_id) const;
+    void AppendEventLocked(const UniValue& event);
+    void TrimEventsLocked();
 
 public:
     void Bind(const fs::path& dir, const NetworkId& network);
@@ -161,6 +212,10 @@ public:
     bool Load(std::string& err);
     bool Save(std::string& err) const;
 };
+
+//! Bounty drafts the store keeps (and saves) at most, and their JSON in all.
+constexpr size_t BOUNTY_DRAFTS_MAX{256};
+constexpr size_t BOUNTY_DRAFT_BYTES_MAX{16 << 20};
 
 bool IsBountyHelperMethod(const std::string& method);
 bool DispatchBountyHelperRpc(ModelCatalog& cat, const std::string& method, const UniValue& params,

@@ -410,6 +410,46 @@ BOOST_AUTO_TEST_CASE(infra_11_no_storage_no_advertise)
     BOOST_CHECK(!AutoHostShouldAdvertise(true, true, 8 * MIB, !seeded.empty(), false));
 }
 
+BOOST_AUTO_TEST_CASE(profile_relaunch_reads_saved_policy_and_preserves_overrides)
+{
+    using namespace modelnet;
+    HelperLaunchConfig cfg;
+    cfg.modeldir = m_path_root / "profile-relaunch";
+    fs::create_directories(cfg.modeldir);
+    cfg.storage_arg = "1073741824";
+    const auto original = BuildHelperArgv(cfg);
+    BOOST_CHECK(ArgvHas(original, "-modelstorage=1073741824"));
+    auto policy = ResolveProfile(OperatorProfile::CUSTOM, {});
+    policy.storage_arg = "8388608";
+    policy.follow_peers = false;
+    policy.seed = "off";
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(SaveOperatorProfile(OperatorProfilePath(cfg.modeldir), OperatorProfile::CUSTOM, policy, err), err);
+    auto argv = BuildHelperArgv(cfg);
+    BOOST_CHECK(ArgvHas(argv, "-modelstorage=8388608"));
+    BOOST_CHECK(ArgvHas(argv, "-modelfollowpeers=0"));
+    BOOST_CHECK(ArgvHas(argv, "-modelseed=off"));
+    policy.storage_arg = "0";
+    BOOST_REQUIRE_MESSAGE(SaveOperatorProfile(OperatorProfilePath(cfg.modeldir), OperatorProfile::CUSTOM, policy, err), err);
+    BOOST_CHECK(ArgvHas(BuildHelperArgv(cfg), "-modelstorage=0"));
+    cfg.profile_overrides.storage_arg = "16777216";
+    cfg.profile_overrides.follow_peers = true;
+    cfg.profile_overrides.seed = "manual";
+    argv = BuildHelperArgv(cfg);
+    BOOST_CHECK(ArgvHas(argv, "-modelstorage=16777216"));
+    BOOST_CHECK(!ArgvHas(argv, "-modelfollowpeers=0"));
+    BOOST_CHECK(ArgvHas(argv, "-modelseed=manual"));
+    cfg.profile_overrides = {};
+    cfg.explicit_profile = OperatorProfile::PERSONAL;
+    HelperLaunchConfig expected;
+    ApplyProfileToLaunchConfig(ResolveProfile(OperatorProfile::PERSONAL, {}), expected);
+    BOOST_CHECK(ArgvHas(BuildHelperArgv(cfg), "-modelstorage=" + expected.storage_arg));
+    cfg.explicit_profile.reset();
+    // An unreadable/invalid profile retains the previously resolved launch policy.
+    { std::ofstream file(OperatorProfilePath(cfg.modeldir)); file << "invalid"; }
+    BOOST_CHECK(ArgvHas(BuildHelperArgv(cfg), "-modelstorage=1073741824"));
+}
+
 BOOST_AUTO_TEST_CASE(infra_12_profile_restart_persist)
 {
     using namespace modelnet;

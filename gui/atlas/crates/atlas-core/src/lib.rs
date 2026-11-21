@@ -12,6 +12,7 @@ pub mod operations;
 pub mod rpc;
 pub mod settings;
 pub mod strict_json;
+pub mod swapnet;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};

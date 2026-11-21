@@ -16,6 +16,7 @@
 #include <script/signingprovider.h>
 #include <script/solver.h>
 #include <serialize.h>
+#include <test/util/logging.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
@@ -99,6 +100,74 @@ BOOST_AUTO_TEST_CASE(outbound_slow_chain_eviction)
     BOOST_CHECK(dummyNode1.fDisconnect == true);
 
     peerman.FinalizeNode(dummyNode1);
+}
+
+BOOST_FIXTURE_TEST_CASE(outbound_peer_behind_tip_is_evicted, TestChain100Setup)
+{
+    // An outbound peer that advertised a height below our tip and never shows
+    // us a better chain is evicted by the chain-sync rule once we are out of
+    // IBD, although the header-sync height gate never starts header sync with
+    // it.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    connman.SetPeerConnectTimeout(99999s);
+    PeerManager& peerman = *m_node.peerman;
+
+    int tip_height;
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(!m_node.chainman->IsInitialBlockDownload());
+        tip_height = m_node.chainman->ActiveChain().Height();
+        BOOST_REQUIRE(tip_height > 1);
+    }
+
+    CAddress addr(ip(0xa0b0c002), NODE_NONE);
+    CNode node{/*id=*/0,
+               /*sock=*/nullptr,
+               addr,
+               /*nKeyedNetGroupIn=*/0,
+               /*nLocalHostNonceIn=*/0,
+               CAddress(),
+               /*addrNameIn=*/"",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(
+        /*node=*/node,
+        /*successfully_connected=*/true,
+        /*remote_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        /*local_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+        /*version=*/PROTOCOL_VERSION,
+        /*relay_txs=*/true,
+        /*starting_height=*/tip_height - 1);
+
+    const int64_t start{GetTime()};
+    BOOST_CHECK(peerman.SendMessages(&node)); // arms the chain-sync timeout
+    connman.FlushSendBuffer(node);
+    CNodeStateStats stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(node.GetId(), stats));
+    BOOST_CHECK(!stats.m_headers_sync_started); // the height gate held it back
+
+    // Inside the 20-minute window the peer stays.
+    for (int minute : {5, 10, 15, 19}) {
+        SetMockTime(start + minute * 60);
+        BOOST_CHECK(peerman.SendMessages(&node));
+        connman.FlushSendBuffer(node);
+        BOOST_CHECK(!node.fDisconnect);
+    }
+    // After it: one getheaders below the benchmark, then the last call.
+    {
+        ASSERT_DEBUG_LOG("Outbound peer has old chain");
+        for (int minute = 21; minute <= 40 && !node.fDisconnect; minute += 3) {
+            SetMockTime(start + minute * 60);
+            BOOST_CHECK(peerman.SendMessages(&node));
+            connman.FlushSendBuffer(node);
+        }
+    }
+    BOOST_CHECK(node.fDisconnect);
+
+    peerman.FinalizeNode(node);
 }
 
 struct OutboundTest : TestingSetup {
@@ -390,6 +459,50 @@ BOOST_AUTO_TEST_CASE(peer_discouragement)
     BOOST_CHECK(nodes[0]->fDisconnect);
     BOOST_CHECK(nodes[1]->fDisconnect);
     BOOST_CHECK(nodes[2]->fDisconnect);
+
+    for (CNode* node : nodes) {
+        peerLogic->FinalizeNode(*node);
+    }
+    connman->ClearTestNodes();
+}
+
+BOOST_AUTO_TEST_CASE(peer_discouragement_disconnects_only_the_misbehaving_peer)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    auto banman = std::make_unique<BanMan>(m_args.GetDataDirBase() / "banlist", nullptr, DEFAULT_MISBEHAVING_BANTIME);
+    auto connman = std::make_unique<ConnmanTestMsg>(0x1337, 0x1337, *m_node.addrman, *m_node.netgroupman, Params());
+    auto peerLogic = PeerManager::make(*connman, *m_node.addrman, banman.get(), *m_node.chainman, *m_node.mempool, *m_node.warnings, {});
+
+    // Two inbound peers behind one address, as with clearnet peers reaching us through the same Tor exit.
+    const CAddress shared_addr{ip(0xa0b0c001), NODE_NONE};
+    banman->ClearBanned();
+    std::array<CNode*, 2> nodes;
+    for (size_t i{0}; i < nodes.size(); ++i) {
+        nodes[i] = new CNode{/*id=*/static_cast<NodeId>(i),
+                             /*sock=*/nullptr,
+                             shared_addr,
+                             /*nKeyedNetGroupIn=*/0,
+                             /*nLocalHostNonceIn=*/i,
+                             CAddress(),
+                             /*addrNameIn=*/"",
+                             ConnectionType::INBOUND,
+                             /*inbound_onion=*/false,
+                             /*network_key=*/1};
+        nodes[i]->SetCommonVersion(PROTOCOL_VERSION);
+        peerLogic->InitializeNode(*nodes[i], NODE_NETWORK);
+        nodes[i]->fSuccessfullyConnected = true;
+        connman->AddTestNode(*nodes[i]);
+    }
+
+    peerLogic->UnitTestMisbehaving(nodes[0]->GetId());
+    BOOST_CHECK(peerLogic->SendMessages(nodes[0]));
+
+    // The address is discouraged and the misbehaving peer is disconnected...
+    BOOST_CHECK(banman->IsDiscouraged(shared_addr));
+    BOOST_CHECK(nodes[0]->fDisconnect);
+    // ...but the other peer on the same address stays connected.
+    BOOST_CHECK(!nodes[1]->fDisconnect);
 
     for (CNode* node : nodes) {
         peerLogic->FinalizeNode(*node);

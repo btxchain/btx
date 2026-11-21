@@ -47,8 +47,19 @@ function(btx_set_packaged_lib_runpath target_name)
   if(APPLE)
     # Mach-O has no $ORIGIN. @executable_path/../lib is the same bin/ -> lib/ hop.
     target_link_options(${target_name} PRIVATE "LINKER:-rpath,@executable_path/../lib")
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+      AND (CMAKE_GENERATOR STREQUAL "Unix Makefiles" OR CMAKE_GENERATOR STREQUAL "Ninja")
+      AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+    # CMake 3.22 over-escapes $ORIGIN in LINK_OPTIONS for both generators.
+    # Pass one quoted dollar to the link script or Ninja's command shell.
+    # Keep this GNU-compatible driver flag raw and shell-quote the loader
+    # token. APPEND_STRING preserves flags already owned by the target.
+    set_property(TARGET ${target_name} APPEND_STRING PROPERTY LINK_FLAGS
+      " -Wl,--enable-new-dtags,-rpath,'$ORIGIN/../lib'")
   else()
-    target_link_options(${target_name} PRIVATE "LINKER:--enable-new-dtags,-rpath,\$ORIGIN/../lib")
+    # Preserve the compiler-wrapper path for other generators and drivers.
+    string(ASCII 36 btx_dollar)
+    target_link_options(${target_name} PRIVATE "LINKER:--enable-new-dtags,-rpath,${btx_dollar}ORIGIN/../lib")
   endif()
   set_target_properties(${target_name} PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
 endfunction()

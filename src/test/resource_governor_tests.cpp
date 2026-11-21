@@ -13,9 +13,19 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <exception>
 #include <iterator>
 #include <string>
 #include <thread>
+
+
+#ifdef MODELNET_MODELD_PATH
+#include <modelnet/catalog.h>
+namespace modelnet { bool AllowModelSeedBytes(const ModelCatalog& cat, size_t n); }
+#endif
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 BOOST_FIXTURE_TEST_SUITE(resource_governor_tests, BasicTestingSetup)
 
@@ -922,26 +932,68 @@ BOOST_AUTO_TEST_CASE(gov_e2e_battery_sysfs)
 
 BOOST_AUTO_TEST_CASE(gov_permit_file_is_never_read_half_written)
 {
-    // btxd rewrites governor-permit.json every 2 s while btx-modeld reads it
-    // before each seeded piece. A file it cannot parse counts as "no governor"
-    // there, so a reader must always find the whole permit.
+    // A successful open sees a complete old or new permit. Windows may refuse
+    // an open during replacement with a sharing violation; the separate helper
+    // consumer tests require optional work to remain denied on such failures.
     ResourceGovernor g;
     const fs::path path = m_path_root / "governor-permit.json";
     BOOST_REQUIRE(g.WritePermitFile(fs::PathToString(path)));
     std::atomic<bool> stop{false};
+    uint64_t written{0};
+    std::exception_ptr writer_error;
     std::thread writer([&] {
-        while (!stop.load()) (void)g.WritePermitFile(fs::PathToString(path));
+        try {
+            while (!stop.load()) if (g.WritePermitFile(fs::PathToString(path))) ++written;
+        } catch (...) { writer_error = std::current_exception(); }
     });
-    int unreadable{0};
-    for (int i = 0; i < 20000; ++i) {
-        std::ifstream in{path};
-        const std::string body{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    struct StopWriter {
+        std::atomic<bool>& stop;
+        std::thread& thread;
+        ~StopWriter() { stop.store(true); if (thread.joinable()) thread.join(); }
+    } stop_writer{stop, writer};
+    auto complete_permit = [](std::ifstream& in) {
+        std::string body;
+        char buffer[4096];
+        while (in) {
+            in.read(buffer, sizeof(buffer));
+            body.append(buffer, static_cast<size_t>(in.gcount()));
+        }
         UniValue permit;
-        if (!permit.read(body) || !permit.isObject() || !permit.exists("seeding_allowed")) ++unreadable;
+        return !in.bad() && in.eof() && permit.read(body) && permit.isObject() &&
+               permit["schema_version"].isNum() && permit["schema_version"].getInt<int>() == 1 &&
+               permit["seeding_allowed"].isBool() && permit["preservation_allowed"].isBool() &&
+               permit["upload_bps"].isNum();
+    };
+    uint64_t opened{0}, sharing{0}, unexpected_open_errors{0}, invalid_opened{0};
+    for (int i = 0; i < 20000; ++i) {
+#ifdef _WIN32
+        SetLastError(ERROR_SUCCESS);
+#endif
+        std::ifstream in{path, std::ios::binary};
+        if (!in) {
+#ifdef _WIN32
+            const DWORD error = GetLastError();
+            if (error == ERROR_SHARING_VIOLATION) ++sharing;
+            else ++unexpected_open_errors;
+#else
+            ++unexpected_open_errors;
+#endif
+            continue;
+        }
+        ++opened;
+        if (!complete_permit(in)) ++invalid_opened;
     }
-    stop = true;
+    stop.store(true);
     writer.join();
-    BOOST_CHECK_EQUAL(unreadable, 0);
+    BOOST_CHECK(!writer_error);
+    BOOST_CHECK_GT(written, 0U);
+    BOOST_CHECK_GT(opened, 0U);
+    BOOST_CHECK_EQUAL(opened + sharing + unexpected_open_errors, 20000U);
+    BOOST_CHECK_EQUAL(unexpected_open_errors, 0U);
+    BOOST_CHECK_EQUAL(invalid_opened, 0U);
+    std::ifstream final_in{path, std::ios::binary};
+    BOOST_REQUIRE(final_in.is_open());
+    BOOST_CHECK(complete_permit(final_in));
 }
 
 BOOST_AUTO_TEST_CASE(gov_observe_and_reports_from_two_threads)
@@ -975,5 +1027,140 @@ BOOST_AUTO_TEST_CASE(gov_observe_and_reports_from_two_threads)
     tick.join();
     BOOST_CHECK_EQUAL(reports, 20000);
 }
+
+
+#ifdef MODELNET_MODELD_PATH
+BOOST_AUTO_TEST_CASE(gov_helper_missing_parent_denies_then_recovers)
+{
+    modelnet::ModelCatalog cat{m_path_root / "gov-parent", 8 << 20};
+    const fs::path dir = cat.Store().Root().parent_path();
+    const fs::path held = m_path_root / "gov-parent-held";
+    BOOST_REQUIRE(fs::is_directory(dir));
+    BOOST_REQUIRE(!fs::exists(dir / "governor-permit.json"));
+    fs::rename(dir, held);
+    struct RestoreDirectory {
+        fs::path from, to;
+        bool active{true};
+        ~RestoreDirectory() { if (active) { std::error_code ec; fs::rename(from, to, ec); } }
+    } restore{held, dir};
+    BOOST_CHECK(!modelnet::AllowModelSeedBytes(cat, 1));
+    fs::rename(held, dir);
+    restore.active = false;
+    BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1));
+}
+#endif
+
+#ifdef MODELNET_MODELD_PATH
+namespace {
+void WriteGovernorControl(const fs::path& path, const std::string& text)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << text;
+    out.close();
+    BOOST_REQUIRE(out.good());
+}
+}
+
+BOOST_AUTO_TEST_CASE(gov_helper_permit_healthy_and_absent)
+{
+    modelnet::ModelCatalog cat{m_path_root / "gov-permit-valid", 8 << 20};
+    const fs::path dir = cat.Store().Root().parent_path();
+    fs::create_directories(dir);
+    const fs::path path = dir / "governor-permit.json";
+    BOOST_REQUIRE(!fs::exists(path));
+    BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1)); // Standalone helper.
+    WriteGovernorControl(path, "{}");
+    BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1)); // Existing optional-field semantics.
+    WriteGovernorControl(path, R"({"seeding_allowed":true,"upload_bps":65536})");
+    BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1));
+    WriteGovernorControl(path, R"({"seeding_allowed":false,"upload_bps":65536})");
+    BOOST_CHECK(!modelnet::AllowModelSeedBytes(cat, 1));
+    for (const auto cap : {0, -1}) {
+        WriteGovernorControl(path, "{\"seeding_allowed\":true,\"upload_bps\":" + std::to_string(cap) + "}");
+        BOOST_CHECK(!modelnet::AllowModelSeedBytes(cat, 1));
+    }
+    WriteGovernorControl(path, R"({"seeding_allowed":true,"upload_bps":65536})");
+    BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1));
+    BOOST_REQUIRE(fs::remove(path));
+    BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1));
+}
+
+BOOST_AUTO_TEST_CASE(gov_helper_invalid_permit_denies_then_recovers)
+{
+    modelnet::ModelCatalog cat{m_path_root / "gov-permit-invalid", 8 << 20};
+    const fs::path dir = cat.Store().Root().parent_path();
+    fs::create_directories(dir);
+    const fs::path path = dir / "governor-permit.json";
+    for (const std::string text : {"", "{", "[]", "null", "true", "123"}) {
+        WriteGovernorControl(path, text);
+        BOOST_CHECK_MESSAGE(!modelnet::AllowModelSeedBytes(cat, 1), "invalid permit: " << text);
+        WriteGovernorControl(path, R"({"seeding_allowed":true,"upload_bps":65536})");
+        BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1));
+    }
+    BOOST_REQUIRE(fs::remove(path));
+    BOOST_REQUIRE(fs::create_directory(path));
+    bool directory_allowed{true};
+    BOOST_CHECK_NO_THROW(directory_allowed = modelnet::AllowModelSeedBytes(cat, 1));
+    BOOST_CHECK(!directory_allowed);
+    BOOST_REQUIRE(fs::remove(path));
+    WriteGovernorControl(path, R"({"seeding_allowed":false,"upload_bps":65536})");
+    BOOST_CHECK(!modelnet::AllowModelSeedBytes(cat, 1));
+}
+
+#ifdef _WIN32
+BOOST_AUTO_TEST_CASE(gov_helper_locked_permit_denies_positive_bytes_then_recovers)
+{
+    modelnet::ModelCatalog cat{m_path_root / "gov-permit-locked", 8 << 20};
+    const fs::path dir = cat.Store().Root().parent_path();
+    fs::create_directories(dir);
+    const fs::path path = dir / "governor-permit.json";
+    WriteGovernorControl(path, R"({"seeding_allowed":false,"upload_bps":65536})");
+    BOOST_REQUIRE(!modelnet::AllowModelSeedBytes(cat, 1));
+    struct HandleGuard {
+        HANDLE handle;
+        ~HandleGuard() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
+    } held{CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    BOOST_REQUIRE(held.handle != INVALID_HANDLE_VALUE);
+    for (int i = 0; i < 100; ++i) BOOST_CHECK(!modelnet::AllowModelSeedBytes(cat, 1));
+    BOOST_REQUIRE(CloseHandle(held.handle));
+    held.handle = INVALID_HANDLE_VALUE;
+    BOOST_CHECK(!modelnet::AllowModelSeedBytes(cat, 1));
+    WriteGovernorControl(path, R"({"seeding_allowed":true,"upload_bps":65536})");
+    BOOST_CHECK(modelnet::AllowModelSeedBytes(cat, 1));
+}
+
+BOOST_AUTO_TEST_CASE(gov_helper_replacing_paused_permit_denies_positive_bytes)
+{
+    modelnet::ModelCatalog cat{m_path_root / "gov-permit-replacing", 8 << 20};
+    const fs::path dir = cat.Store().Root().parent_path();
+    fs::create_directories(dir);
+    const fs::path path = dir / "governor-permit.json";
+    ResourceGovernor governor;
+    governor.SetMode(GovernorMode::OFF);
+    BOOST_REQUIRE(governor.WritePermitFile(fs::PathToString(path)));
+    std::atomic<bool> stop{false};
+    uint64_t written{0};
+    std::exception_ptr writer_error;
+    std::thread writer([&] {
+        try {
+            while (!stop.load()) if (governor.WritePermitFile(fs::PathToString(path))) ++written;
+        } catch (...) { writer_error = std::current_exception(); }
+    });
+    struct StopWriter {
+        std::atomic<bool>& stop;
+        std::thread& thread;
+        ~StopWriter() { stop.store(true); if (thread.joinable()) thread.join(); }
+    } stop_writer{stop, writer};
+    uint64_t allowed{0};
+    for (int i = 0; i < 20000; ++i) allowed += modelnet::AllowModelSeedBytes(cat, 1) ? 1 : 0;
+    stop.store(true);
+    writer.join();
+    BOOST_CHECK(writer_error == nullptr);
+    BOOST_CHECK_GT(written, 0U);
+    BOOST_CHECK_EQUAL(allowed, 0U);
+    BOOST_CHECK(!modelnet::AllowModelSeedBytes(cat, 1));
+}
+#endif
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

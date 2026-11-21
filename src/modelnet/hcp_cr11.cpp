@@ -5,6 +5,7 @@
 // Cognitive Reserve v1.1 pure functions. Not a second ledger or engine.
 // automatic_spend_atoms stays 0. No Core v4.
 
+#include <compat/wide128.h>
 #include <modelnet/hcp.h>
 
 #include <algorithm>
@@ -21,7 +22,7 @@ namespace modelnet {
 
 namespace {
 
-bool ParseDec18(const std::string& s, __int128& out, std::string& err)
+bool ParseDec18(const std::string& s, btx::I128& out, std::string& err)
 {
     out = 0;
     if (s.empty() || s == "+" || s == "-" || s[0] == '+') {
@@ -44,7 +45,7 @@ bool ParseDec18(const std::string& s, __int128& out, std::string& err)
         err = HCP_ERR_EXACT_DECIMAL;
         return false;
     }
-    __int128 whole = 0;
+    btx::I128 whole = 0;
     int frac = 0;
     bool seen_dot = false;
     bool any = false;
@@ -88,7 +89,7 @@ bool ParseDec18(const std::string& s, __int128& out, std::string& err)
     return true;
 }
 
-std::string FormatDec18(__int128 n)
+std::string FormatDec18(btx::I128 n)
 {
     if (n == 0) return "0";
     const bool neg = n < 0;
@@ -109,7 +110,7 @@ std::string FormatDec18(__int128 n)
     return o;
 }
 
-int64_t ClampNonNeg(__int128 n)
+int64_t ClampNonNeg(btx::I128 n)
 {
     if (n < 0) return 0;
     if (n > std::numeric_limits<int64_t>::max()) return std::numeric_limits<int64_t>::max();
@@ -141,7 +142,7 @@ bool Cr11ReportingFloorAtoms(const std::string& required_quote, const std::strin
         err = HCP_ERR_PRICE_STALE;
         return false;
     }
-    __int128 need = 0, price = 0;
+    btx::I128 need = 0, price = 0;
     if (!ParseDec18(required_quote, need, err) || !ParseDec18(price_quote_per_coin, price, err)) return false;
     if (price <= 0) {
         err = "INVALID_PRICE";
@@ -152,12 +153,12 @@ bool Cr11ReportingFloorAtoms(const std::string& required_quote, const std::strin
         err = "INVALID_PRICE";
         return false;
     }
-    __int128 scale = 1;
+    btx::I128 scale = 1;
     for (int i = 0; i < exponent; ++i) scale *= 10;
     // ceil(need/price * 10^exp) with need,price at 1e18
-    __int128 num = need * scale;
-    __int128 den = price;
-    __int128 q = (num + den - 1) / den;
+    btx::I128 num = need * scale;
+    btx::I128 den = price;
+    btx::I128 q = (num + den - 1) / den;
     out = ClampNonNeg(q);
     return true;
 }
@@ -178,15 +179,15 @@ bool Cr11Tco(const std::string& annual_tasks, const std::string& service_per_tas
         err = HCP_ERR_HORIZON;
         return false;
     }
-    __int128 tasks = 0, unit = 0, fixed = 0, annual = 0;
+    btx::I128 tasks = 0, unit = 0, fixed = 0, annual = 0;
     if (!ParseDec18(annual_tasks, tasks, err) || !ParseDec18(service_per_task, unit, err) ||
         !ParseDec18(upfront, fixed, err) || !ParseDec18(annual_local, annual, err)) {
         return false;
     }
-    const __int128 scale = 1000000000000000000LL; // 1e18
-    const __int128 tasks_whole = tasks / scale;
-    const __int128 external = tasks_whole * unit * years;
-    const __int128 local = fixed + annual * years;
+    const btx::I128 scale = 1000000000000000000LL; // 1e18
+    const btx::I128 tasks_whole = tasks / scale;
+    const btx::I128 external = tasks_whole * unit * years;
+    const btx::I128 local = fixed + annual * years;
     out = UniValue(UniValue::VOBJ);
     out.pushKV("external", FormatDec18(external));
     out.pushKV("local", FormatDec18(local));
@@ -194,17 +195,17 @@ bool Cr11Tco(const std::string& annual_tasks, const std::string& service_per_tas
     if (unit > 0 && years > 0) {
         // break_even = local / (unit * years), at 1e18. local and unit both
         // carry the 1e18 scale already, so local * scale would carry 1e36 and
-        // overflow __int128 for ordinary inputs. Divide first and build the 18
+        // overflow btx::I128 for ordinary inputs. Divide first and build the 18
         // fractional digits by long division: the result is the same floor.
         // Inputs too large to represent give null, as below, instead of
         // wrapping.
-        constexpr auto kMax = static_cast<__int128>(~static_cast<unsigned __int128>(0) >> 1);
+        constexpr auto kMax = static_cast<btx::I128>(~static_cast<btx::U128>(0) >> 1);
         UniValue be;
         if (local >= 0 && unit <= kMax / 10 / years) {
-            const __int128 denom = unit * years;
-            const __int128 whole = local / denom;
-            __int128 rem = local % denom;
-            __int128 frac = 0;
+            const btx::I128 denom = unit * years;
+            const btx::I128 whole = local / denom;
+            btx::I128 rem = local % denom;
+            btx::I128 frac = 0;
             for (int i = 0; i < 18; ++i) {
                 rem *= 10;
                 frac = frac * 10 + rem / denom;

@@ -40,7 +40,7 @@ class Maker:
         Asset.parse(asset);atoms(amount_atoms);integer(observed_at)
         with self.store.transaction() as db:
             db.execute('INSERT INTO maker_inventory VALUES(?,?,?) ON CONFLICT(asset) DO UPDATE SET amount=excluded.amount,observed=excluded.observed',(asset,amount_atoms,observed_at))
-    def quote(self,rfq,market,now):
+    def quote(self,rfq,market,now,*,public_slot=None):
         exact_fields(rfq,{'network','requester','sell_asset','buy_asset','sell_atoms','nonce','issued_at','expires_at'})
         require(rfq['network']==self.network and rfq['issued_at']<=now<rfq['expires_at']<=rfq['issued_at']+120,'RFQ','Invalid RFQ lifetime/network')
         require((rfq['sell_asset'],rfq['buy_asset'])==(market.sell_asset,market.buy_asset) and now<market.expires_at,'MARKET','Market unavailable')
@@ -55,6 +55,12 @@ class Maker:
                 row=db.execute('SELECT amount,observed FROM maker_inventory WHERE asset=?',(market.buy_asset,)).fetchone()
                 require(row is not None and 0<=now-row[1]<=30,'INVENTORY_STALE','Fresh local inventory required')
                 held=sum(atoms(r[0]) for r in db.execute('SELECT amount FROM maker_quotes WHERE asset=?',(market.buy_asset,)))
+                from .public_market import reserved_inventory
+                if public_slot is not None:
+                    slot=db.execute("SELECT rfq_id,state,buy_asset,buy_atoms FROM sn_public_slots WHERE slot_id=?",(public_slot,)).fetchone()
+                    require(slot and slot[0]==rid and slot[1] in ('allocating','quoted') and slot[2]==market.buy_asset and atoms(slot[3])==amount,
+                            'OFFER_ALLOCATION','Public slot does not cover this exact request')
+                held+=reserved_inventory(db,market.buy_asset,now,public_slot)
                 # Conservative: reserve gross receive size, not size net of maker fee.
                 require(held+amount<=atoms(row[0]),'INSUFFICIENT_LIQUIDITY',
                         'Maker inventory already reserved' if held else 'Maker verified balance is below this quote')

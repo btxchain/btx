@@ -4,6 +4,7 @@
 #include <array>
 #include <fstream>
 #include <set>
+#include <vector>
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -35,8 +36,10 @@ namespace modelnet::security {
             "SEC_ARTIFACT_REGULAR");
             Require(fs::file_size(source)==expected,"SEC_ARTIFACT_SIZE");
             CSHA384 hash;
-            std::array<unsigned char,1024*1024> buffer {
-            };
+            // FileDigest, VerifyResident and ResidentFrame run on btx-guardd's worker and
+            // maintenance threads, which get only 512 KiB of stack on macOS: keep the 1 MiB
+            // read buffer on the heap.
+            std::vector<unsigned char> buffer(1024*1024);
             uint64_t total=0;
 #ifndef _WIN32
             int in=open(source.c_str(),O_RDONLY|O_NOFOLLOW|O_CLOEXEC);

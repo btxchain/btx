@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <matmul/compute_passport.h>
 
 #include <matmul/compute_profile.h>
@@ -35,12 +36,12 @@ bool MicrounitsPerHour(uint64_t sample_count, uint64_t total_wall_us, uint64_t& 
         return false;
     }
     constexpr uint64_t kScale = 1000000ull * 3600000000ull;
-    const unsigned __int128 num = static_cast<unsigned __int128>(sample_count) * kScale;
+    const btx::U128 num = static_cast<btx::U128>(sample_count) * kScale;
     if (num / kScale != sample_count) {
         err = "COMPUTE_CREDIT_OVERFLOW";
         return false;
     }
-    const unsigned __int128 rate = num / total_wall_us;
+    const btx::U128 rate = num / total_wall_us;
     if (rate > std::numeric_limits<uint64_t>::max()) {
         err = "COMPUTE_CREDIT_OVERFLOW";
         return false;

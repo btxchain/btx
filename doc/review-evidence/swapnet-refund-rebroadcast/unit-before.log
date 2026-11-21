@@ -1,0 +1,152 @@
+test_confirmed_active_block_is_present (__main__.TransactionPresenceTests.test_confirmed_active_block_is_present) ... ok
+test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) ... 
+  test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry=None) ... FAIL
+  test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry=[]) ... FAIL
+  test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry={}) ... FAIL
+  test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry=True) ... FAIL
+test_mempool_entry_is_present (__main__.TransactionPresenceTests.test_mempool_entry_is_present) ... FAIL
+test_offline_refund_shortcut_keeps_output_safety_checks (__main__.TransactionPresenceTests.test_offline_refund_shortcut_keeps_output_safety_checks) ... 
+  test_offline_refund_shortcut_keeps_output_safety_checks (__main__.TransactionPresenceTests.test_offline_refund_shortcut_keeps_output_safety_checks) (active=False, coin_present=False) ... FAIL
+  test_offline_refund_shortcut_keeps_output_safety_checks (__main__.TransactionPresenceTests.test_offline_refund_shortcut_keeps_output_safety_checks) (active=False, coin_present=True) ... FAIL
+test_orphan_block_is_not_active (__main__.TransactionPresenceTests.test_orphan_block_is_not_active) ... FAIL
+test_read_failure_is_not_treated_as_missing (__main__.TransactionPresenceTests.test_read_failure_is_not_treated_as_missing) ... FAIL
+test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) ... 
+  test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) (code='RPC_UNAVAILABLE') ... FAIL
+  test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) (code='RPC_COOKIE') ... FAIL
+  test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) (code='RPC_RESPONSE_ID') ... FAIL
+test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) ... FAIL
+test_unknown_transaction_is_absent (__main__.TransactionPresenceTests.test_unknown_transaction_is_absent) ... ok
+test_wallet_history_without_block_is_not_active (__main__.TransactionPresenceTests.test_wallet_history_without_block_is_not_active) ... FAIL
+
+======================================================================
+FAIL: test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 55, in test_malformed_mempool_response_is_rejected
+    with self.subTest(entry=entry),self.assertRaises(SwapError):
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry=[])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 55, in test_malformed_mempool_response_is_rejected
+    with self.subTest(entry=entry),self.assertRaises(SwapError):
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry={})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 55, in test_malformed_mempool_response_is_rejected
+    with self.subTest(entry=entry),self.assertRaises(SwapError):
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_malformed_mempool_response_is_rejected (__main__.TransactionPresenceTests.test_malformed_mempool_response_is_rejected) (entry=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 55, in test_malformed_mempool_response_is_rejected
+    with self.subTest(entry=entry),self.assertRaises(SwapError):
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_mempool_entry_is_present (__main__.TransactionPresenceTests.test_mempool_entry_is_present)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 39, in test_mempool_entry_is_present
+    self.assertTrue(d.has_transaction(TXID))
+                    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-fee-replacement-admission/runtime-source/swapnet/drivers.py", line 254, in has_transaction
+    try:return self._read_tx(txid).get('txid')==txid
+               ^^^^^^^^^^^^^^^^^^^
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 38, in <lambda>
+    d._read_tx=lambda _:self.fail('Mempool presence does not need wallet history')
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Mempool presence does not need wallet history
+
+======================================================================
+FAIL: test_offline_refund_shortcut_keeps_output_safety_checks (__main__.TransactionPresenceTests.test_offline_refund_shortcut_keeps_output_safety_checks) (active=False, coin_present=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 88, in test_offline_refund_shortcut_keeps_output_safety_checks
+    self.assertEqual(Coordinator._refund_without_bitcoin(c,'sid',state,0,agr,d,report),expected)
+AssertionError: True != False
+
+======================================================================
+FAIL: test_offline_refund_shortcut_keeps_output_safety_checks (__main__.TransactionPresenceTests.test_offline_refund_shortcut_keeps_output_safety_checks) (active=False, coin_present=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 89, in test_offline_refund_shortcut_keeps_output_safety_checks
+    self.assertEqual(len(sent),1 if not active and coin_present else 0)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_orphan_block_is_not_active (__main__.TransactionPresenceTests.test_orphan_block_is_not_active)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 31, in test_orphan_block_is_not_active
+    self.assertFalse(self.driver(tx={'txid':TXID,'blockhash':'old','confirmations':6},confirmations=-1).has_transaction(TXID))
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_read_failure_is_not_treated_as_missing (__main__.TransactionPresenceTests.test_read_failure_is_not_treated_as_missing)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 62, in test_read_failure_is_not_treated_as_missing
+    with self.assertRaises(SwapError):d.has_transaction(TXID)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) (code='RPC_UNAVAILABLE')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 48, in test_rpc_failures_are_not_presence_results
+    with self.subTest(code=code),self.assertRaises(SwapError):
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) (code='RPC_COOKIE')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 48, in test_rpc_failures_are_not_presence_results
+    with self.subTest(code=code),self.assertRaises(SwapError):
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results) (code='RPC_RESPONSE_ID')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 48, in test_rpc_failures_are_not_presence_results
+    with self.subTest(code=code),self.assertRaises(SwapError):
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_rpc_failures_are_not_presence_results (__main__.TransactionPresenceTests.test_rpc_failures_are_not_presence_results)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 50, in test_rpc_failures_are_not_presence_results
+    with self.assertRaises(SwapError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: SwapError not raised
+
+======================================================================
+FAIL: test_wallet_history_without_block_is_not_active (__main__.TransactionPresenceTests.test_wallet_history_without_block_is_not_active)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/wildwood/Documents/Playground/work/btx-lanes/session-1/swapnet-financial-rollback-admission/test_transaction_presence.py", line 27, in test_wallet_history_without_block_is_not_active
+    self.assertFalse(d.has_transaction(TXID))
+AssertionError: True is not false
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.005s
+
+FAILED (failures=14)

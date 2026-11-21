@@ -3,6 +3,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <node/miner.h>
 
 #include <chain.h>
@@ -519,7 +520,7 @@ struct PackageSelectionCandidate {
 {
     if (used == 0) return 0;
     if (remaining == 0) return std::numeric_limits<uint64_t>::max();
-    const __int128 scaled = static_cast<__int128>(used) * SCARCITY_PPM_SCALE + remaining - 1;
+    const btx::I128 scaled = static_cast<btx::I128>(used) * SCARCITY_PPM_SCALE + remaining - 1;
     return static_cast<uint64_t>(scaled / remaining);
 }
 
@@ -567,8 +568,8 @@ struct PackageSelectionCandidate {
 template <typename T>
 void SetLegacySelectionScore(const T& source, PackageSelectionCandidate& candidate)
 {
-    const __int128 tx_score = static_cast<__int128>(source.GetModifiedFee()) * source.GetSizeWithAncestors();
-    const __int128 ancestor_score = static_cast<__int128>(source.GetModFeesWithAncestors()) * source.GetTxSize();
+    const btx::I128 tx_score = static_cast<btx::I128>(source.GetModifiedFee()) * source.GetSizeWithAncestors();
+    const btx::I128 ancestor_score = static_cast<btx::I128>(source.GetModFeesWithAncestors()) * source.GetTxSize();
     if (tx_score > ancestor_score) {
         candidate.selection_fees = source.GetModFeesWithAncestors();
         candidate.selection_size = source.GetSizeWithAncestors();
@@ -758,12 +759,12 @@ PackageSelectionCandidate BuildPackageSelectionCandidate(const CTxMemPool& mempo
         PackageResourceDimension::TREE_UPDATE_UNITS,
     };
     std::sort(order.begin(), order.end(), [&](PackageResourceDimension lhs, PackageResourceDimension rhs) {
-        const __int128 lhs_remaining = GetRemainingResource(remaining, lhs);
-        const __int128 rhs_remaining = GetRemainingResource(remaining, rhs);
-        const __int128 lhs_max = GetMaxResource(remaining, lhs);
-        const __int128 rhs_max = GetMaxResource(remaining, rhs);
-        const __int128 lhs_ratio = lhs_remaining * rhs_max;
-        const __int128 rhs_ratio = rhs_remaining * lhs_max;
+        const btx::I128 lhs_remaining = GetRemainingResource(remaining, lhs);
+        const btx::I128 rhs_remaining = GetRemainingResource(remaining, rhs);
+        const btx::I128 lhs_max = GetMaxResource(remaining, lhs);
+        const btx::I128 rhs_max = GetMaxResource(remaining, rhs);
+        const btx::I128 lhs_ratio = lhs_remaining * rhs_max;
+        const btx::I128 rhs_ratio = rhs_remaining * lhs_max;
         if (lhs_ratio != rhs_ratio) return lhs_ratio < rhs_ratio;
         return static_cast<size_t>(lhs) < static_cast<size_t>(rhs);
     });
@@ -774,8 +775,8 @@ PackageSelectionCandidate BuildPackageSelectionCandidate(const CTxMemPool& mempo
                                           const PackageSelectionCandidate& rhs,
                                           const RemainingBlockResources& remaining)
 {
-    const __int128 lhs_base = static_cast<__int128>(lhs.selection_fees) * rhs.selection_size;
-    const __int128 rhs_base = static_cast<__int128>(rhs.selection_fees) * lhs.selection_size;
+    const btx::I128 lhs_base = static_cast<btx::I128>(lhs.selection_fees) * rhs.selection_size;
+    const btx::I128 rhs_base = static_cast<btx::I128>(rhs.selection_fees) * lhs.selection_size;
 
     if (!IsShieldedScarcityActive(remaining) || lhs_base == rhs_base) {
         if (lhs_base != rhs_base) return lhs_base > rhs_base;
@@ -798,10 +799,10 @@ PackageSelectionCandidate BuildPackageSelectionCandidate(const CTxMemPool& mempo
     const uint64_t lhs_dominant = std::max<uint64_t>(1, GetDominantShieldedPressurePpm(lhs_pressures));
     const uint64_t rhs_dominant = std::max<uint64_t>(1, GetDominantShieldedPressurePpm(rhs_pressures));
 
-    const __int128 lhs_score =
-        static_cast<__int128>(lhs.selection_fees) * rhs.selection_size * rhs_dominant;
-    const __int128 rhs_score =
-        static_cast<__int128>(rhs.selection_fees) * lhs.selection_size * lhs_dominant;
+    const btx::I128 lhs_score =
+        static_cast<btx::I128>(lhs.selection_fees) * rhs.selection_size * rhs_dominant;
+    const btx::I128 rhs_score =
+        static_cast<btx::I128>(rhs.selection_fees) * lhs.selection_size * lhs_dominant;
     if (lhs_score != rhs_score) return lhs_score > rhs_score;
 
     const auto scarcity_order = GetScarcityPriority(remaining);

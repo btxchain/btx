@@ -1033,8 +1033,12 @@ BOOST_AUTO_TEST_CASE(
                 std::move(base));
         };
 
-    auto [cs, columns, base] =
-        make_relation(roots, false);
+    // Ordinary locals. A lambda below reads cs and base, and Clang with
+    // OpenMP rejects a capture of the structured binding.
+    auto relation = make_relation(roots, false);
+    auto cs = std::move(std::get<0>(relation));
+    auto columns = std::move(std::get<1>(relation));
+    auto base = std::move(std::get<2>(relation));
     const uint256 seed = H(9250);
     const auto honest =
         aq::AirQuotientProveRowsSplitRap(

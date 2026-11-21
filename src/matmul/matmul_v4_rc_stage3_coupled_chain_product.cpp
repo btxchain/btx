@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/MIT.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_chain_product.h>
 
 #include <hash.h>
@@ -166,9 +167,9 @@ bool ValidateRCStage3CoupledChainProduct(
         auto& sum = gemm_sums[aggregate_index];
         for (uint64_t cell = 0;
              cell < lobe_cells; ++cell) {
-            const __int128 candidate =
-                static_cast<__int128>(sum[cell]) +
-                static_cast<__int128>(
+            const btx::I128 candidate =
+                static_cast<btx::I128>(sum[cell]) +
+                static_cast<btx::I128>(
                     instance.output_y[cell]);
             if (candidate <
                     std::numeric_limits<int64_t>::min() ||

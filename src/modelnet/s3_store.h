@@ -92,6 +92,11 @@ public:
                        uint64_t expected_bytes, uint64_t logical_piece_count, std::string& err);
     bool PutPieceObjects(const Digest48& artifact, uint32_t file_index, const fs::path& src,
                          uint64_t expected_bytes, std::string& err);
+    /** Stream overloads let a model caller supply catalog-verified bytes. */
+    bool PutSourceFile(const Digest48& artifact, uint32_t file_index, std::istream& source,
+                       uint64_t expected_bytes, uint64_t logical_piece_count, std::string& err);
+    bool PutPieceObjects(const Digest48& artifact, uint32_t file_index, std::istream& source,
+                         uint64_t expected_bytes, std::string& err);
     bool GetSourceFile(const Digest48& artifact, uint32_t file_index, std::vector<unsigned char>& out,
                        std::string& err);
     bool GetPieceObject(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,

@@ -11,6 +11,7 @@
 //   A14-A17: Serialization & consensus integration
 //   B1-B5: Performance benchmarks (prove, verify, throughput)
 
+#include <compat/wide128.h>
 #include <shielded/smile2/bdlop.h>
 #include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/membership.h>
@@ -219,9 +220,9 @@ BOOST_AUTO_TEST_CASE(a0_deserialize_poly_rejects_noncanonical_coefficients)
 BOOST_AUTO_TEST_CASE(a0_mul_mod_q_matches_exact_128bit_reduction)
 {
     const auto exact_mul = [](int64_t a, int64_t b) {
-        const __int128 lhs = static_cast<__int128>(mod_q(a));
-        const __int128 rhs = static_cast<__int128>(mod_q(b));
-        return static_cast<int64_t>((lhs * rhs) % static_cast<__int128>(Q));
+        const btx::I128 lhs = static_cast<btx::I128>(mod_q(a));
+        const btx::I128 rhs = static_cast<btx::I128>(mod_q(b));
+        return static_cast<int64_t>((lhs * rhs) % static_cast<btx::I128>(Q));
     };
 
     const std::array<std::pair<int64_t, int64_t>, 8> cases{{

@@ -48,6 +48,29 @@ RPCHelpMan exportswaprecovery() { return SwapRPC("exportswaprecovery"); }
 RPCHelpMan bumpswapfee() { return SwapRPC("bumpswapfee"); }
 RPCHelpMan getswapevents() { return SwapRPC("getswapevents"); }
 RPCHelpMan getswapvalidationinfo() { return SwapRPC("getswapvalidationinfo"); }
+RPCHelpMan getswapmode() { return SwapRPC("getswapmode"); }
+RPCHelpMan setswapmode() { return SwapRPC("setswapmode"); }
+RPCHelpMan getswapreadiness() { return SwapRPC("getswapreadiness"); }
+RPCHelpMan getswapauthinfo() { return SwapRPC("getswapauthinfo"); }
+RPCHelpMan listswappublicoffers() { return SwapRPC("listswappublicoffers"); }
+RPCHelpMan publishswapoffer() { return SwapRPC("publishswapoffer"); }
+RPCHelpMan withdrawswapoffer() { return SwapRPC("withdrawswapoffer"); }
+RPCHelpMan requestpublicswapquote() { return SwapRPC("requestpublicswapquote"); }
+RPCHelpMan getswapmakercapacity() { return SwapRPC("getswapmakercapacity"); }
+RPCHelpMan previewswap() { return SwapRPC("previewswap"); }
+RPCHelpMan confirmswap() { return SwapRPC("confirmswap"); }
+RPCHelpMan getswaptradepreview() { return SwapRPC("getswaptradepreview"); }
+RPCHelpMan createswapinvite() { return SwapRPC("createswapinvite"); }
+RPCHelpMan inspectswapinvite() { return SwapRPC("inspectswapinvite"); }
+RPCHelpMan connectswapinvite() { return SwapRPC("connectswapinvite"); }
+RPCHelpMan exportswapreceipt() { return SwapRPC("exportswapreceipt"); }
+RPCHelpMan verifyswapreceipt() { return SwapRPC("verifyswapreceipt"); }
+RPCHelpMan listswaprefusals() { return SwapRPC("listswaprefusals"); }
+RPCHelpMan setswapexecutionpolicy() { return SwapRPC("setswapexecutionpolicy"); }
+RPCHelpMan getswapexecutionpolicy() { return SwapRPC("getswapexecutionpolicy"); }
+RPCHelpMan setupswapbitcoin() { return SwapRPC("setupswapbitcoin"); }
+RPCHelpMan setswapmarkets() { return SwapRPC("setswapmarkets"); }
+RPCHelpMan getsharedp2pinfo() { return SwapRPC("getsharedp2pinfo"); }
 }
 void RegisterSwapNetRPCCommands(CRPCTable& table) {
     static const CRPCCommand commands[] = {
@@ -84,6 +107,29 @@ void RegisterSwapNetRPCCommands(CRPCTable& table) {
         {"swapnet", &bumpswapfee},
         {"swapnet", &getswapevents},
         {"swapnet", &getswapvalidationinfo},
+        {"swapnet", &getswapmode},
+        {"swapnet", &setswapmode},
+        {"swapnet", &getswapreadiness},
+        {"swapnet", &getswapauthinfo},
+        {"swapnet", &listswappublicoffers},
+        {"swapnet", &publishswapoffer},
+        {"swapnet", &withdrawswapoffer},
+        {"swapnet", &requestpublicswapquote},
+        {"swapnet", &getswapmakercapacity},
+        {"swapnet", &previewswap},
+        {"swapnet", &confirmswap},
+        {"swapnet", &getswaptradepreview},
+        {"swapnet", &createswapinvite},
+        {"swapnet", &inspectswapinvite},
+        {"swapnet", &connectswapinvite},
+        {"swapnet", &exportswapreceipt},
+        {"swapnet", &verifyswapreceipt},
+        {"swapnet", &listswaprefusals},
+        {"swapnet", &setswapexecutionpolicy},
+        {"swapnet", &getswapexecutionpolicy},
+        {"swapnet", &setupswapbitcoin},
+        {"swapnet", &setswapmarkets},
+        {"swapnet", &getsharedp2pinfo},
     };
     for (const auto& command:commands) table.appendCommand(command.name,&command);
 }

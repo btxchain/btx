@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_alg_hash.h>
 
 #include <matmul/matmul_v4_rc_fri_ext3.h> // Sha256dBytes (deterministic XOF)
@@ -184,20 +185,20 @@ template <typename Pred>
 /** e = 7^{-1} mod (p−1) by extended Euclid; gcd(7, p−1) = 1 so e exists. */
 [[nodiscard]] uint64_t InverseSboxExponent()
 {
-    const unsigned __int128 m = kP - 1; // 2^64 − 2^32
-    __int128 old_r = 7, r = static_cast<__int128>(m);
-    __int128 old_s = 1, s = 0;
+    const btx::U128 m = kP - 1; // 2^64 − 2^32
+    btx::I128 old_r = 7, r = static_cast<btx::I128>(m);
+    btx::I128 old_s = 1, s = 0;
     while (r != 0) {
-        const __int128 q = old_r / r;
-        const __int128 tr = old_r - q * r;
+        const btx::I128 q = old_r / r;
+        const btx::I128 tr = old_r - q * r;
         old_r = r;
         r = tr;
-        const __int128 ts = old_s - q * s;
+        const btx::I128 ts = old_s - q * s;
         old_s = s;
         s = ts;
     }
     assert(old_r == 1); // gcd(7, p−1) = 1
-    if (old_s < 0) old_s += static_cast<__int128>(m);
+    if (old_s < 0) old_s += static_cast<btx::I128>(m);
     return static_cast<uint64_t>(old_s);
 }
 

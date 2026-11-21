@@ -584,4 +584,83 @@ BOOST_AUTO_TEST_CASE(swarm_px_numbers_outside_int64_are_refused)
     BOOST_CHECK_EQUAL(hint.expiry_ms, now + PEX_DEFAULT_TTL_MS);
 }
 
+// An availability answer is one remote peer's claim. Each of its file entries
+// became a source of its own, under any netgroup and service_id the entry
+// named, and the retrieve pickers walk every source for every piece.
+BOOST_AUTO_TEST_CASE(peer_availability_gives_one_source_per_peer)
+{
+    using namespace modelnet;
+    const std::string artifact_hex(96, 'a');
+    Digest48 artifact;
+    std::string err;
+    BOOST_REQUIRE(Digest48::FromHex(artifact_hex, artifact, err));
+    PeerId pid;
+    pid.endpoint = "203.0.113.7:29447";
+    pid.netgroup = "203.0.113.7";
+    pid.service_id = "svc-a";
+
+    // An answer as a node gives it: one entry per file of the model.
+    {
+        UniValue body;
+        BOOST_REQUIRE(body.read("{\"local\":{\"models\":[{\"artifact_id\":\"" + artifact_hex +
+                                "\",\"files\":[{\"file_index\":0,\"ranges\":[[0,9]],\"piece_count\":10,\"pieces_total\":10},"
+                                "{\"file_index\":1,\"ranges\":[[0,5]],\"piece_count\":6,\"pieces_total\":8}]}]}}"));
+        std::vector<SourceAvailability> srcs;
+        TakePeerAvailability(body, pid, artifact, 1, 1000, srcs);
+        BOOST_REQUIRE_EQUAL(srcs.size(), 1U);
+        BOOST_CHECK_EQUAL(srcs[0].file_index, 1U);
+        BOOST_CHECK_EQUAL(srcs[0].peer.endpoint, pid.endpoint);
+        BOOST_CHECK(SourceHasPiece(srcs[0], 1, 5));
+        BOOST_CHECK(!SourceHasPiece(srcs[0], 1, 6));
+        BOOST_CHECK(!SourceHasPiece(srcs[0], 0, 0));
+        BOOST_CHECK_EQUAL(srcs[0].last_update_ms, 1000);
+    }
+
+    // Thousands of entries for the same file, each naming its own netgroup
+    // and service_id, within the size the helper reads from a peer.
+    UniValue files(UniValue::VARR);
+    for (int i = 0; i < 4000; ++i) {
+        UniValue f(UniValue::VOBJ);
+        f.pushKV("file_index", 0);
+        f.pushKV("netgroup", "ng" + std::to_string(i));
+        f.pushKV("service_id", "s" + std::to_string(i));
+        files.push_back(f);
+    }
+    UniValue model(UniValue::VOBJ);
+    model.pushKV("artifact_id", artifact_hex);
+    model.pushKV("files", files);
+    UniValue models(UniValue::VARR);
+    models.push_back(model);
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("models", models);
+    BOOST_REQUIRE_LT(body.write().size(), 256U * 1024);
+    std::vector<SourceAvailability> srcs;
+    TakePeerAvailability(body, pid, artifact, 0, 1000, srcs);
+    BOOST_REQUIRE_EQUAL(srcs.size(), 1U);
+    BOOST_CHECK_EQUAL(srcs[0].peer.netgroup, pid.netgroup);
+    BOOST_CHECK_EQUAL(srcs[0].peer.service_id, pid.service_id);
+
+    // The same endpoint asked again, naming another service_id, adds nothing.
+    PeerId again = pid;
+    again.service_id = "svc-b";
+    TakePeerAvailability(body, again, artifact, 0, 1000, srcs);
+    BOOST_REQUIRE_EQUAL(srcs.size(), 1U);
+    BOOST_CHECK_EQUAL(srcs[0].peer.service_id, pid.service_id);
+
+    // What the retrieve does with them, for a file of 4096 pieces (16 GiB).
+    constexpr uint32_t pieces{4096};
+    std::vector<uint32_t> missing;
+    for (uint32_t p = 0; p < pieces; ++p) missing.push_back(p);
+    PickConfig cfg;
+    cfg.now_ms = 1000;
+    cfg.max_assignments = static_cast<int>(pieces * 2 + 1);
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto snap = SummarizeSwarm(0, pieces, {}, srcs, {}, cfg);
+    const auto picks = PickRarestFirst(0, pieces, missing, srcs, {}, {}, {}, cfg);
+    BOOST_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds{1});
+    BOOST_CHECK_EQUAL(snap.min_piece_sources, 1);
+    BOOST_CHECK_EQUAL(snap.complete_sources + snap.partial_sources, 1);
+    BOOST_CHECK(!picks.empty());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_GKR_FIELD_H
 #define BTX_MATMUL_MATMUL_V4_RC_GKR_FIELD_H
 
+#include <compat/wide128.h>
 #include <cstdint>
 
 // ENC_RC Stage E — Goldilocks prime field for winner-only GKR/sumcheck.
@@ -55,18 +56,18 @@ inline constexpr uint64_t kEpsilon = 0xFFFFFFFFULL;
  * Pinned against the `% kP` reference over edge cases and randoms by
  * gkr_field_reduce128_matches_modulo_reference (alg_hash tests).
  */
-[[nodiscard]] inline Fp Reduce128(unsigned __int128 x)
+[[nodiscard]] inline Fp Reduce128(btx::U128 x)
 {
     const uint64_t lo = static_cast<uint64_t>(x);
     const uint64_t hi = static_cast<uint64_t>(x >> 64);
     const uint64_t hh = hi >> 32;        // coefficient of 2^96 ≡ −1
     const uint64_t hl = hi & kEpsilon;   // coefficient of 2^64 ≡ ε
     uint64_t t0;
-    const uint64_t borrow = static_cast<uint64_t>(__builtin_sub_overflow(lo, hh, &t0));
+    const uint64_t borrow = static_cast<uint64_t>(btx::SubOverflow(lo, hh, &t0));
     t0 -= kEpsilon * borrow;
     const uint64_t t1 = hl * kEpsilon;
     uint64_t r;
-    const uint64_t carry = static_cast<uint64_t>(__builtin_add_overflow(t0, t1, &r));
+    const uint64_t carry = static_cast<uint64_t>(btx::AddOverflow(t0, t1, &r));
     r += kEpsilon * carry;
     r -= kP * static_cast<uint64_t>(r >= kP);
     return r;
@@ -88,7 +89,7 @@ inline constexpr uint64_t kEpsilon = 0xFFFFFFFFULL;
     a = Canonical(a);
     b = Canonical(b);
     uint64_t s;
-    const uint64_t carry = static_cast<uint64_t>(__builtin_add_overflow(a, b, &s));
+    const uint64_t carry = static_cast<uint64_t>(btx::AddOverflow(a, b, &s));
     s += kEpsilon * carry;
     s -= kP * static_cast<uint64_t>(s >= kP);
     return s;
@@ -109,7 +110,7 @@ inline constexpr uint64_t kEpsilon = 0xFFFFFFFFULL;
 
 [[nodiscard]] inline Fp Mul(Fp a, Fp b)
 {
-    return Reduce128(static_cast<unsigned __int128>(Canonical(a)) * Canonical(b));
+    return Reduce128(static_cast<btx::U128>(Canonical(a)) * Canonical(b));
 }
 
 /** Fermat inverse a^{p-2} mod p. Requires a != 0. */

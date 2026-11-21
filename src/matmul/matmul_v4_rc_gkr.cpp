@@ -636,7 +636,8 @@ bool ReadBytesChecked(const unsigned char*& p, const unsigned char* end, unsigne
                       size_t n)
 {
     if (static_cast<size_t>(end - p) < n) return false;
-    std::memcpy(dst, p, n);
+    // A zero-length read is success. memcpy rejects a null source even when n is 0.
+    if (n != 0) std::memcpy(dst, p, n);
     p += n;
     return true;
 }

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:public-offer-v1",
+  "type": "object",
+  "properties": {
+    "body": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "network": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "offer_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "issued_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "enum": [
+            "indicative",
+            "firm"
+          ]
+        },
+        "sell_asset": {
+          "type": "string",
+          "pattern": "^(btx|btc|evm):[0-9a-f]{64}:[0-9]+:native$",
+          "maxLength": 160
+        },
+        "buy_asset": {
+          "type": "string",
+          "pattern": "^(btx|btc|evm):[0-9a-f]{64}:[0-9]+:native$",
+          "maxLength": 160
+        },
+        "tiers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sell_atoms": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,77}$"
+              },
+              "buy_atoms": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,77}$"
+              },
+              "maker_fee_atoms": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,77})$"
+              },
+              "max_receive_network_fee_atoms": {
+                "type": "string",
+                "pattern": "^(0|[1-9][0-9]{0,77})$"
+              },
+              "slots": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64
+              }
+            },
+            "required": [
+              "sell_atoms",
+              "buy_atoms",
+              "maker_fee_atoms",
+              "max_receive_network_fee_atoms",
+              "slots"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 8
+        },
+        "withdrawn": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "version",
+        "network",
+        "provider",
+        "offer_id",
+        "sequence",
+        "issued_at",
+        "expires_at",
+        "kind",
+        "sell_asset",
+        "buy_asset",
+        "tiers",
+        "withdrawn"
+      ],
+      "additionalProperties": false
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384
+    }
+  },
+  "required": [
+    "body",
+    "signature"
+  ],
+  "additionalProperties": false
+}

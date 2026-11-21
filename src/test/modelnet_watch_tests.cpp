@@ -17,6 +17,9 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
+#include <iterator>
+
 #include <atomic>
 #include <chrono>
 #include <set>
@@ -426,6 +429,49 @@ BOOST_AUTO_TEST_CASE(watch_persist_restart)
     BOOST_CHECK_EQUAL(ActionPolicyName(got.action), std::string("KEEP"));
 }
 
+// watches.json and channels.json that are there but cannot be read are kept:
+// the store refuses to save over them instead of writing an empty store.
+BOOST_AUTO_TEST_CASE(unreadable_watch_files_are_kept)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "watch-unreadable";
+    fs::create_directories(dir);
+    const std::string garbage = "{\"watches\":[";
+    const auto plant = [&](const char* name) {
+        std::ofstream out(dir / name, std::ios::binary | std::ios::trunc);
+        out << garbage;
+    };
+    const auto read_all = [&](const char* name) {
+        std::ifstream in(dir / name, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    plant("watches.json");
+    plant("channels.json");
+    ModelWatchStore store(dir);
+    std::string err;
+    ModelWatch w;
+    w.kind = WatchKind::PUBLISHER;
+    w.publisher_id = "pub-u";
+    BOOST_CHECK(!store.PutWatch(w, err));
+    BOOST_CHECK_EQUAL(read_all("watches.json"), garbage);
+
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    Digest48 mid{};
+    mid.data[0] = 0x33;
+    std::string uri;
+    BOOST_REQUIRE(EncodeResource(ResourceKind::MODEL, mid, uri, err));
+    SignedChannel ch;
+    ch.pubkey = pk;
+    ch.name = "coder";
+    ch.channel = "stable";
+    ch.target_uri = uri;
+    ch.sequence = 1;
+    BOOST_REQUIRE(SignSignedChannel(ch, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    BOOST_CHECK(!store.ApplySignedChannel(ch, err));
+    BOOST_CHECK_EQUAL(read_all("channels.json"), garbage);
+}
+
 BOOST_AUTO_TEST_CASE(watch_longpoll_timeout)
 {
     using namespace modelnet;
@@ -498,6 +544,58 @@ BOOST_AUTO_TEST_CASE(events_cursor_continues_after_the_last_event_returned)
     // An empty page keeps the cursor; one past the journal comes back to it.
     BOOST_CHECK_EQUAL(page("getmodelevents", "250", 0)["cursor"].get_str(), "250");
     BOOST_CHECK_EQUAL(page("getmodelevents", "9999", 0)["cursor"].get_str(), "250");
+}
+
+// Compaction dropped the dedupe keys of the events it removed: a record seen
+// again (the feed refresh observes every record in the index) became a new
+// event, and a watch acted on it again. getmodelevents always said gap false,
+// also when events after the caller's cursor were gone, and a tombstone was
+// journaled as a metadata update.
+BOOST_AUTO_TEST_CASE(compacted_events_stay_deduplicated_and_report_a_gap)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "events-compacted";
+    BindModelEventLayer(dir, 2);
+    std::string code, err;
+    for (int i = 0; i < 3; ++i) {
+        ObserveResult o;
+        BOOST_REQUIRE(JournalObserve(MakeSigned("gap-publisher", "gap-model-" + std::to_string(i)), o, err));
+    }
+    ObserveResult again;
+    BOOST_REQUIRE(JournalObserve(MakeSigned("gap-publisher", "gap-model-0"), again, err));
+    BOOST_CHECK(again.duplicate);
+    BOOST_CHECK_EQUAL(BoundModelEventJournal()->Cursor(), 3U);
+
+    const auto gap = [&](const std::string& cursor) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("cursor", cursor);
+        UniValue result;
+        BOOST_REQUIRE_MESSAGE(DispatchModelWatchRpc("getmodelevents", RpcParamsObj(p), result, code, err, nullptr), err);
+        return result["gap"].get_bool();
+    };
+    BOOST_CHECK(gap("0"));
+    BOOST_CHECK(!gap("1"));
+    BOOST_CHECK(!gap("3"));
+    UniValue wp(UniValue::VOBJ);
+    wp.pushKV("cursor", "0");
+    wp.pushKV("timeout_ms", 0);
+    UniValue waited;
+    BOOST_REQUIRE_MESSAGE(DispatchModelWatchRpc("waitformodelevent", RpcParamsObj(wp), waited, code, err, nullptr), err);
+    BOOST_CHECK(waited["gap"].get_bool());
+
+    BindModelEventLayer(dir, 2); // restart
+    BOOST_REQUIRE(JournalObserve(MakeSigned("gap-publisher", "gap-model-0"), again, err));
+    BOOST_CHECK(again.duplicate);
+    BOOST_CHECK_EQUAL(BoundModelEventJournal()->Cursor(), 3U);
+
+    ModelSearchRecord rec;
+    rec.model_id.data[0] = 0x61;
+    rec.metadata_sequence = 2;
+    rec.signed_ok = true;
+    ModelEvent ev;
+    BOOST_CHECK(ModelEventFromSearchRecord(rec, ev));
+    rec.tombstone = true;
+    BOOST_CHECK(!ModelEventFromSearchRecord(rec, ev));
 }
 
 BOOST_AUTO_TEST_CASE(watch_rpc_roundtrip)
@@ -890,6 +988,73 @@ BOOST_AUTO_TEST_CASE(drain_actions_drops_fund_when_mandate_revoked_or_missing)
     GlobalSubscriptionStore().Reset();
 }
 
+// Every model event is matched against every watch, and watches.json holds
+// them all: the same watch again keeps its id, the ids a watch names have a
+// length bound, and the number of watches is bounded.
+BOOST_AUTO_TEST_CASE(model_watches_are_bounded)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "model-watches-bound";
+    fs::create_directories(dir);
+    ModelWatchStore store(dir);
+    std::string err;
+    const auto put = [&](ModelWatchStore& s, const std::string& model_id, ActionPolicy action) {
+        ModelWatch w;
+        w.kind = WatchKind::MODEL;
+        w.model_id = model_id;
+        w.action = action;
+        err.clear();
+        const bool ok = s.PutWatch(w, err);
+        return std::make_pair(ok, w.watch_id);
+    };
+    const auto first = put(store, "watched-0", ActionPolicy::NOTIFY);
+    BOOST_REQUIRE_MESSAGE(first.first, err);
+    BOOST_CHECK_EQUAL(put(store, "watched-0", ActionPolicy::NOTIFY).second, first.second);
+    BOOST_CHECK_EQUAL(store.List().size(), 1U);
+    // Another action on the same model is another watch.
+    const auto other_action = put(store, "watched-0", ActionPolicy::FREE_DOWNLOAD);
+    BOOST_REQUIRE_MESSAGE(other_action.first, err);
+    BOOST_CHECK(other_action.second != first.second);
+
+    BOOST_CHECK(!put(store, std::string(MODEL_WATCH_ID_MAX + 1, 'x'), ActionPolicy::NOTIFY).first);
+    BOOST_CHECK(err.find("too long") != std::string::npos);
+    BOOST_REQUIRE_MESSAGE(put(store, std::string(MODEL_WATCH_ID_MAX, 'y'), ActionPolicy::NOTIFY).first, err);
+
+    for (size_t i = 3; i < MODEL_WATCHES_MAX; ++i) {
+        BOOST_REQUIRE_MESSAGE(put(store, "watched-" + std::to_string(i), ActionPolicy::NOTIFY).first, err);
+    }
+    BOOST_CHECK_EQUAL(store.List().size(), MODEL_WATCHES_MAX);
+    BOOST_CHECK(!put(store, "one-too-many", ActionPolicy::NOTIFY).first);
+    BOOST_CHECK(err.find("too many") != std::string::npos);
+    // A watch already there is still returned at the limit.
+    BOOST_CHECK_EQUAL(put(store, "watched-0", ActionPolicy::NOTIFY).second, first.second);
+    // A caller that names its own id is held to the limit too, and may still
+    // replace the watch it named.
+    ModelWatch named;
+    named.watch_id = "mirror-0123456789abcdef";
+    named.kind = WatchKind::PUBLISHER;
+    named.publisher_id = "mirror-publisher";
+    BOOST_CHECK(!store.PutWatch(named, err));
+    BOOST_CHECK(err.find("too many") != std::string::npos);
+    ModelWatch replaced;
+    replaced.watch_id = first.second;
+    replaced.kind = WatchKind::MODEL;
+    replaced.model_id = "watched-0";
+    replaced.action = ActionPolicy::FREE_DOWNLOAD;
+    BOOST_REQUIRE_MESSAGE(store.PutWatch(replaced, err), err);
+    replaced.action = ActionPolicy::NOTIFY;
+    BOOST_REQUIRE_MESSAGE(store.PutWatch(replaced, err), err);
+    // Removing one makes room for another.
+    std::string remove_err;
+    BOOST_REQUIRE(store.RemoveWatch(first.second, remove_err));
+    BOOST_REQUIRE_MESSAGE(put(store, "one-too-many", ActionPolicy::NOTIFY).first, err);
+
+    // The saved watches load again, and the limit holds there too.
+    ModelWatchStore reloaded(dir);
+    BOOST_CHECK_EQUAL(reloaded.List().size(), MODEL_WATCHES_MAX);
+    BOOST_CHECK(!put(reloaded, "another", ActionPolicy::NOTIFY).first);
+}
+
 BOOST_AUTO_TEST_CASE(remaining_watch_collection_query_get_unwatch_helper)
 {
     using namespace modelnet;
@@ -1014,6 +1179,214 @@ BOOST_AUTO_TEST_CASE(mirror_keep_latest_keeps_one_watch_per_selector)
     const UniValue cleared = set_mirror(0, "mirror-keep-c");
     BOOST_CHECK(keep_watches().empty());
     BOOST_CHECK(!cleared.exists("watch_id"));
+}
+
+
+static void CheckFailedWatchPut(const fs::path& dir, bool replacing)
+{
+    using namespace modelnet;
+    fs::create_directories(dir);
+    ModelWatchStore store(dir);
+    std::string err;
+    ModelWatch other;
+    other.watch_id = "other";
+    other.kind = WatchKind::PUBLISHER;
+    other.publisher_id = "other-publisher";
+    other.action = ActionPolicy::FREE_DOWNLOAD;
+    BOOST_REQUIRE(store.PutWatch(other, err));
+    ModelWatch target = other;
+    target.watch_id = "target";
+    target.publisher_id = "old-publisher";
+    if (replacing) BOOST_REQUIRE(store.PutWatch(target, err));
+    store.NoteEvent(MakeSigned("other-publisher", "queued-other"));
+    if (replacing) store.NoteEvent(MakeSigned("old-publisher", "queued-target"));
+    const auto actions_json = [](const ModelWatchStore& s) {
+        UniValue a(UniValue::VARR);
+        for (const auto& item : s.PeekActions()) a.push_back(WatchActionToJson(item));
+        return a.write();
+    };
+    const std::string queued = actions_json(store);
+    const auto disk = [&]() {
+        std::ifstream in(dir / "watches.json");
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string saved = disk();
+    target.publisher_id = "new-publisher";
+    fs::create_directory(dir / "watches.json.tmp");
+    BOOST_CHECK(!store.PutWatch(target, err));
+    BOOST_CHECK(!err.empty());
+    BOOST_CHECK_EQUAL(disk(), saved);
+    ModelWatch got;
+    const bool found = store.GetWatch(target.watch_id, got);
+    BOOST_CHECK_EQUAL(found, replacing);
+    if (replacing && found) BOOST_CHECK_EQUAL(got.publisher_id, "old-publisher");
+    BOOST_CHECK_EQUAL(actions_json(store), queued);
+    store.DrainActions();
+    store.NoteEvent(MakeSigned("new-publisher", "after-failure-new"));
+    store.NoteEvent(MakeSigned("old-publisher", "after-failure-old"));
+    store.NoteEvent(MakeSigned("other-publisher", "after-failure-other"));
+    unsigned old_count = 0, new_count = 0, other_count = 0;
+    for (const auto& a : store.DrainActions()) {
+        BOOST_CHECK(!a.spends);
+        if (a.publisher_id == "new-publisher") ++new_count;
+        if (a.publisher_id == "old-publisher") ++old_count;
+        if (a.publisher_id == "other-publisher") ++other_count;
+    }
+    BOOST_CHECK_EQUAL(new_count, 0U);
+    BOOST_CHECK_EQUAL(old_count, replacing ? 1U : 0U);
+    BOOST_CHECK_EQUAL(other_count, 1U);
+    {
+        ModelWatchStore reopened(dir);
+        BOOST_CHECK_EQUAL(reopened.GetWatch(target.watch_id, got), replacing);
+        if (replacing) BOOST_CHECK_EQUAL(got.publisher_id, "old-publisher");
+        BOOST_REQUIRE(reopened.GetWatch(other.watch_id, got));
+    }
+    fs::remove(dir / "watches.json.tmp");
+    store.NoteEvent(MakeSigned("other-publisher", "before-retry"));
+    const std::string queued_retry = actions_json(store);
+    err.clear();
+    BOOST_REQUIRE(store.PutWatch(target, err));
+    BOOST_CHECK_EQUAL(actions_json(store), queued_retry);
+    store.DrainActions();
+    store.NoteEvent(MakeSigned("new-publisher", "after-retry-new"));
+    store.NoteEvent(MakeSigned("old-publisher", "after-retry-old"));
+    const auto retry = store.DrainActions();
+    BOOST_REQUIRE_EQUAL(retry.size(), 1U);
+    BOOST_CHECK_EQUAL(retry[0].publisher_id, "new-publisher");
+    BOOST_CHECK(!retry[0].spends);
+    ModelWatchStore reopened(dir);
+    BOOST_REQUIRE(reopened.GetWatch(target.watch_id, got));
+    BOOST_CHECK_EQUAL(got.publisher_id, "new-publisher");
+    BOOST_REQUIRE(reopened.GetWatch(other.watch_id, got));
+}
+
+BOOST_AUTO_TEST_CASE(failed_watch_creation_preserves_live_state_actions_and_retry)
+{
+    CheckFailedWatchPut(m_path_root / "failed-watch-create", false);
+}
+
+BOOST_AUTO_TEST_CASE(failed_watch_replacement_preserves_live_state_actions_and_retry)
+{
+    CheckFailedWatchPut(m_path_root / "failed-watch-replace", true);
+}
+
+static void CheckRejectedChannelSave(const fs::path& dir, bool replacing)
+{
+    using namespace modelnet;
+    fs::create_directories(dir);
+    ModelEventJournal journal(dir, 64);
+    ModelWatchStore store(dir);
+    store.BindJournal(&journal);
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    Digest48 first{}, second{};
+    first.data[0] = 1;
+    second.data[0] = 2;
+    std::string uri1, uri2;
+    BOOST_REQUIRE(EncodeResource(ResourceKind::MODEL, first, uri1, err));
+    BOOST_REQUIRE(EncodeResource(ResourceKind::MODEL, second, uri2, err));
+    SignedChannel other;
+    other.pubkey = pk;
+    other.name = "unrelated";
+    other.channel = "stable";
+    other.sequence = 1;
+    other.target_uri = uri1;
+    BOOST_REQUIRE(SignSignedChannel(other, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    BOOST_REQUIRE(store.ApplySignedChannel(other, err));
+    SignedChannel prior = other;
+    prior.name = "target";
+    BOOST_REQUIRE(SignSignedChannel(prior, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    if (replacing) BOOST_REQUIRE(store.ApplySignedChannel(prior, err));
+    SignedChannel wanted = prior;
+    wanted.sequence = 2;
+    wanted.target_uri = uri2;
+    BOOST_REQUIRE(SignSignedChannel(wanted, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    SignedChannel invalid = wanted;
+    invalid.sig.clear();
+    BOOST_CHECK(!store.ApplySignedChannel(invalid, err));
+    ModelWatch watch;
+    watch.watch_id = "queued-watch";
+    watch.kind = WatchKind::PUBLISHER;
+    watch.publisher_id = "watch-publisher";
+    watch.action = ActionPolicy::FREE_DOWNLOAD;
+    BOOST_REQUIRE(store.PutWatch(watch, err));
+    store.NoteEvent(MakeSigned(watch.publisher_id, "queued-object"));
+    BOOST_REQUIRE_EQUAL(store.PeekActions().size(), 1U);
+    const auto queue = [&]() {
+        UniValue a(UniValue::VARR);
+        for (const auto& item : store.PeekActions()) a.push_back(WatchActionToJson(item));
+        return a.write();
+    };
+    const std::string queued = queue();
+    const auto bytes = [&]() {
+        std::ifstream in(dir / "channels.json");
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string saved = bytes();
+    const auto events_before = journal.ReplayAfter(0, 64).size();
+    BOOST_CHECK_EQUAL(events_before, replacing ? 2U : 1U);
+    fs::create_directory(dir / "channels.json.tmp");
+    err.clear();
+    BOOST_CHECK(!store.ApplySignedChannel(wanted, err));
+    BOOST_CHECK(!err.empty());
+    BOOST_CHECK_EQUAL(bytes(), saved);
+    BOOST_CHECK_EQUAL(journal.ReplayAfter(0, 64).size(), events_before);
+    SignedChannel got;
+    const bool found = store.GetChannel(prior.publisher_id, "target", "stable", got);
+    BOOST_CHECK_EQUAL(found, replacing);
+    if (replacing && found) {
+        BOOST_CHECK_EQUAL(got.sequence, 1U);
+        BOOST_CHECK_EQUAL(got.target_uri, uri1);
+    }
+    BOOST_CHECK_EQUAL(queue(), queued);
+    {
+        ModelWatchStore reopened(dir);
+        BOOST_CHECK_EQUAL(reopened.GetChannel(prior.publisher_id, "target", "stable", got), replacing);
+        if (replacing) BOOST_CHECK_EQUAL(got.sequence, 1U);
+        BOOST_REQUIRE(reopened.GetChannel(other.publisher_id, "unrelated", "stable", got));
+        BOOST_CHECK_EQUAL(got.target_uri, uri1);
+    }
+    fs::remove(dir / "channels.json.tmp");
+    err.clear();
+    // The exact rejected signature and sequence must now work, without reopening store.
+    BOOST_REQUIRE_MESSAGE(store.ApplySignedChannel(wanted, err), err);
+    const auto events = journal.ReplayAfter(0, 64);
+    BOOST_REQUIRE_EQUAL(events.size(), events_before + 1);
+    BOOST_CHECK(events.back().event_type == ModelEventType::CHANNEL_UPDATED);
+    BOOST_CHECK_EQUAL(events.back().record_sequence, wanted.sequence);
+    BOOST_CHECK_EQUAL(events.back().new_state, uri2);
+    BOOST_CHECK_EQUAL(events.back().publisher_id, wanted.publisher_id);
+    BOOST_CHECK_EQUAL(queue(), queued);
+    // Once persisted, genuine duplicate and decreasing sequences remain refused.
+    BOOST_CHECK(!store.ApplySignedChannel(wanted, err));
+    BOOST_CHECK(!store.ApplySignedChannel(prior, err));
+    invalid.sequence = 3;
+    BOOST_CHECK(!store.ApplySignedChannel(invalid, err));
+    BOOST_CHECK_EQUAL(journal.ReplayAfter(0, 64).size(), events.size());
+    ModelWatchStore reopened(dir);
+    BOOST_REQUIRE(reopened.GetChannel(wanted.publisher_id, "target", "stable", got));
+    BOOST_CHECK_EQUAL(got.sequence, wanted.sequence);
+    BOOST_CHECK_EQUAL(got.target_uri, uri2);
+    BOOST_CHECK(got.signature_ok);
+    BOOST_REQUIRE(reopened.GetChannel(other.publisher_id, "unrelated", "stable", got));
+    BOOST_CHECK_EQUAL(got.sequence, 1U);
+    BOOST_CHECK_EQUAL(got.target_uri, uri1);
+    ModelEventJournal reopened_journal(dir, 64);
+    const auto durable_events = reopened_journal.ReplayAfter(0, 64);
+    BOOST_REQUIRE_EQUAL(durable_events.size(), events.size());
+    BOOST_CHECK_EQUAL(durable_events.back().record_sequence, wanted.sequence);
+    BOOST_CHECK_EQUAL(durable_events.back().new_state, uri2);
+}
+
+BOOST_AUTO_TEST_CASE(rejected_channel_creation_allows_identical_retry)
+{
+    CheckRejectedChannelSave(m_path_root / "channel-create-save", false);
+}
+
+BOOST_AUTO_TEST_CASE(rejected_channel_replacement_allows_identical_retry)
+{
+    CheckRejectedChannelSave(m_path_root / "channel-replace-save", true);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

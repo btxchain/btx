@@ -317,3 +317,302 @@ BOOST_AUTO_TEST_CASE(feed_load_skips_malformed_objects)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+
+namespace {
+std::vector<modelnet::FeedEvent> WalkFeed(modelnet::FeedStore& store, int limit, std::string cursor = {})
+{
+    modelnet::FeedQuery q; q.limit = limit;
+    std::vector<modelnet::FeedEvent> all;
+    std::set<std::string> seen, cursors;
+    for (size_t n = 0; n < store.Size() + 2; ++n) {
+        q.cursor = cursor;
+        auto page = store.Query(q, 2000, cursor);
+        for (auto& e : page) {
+            BOOST_REQUIRE_MESSAGE(seen.insert(e.event_id).second, "duplicate event " << e.event_id);
+            all.push_back(e);
+        }
+        if (cursor.empty()) return all;
+        BOOST_REQUIRE_MESSAGE(cursors.insert(cursor).second, "cursor repeated");
+    }
+    BOOST_FAIL("feed traversal did not terminate"); return all;
+}
+modelnet::ModelSearchRecord TestRecord(unsigned id, unsigned publisher = 0)
+{
+    modelnet::ModelSearchRecord r;
+    r.model_id.data[0] = id;
+    r.publisher_identity.data[0] = publisher;
+    r.display_name = r.canonical_name = "Model " + std::to_string(id);
+    r.published_at = 1000 + id / 3;
+    return r;
+}
+void CompareEvents(modelnet::FeedStore& a, modelnet::FeedStore& b)
+{
+    auto x = WalkFeed(a, 2), y = WalkFeed(b, 2);
+    BOOST_REQUIRE_EQUAL(x.size(), y.size());
+    BOOST_CHECK_EQUAL(a.Sequence(), b.Sequence());
+    for (size_t i = 0; i < x.size(); ++i) {
+        BOOST_CHECK_EQUAL(x[i].event_id, y[i].event_id);
+        BOOST_CHECK_EQUAL(x[i].sequence, y[i].sequence);
+        BOOST_CHECK_EQUAL(x[i].observed_at, y[i].observed_at);
+        BOOST_CHECK_EQUAL(x[i].first_seen_at, y[i].first_seen_at);
+        BOOST_CHECK_EQUAL(a.EventToJson(x[i], nullptr).write(), b.EventToJson(y[i], nullptr).write());
+    }
+}
+}
+BOOST_FIXTURE_TEST_SUITE(modelnet_feed_restart_tests, BasicTestingSetup)
+BOOST_AUTO_TEST_CASE(complete_pages_continue_after_reopen)
+{
+    modelnet::FeedStore feed, reopened;
+    auto path = m_args.GetDataDirBase() / "feed-page-reopen.json";
+    feed.SetPath(path); reopened.SetPath(path);
+    for (unsigned i = 1; i <= 15; ++i) BOOST_REQUIRE(feed.NoteSearchRecord(TestRecord(i), 100 + i));
+    std::set<std::string> expected;
+    for (unsigned i = 1; i <= 15; ++i) expected.insert(modelnet::MakeFeedEventId(modelnet::FeedEventType::MODEL_PUBLISHED, TestRecord(i).model_id, "", TestRecord(i).metadata_sequence, ""));
+    std::string err; BOOST_REQUIRE(feed.Save(err)); BOOST_REQUIRE(reopened.Load(200, err));
+    for (int limit : {1, 2, 7}) {
+        auto all = WalkFeed(feed, limit); std::set<std::string> got;
+        for (auto& e : all) got.insert(e.event_id);
+        BOOST_CHECK(got == expected);
+        modelnet::FeedQuery q; q.limit = limit; std::string cursor;
+        auto first = feed.Query(q, 200, cursor);
+        BOOST_REQUIRE(!cursor.empty());
+        auto rest = WalkFeed(reopened, limit, cursor);
+        first.insert(first.end(), rest.begin(), rest.end());
+        BOOST_REQUIRE_EQUAL(first.size(), all.size());
+        for (size_t i = 0; i < all.size(); ++i) BOOST_CHECK_EQUAL(first[i].event_id, all[i].event_id);
+    }
+    CompareEvents(feed, reopened);
+}
+BOOST_AUTO_TEST_CASE(publisher_observation_matches_after_reopen)
+{
+    modelnet::FeedStore continuous, reopened;
+    auto path = m_args.GetDataDirBase() / "feed-publisher-reopen.json";
+    continuous.SetPath(path); reopened.SetPath(path);
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(1, 9), 100));
+    std::string err; BOOST_REQUIRE(continuous.Save(err)); BOOST_REQUIRE(reopened.Load(101, err));
+    CompareEvents(continuous, reopened);
+    // Both stores receive the same next legitimate record from a known publisher.
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(2, 9), 110));
+    BOOST_REQUIRE(reopened.NoteSearchRecord(TestRecord(2, 9), 110));
+    CompareEvents(continuous, reopened);
+    // A genuinely new publisher must still create its own first-publisher event.
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(3, 10), 120));
+    BOOST_REQUIRE(reopened.NoteSearchRecord(TestRecord(3, 10), 120));
+    CompareEvents(continuous, reopened);
+    modelnet::FeedQuery q; q.mode = modelnet::FeedMode::NEW_PUBLISHERS;
+    std::string next; BOOST_CHECK_EQUAL(continuous.Query(q, 130, next).size(), 2);
+}
+
+// A search record names its publisher itself: one signing key can name a new
+// publisher with each new version of a record. The feed keeps the publishers
+// seen most recently, also across a reload.
+BOOST_AUTO_TEST_CASE(publisher_history_keeps_the_newest_publishers)
+{
+    modelnet::FeedStore feed, reopened;
+    const auto path = m_args.GetDataDirBase() / "feed-publisher-cap.json";
+    feed.SetPath(path); reopened.SetPath(path);
+    constexpr size_t cap = 8;
+    feed.SetPublisherCap(cap); reopened.SetPublisherCap(cap);
+    // Publisher ids whose hex order differs from the order they are seen in.
+    const auto publisher = [](unsigned i) {
+        modelnet::Digest48 id;
+        id.data[0] = static_cast<unsigned char>(0xf0 - i);
+        id.data[1] = 0x5c;
+        return id;
+    };
+    const auto record = [&](unsigned i, uint64_t sequence) {
+        modelnet::ModelSearchRecord r = TestRecord(1);
+        r.publisher_identity = publisher(i);
+        r.metadata_sequence = sequence;
+        return r;
+    };
+    uint64_t sequence = 1;
+    int64_t now = 1000;
+    // The same model, a new publisher with each version: 0, then 1..7.
+    for (unsigned i = 0; i < cap; ++i) BOOST_REQUIRE(feed.NoteSearchRecord(record(i, sequence++), now++));
+    BOOST_CHECK_EQUAL(feed.KnownPublishers(), cap);
+    // Publisher 0 is seen again and becomes the newest.
+    BOOST_REQUIRE(feed.NoteSearchRecord(record(0, sequence++), now++));
+    // Three more new publishers push out the three seen least recently: 1, 2, 3.
+    for (unsigned i = cap; i < cap + 3; ++i) BOOST_REQUIRE(feed.NoteSearchRecord(record(i, sequence++), now++));
+    BOOST_CHECK_EQUAL(feed.KnownPublishers(), cap);
+    BOOST_CHECK(feed.KnowsPublisher(publisher(0)));
+    for (unsigned i = 1; i <= 3; ++i) BOOST_CHECK(!feed.KnowsPublisher(publisher(i)));
+    for (unsigned i = 4; i < cap + 3; ++i) BOOST_CHECK(feed.KnowsPublisher(publisher(i)));
+
+    // A reload keeps the same publishers in the same order: the next new one
+    // pushes out publisher 4, the oldest left.
+    std::string err;
+    BOOST_REQUIRE(feed.Save(err));
+    BOOST_REQUIRE(reopened.Load(now, err));
+    BOOST_CHECK_EQUAL(reopened.KnownPublishers(), cap);
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(0)));
+    BOOST_CHECK(!reopened.KnowsPublisher(publisher(3)));
+    BOOST_REQUIRE(reopened.NoteSearchRecord(record(cap + 3, sequence++), now++));
+    BOOST_CHECK(!reopened.KnowsPublisher(publisher(4)));
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(5)));
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(0)));
+    BOOST_CHECK_EQUAL(reopened.KnownPublishers(), cap);
+
+    // A lower limit drops the oldest at once.
+    reopened.SetPublisherCap(2);
+    BOOST_CHECK_EQUAL(reopened.KnownPublishers(), 2U);
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(cap + 3)));
+    BOOST_CHECK(reopened.KnowsPublisher(publisher(cap + 2)));
+
+    // A legacy file without the list: publishers in the order of their events.
+    {
+        modelnet::FeedStore legacy_writer, legacy_reader;
+        const auto legacy_path = m_args.GetDataDirBase() / "feed-publisher-cap-legacy.json";
+        legacy_writer.SetPath(legacy_path); legacy_reader.SetPath(legacy_path);
+        for (unsigned i = 0; i < 6; ++i) BOOST_REQUIRE(legacy_writer.NoteSearchRecord(record(20 + i, i + 1), 5000 + i));
+        BOOST_REQUIRE(legacy_writer.Save(err));
+        UniValue saved;
+        { std::ifstream in(legacy_path); std::string raw((std::istreambuf_iterator<char>(in)), {}); BOOST_REQUIRE(saved.read(raw)); }
+        UniValue legacy(UniValue::VOBJ);
+        for (const auto& key : saved.getKeys()) {
+            if (key != "seen_publishers") legacy.pushKV(key, saved[key]);
+        }
+        { std::ofstream out(legacy_path, std::ios::trunc); out << legacy.write(); }
+        legacy_reader.SetPublisherCap(3);
+        BOOST_REQUIRE(legacy_reader.Load(5100, err));
+        BOOST_CHECK_EQUAL(legacy_reader.KnownPublishers(), 3U);
+        for (unsigned i = 0; i < 3; ++i) BOOST_CHECK(!legacy_reader.KnowsPublisher(publisher(20 + i)));
+        for (unsigned i = 3; i < 6; ++i) BOOST_CHECK(legacy_reader.KnowsPublisher(publisher(20 + i)));
+    }
+
+    // The default keeps far more than a test needs, and a fresh store uses it.
+    modelnet::FeedStore fresh;
+    for (unsigned i = 0; i < 64; ++i) BOOST_REQUIRE(fresh.NoteSearchRecord(record(i, i + 1), 1000 + i));
+    BOOST_CHECK_EQUAL(fresh.KnownPublishers(), 64U);
+    static_assert(modelnet::FEED_PUBLISHERS_MAX >= 1024);
+}
+
+BOOST_AUTO_TEST_CASE(publisher_history_survives_expired_events_and_legacy_load)
+{
+    modelnet::FeedStore continuous, restored;
+    const auto path = m_args.GetDataDirBase() / "feed-publisher-history.json";
+    continuous.SetPath(path); restored.SetPath(path);
+    continuous.SetTtlMs(10); restored.SetTtlMs(10);
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(1, 9), 100));
+    std::string err; BOOST_REQUIRE(continuous.Save(err));
+    // Legacy format: recover publisher membership from its retained records.
+    UniValue saved;
+    { std::ifstream in(path); std::string raw((std::istreambuf_iterator<char>(in)), {}); BOOST_REQUIRE(saved.read(raw)); }
+    UniValue legacy(UniValue::VOBJ);
+    legacy.pushKV("schema_version", saved["schema_version"]);
+    legacy.pushKV("sequence", saved["sequence"]);
+    legacy.pushKV("events", saved["events"]);
+    { std::ofstream out(path); out << legacy.write(); }
+    BOOST_REQUIRE(restored.Load(101, err));
+    modelnet::FeedStore expired_legacy;
+    expired_legacy.SetPath(path); expired_legacy.SetTtlMs(10);
+    BOOST_REQUIRE(expired_legacy.Load(200, err));
+    BOOST_REQUIRE_EQUAL(expired_legacy.Size(), 0U);
+    BOOST_REQUIRE(expired_legacy.NoteSearchRecord(TestRecord(2, 9), 202));
+    modelnet::FeedQuery legacy_query; legacy_query.mode = modelnet::FeedMode::NEW_PUBLISHERS;
+    std::string legacy_next;
+    BOOST_CHECK(expired_legacy.Query(legacy_query, 203, legacy_next).empty());
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(2, 9), 102));
+    BOOST_REQUIRE(restored.NoteSearchRecord(TestRecord(2, 9), 102));
+    CompareEvents(continuous, restored);
+    // Once persisted with history, expiry must not turn a known publisher into a new one.
+    continuous.Expire(200); restored.Expire(200);
+    BOOST_REQUIRE_EQUAL(continuous.Size(), 0U);
+    BOOST_REQUIRE(restored.Save(err));
+    modelnet::FeedStore again; again.SetPath(path); again.SetTtlMs(10);
+    BOOST_REQUIRE(again.Load(201, err));
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(3, 9), 202));
+    BOOST_REQUIRE(again.NoteSearchRecord(TestRecord(3, 9), 202));
+    CompareEvents(continuous, again);
+    modelnet::FeedQuery q; q.mode = modelnet::FeedMode::NEW_PUBLISHERS; std::string next;
+    BOOST_CHECK(again.Query(q, 203, next).empty());
+    BOOST_REQUIRE(again.NoteSearchRecord(TestRecord(4, 10), 204));
+    BOOST_CHECK_EQUAL(again.Query(q, 205, next).size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(unlock_only_history_preserves_first_publisher_observation)
+{
+    modelnet::FeedStore continuous, restored;
+    const auto path = m_args.GetDataDirBase() / "feed-unlock-publisher.json";
+    continuous.SetPath(path); restored.SetPath(path);
+    auto rec = TestRecord(1, 9);
+    BOOST_REQUIRE(continuous.NoteUnlock(rec.model_id, "release", rec, 100));
+    std::string err;
+    BOOST_REQUIRE(continuous.Save(err)); BOOST_REQUIRE(restored.Load(101, err));
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(2, 9), 110));
+    BOOST_REQUIRE(restored.NoteSearchRecord(TestRecord(2, 9), 110));
+    CompareEvents(continuous, restored);
+    modelnet::FeedQuery q; q.mode = modelnet::FeedMode::NEW_PUBLISHERS;
+    std::string next;
+    BOOST_CHECK_EQUAL(restored.Query(q, 111, next).size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(malformed_publisher_history_keeps_valid_new_publishers)
+{
+    const auto path = m_args.GetDataDirBase() / "feed-publisher-malformed.json";
+    UniValue data(UniValue::VOBJ), publishers(UniValue::VARR);
+    publishers.push_back(12); publishers.push_back("bad"); publishers.push_back(std::string(96, '0'));
+    publishers.push_back(std::string("FF") + std::string(94, '0'));
+    publishers.push_back(std::string("ff") + std::string(94, '0'));
+    data.pushKV("events", UniValue(UniValue::VARR)); data.pushKV("seen_publishers", publishers);
+    { std::ofstream out(path); out << data.write(); }
+    modelnet::FeedStore restored; restored.SetPath(path); std::string err;
+    BOOST_REQUIRE(restored.Load(100, err));
+    BOOST_REQUIRE(restored.NoteSearchRecord(TestRecord(1, 9), 101));
+    modelnet::FeedQuery q; q.mode = modelnet::FeedMode::NEW_PUBLISHERS;
+    std::string next; BOOST_CHECK_EQUAL(restored.Query(q, 102, next).size(), 1U);
+    BOOST_REQUIRE(restored.NoteSearchRecord(TestRecord(2, 255), 103));
+    BOOST_CHECK_EQUAL(restored.Query(q, 104, next).size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(legacy_unlock_history_preserves_first_publisher_observation)
+{
+    modelnet::FeedStore continuous, restored;
+    const auto path = m_args.GetDataDirBase() / "feed-legacy-unlock-publisher.json";
+    continuous.SetPath(path); restored.SetPath(path);
+    const auto rec = TestRecord(1, 9);
+    BOOST_REQUIRE(continuous.NoteUnlock(rec.model_id, "release", rec, 100));
+    std::string err; BOOST_REQUIRE(continuous.Save(err));
+    UniValue saved;
+    { std::ifstream in(path); std::string raw((std::istreambuf_iterator<char>(in)), {}); BOOST_REQUIRE(saved.read(raw)); }
+    UniValue legacy(UniValue::VOBJ);
+    legacy.pushKV("schema_version", saved["schema_version"]);
+    legacy.pushKV("sequence", saved["sequence"]);
+    legacy.pushKV("events", saved["events"]);
+    { std::ofstream out(path); out << legacy.write(); }
+    BOOST_REQUIRE(restored.Load(101, err));
+    BOOST_REQUIRE(continuous.NoteSearchRecord(TestRecord(2, 9), 110));
+    BOOST_REQUIRE(restored.NoteSearchRecord(TestRecord(2, 9), 110));
+    CompareEvents(continuous, restored);
+    modelnet::FeedQuery q; q.mode = modelnet::FeedMode::NEW_PUBLISHERS;
+    std::string next; BOOST_CHECK_EQUAL(restored.Query(q, 111, next).size(), 1U);
+}
+// NEARLY_FUNDED sorts by the amount left to fund. A campaign with nothing
+// left was "equal" to every other one while those two still had an order,
+// which std::sort does not allow; the result depended on the input order.
+BOOST_AUTO_TEST_CASE(nearly_funded_orders_by_remaining_amount)
+{
+    modelnet::FeedStore feed;
+    auto campaign = [](unsigned id, int64_t target, int64_t published) {
+        modelnet::ModelSearchRecord r = TestRecord(id);
+        r.release_id = std::string(96, static_cast<char>('a' + id));
+        r.release_target_atoms = target;
+        r.published_at = published;
+        return r;
+    };
+    // Nothing left, newest; 200 left; 100 left, oldest.
+    BOOST_REQUIRE(feed.NoteSearchRecord(campaign(1, 0, 3000), 100));
+    BOOST_REQUIRE(feed.NoteSearchRecord(campaign(2, 200, 2000), 101));
+    BOOST_REQUIRE(feed.NoteSearchRecord(campaign(3, 100, 1000), 102));
+    modelnet::FeedQuery q;
+    q.mode = modelnet::FeedMode::NEARLY_FUNDED;
+    q.limit = 50;
+    std::string next;
+    std::vector<unsigned> order;
+    for (const auto& ev : feed.Query(q, 200, next)) order.push_back(ev.model_id.data[0]);
+    BOOST_CHECK((order == std::vector<unsigned>{3, 2, 1}));
+}
+
+BOOST_AUTO_TEST_SUITE_END()

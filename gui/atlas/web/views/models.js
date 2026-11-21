@@ -17,7 +17,8 @@ export function modelsView(app){
  const renderRows=data=>{const rows=sourceRows(data);results.replaceChildren(note('Search coverage is partial. Availability advertisements do not prove byte verification or runtime permission.'),table(rows,[{key:'name',label:'Model'},{key:'format',label:'Format'},{key:'size_bytes',label:'Size',render:v=>humanBytes(v)},{key:'bytes_verified',label:'Verified bytes'},{key:'incomplete',label:'Incomplete'},'model_id'],{onSelect:m=>modelDetails(app,m)}));};
  const search=button('Search',async()=>{search.disabled=true;try{const p=[{text:query.value,scope:scope.value,limit:100}];if(scope.value==='NETWORK'){const prepared=await app.bridge.prepare('searchmodels',p);renderRows((await app.bridge.execute(prepared.id)).result);}else renderRows((await app.bridge.read('searchmodels',p)).result);}catch(e){results.replaceChildren(note(e.message,'danger'));}finally{search.disabled=false;}},'primary');
  const bar=el('div',{class:'row'},query,scope,search,button('Import / host',()=>operationDialog(app,'hostmodel')),button('Open model link',()=>app.openResource()));
- async function show(){[...tabs.children].forEach(b=>b.classList.toggle('active',b.dataset.tab===selected));bar.hidden=selected!=='Catalogue';results.replaceChildren();try{
+ const discovery=el('div',{class:'row'},button('Directory',()=>operationDialog(app,'getmodeldirectory')),button('Browse',()=>operationDialog(app,'browsemodels')),button('Trending',()=>operationDialog(app,'gettrendingmodels')),button('New',()=>operationDialog(app,'getnewmodels')),button('Similar',()=>operationDialog(app,'getsimilarmodels')),button('Search index',()=>operationDialog(app,'listmodelsearchrecords')),button('LAN discovery',()=>operationDialog(app,'getmodellandiscovery')));
+ async function show(){[...tabs.children].forEach(b=>b.classList.toggle('active',b.dataset.tab===selected));bar.hidden=discovery.hidden=selected!=='Catalogue';results.replaceChildren();try{
   switch(selected){
    case 'Catalogue':renderRows(app.state.state.sources.listmodels||await app.bridge.read('listmodels'));break;
    case 'Downloads':{const ticket=++transferPaint;const r=await app.bridge.read('getmodeltransfers');if(nodeAlive&&ticket===transferPaint&&selected==='Downloads')results.replaceChildren(...transferView(r));break;}
@@ -65,7 +66,7 @@ export function modelsView(app){
    }).catch(()=>{});
   }catch{/* disconnected bridge refused the read */}}
  const nodePanel=el('section',{class:'panel'},el('h2',{},'This node on the model network'),note('This page does not fetch a model or spend.'),nodeFacts,operationButtons(app,['showmodel','getmodelwatchstatus','getmodelpolicy']));
- root.append(nodePanel,tabs,bar,results);show();return root;
+ root.append(nodePanel,tabs,bar,discovery,results);show();return root;
 }
 function recordColumns(rows,preferred){
  const chosen=preferred.filter(key=>Object.prototype.hasOwnProperty.call(rows[0],key));
@@ -78,4 +79,4 @@ function recordObservation(rows,preferred,envelope,title){
  return [view,el('details',{},el('summary',{},'Native record'),jsonView(envelope,{open:true,title}))];
 }
 export function operationButtons(app,methods){return el('div',{class:'actions'},...methods.map(m=>button(m,()=>operationDialog(app,m),'',{disabled:app.bridge.supported(m)===false})));}
-export function modelDetails(app,m){const id=m.model_id||m.id||m.uri||m.share?.uri;if(!id)return;const body=el('div',{class:'surface-stack'},badge(m.bytes_verified===true&&m.incomplete===false?'Verified local bytes':'Verification incomplete / unknown'),note('Byte verification is not quality evaluation, software admission or permission to execute.'),jsonView(m,{open:true}),el('div',{class:'actions'},...['showmodel','getmodel','getmodelsharecard','loadmodel','generatemodel','unloadmodel'].map(method=>button(method,()=>operationDialog(app,method,[id])))),button('Configure local assistant',()=>app.openAssistant(id),'primary'));dialog(m.name||String(id).slice(0,64),body);}
+export function modelDetails(app,m){const id=m.model_id||m.id||m.uri||m.share?.uri;if(!id)return;const body=el('div',{class:'surface-stack'},badge(m.bytes_verified===true&&m.incomplete===false?'Verified local bytes':'Verification incomplete / unknown'),note('Byte verification is not quality evaluation, software admission or permission to execute.'),jsonView(m,{open:true}),el('div',{class:'actions'},...['showmodel','getmodel','getmodelavailability','getmodelproviders','getmodelpeercount','getmodeldirectoryentry','getmodelsearchrecord','getmodelsharecard','loadmodel','generatemodel','unloadmodel'].map(method=>button(method,()=>operationDialog(app,method,[id])))),button('Configure local assistant',()=>app.openAssistant(id),'primary'));dialog(m.name||String(id).slice(0,64),body);}

@@ -457,6 +457,64 @@ BOOST_AUTO_TEST_CASE(v05_live_metrics_rerun_and_request_phases)
     BOOST_CHECK(tr.phase == RequestPhase::CANCELLED);
 }
 
+BOOST_AUTO_TEST_CASE(failed_request_gives_its_credit_back_once)
+{
+    using namespace modelnet;
+    // Two transfers share one broker, as every fetch shares GlobalTransferCredits().
+    CreditBroker broker{2 * PIECE_SIZE};
+    TransferSession other(broker);
+    TransferSession sess(broker);
+    uint64_t held = 0, first = 0, retry = 0;
+    std::string err;
+    BOOST_REQUIRE(other.ReserveAndQueue("a", 0, 0, PIECE_SIZE, held, err));
+    BOOST_REQUIRE(sess.ReserveAndQueue("b", 0, 1, PIECE_SIZE, first, err));
+    sess.NoteSent(first);
+    sess.NoteFailed(first);
+    BOOST_CHECK_EQUAL(broker.Reserved(), PIECE_SIZE);
+    // The piece is asked again; the fetch keeps the failed id with the new one
+    // and reports both when the piece fails or arrives.
+    BOOST_REQUIRE(sess.ReserveAndQueue("c", 0, 1, PIECE_SIZE, retry, err));
+    sess.NoteSent(retry);
+    sess.NoteFailed(first);
+    BOOST_CHECK_EQUAL(broker.Reserved(), 2 * PIECE_SIZE);
+    sess.NoteCommitted(first, PIECE_SIZE);
+    BOOST_CHECK_EQUAL(broker.Reserved(), 2 * PIECE_SIZE);
+    TransferRequest tr;
+    BOOST_REQUIRE(sess.GetRequest(first, tr));
+    BOOST_CHECK(tr.phase == RequestPhase::FAILED);
+    sess.NoteCommitted(retry, PIECE_SIZE);
+    BOOST_CHECK_EQUAL(broker.Reserved(), PIECE_SIZE);
+    other.NoteCommitted(held, PIECE_SIZE);
+    BOOST_CHECK_EQUAL(broker.Reserved(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(piece_commit_goes_to_the_request_in_flight)
+{
+    using namespace modelnet;
+    CreditBroker broker{2 * PIECE_SIZE};
+    TransferSession sess(broker);
+    uint64_t first = 0, retry = 0;
+    std::string err;
+    BOOST_REQUIRE(sess.ReserveAndQueue("b", 0, 1, PIECE_SIZE, first, err));
+    sess.NoteSent(first);
+    sess.NoteFailed(first);
+    BOOST_REQUIRE(sess.ReserveAndQueue("c", 0, 1, PIECE_SIZE, retry, err));
+    sess.NoteSent(retry);
+    // The fetch reports a piece with every request id it kept for it.
+    sess.NotePieceCommitted({first, retry}, PIECE_SIZE);
+    TransferRequest tr;
+    BOOST_REQUIRE(sess.GetRequest(retry, tr));
+    BOOST_CHECK(tr.phase == RequestPhase::COMMITTED);
+    BOOST_REQUIRE(sess.GetRequest(first, tr));
+    BOOST_CHECK(tr.phase == RequestPhase::FAILED);
+    const auto metrics = sess.Metrics();
+    BOOST_CHECK_EQUAL(metrics.at("c").completed_pieces, 1U);
+    BOOST_CHECK_EQUAL(metrics.at("c").timeout_count, 0U);
+    BOOST_CHECK_EQUAL(metrics.at("b").timeout_count, 1U);
+    BOOST_CHECK_EQUAL(sess.Json()["useful_bytes"].getInt<int64_t>(), static_cast<int64_t>(PIECE_SIZE));
+    BOOST_CHECK_EQUAL(broker.Reserved(), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(v06_thread_join_raii)
 {
     using namespace modelnet;

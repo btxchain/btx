@@ -64,6 +64,11 @@
 #include <sched.h>
 #endif
 
+namespace modelnet {
+bool ReadCatalogBytes(ModelCatalog&, const CatalogEntry&, std::vector<unsigned char>&, std::string&);
+bool CipherCopyMissingPiece(ModelCatalog&, const CatalogEntry&);
+}
+
 BOOST_FIXTURE_TEST_SUITE(modelnet_hosting_tests, BasicTestingSetup)
 
 namespace {
@@ -883,6 +888,30 @@ BOOST_AUTO_TEST_CASE(cache_06_common_before_rare)
     BOOST_CHECK_LT(modelnet::EvictPriority(common), modelnet::EvictPriority(rare));
 }
 
+// Seed finds a model by its artifact id too, as PinModel and RemoveModel do,
+// and does not claim SEEDING for an incomplete replica.
+BOOST_AUTO_TEST_CASE(seed_takes_the_artifact_id_and_skips_an_incomplete_replica)
+{
+    const fs::path tmp = m_path_root / "seed-artifact-incomplete";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x72, false);
+    std::string err;
+    modelnet::CatalogEntry e;
+    BOOST_REQUIRE_MESSAGE(cat.Seed(imported.artifact_id, true, err), err);
+    BOOST_REQUIRE(cat.Find(imported.model_id, e));
+    BOOST_CHECK(e.seeded);
+    BOOST_REQUIRE_MESSAGE(cat.Seed(imported.artifact_id, false, err), err);
+    BOOST_REQUIRE(cat.Find(imported.model_id, e));
+    BOOST_CHECK(!e.seeded);
+
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(imported.model_id, true, err), err);
+    BOOST_CHECK(!cat.Seed(imported.model_id, true, err));
+    BOOST_CHECK_EQUAL(err, "incomplete replica");
+    BOOST_REQUIRE(cat.Find(imported.model_id, e));
+    BOOST_CHECK(!e.seeded);
+    BOOST_CHECK(e.admission != modelnet::AdmissionLevel::SEEDING);
+}
+
 BOOST_AUTO_TEST_CASE(demand_seed_skips_incomplete_replica)
 {
     const fs::path tmp = m_path_root / "demand-seed-incomplete";
@@ -932,6 +961,106 @@ BOOST_AUTO_TEST_CASE(demand_seed_skips_incomplete_replica)
     BOOST_CHECK(catalog_body.find("automatic_spend") == std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(import_path_refreshes_verified_source_durably)
+{
+    for (const bool initially_pinned : {false, true}) {
+        for (const bool request_pin : {false, true}) {
+            const fs::path tmp = m_path_root / fs::PathFromString(std::string("rehost-") +
+                (initially_pinned ? "pinned-" : "unpinned-") + (request_pin ? "pin" : "no-pin"));
+            const fs::path catalog_dir = tmp / "catalog";
+            modelnet::ModelCatalog cat{catalog_dir, 8 << 20};
+            const auto original = ImportTiny(cat, tmp / "original", 0x91, initially_pinned);
+            const auto replacement = WriteTinyModel(tmp / "replacement", 0x91);
+            fs::rename(tmp / "original", tmp / "retained-original");
+            modelnet::CatalogEntry refreshed;
+            std::string err;
+            BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(replacement), request_pin, refreshed, err), err);
+            BOOST_CHECK(refreshed.model_id == original.model_id);
+            BOOST_CHECK(refreshed.artifact_id == original.artifact_id);
+            BOOST_CHECK_EQUAL(refreshed.source_path, fs::PathToString(replacement));
+            BOOST_CHECK_EQUAL(refreshed.pinned, initially_pinned || request_pin);
+            BOOST_CHECK(refreshed.admission == (request_pin ? modelnet::AdmissionLevel::PINNED : original.admission));
+            BOOST_CHECK_EQUAL(refreshed.bytes_verified, request_pin || original.bytes_verified);
+            modelnet::ModelCatalog reopened{catalog_dir, 8 << 20};
+            modelnet::CatalogEntry saved;
+            BOOST_REQUIRE(reopened.Find(original.model_id, saved));
+            BOOST_CHECK_EQUAL(saved.source_path, refreshed.source_path);
+            BOOST_CHECK_EQUAL(saved.pinned, refreshed.pinned);
+            BOOST_CHECK(saved.admission == refreshed.admission);
+            BOOST_CHECK_EQUAL(saved.bytes_verified, refreshed.bytes_verified);
+
+            // No mutation means no save is needed, even if saving is unavailable.
+            fs::rename(catalog_dir / "catalog.json", catalog_dir / "retained.json");
+            fs::create_directory(catalog_dir / "catalog.json");
+            BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(replacement), false, saved, err), err);
+            BOOST_CHECK_EQUAL(saved.source_path, refreshed.source_path);
+            BOOST_CHECK_EQUAL(saved.pinned, refreshed.pinned);
+            fs::remove(catalog_dir / "catalog.json");
+            fs::rename(catalog_dir / "retained.json", catalog_dir / "catalog.json");
+
+            // Different valid bytes are a new model, not a source for the old one.
+            const auto other = ImportTiny(cat, tmp / "other", 0x92, false);
+            BOOST_CHECK(other.model_id != original.model_id);
+            BOOST_REQUIRE(cat.Find(original.model_id, saved));
+            BOOST_CHECK_EQUAL(saved.source_path, refreshed.source_path);
+            const fs::path invalid = tmp / "invalid";
+            fs::create_directories(invalid);
+            { std::ofstream bad(invalid / "model.safetensors", std::ios::binary); bad << "invalid"; }
+            BOOST_CHECK(!cat.ImportPath(fs::PathToString(invalid), true, saved, err));
+            BOOST_REQUIRE(cat.Find(original.model_id, saved));
+            BOOST_CHECK_EQUAL(saved.source_path, refreshed.source_path);
+            BOOST_CHECK(saved.artifact_id == original.artifact_id);
+            const fs::path checkout = tmp / "checkout";
+            BOOST_REQUIRE_MESSAGE(cat.MaterializeCheckout(original.model_id, checkout, err), err);
+            BOOST_CHECK(ReadFileBytes(checkout / "model.safetensors") == TinySafeTensors(0x91));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(import_path_source_refresh_rolls_back_failed_save)
+{
+    for (const bool initially_pinned : {false, true}) {
+        const fs::path tmp = m_path_root / (initially_pinned ? "rehost-rollback-pinned" : "rehost-rollback-unpinned");
+        const fs::path catalog_dir = tmp / "catalog";
+        modelnet::ModelCatalog cat{catalog_dir, 8 << 20};
+        const auto original = ImportTiny(cat, tmp / "original", 0x93, initially_pinned);
+        const auto replacement = WriteTinyModel(tmp / "replacement", 0x93);
+        fs::rename(tmp / "original", tmp / "retained-original");
+        const auto durable_before = ReadFileBytes(catalog_dir / "catalog.json");
+        // A directory at the save destination forces the actual atomic save to fail.
+        fs::rename(catalog_dir / "catalog.json", catalog_dir / "retained.json");
+        fs::create_directory(catalog_dir / "catalog.json");
+        modelnet::CatalogEntry entry;
+        std::string err;
+        BOOST_CHECK(!cat.ImportPath(fs::PathToString(replacement), true, entry, err));
+        BOOST_CHECK(!err.empty());
+        BOOST_REQUIRE(cat.Find(original.model_id, entry));
+        BOOST_CHECK_EQUAL(entry.source_path, original.source_path);
+        BOOST_CHECK_EQUAL(entry.pinned, original.pinned);
+        BOOST_CHECK(entry.admission == original.admission);
+        BOOST_CHECK_EQUAL(entry.bytes_verified, original.bytes_verified);
+        BOOST_CHECK(ReadFileBytes(catalog_dir / "retained.json") == durable_before);
+        fs::remove(catalog_dir / "catalog.json");
+        fs::rename(catalog_dir / "retained.json", catalog_dir / "catalog.json");
+        // An unrelated successful save must not persist the rejected source/pin.
+        ImportTiny(cat, tmp / "other", 0x94, false);
+        modelnet::ModelCatalog reopened{catalog_dir, 8 << 20};
+        BOOST_REQUIRE(reopened.Find(original.model_id, entry));
+        BOOST_CHECK_EQUAL(entry.source_path, original.source_path);
+        BOOST_CHECK_EQUAL(entry.pinned, original.pinned);
+        BOOST_CHECK(entry.admission == original.admission);
+        BOOST_CHECK_EQUAL(entry.bytes_verified, original.bytes_verified);
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(replacement), true, entry, err), err);
+        modelnet::ModelCatalog retried{catalog_dir, 8 << 20};
+        BOOST_REQUIRE(retried.Find(original.model_id, entry));
+        BOOST_CHECK_EQUAL(entry.source_path, fs::PathToString(replacement));
+        BOOST_CHECK(entry.pinned);
+        BOOST_CHECK(entry.admission == modelnet::AdmissionLevel::PINNED);
+        BOOST_CHECK(entry.bytes_verified);
+        BOOST_CHECK(entry.artifact_id == original.artifact_id);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(materialize_checkout_rebuilds_original_bytes)
 {
     const fs::path tmp = m_path_root / "materialize-checkout";
@@ -946,6 +1075,47 @@ BOOST_AUTO_TEST_CASE(materialize_checkout_rebuilds_original_bytes)
     const auto expect = TinySafeTensors(tag);
     BOOST_CHECK_EQUAL(got.size(), expect.size());
     BOOST_CHECK(got == expect);
+}
+
+BOOST_AUTO_TEST_CASE(materialize_checkout_does_not_follow_a_symlinked_directory)
+{
+    // A directory of the checkout that is a symlink would put the model file
+    // outside the checkout and replace a file there. The checkout must refuse
+    // it, whether the bytes come from the source file or from the store.
+    const fs::path tmp = m_path_root / "materialize-checkout-symlink";
+    const fs::path src = tmp / "src";
+    fs::create_directories(src / "sub");
+    const auto bytes = TinySafeTensors(0x83);
+    {
+        std::ofstream out(src / "sub" / "model.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    modelnet::ModelCatalog cat{tmp / "cat", 8 << 20};
+    modelnet::CatalogEntry e;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), /*pin=*/true, e, err), err);
+    const fs::path outside = tmp / "outside";
+    fs::create_directories(outside);
+    const std::string other{"OTHER FILE"};
+    {
+        std::ofstream out(outside / "model.safetensors", std::ios::binary);
+        out << other;
+    }
+    for (const bool source_kept : {true, false}) {
+        if (!source_kept) fs::rename(src, tmp / "src-moved");
+        const fs::path dest = tmp / (source_kept ? "checkout-source" : "checkout-store");
+        fs::create_directories(dest);
+        fs::create_directory_symlink(outside, dest / "sub");
+        err.clear();
+        BOOST_CHECK(!cat.MaterializeCheckout(e.model_id, dest, err));
+        BOOST_CHECK_MESSAGE(err.find("symlink") != std::string::npos, err);
+        const auto kept = ReadFileBytes(outside / "model.safetensors");
+        BOOST_CHECK(std::string(kept.begin(), kept.end()) == other);
+    }
+    // Without the symlink the same checkout works.
+    const fs::path clean = tmp / "checkout-clean";
+    BOOST_REQUIRE_MESSAGE(cat.MaterializeCheckout(e.model_id, clean, err), err);
+    BOOST_CHECK(ReadFileBytes(clean / "sub" / "model.safetensors") == bytes);
 }
 
 BOOST_AUTO_TEST_CASE(exportmodelpath_returns_usable_runtime_root_from_pieces)
@@ -995,6 +1165,143 @@ BOOST_AUTO_TEST_CASE(exportmodelpath_returns_usable_runtime_root_from_pieces)
     if (result.exists("automatic_spend_atoms")) {
         BOOST_CHECK_EQUAL(result["automatic_spend_atoms"].getInt<int64_t>(), 0);
     }
+}
+
+// importmodel of the files of a model that a fetch left incomplete added a
+// second entry with the same model id when no piece had arrived, and answered
+// with the partial entry, unchanged, when some had.
+BOOST_AUTO_TEST_CASE(import_completes_a_partial_entry_of_the_same_model)
+{
+    const fs::path tmp = m_path_root / "import-over-partial";
+    modelnet::ModelCatalog cat_a{tmp / "a", 8 << 20};
+    const auto imported = ImportTiny(cat_a, tmp / "src", 0x93, false);
+    std::string err;
+    UniValue man;
+    BOOST_REQUIRE_MESSAGE(cat_a.GetManifest(imported.model_id, man, err), err);
+    std::vector<unsigned char> bytes;
+    std::vector<modelnet::Digest48> proof;
+    uint64_t file_size = 0;
+    BOOST_REQUIRE_MESSAGE(cat_a.GetVerifiedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size, err), err);
+
+    const auto entries = [&](const modelnet::ModelCatalog& cat) {
+        UniValue listed;
+        BOOST_REQUIRE(cat.List(listed));
+        int n = 0;
+        for (const auto& row : listed["models"].getValues()) {
+            if (row["model_id"].get_str() == imported.model_id.Hex()) ++n;
+        }
+        return n;
+    };
+    for (const bool with_piece : {false, true}) {
+        const fs::path dir = tmp / (with_piece ? "with-piece" : "no-piece");
+        modelnet::ModelCatalog cat{dir, 8 << 20};
+        BOOST_REQUIRE_MESSAGE(cat.InstallFromManifest(man, err, /*complete=*/false), err);
+        if (with_piece) {
+            BOOST_REQUIRE_MESSAGE(cat.PutFetchedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size,
+                                                      imported.core.files[0].pieces_root, err), err);
+        }
+        const auto again = ImportTiny(cat, dir / "src", 0x93, /*pin=*/true);
+        BOOST_REQUIRE(again.model_id == imported.model_id);
+        BOOST_CHECK(!again.incomplete);
+        BOOST_CHECK_EQUAL(entries(cat), 1);
+        modelnet::CatalogEntry e;
+        BOOST_REQUIRE(cat.Find(imported.model_id, e));
+        BOOST_CHECK(!e.incomplete);
+        BOOST_CHECK(e.pinned);
+        BOOST_CHECK(e.admission == modelnet::AdmissionLevel::PINNED);
+    }
+
+    // A catalog an older helper wrote can hold an incomplete duplicate in front
+    // of the complete entry. The import goes to the complete entry and drops it.
+    const fs::path dup_dir = tmp / "duplicate";
+    {
+        modelnet::ModelCatalog cat{dup_dir, 8 << 20};
+        ImportTiny(cat, dup_dir / "src", 0x93, false);
+    }
+    {
+        std::ifstream in(dup_dir / "catalog.json");
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue root;
+        BOOST_REQUIRE(root.read(text));
+        std::string row = root["models"][0].write();
+        const std::string complete_flag = "\"incomplete\":false";
+        BOOST_REQUIRE(row.find(complete_flag) != std::string::npos);
+        row.replace(row.find(complete_flag), complete_flag.size(), "\"incomplete\":true");
+        UniValue dup;
+        BOOST_REQUIRE(dup.read(row));
+        UniValue models(UniValue::VARR);
+        models.push_back(dup);
+        models.push_back(root["models"][0]);
+        UniValue out_root(UniValue::VOBJ);
+        out_root.pushKV("models", models);
+        std::ofstream out(dup_dir / "catalog.json", std::ios::trunc);
+        out << out_root.write();
+    }
+    modelnet::ModelCatalog dup_cat{dup_dir, 8 << 20};
+    BOOST_REQUIRE_EQUAL(entries(dup_cat), 2);
+    const auto again = ImportTiny(dup_cat, dup_dir / "src", 0x93, /*pin=*/true);
+    BOOST_CHECK(!again.incomplete);
+    BOOST_CHECK(again.pinned);
+    BOOST_CHECK_EQUAL(entries(dup_cat), 1);
+    modelnet::CatalogEntry e;
+    BOOST_REQUIRE(dup_cat.Find(imported.model_id, e));
+    BOOST_CHECK(!e.incomplete);
+    BOOST_CHECK(e.admission == modelnet::AdmissionLevel::PINNED);
+}
+
+// InstallFromManifest(complete=false) replaced every entry of the model with
+// a FETCHING one, also a copy this node already held whole and verified, so a
+// package import or a fetch that only started took the model out of service.
+BOOST_AUTO_TEST_CASE(complete_copy_stays_complete_when_a_fetch_starts)
+{
+    const fs::path tmp = m_path_root / "complete-stays";
+    modelnet::ModelCatalog cat{tmp / "cat", 8 << 20};
+    const auto imported = ImportTiny(cat, tmp / "src", 0x93, false);
+    std::string err;
+    UniValue man;
+    BOOST_REQUIRE_MESSAGE(cat.GetManifest(imported.model_id, man, err), err);
+    modelnet::CatalogEntry before;
+    BOOST_REQUIRE(cat.Find(imported.model_id, before));
+    BOOST_REQUIRE(!before.incomplete && before.bytes_verified);
+
+    BOOST_REQUIRE_MESSAGE(cat.InstallFromManifest(man, err, /*complete=*/false), err);
+    modelnet::CatalogEntry after;
+    BOOST_REQUIRE(cat.Find(imported.model_id, after));
+    BOOST_CHECK(!after.incomplete);
+    BOOST_CHECK(after.bytes_verified);
+    BOOST_CHECK(after.admission == before.admission);
+    BOOST_CHECK_EQUAL(after.label, before.label);
+    std::vector<unsigned char> bytes;
+    std::vector<modelnet::Digest48> proof;
+    uint64_t file_size = 0;
+    BOOST_CHECK_MESSAGE(cat.GetVerifiedPiece(imported.artifact_id, 0, 0, bytes, proof, file_size, err), err);
+
+    // Without auto seeding an import keeps bytes_verified false; its admission
+    // still counts as verified bytes, and the copy stays as it is too.
+    {
+        modelnet::ModelCatalog manual{tmp / "manual", 8 << 20};
+        modelnet::PreservationPolicy pol = manual.Policy();
+        pol.seed_mode = modelnet::SeedMode::OFF;
+        manual.SetPolicy(pol);
+        const auto held = ImportTiny(manual, tmp / "src-manual", 0x94, false);
+        UniValue held_man;
+        BOOST_REQUIRE_MESSAGE(manual.GetManifest(held.model_id, held_man, err), err);
+        modelnet::CatalogEntry was;
+        BOOST_REQUIRE(manual.Find(held.model_id, was));
+        BOOST_REQUIRE(!was.incomplete && !was.bytes_verified);
+        BOOST_REQUIRE_MESSAGE(manual.InstallFromManifest(held_man, err, /*complete=*/false), err);
+        modelnet::CatalogEntry is;
+        BOOST_REQUIRE(manual.Find(held.model_id, is));
+        BOOST_CHECK(!is.incomplete);
+        BOOST_CHECK(is.admission == was.admission);
+    }
+
+    // A partial copy still takes the fetch.
+    BOOST_REQUIRE_MESSAGE(cat.MarkIncomplete(imported.model_id, true, err), err);
+    BOOST_REQUIRE_MESSAGE(cat.InstallFromManifest(man, err, /*complete=*/false), err);
+    BOOST_REQUIRE(cat.Find(imported.model_id, after));
+    BOOST_CHECK(after.incomplete);
+    BOOST_CHECK(after.admission == modelnet::AdmissionLevel::FETCHING);
 }
 
 BOOST_AUTO_TEST_CASE(loadmodel_incomplete_replica_is_rejected)
@@ -2143,6 +2450,44 @@ BOOST_AUTO_TEST_CASE(model_dns_seeds_stay_empty_and_reject_addresses)
     BOOST_CHECK_EQUAL(looked, 1);
     BOOST_REQUIRE_EQUAL(got.size(), 1U);
     BOOST_CHECK_EQUAL(got[0], "192.0.2.10:" + std::to_string(modelnet::DEFAULT_MODEL_PORT));
+}
+
+BOOST_AUTO_TEST_CASE(wrap_bound_does_not_make_a_complete_copy_look_missing)
+{
+    // The ciphertext wrap stops at 64 MiB before it reads a piece. A complete
+    // copy of a larger file still has every piece. cacheencryptedmodel uses
+    // this predicate, and only then marks the copy incomplete.
+    const fs::path tmp = m_path_root / "wrap-bound";
+    const fs::path dir = tmp / "wide.safetensors.dir";
+    fs::create_directories(dir);
+    const uint64_t target = (64ull << 20) + 1;
+    std::string json;
+    uint64_t n = target;
+    for (int i = 0; i < 4; ++i) {
+        json = "{\"w\":{\"dtype\":\"U8\",\"shape\":[" + std::to_string(n) + "],\"data_offsets\":[0," + std::to_string(n) + "]}}";
+        n = target - 8 - json.size();
+    }
+    BOOST_REQUIRE_EQUAL(8 + json.size() + n, target);
+    {
+        std::ofstream out(dir / "wide.safetensors", std::ios::binary | std::ios::trunc);
+        unsigned char hdr[8];
+        WriteLE64(hdr, json.size());
+        out.write(reinterpret_cast<const char*>(hdr), 8);
+        out.write(json.data(), static_cast<std::streamsize>(json.size()));
+        out.seekp(static_cast<std::streamoff>(target - 1));
+        const char zero = 0;
+        out.write(&zero, 1);
+        BOOST_REQUIRE(out);
+    }
+    modelnet::ModelCatalog cat{tmp / "cat", 256ull << 20};
+    std::string err;
+    modelnet::CatalogEntry imported;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(dir), false, imported, err), err);
+    BOOST_CHECK(!imported.incomplete);
+    BOOST_CHECK(imported.bytes_verified);
+    std::vector<unsigned char> bytes;
+    BOOST_CHECK(!modelnet::ReadCatalogBytes(cat, imported, bytes, err));
+    BOOST_CHECK(!modelnet::CipherCopyMissingPiece(cat, imported));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

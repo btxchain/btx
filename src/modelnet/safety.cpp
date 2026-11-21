@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <system_error>
 
 namespace modelnet {
 namespace {
@@ -38,6 +39,33 @@ bool ReadJson(const fs::path& path, UniValue& out)
         return false;
     }
     return true;
+}
+
+//! Read a saved list. True when a regular file is there but cannot be read:
+//! it may still hold entries, so it must not be saved over. A missing file,
+//! or anything other than a regular file at the path, reads as an empty list.
+bool ReadJsonKeepsUnreadable(const fs::path& path, UniValue& out)
+{
+    std::error_code ec;
+    const bool regular{fs::is_regular_file(path, ec)};
+    if (ec && ec != std::errc::no_such_file_or_directory) {
+        // The path cannot even be inspected; something may be there, as for
+        // bounty-store.json (a status error other than "missing" is present).
+        out = UniValue(UniValue::VOBJ);
+        return true;
+    }
+    if (!regular) {
+        out = UniValue(UniValue::VOBJ);
+        return false;
+    }
+    // ReadJson reads a file it cannot open as an empty list. A regular file
+    // that is there but cannot be opened (permissions, EMFILE, EIO) may still
+    // hold entries, as in bounty-store.json.
+    if (!std::ifstream{path}) {
+        out = UniValue(UniValue::VOBJ);
+        return true;
+    }
+    return !ReadJson(path, out);
 }
 
 bool WriteJsonAtomic(const fs::path& path, const UniValue& obj, std::string& err)
@@ -176,13 +204,17 @@ void SafetyRegistry::LoadLocked()
     m_warnings.clear();
     m_deny.clear();
     m_quarantine.clear();
+    m_publishers_unreadable = false;
+    m_advisories_unreadable = false;
     if (m_dir.empty()) return;
     UniValue pubs;
-    if (!ReadJson(m_dir / "safety_publishers.json", pubs)) {
-        // Corrupt pin list: fail-closed (no remote auto-apply).
-        pubs = UniValue(UniValue::VOBJ);
-    }
-    if (pubs.isObject() && pubs.exists("publishers") && pubs["publishers"].isArray()) {
+    // A missing file is an empty pin list. A file that is present but cannot be
+    // read (truncated by a crash, or not an object) may still hold pinned
+    // publishers: keep it, start with an empty list in memory, and refuse to
+    // save over it (PersistPublishersLocked) until it is repaired. Starting
+    // empty used to let the next save overwrite the file with the empty list.
+    m_publishers_unreadable = ReadJsonKeepsUnreadable(m_dir / "safety_publishers.json", pubs);
+    if (!m_publishers_unreadable && pubs.isObject() && pubs.exists("publishers") && pubs["publishers"].isArray()) {
         for (const auto& p : pubs["publishers"].getValues()) {
             if (!p.isObject() || !p.exists("id") || !p["id"].isStr()) continue;
             const std::string id = ToLower(p["id"].get_str());
@@ -194,9 +226,9 @@ void SafetyRegistry::LoadLocked()
         }
     }
     UniValue ads;
-    if (!ReadJson(m_dir / "safety_advisories.json", ads)) {
-        ads = UniValue(UniValue::VOBJ);
-    }
+    // Same for advisories and warnings: an unreadable file may hold takedowns
+    // that still apply, so keep it and refuse to save over it (PersistLocked).
+    m_advisories_unreadable = ReadJsonKeepsUnreadable(m_dir / "safety_advisories.json", ads);
     auto load_list = [&](const char* key, std::vector<Advisory>& dest, size_t cap) {
         if (!ads.isObject() || !ads.exists(key) || !ads[key].isArray()) return;
         for (const auto& x : ads[key].getValues()) {
@@ -217,14 +249,20 @@ void SafetyRegistry::LoadLocked()
             dest.push_back(std::move(a));
         }
     };
-    load_list("advisories", m_advisories, MAX_SAFETY_ADVISORIES);
-    load_list("warnings", m_warnings, MAX_SAFETY_WARNINGS);
+    if (!m_advisories_unreadable) {
+        load_list("advisories", m_advisories, MAX_SAFETY_ADVISORIES);
+        load_list("warnings", m_warnings, MAX_SAFETY_WARNINGS);
+    }
     RebuildLocked(0);
 }
 
 bool SafetyRegistry::PersistPublishersLocked(std::string& err) const
 {
     if (m_dir.empty()) return true;
+    if (m_publishers_unreadable) {
+        err = "safety_publishers.json cannot be read; repair it before changing safety pins";
+        return false;
+    }
     UniValue pubs(UniValue::VOBJ);
     UniValue parr(UniValue::VARR);
     for (const auto& [id, label] : m_publishers) {
@@ -243,6 +281,10 @@ bool SafetyRegistry::PersistPublishersLocked(std::string& err) const
 bool SafetyRegistry::PersistLocked(std::string& err) const
 {
     if (m_dir.empty()) return true;
+    if (m_advisories_unreadable) {
+        err = "safety_advisories.json cannot be read; repair it before changing safety reports";
+        return false;
+    }
     if (!PersistPublishersLocked(err)) return false;
     UniValue ads(UniValue::VOBJ);
     UniValue aarr(UniValue::VARR);
@@ -272,6 +314,8 @@ void SafetyRegistry::ResetForTests()
     m_warnings.clear();
     m_deny.clear();
     m_quarantine.clear();
+    m_publishers_unreadable = false;
+    m_advisories_unreadable = false;
 }
 
 bool SafetyRegistry::PinPublisher(const std::string& publisher_id_hex, const std::string& label, std::string& err)
@@ -291,7 +335,7 @@ bool SafetyRegistry::PinPublisher(const std::string& publisher_id_hex, const std
         err = "too many safety publishers";
         return false;
     }
-    m_publishers[id] = label.substr(0, 96);
+    m_publishers[id] = CutUtf8(label, 96);
     RebuildLocked(0);
     return PersistLocked(err);
 }
@@ -343,7 +387,7 @@ bool SafetyRegistry::LocalReport(const std::string& target_hex, uint8_t target_k
     a.target_id = tid;
     a.target_kind = target_kind;
     a.severity = severity;
-    a.note = note.substr(0, 192);
+    a.note = CutUtf8(note, 192);
     a.expires_at = now > 0 ? now + 30 * DAY_SECONDS : 0;
     a.local = true;
     a.content_sha384 = std::string(96, '0');

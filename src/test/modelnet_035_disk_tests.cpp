@@ -12,6 +12,7 @@
 #include <test/util/setup_common.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 #include <util/string.h>
 
 #include <boost/test/unit_test.hpp>
@@ -1275,6 +1276,20 @@ modelnet::ExchangeObject PieceObject(const std::string& model_digest, const std:
     return DigestedObject("piece", "v1|" + model_digest + "|" + index + "|" + hex);
 }
 
+/** A model followed by its pieces, split the way the store splits model bytes, so the pieces import. */
+std::vector<modelnet::ExchangeObject> ModelWithPieces(const std::string& bytes)
+{
+    std::vector<std::string> chunks;
+    std::string err;
+    BOOST_REQUIRE(modelnet::SplitModelPieces(bytes, chunks, err));
+    BOOST_REQUIRE_GE(chunks.size(), 2U);
+    std::vector<modelnet::ExchangeObject> objects{DigestedObject("model", bytes)};
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        objects.push_back(PieceObject(objects.front().digest, util::ToString(i), HexStr(chunks[i])));
+    }
+    return objects;
+}
+
 bool ImportObjects(const std::vector<modelnet::ExchangeObject>& objects, const std::string& idem, std::string& err)
 {
     std::string manifest;
@@ -1362,14 +1377,14 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     const std::string last = util::ToString(modelnet::MODEL_MAX_PIECES - 1);
     const std::string cap = util::ToString(modelnet::MODEL_MAX_PIECES);
     const std::string cap_plus_one = util::ToString(modelnet::MODEL_MAX_PIECES + 1);
-    const std::string model_a(96, '1');
+    const std::vector<modelnet::ExchangeObject> model_a = ModelWithPieces("btx035 piece bounds model, two pieces long");
     const std::string model_b(96, '2');
     const std::string model_c(96, '3');
     const std::string model_d(96, '4');
     std::string err;
 
     // Pieces in index order still import.
-    BOOST_CHECK(ImportObjects({PieceObject(model_a, "0", "aa"), PieceObject(model_a, "1", "bb")}, "idempotency-bound-piece-ok", err));
+    BOOST_CHECK(ImportObjects(model_a, "idempotency-bound-piece-ok", err));
     BOOST_CHECK(err.empty());
 
     // An index at or past MODEL_MAX_PIECES is refused before anything is stored.
@@ -1389,7 +1404,9 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     LabDirEnv env(dir.path);
     modelnet::ResetLabApi();
     const modelnet::ExchangeObject blob = DigestedObject("blob", "piece bounds manifest\n");
-    BOOST_REQUIRE(ImportObjects({blob, PieceObject(model_a, "0", "aa")}, "idempotency-bound-piece-disk", err));
+    std::vector<modelnet::ExchangeObject> disk_import{blob};
+    disk_import.insert(disk_import.end(), model_a.begin(), model_a.end());
+    BOOST_REQUIRE(ImportObjects(disk_import, "idempotency-bound-piece-disk", err));
     UniValue disk = ReadLabJson(dir.path);
     BOOST_REQUIRE(disk["repo_objects"].isObject());
     UniValue repos = disk["repo_objects"];
@@ -1404,7 +1421,7 @@ BOOST_AUTO_TEST_CASE(piece_index_past_the_cap_or_after_a_gap_is_refused)
     WriteLabJson(dir.path, disk);
 
     modelnet::ReloadLabFromDisk();
-    BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_a, "0"), "OK");
+    BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_a.front().digest, "0"), "OK");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_b, cap), "BTX035_NOT_FOUND");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_c, cap), "BTX035_NOT_FOUND");
     BOOST_CHECK_EQUAL(PeerPiece(blob.digest, model_d, "0"), "OK");
@@ -1421,7 +1438,7 @@ BOOST_AUTO_TEST_CASE(manifest_pieces_out_of_index_order_are_a_gap)
     modelnet::ResetLabApi();
 
     const std::string model_e(96, '5');
-    const std::string model_f(96, '6');
+    const std::vector<modelnet::ExchangeObject> model_f = ModelWithPieces("btx035 piece order model, two pieces long");
     std::string err;
 
     // An export lists a model's pieces in index order from 0. A complete set in another order is refused
@@ -1430,7 +1447,7 @@ BOOST_AUTO_TEST_CASE(manifest_pieces_out_of_index_order_are_a_gap)
     BOOST_CHECK_EQUAL(err, "BTX035_GAP");
 
     // The same pieces in index order import.
-    BOOST_CHECK(ImportObjects({PieceObject(model_f, "0", "aa"), PieceObject(model_f, "1", "bb")}, "idempotency-piece-order-ok", err));
+    BOOST_CHECK(ImportObjects(model_f, "idempotency-piece-order-ok", err));
     BOOST_CHECK(err.empty());
 
     modelnet::ResetLabApi();
@@ -1487,6 +1504,176 @@ BOOST_AUTO_TEST_CASE(integer_train_record_past_the_step_cap_is_refused)
     BOOST_CHECK(!AuditComplete(disk_id, gap));
     BOOST_CHECK_EQUAL(gap, "BTX035_NOT_FOUND");
 
+    modelnet::ResetLabApi();
+}
+
+// lab.deployment_observe activated the generation once two rings reported
+// ACTIVE with the owner's approval, whatever the plan's state: a paused plan,
+// a rolled-back plan and a plan that was never started all went live. The
+// plan state was kept for a paused plan only.
+BOOST_AUTO_TEST_CASE(stopped_rollout_is_not_activated_by_receipts)
+{
+    BOOST_REQUIRE(!m_path_root.empty());
+    test::UnsetEnv("BTX035_LAB_DIR");
+    test::UnsetEnv("BTX_GUARD_PORT");
+    test::UnsetEnv("BTX035_LAB_PEER");
+    test::UnsetEnv("BTX035_LAB_PEER_USER");
+    test::UnsetEnv("BTX035_LAB_PEER_PASSWORD");
+    TempTree dir{m_path_root / "btx035-lab-disk" / "stopped-rollout"};
+    LabDirEnv env(dir.path);
+    modelnet::ResetLabApi();
+
+    std::string err;
+    UniValue identity(UniValue::VOBJ);
+    identity.pushKV("label", "author-p");
+    identity.pushKV("recovery_key_ids", UniValue(UniValue::VARR));
+    identity.pushKV("recovery_threshold", 1);
+    identity.pushKV("recovery_delay_ms", "1");
+    identity.pushKV("idempotency_key", "idempotency-stop-id");
+    identity.pushKV("expected_state", Nullable());
+    UniValue identified;
+    BOOST_REQUIRE(LabCall("lab.identity_create", identity, identified, err));
+
+    const std::string intent(96, '1');
+    UniValue prepare(UniValue::VOBJ);
+    prepare.pushKV("intent_id", intent);
+    prepare.pushKV("idempotency_key", "idempotency-stop-prep");
+    prepare.pushKV("expected_state", Nullable());
+    UniValue prepared;
+    BOOST_REQUIRE(LabCall("lab.action_prepare", prepare, prepared, err));
+    UniValue exec(UniValue::VOBJ);
+    exec.pushKV("input_capsule_id", std::string(96, '2'));
+    exec.pushKV("recipe_id", "INTEGER_MODEL");
+    exec.pushKV("runtime_binding_id", std::string(96, '3'));
+    exec.pushKV("research_grant_id", std::string(96, '4'));
+    exec.pushKV("local_capability_grant_id", intent);
+    exec.pushKV("idempotency_key", "idempotency-stop-exec");
+    exec.pushKV("expected_state", Nullable());
+    UniValue ran;
+    BOOST_REQUIRE_MESSAGE(LabCall("lab.research_execute", exec, ran, err), err);
+    const std::string digest = ran["artifact_digest"].get_str();
+
+    UniValue channel(UniValue::VOBJ);
+    channel.pushKV("realm_id", std::string(96, 'a'));
+    channel.pushKV("channel", "model");
+    channel.pushKV("epoch", "0");
+    channel.pushKV("sequence", "0");
+    channel.pushKV("previous_update_id", Nullable());
+    channel.pushKV("promotion_id", Nullable());
+    channel.pushKV("trust_attestation_ids", UniValue(UniValue::VARR));
+    channel.pushKV("desired_closure_root", digest);
+    channel.pushKV("policy_id", std::string(96, '5'));
+    channel.pushKV("valid_until_ms", "4102444800000");
+    channel.pushKV("rollback_of", Nullable());
+    channel.pushKV("conflict_resolution_id", Nullable());
+    const std::string update = SignAndStore("ChannelUpdate", channel, "idem-stop-chan-0");
+    UniValue publish(UniValue::VOBJ);
+    publish.pushKV("update_id", update);
+    publish.pushKV("approval_set_id", Nullable());
+    publish.pushKV("idempotency_key", "idempotency-stop-pub-0");
+    publish.pushKV("expected_state", Nullable());
+    UniValue published;
+    BOOST_REQUIRE_MESSAGE(LabCall("lab.channel_publish", publish, published, err), err);
+
+    const auto make_plan = [&](const std::string& tag) {
+        UniValue rings(UniValue::VARR);
+        rings.push_back("canary");
+        rings.push_back("rest");
+        UniValue plan(UniValue::VOBJ);
+        plan.pushKV("channel_update_id", update);
+        plan.pushKV("fleet_policy_id", std::string(96, '5'));
+        plan.pushKV("rings", rings);
+        plan.pushKV("activation", "ATOMIC");
+        plan.pushKV("deadline_ms", "10");
+        plan.pushKV("rollback_update_id", Nullable());
+        plan.pushKV("bandwidth_limit_bytes_s", tag);
+        return SignAndStore("RolloutPlan", plan, ("idem-stop-plan-" + tag).c_str());
+    };
+    const auto call = [&](const char* method, UniValue req, const std::string& key) {
+        req.pushKV("idempotency_key", "idempotency-stop-" + key);
+        req.pushKV("expected_state", Nullable());
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(LabCall(method, req, out, err), std::string(method) + " " + err);
+        return out;
+    };
+    const auto start = [&](const std::string& plan_id, const std::string& tag) {
+        UniValue roll(UniValue::VOBJ);
+        roll.pushKV("plan_id", plan_id);
+        roll.pushKV("approval_set_id", Nullable());
+        call("lab.rollout_start", roll, "roll-" + tag);
+    };
+    // Both rings report ACTIVE with the owner's approval.
+    const auto report = [&](const std::string& plan_id, const std::string& tag) {
+        UniValue approval(UniValue::VOBJ);
+        approval.pushKV("proposal_id", plan_id);
+        approval.pushKV("policy_id", std::string(96, '5'));
+        approval.pushKV("decision", "APPROVE");
+        approval.pushKV("decision_context", plan_id);
+        const UniValue authorization{SignAndStore("GovernanceApproval", approval, ("idem-stop-owner-" + tag).c_str())};
+        for (const std::string ring : {"canary", "rest"}) {
+            UniValue payload(UniValue::VOBJ);
+            payload.pushKV("rollout_id", plan_id);
+            payload.pushKV("channel_update_id", update);
+            payload.pushKV("device_id", "device-" + ring);
+            payload.pushKV("ring_id", ring);
+            payload.pushKV("state", "ACTIVE");
+            payload.pushKV("observed_closure_root", digest);
+            payload.pushKV("local_generation", "1");
+            payload.pushKV("health_evidence_id", Nullable());
+            payload.pushKV("last_observed_ms", "1");
+            payload.pushKV("observation_epoch", "0");
+            payload.pushKV("receipt_sequence", "1");
+            payload.pushKV("previous_receipt_id", Nullable());
+            payload.pushKV("controller_pause_epoch", "0");
+            payload.pushKV("activation_authorization_id", authorization);
+            payload.pushKV("observer_key_id", Nullable());
+            UniValue observe(UniValue::VOBJ);
+            observe.pushKV("receipt_id", SignAndStore("DeploymentReceipt", payload, ("idem-stop-rec-" + tag + "-" + ring).c_str()));
+            BOOST_CHECK_EQUAL(call("lab.deployment_observe", observe, "rec-" + tag + "-" + ring)["endpoint_state"].get_str(), "ACTIVE");
+        }
+    };
+    const auto status = [&](const std::string& plan_id) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("plan_id", plan_id);
+        UniValue out;
+        BOOST_REQUIRE(LabCall("lab.rollout_status", req, out, err));
+        return out;
+    };
+
+    const std::string paused_plan = make_plan("1");
+    start(paused_plan, "1");
+    UniValue pause(UniValue::VOBJ);
+    pause.pushKV("plan_id", paused_plan);
+    pause.pushKV("reason", "operator");
+    call("lab.rollout_pause", pause, "pause-1");
+    report(paused_plan, "1");
+    BOOST_CHECK_EQUAL(status(paused_plan)["state"].get_str(), "PAUSED");
+    BOOST_CHECK(status(paused_plan)["active_generation"].get_str().empty());
+
+    const std::string rolled_plan = make_plan("2");
+    start(rolled_plan, "2");
+    channel.pushKV("sequence", "1");
+    channel.pushKV("previous_update_id", update);
+    UniValue back(UniValue::VOBJ);
+    back.pushKV("plan_id", rolled_plan);
+    back.pushKV("new_channel_update_id", SignAndStore("ChannelUpdate", channel, "idem-stop-chan-1"));
+    call("lab.rollout_rollback", back, "back-2");
+    report(rolled_plan, "2");
+    BOOST_CHECK_EQUAL(status(rolled_plan)["state"].get_str(), "ROLLED_BACK");
+    BOOST_CHECK(status(rolled_plan)["active_generation"].get_str().empty());
+
+    // A plan that was never started has no status; the active generation is
+    // the realm's.
+    const std::string unstarted_plan = make_plan("3");
+    report(unstarted_plan, "3");
+    BOOST_CHECK(status(paused_plan)["active_generation"].get_str().empty());
+
+    // A running plan still goes live.
+    const std::string running_plan = make_plan("4");
+    start(running_plan, "4");
+    report(running_plan, "4");
+    BOOST_CHECK_EQUAL(status(running_plan)["state"].get_str(), "ACTIVE");
+    BOOST_CHECK_EQUAL(status(running_plan)["active_generation"].get_str(), running_plan);
     modelnet::ResetLabApi();
 }
 

@@ -47,6 +47,11 @@ enum class ActionPolicy {
     FUND_WITH_MANDATE,
 };
 
+//! Model watches a store keeps (and saves) at most, and the longest id or query
+//! text a watch names.
+constexpr size_t MODEL_WATCHES_MAX{1024};
+constexpr size_t MODEL_WATCH_ID_MAX{4096};
+
 struct ModelWatch {
     std::string watch_id;
     WatchKind kind{WatchKind::PUBLISHER};
@@ -116,6 +121,10 @@ class ModelWatchStore
     fs::path m_dir;
     fs::path m_watch_path;
     fs::path m_channel_path;
+    //! watches.json or channels.json was there but could not be read; the
+    //! store then refuses to save over it.
+    bool m_watches_unreadable{false};
+    bool m_channels_unreadable{false};
     std::map<std::string, ModelWatch> m_watches;
     std::map<std::string, SignedChannel> m_channels;
     //! Oldest first. Bounded by m_action_cap: nothing drains it unless getmodelwatchactions is called.

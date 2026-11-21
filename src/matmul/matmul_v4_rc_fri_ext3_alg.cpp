@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 
 #include <matmul/matmul_v4_rc_fri_ext3.h> // Sha256dBytes (FS transcript only)
@@ -112,11 +113,19 @@ constexpr Fp kOmega2_32 = 0x185629dcda58878cULL;
 // row-leaf digest stage of every row-Merkle commit runs on the GPU, producing
 // digests bit-identical to alg_hash::LeafHashRow.
 #if !defined(__APPLE__)
+#if defined(_MSC_VER)
+// MSVC has no weak extern. The Windows node does not link the CUDA row-leaf
+// hook, so the pointer stays null and every call site uses the CPU path.
+using GpuRowLeafDigestsFn = void (*)(const unsigned long long*, unsigned int,
+                                     unsigned int, unsigned long long*);
+GpuRowLeafDigestsFn gpu_row_leaf_digests = nullptr;
+#else
 #define BTX_GPU_PROVE_WEAK __attribute__((weak))
 extern "C" void gpu_row_leaf_digests(const unsigned long long* h_lde,
                                      unsigned int W, unsigned int n_lde,
                                      unsigned long long* h_dig)
     BTX_GPU_PROVE_WEAK;
+#endif
 
 bool GpuProveEnabled()
 {
@@ -1226,8 +1235,8 @@ bool ProtocolChallengeIndex(Fri3AlgFs& fs, const Fri3AlgProtocolConfig& config,
                        fs.buf, label, idx, ch, nullptr)) {
             return false;
         }
-        const unsigned __int128 wide =
-            (static_cast<unsigned __int128>(Canonical(ch.c1)) << 64) |
+        const btx::U128 wide =
+            (static_cast<btx::U128>(Canonical(ch.c1)) << 64) |
             Canonical(ch.c0);
         out = static_cast<uint32_t>(wide % modulus);
         return true;
@@ -1237,8 +1246,8 @@ bool ProtocolChallengeIndex(Fri3AlgFs& fs, const Fri3AlgProtocolConfig& config,
         const Fp3 ch = Fri3AlgP2SqueezeChallengeFp3(fs.buf, label, idx);
         // Preserve the V3 index RULE (low bits of canonical c0 when modulus
         // is a power of two) — only the digest preimage moves to Poseidon2.
-        const unsigned __int128 wide =
-            (static_cast<unsigned __int128>(Canonical(ch.c1)) << 64) |
+        const btx::U128 wide =
+            (static_cast<btx::U128>(Canonical(ch.c1)) << 64) |
             Canonical(ch.c0);
         out = static_cast<uint32_t>(wide % modulus);
         return true;
@@ -1250,8 +1259,8 @@ bool ProtocolChallengeIndex(Fri3AlgFs& fs, const Fri3AlgProtocolConfig& config,
     if (modulus == 0) return false;
     const Fp3 ch = fs.ChallengeFp3(label, idx);
     // V3 baseline behavior, deliberately preserved.
-    const unsigned __int128 wide =
-        (static_cast<unsigned __int128>(Canonical(ch.c1)) << 64) |
+    const btx::U128 wide =
+        (static_cast<btx::U128>(Canonical(ch.c1)) << 64) |
         Canonical(ch.c0);
     out = static_cast<uint32_t>(wide % modulus);
     return true;
@@ -1520,10 +1529,14 @@ std::vector<Fri3AlgDigest> RowLeafDigestsCpu(const std::vector<std::vector<Fp3>>
 #endif
     {
         std::vector<Fp3> row(W);
+        // MSVC OpenMP 2.0 rejects an unsigned loop index. The leaf number
+        // stays a uint32_t inside the body.
+        const int64_t leaf_count = static_cast<int64_t>(n_lde);
 #if defined(_OPENMP)
 #pragma omp for schedule(static)
 #endif
-        for (uint32_t i = 0; i < n_lde; ++i) {
+        for (int64_t leaf = 0; leaf < leaf_count; ++leaf) {
+            const uint32_t i = static_cast<uint32_t>(leaf);
             for (uint32_t c = 0; c < W; ++c) row[c] = column_lde[c][i];
             leaves[i] = AlgHashRowLeafForLane(row, i, lane);
         }
@@ -2179,7 +2192,7 @@ AssessFri3AlgStreamingProverPlan(
     }
     out.n_lde = n_coeffs * kRCFriBlowup;
     const auto checked =
-        [](unsigned __int128 value) {
+        [](btx::U128 value) {
             return value >
                            std::numeric_limits<uint64_t>::max()
                        ? std::numeric_limits<uint64_t>::max()
@@ -2190,55 +2203,55 @@ AssessFri3AlgStreamingProverPlan(
         alg_hash::kAlgHashDigestLen * sizeof(uint64_t);
     out.materialized_column_lde_bytes =
         checked(
-            static_cast<unsigned __int128>(batch_columns) *
+            static_cast<btx::U128>(batch_columns) *
             out.n_lde * FP3_BYTES);
     out.row_sponge_bytes =
         alg_hash::StreamingRowHasher::
             WorkingSetBytesForRows(out.n_lde);
     out.row_merkle_bytes =
         checked(
-            (static_cast<unsigned __int128>(2) *
+            (static_cast<btx::U128>(2) *
                  out.n_lde -
              1) *
             DIGEST_BYTES);
     out.one_column_recompute_bytes =
         checked(
-            (static_cast<unsigned __int128>(out.n_lde) +
+            (static_cast<btx::U128>(out.n_lde) +
              n_coeffs) *
             FP3_BYTES);
     out.composition_coeff_bytes =
         checked(
-            static_cast<unsigned __int128>(n_coeffs) *
+            static_cast<btx::U128>(n_coeffs) *
             FP3_BYTES);
     out.retained_query_value_bytes =
         checked(
-            static_cast<unsigned __int128>(batch_columns) *
+            static_cast<btx::U128>(batch_columns) *
             query_openings * FP3_BYTES);
     // Fold one layer at a time; after query indices are known, recompute the
     // layers once to emit paths instead of retaining every layer/tree.
     out.fold_recompute_peak_bytes =
         checked(
-            static_cast<unsigned __int128>(out.n_lde) *
+            static_cast<btx::U128>(out.n_lde) *
                 FP3_BYTES +
-            (static_cast<unsigned __int128>(2) *
+            (static_cast<btx::U128>(2) *
                  out.n_lde -
              1) *
                 DIGEST_BYTES +
             out.retained_query_value_bytes);
     const uint64_t pass1_sponge =
         checked(
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 out.row_sponge_bytes) +
             out.one_column_recompute_bytes +
             out.composition_coeff_bytes);
     const uint64_t pass1_tree =
         checked(
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 out.row_merkle_bytes) +
             out.composition_coeff_bytes);
     const uint64_t pass2 =
         checked(
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 out.one_column_recompute_bytes) +
             out.retained_query_value_bytes);
     out.streaming_peak_bytes =
@@ -2468,10 +2481,14 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     if (!stream_column_lde) out.column_lde.resize(W);
     // LDE-NTT: forward coset-LDE per column, independent transforms writing
     // distinct out.column_lde[i]. padded scratch is loop-local (thread-private).
+    // MSVC OpenMP 2.0 rejects an unsigned loop index. The column number
+    // stays a uint32_t inside the body.
+    const int64_t column_count = static_cast<int64_t>(W);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
 #endif
-    for (uint32_t i = 0; i < W; ++i) {
+    for (int64_t column = 0; column < column_count; ++column) {
+        const uint32_t i = static_cast<uint32_t>(column);
         p.column_len[i] = static_cast<uint32_t>(columns[i].size());
         if (!stream_column_lde) {
             std::vector<Fp3> padded(n, Fp3::Zero());
@@ -4567,44 +4584,44 @@ bool MultiRowCodecShape(
     // Exact size arithmetic is performed before reserve/append. This both
     // prevents wraparound and ensures serialization never temporarily grows
     // beyond the decoder's consensus-facing cap.
-    unsigned __int128 bytes = 0;
+    btx::U128 bytes = 0;
     const auto add =
-        [&](unsigned __int128 amount) {
+        [&](btx::U128 amount) {
             bytes += amount;
             return bytes <=
                 kRCFri3AlgMultiRowMaxProofBytesHard;
         };
     if (!add(4 + 4 + 8 + 4 + 4 + 4) ||
         !add(
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 proof.groups.size()) *
             (4 + 4 + 4 + 32 + 4)) ||
         !add(
             4 +
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 proof.column_len.size()) *
                 4) ||
         !add(3 * 24) ||
         !add(
             4 +
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 proof.evals_z1.size()) *
                 24) ||
         !add(
             4 +
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 proof.evals_z2.size()) *
                 24) ||
         !add(2 * 24) ||
         !add(
             4 +
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 proof.fold_layers.size()) *
                 (32 + 4)) ||
         !add(24) ||
         !add(
             4 +
-            static_cast<unsigned __int128>(
+            static_cast<btx::U128>(
                 proof.fold_challenges.size()) *
                 24) ||
         !add(4)) {
@@ -4616,11 +4633,11 @@ bool MultiRowCodecShape(
              query.group_rows) {
             if (!add(
                     4 +
-                    static_cast<unsigned __int128>(
+                    static_cast<btx::U128>(
                         row.values.size()) *
                         24 +
                     4 +
-                    static_cast<unsigned __int128>(
+                    static_cast<btx::U128>(
                         row.siblings.size()) *
                         32)) {
                 return false;
@@ -4631,12 +4648,12 @@ bool MultiRowCodecShape(
              query.steps) {
             if (!add(
                     4 + 4 + 24 + 24 + 4 +
-                    static_cast<unsigned __int128>(
+                    static_cast<btx::U128>(
                         step.even_siblings
                             .size()) *
                         32 +
                     4 +
-                    static_cast<unsigned __int128>(
+                    static_cast<btx::U128>(
                         step.odd_siblings
                             .size()) *
                         32)) {
@@ -7080,35 +7097,35 @@ EstimateFri3AlgDualBatchProofBytesConfigured(
     // Fixed lane prefix through query count:
     // header/row shape + column lengths + lambda/z1/z2 + two evaluation
     // vectors + w1/w2 + fold-layer roots + terminal + fold challenges.
-    const unsigned __int128 lane_fixed =
+    const btx::U128 lane_fixed =
         64 +
-        4 * static_cast<unsigned __int128>(width) +
+        4 * static_cast<btx::U128>(width) +
         3 * FP3_BYTES +
         2 * (4 + FP3_BYTES *
-                     static_cast<unsigned __int128>(width)) +
+                     static_cast<btx::U128>(width)) +
         2 * FP3_BYTES +
-        4 + 36 * static_cast<unsigned __int128>(folds + 1) +
+        4 + 36 * static_cast<btx::U128>(folds + 1) +
         FP3_BYTES +
-        4 + FP3_BYTES * static_cast<unsigned __int128>(folds) +
+        4 + FP3_BYTES * static_cast<btx::U128>(folds) +
         4;
 
     // Query row opening followed by every half-domain fold opening. At fold L
     // both values are opened against a tree of depth row_path_depth-L.
-    const unsigned __int128 fold_path_depth_sum =
-        static_cast<unsigned __int128>(folds) * row_path_depth -
-        static_cast<unsigned __int128>(folds) * (folds - 1) / 2;
-    const unsigned __int128 query_bytes =
+    const btx::U128 fold_path_depth_sum =
+        static_cast<btx::U128>(folds) * row_path_depth -
+        static_cast<btx::U128>(folds) * (folds - 1) / 2;
+    const btx::U128 query_bytes =
         16 +
-        FP3_BYTES * static_cast<unsigned __int128>(width) +
+        FP3_BYTES * static_cast<btx::U128>(width) +
         DIGEST_BYTES * row_path_depth +
-        64 * static_cast<unsigned __int128>(folds) +
+        64 * static_cast<btx::U128>(folds) +
         64 * fold_path_depth_sum;
-    const unsigned __int128 lane_bytes =
+    const btx::U128 lane_bytes =
         lane_fixed + queries * query_bytes;
 
     // Dual envelope: magic/version/lane count, master, two child bindings,
     // then lane id + encoded-size prefix for each lane.
-    const unsigned __int128 total =
+    const btx::U128 total =
         124 + kRCFri3AlgDualNumLanes * lane_bytes;
     if (total > std::numeric_limits<size_t>::max()) {
         return std::nullopt;
@@ -7471,10 +7488,10 @@ Fri3AlgGrindPredicateAirV1 BuildFri3AlgGrindPredicateAirV1(
     uint64_t bits_source = canonical;
     if (use_aliased_witness) {
         // B = x + p is only representable in 64 bits when x < 2^32 - 1.
-        const unsigned __int128 aliased =
-            static_cast<unsigned __int128>(canonical) +
-            static_cast<unsigned __int128>(gkr_field::kP);
-        if (aliased >> 64) {
+        const btx::U128 aliased =
+            static_cast<btx::U128>(canonical) +
+            static_cast<btx::U128>(gkr_field::kP);
+        if ((aliased >> 64) != 0) {
             out.note = "grind predicate: value admits no 64-bit alias";
             return out;
         }
@@ -8513,8 +8530,8 @@ bool Fri3AlgSafeQ192K2V13BatchVerifyReplay(
                 event.safe_digest[1]),
             gf::Canonical(
                 event.safe_digest[2])};
-        const unsigned __int128 wide =
-            (static_cast<unsigned __int128>(
+        const btx::U128 wide =
+            (static_cast<btx::U128>(
                  Canonical(
                      event.consumed_fp3.c1))
              << 64) |
@@ -8886,8 +8903,8 @@ bool Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
                 event.safe_digest[1]),
             gf::Canonical(
                 event.safe_digest[2])};
-        const unsigned __int128 wide =
-            (static_cast<unsigned __int128>(
+        const btx::U128 wide =
+            (static_cast<btx::U128>(
                  Canonical(
                      event.consumed_fp3.c1))
              << 64) |

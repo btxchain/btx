@@ -47,6 +47,7 @@ class Driver:
     def ready(self):return True
     def inventory(self):return 10**12
     def clock(self):return ChainClock(self.family,self.ledger.height,self.ledger.time(),self.ledger.time(),1,1)
+    def finality_lag(self):return 0  # The in-memory ledger has no finality delay.
     def new_key(self,role):
         self.key_n+=1
         return {'public':self.name+role+str(self.key_n),'handle':self.name+role+str(self.key_n),
@@ -98,7 +99,8 @@ class Pair:
         v=ForeignKeyVault(folder/'vault.json',b'0123456789abcdef0123456789abcdef')
         c=Coordinator(j,auth,{A:Driver(self.a,n),B:Driver(self.b,n)},self.identities[n],v,
                       lambda peer,kind,sid,body:self.queue.append((n,peer,kind,sid,body)),clock=self.time,
-                      policy=SafetyPolicy(btx_confirmations=2,btc_confirmations=2,settlement_margin_seconds=10,reveal_margin_seconds=10))
+                      policy=SafetyPolicy(btx_confirmations=2,btc_confirmations=2,settlement_margin_seconds=10,reveal_margin_seconds=10,
+                                          terminal_recheck_seconds=0))  # one tick is one simulated step
         self.nodes[n]=(store,j,auth,c)
     def close(self,n):self.nodes[n][0].close()
     def restart(self,n):self.close(n);self.open(n)
@@ -170,6 +172,20 @@ def test_timeout_refunds_without_counterparty_funding(pair):
     for _ in range(4):c.tick();pair.a.mine();pair.time.n+=1
     assert pair.state('alice')['stage']=='refunded'
     assert not pair.state('alice')['secret_exposed']
+
+def test_maker_accepts_when_chain_clock_is_read_after_receipt(pair):
+    pair.start()
+    sender, peer, kind, sid, body = pair.queue.pop(0)
+    maker = pair.nodes['bob'][3]
+    for driver in maker.drivers.values():
+        real = driver.clock
+        def late(real=real):
+            pair.time.n += 2
+            return real()
+        driver.clock = late
+    maker.receive_proposal(sender, sid, body, pair.market)
+    assert pair.nodes['bob'][1].load(sid)[1]['stage'] == 'offered'
+
 
 def test_mutated_payout_rejected_before_signature(pair):
     pair.start()

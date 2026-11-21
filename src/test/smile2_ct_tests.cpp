@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <shielded/smile2/ct_proof.h>
 #include <shielded/smile2/membership.h>
 #include <shielded/smile2/ntt.h>
@@ -171,16 +172,16 @@ SmilePoly ComputeLinearOpening(Span<const SmilePoly> row, Span<const SmilePoly> 
 bool HasBoundedCenteredNorm(const SmilePolyVec& response, int64_t sigma)
 {
     const int64_t half_q = Q / 2;
-    __int128 norm_sq = 0;
+    btx::I128 norm_sq = 0;
     for (const auto& poly : response) {
         for (size_t c = 0; c < POLY_DEGREE; ++c) {
             int64_t val = mod_q(poly.coeffs[c]);
             if (val > half_q) val -= Q;
-            norm_sq += static_cast<__int128>(val) * val;
+            norm_sq += static_cast<btx::I128>(val) * val;
         }
     }
-    const __int128 bound_sq =
-        static_cast<__int128>(sigma) * sigma * 2 * response.size() * POLY_DEGREE;
+    const btx::I128 bound_sq =
+        static_cast<btx::I128>(sigma) * sigma * 2 * response.size() * POLY_DEGREE;
     return norm_sq < bound_sq;
 }
 

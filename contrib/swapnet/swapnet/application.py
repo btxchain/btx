@@ -20,7 +20,7 @@ from .errors import require,SwapError
 
 VERSION='2.0.0'
 NEW_METHODS={
- 'setswapmarket':'owner','listswapmarkets':'read','getswapwalletinfo':'read',
+ 'setswapmarket':'owner','listswapmarkets':'read','getswapwalletinfo':'owner',
  'setswapassetpolicy':'owner','listswapassetpolicies':'read','getswaprouteinfo':'read',
  'exportswaprecovery':'owner','bumpswapfee':'trade','getswapevents':'audit',
  'getswapvalidationinfo':'read'
@@ -45,12 +45,16 @@ class NativeIdentity:
 
 class Application:
     def __init__(self,store,network,identity,vault,drivers,send,*,clock=None,policy=None,configure_asset=None,
-                 wallet_info=None,export_recovery=None):
+                 wallet_info=None,export_recovery=None,client_version=None,clear_startup_error=None):
         self.store,self.network,self.identity,self.vault,self.drivers,self.send=store,hex32(network),identity,vault,drivers,send
         self.now=clock or (lambda:int(time.time()));self.journal=Journal(store);self.authority=Authority(store,self.journal,self.now)
         self.routes={};self.peers=set();self.relay_seen=OrderedDict();self.packet_errors=0
         self.recent_packet_errors=[];self.last_tick_error=None
         self.configure_asset,self.wallet_info,self.export_recovery=configure_asset,wallet_info,export_recovery
+        self.clear_startup_error=clear_startup_error
+        # The host build, e.g. "v0.34.17". VERSION names the SwapNet protocol source, not the release.
+        # It is only reported, so an unusable value is dropped instead of stopping the runtime.
+        self.client_version=client_version if type(client_version) is str and 0<len(client_version)<=128 else None
         self.service=Service(store,network,identity.verify,clock=self.now,enqueue=lambda *args:None)
         self.coordinator=Coordinator(self.journal,self.authority,drivers,identity,vault,self.emit,clock=self.now,policy=policy)
         self.maker=None;self._last_advertisement=0;self._last_maintenance=0
@@ -65,6 +69,10 @@ class Application:
         return self.maker
     def markets(self):return self.journal.setting('markets',[])
     def _learn_route(self,identity,peer,expires):
+        # A live next hop stays until it expires. A replay delivered by another
+        # peer must not replace it and black-hole later messages.
+        current=self.routes.get(identity)
+        if current and current[1]>self.now() and current[0]!=peer:return
         if identity not in self.routes and len(self.routes)>=8192:
             oldest=min(self.routes,key=lambda k:self.routes[k][1]);self.routes.pop(oldest)
         self.routes[identity]=(peer,expires)
@@ -144,9 +152,18 @@ class Application:
             return
         if b['kind']=='ack':
             exact_fields(b['payload'],{'message_id'});self.journal.ack(b['payload']['message_id'],b['sender']);return
-        seen=self.journal.seen(mid,b['expires_at'],self.now())
+        seen=self.journal.seen(mid,b['expires_at'],self.now(),sender=b['sender'],broadcast=b['recipient']=='*')
+        # Admission can survive an interrupted negotiation handler before its
+        # response is queued. Only completion permits skipping it; replay uses
+        # the handler's saved financial intent and existing recovery guards.
+        needs_completion=b['kind'] in ('proposal','agreement','commit')
+        if needs_completion:seen=self.journal.commit_completed(mid)
         if not seen:
-            try:self._process(b)
+            try:
+                acted=self._process(b)
+                if needs_completion:self.journal.complete_commit(mid)
+                if b['recipient']=='*' and b['kind']=='rfq' and not acted:
+                    self.journal.forget_message(mid)
             except Exception:
                 self.journal.forget_message(mid);raise
         if b['recipient']!='*':self.emit(b['sender'],'ack',b['swap_id'],{'message_id':mid})
@@ -163,11 +180,12 @@ class Application:
                 if (market.sell_asset,market.buy_asset)!=(p['rfq']['sell_asset'],p['rfq']['buy_asset']) or market.expires_at<=self.now():continue
                 try:
                     driver=self.coordinator._driver(market.buy_asset)
+                    self.coordinator.check_finality(market.sell_asset,market.buy_asset)
                     maker=self._maker();maker.set_verified_inventory(market.buy_asset,str(driver.inventory()),self.now())
                     quote=maker.quote(p['rfq'],market,self.now())
                     self._quote_within_mandate(policy,quote.quote,sender)
                     self.emit(sender,'quote',sid,{'request_id':p['request_id'],'quote':quote.as_dict()})
-                    return
+                    return True
                 except SwapError as e:
                     refusal=e
             if refusal is not None:
@@ -339,11 +357,13 @@ class Application:
         return {'withdrawn':True,'remote_expiry_seconds':600}
     def rpc_setswapassetpolicy(self,ctx,policy):
         self.authority.owner(ctx);require(self.configure_asset is not None,'ASSET_CONFIG','Native asset factory unavailable')
-        asset=policy.get('asset');active=[s for _,_,s in self.journal.all() if s['stage'] not in {'cancelled','refunded','complete','rejected'}]
-        require(not any(asset in (s.get('agreement',{}).get('long_leg',{}).get('asset'),s.get('agreement',{}).get('short_leg',{}).get('asset')) for s in active),
+        asset=policy.get('asset')
+        require(not self.journal.active_asset_in_use(asset),
                 'ASSET_BUSY','Cannot reconfigure an asset with active settlement obligations')
-        driver=self.configure_asset(policy);driver.ready();self.drivers[asset]=driver
+        driver=self.configure_asset(policy);driver.ready()
         policies=self.journal.setting('asset_policies',{});policies[asset]=policy;self.journal.set_setting('asset_policies',policies)
+        self.drivers[asset]=driver
+        if self.clear_startup_error:self.clear_startup_error(asset)
         return {'asset':asset,'ready':True}
     def rpc_listswapassetpolicies(self,ctx):
         policies=self.journal.setting('asset_policies',{})
@@ -358,14 +378,14 @@ class Application:
         return bump(self.coordinator,ctx,swap_id,kind,new_fee_atoms)
     def rpc_getswapevents(self,ctx,after=0,limit=100):
         integer(after);integer(limit,lo=1,hi=500)
-        allowed={sid for sid,_,s in self.journal.all(None if ctx.owner else ctx.name)}
         with self.store.lock:rows=self.store.db.execute('SELECT seq,body,digest FROM audit WHERE seq>? ORDER BY seq LIMIT ?',(after,limit)).fetchall()
+        decoded=[(seq,loads(raw),h) for seq,raw,h in rows]
+        allowed=set() if ctx.owner else self.journal.owned_session_ids(ctx.name,[body.get('swap_id',body.get('id')) for _,body,_ in decoded])
         events=[]
-        for seq,raw,h in rows:
-            body=loads(raw)
+        for seq,body,h in decoded:
             if ctx.owner or body.get('swap_id',body.get('id')) in allowed:events.append({'sequence':seq,'event':body,'hash':h})
         return {'events':events,'next_sequence':rows[-1][0] if rows else after}
     def rpc_getswapvalidationinfo(self,ctx):
-        return {'source_version':VERSION,'qualification_source':'package evidence/VALIDATION_REPORT.json',
+        return {'source_version':VERSION,'client_version':self.client_version,'qualification_source':'package evidence/VALIDATION_REPORT.json',
                 'runtime_observations_are_not_release_certification':True,'protocol_profile':'native-btx-btc-eth-htlc-v2'}
     def close(self):self.journal.checkpoint();self.store.close()

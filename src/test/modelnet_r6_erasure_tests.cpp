@@ -1386,4 +1386,71 @@ BOOST_AUTO_TEST_CASE(r6_c_spec14_json_keys)
     }
 }
 
+// Three claims the erasure checks took without what backs them: a padding
+// claim on a manifest whose file goes past its listed stripes, a file size so
+// large that the stripe bound wrapped, and a repair of a one-stripe manifest
+// from positions that stripe does not store.
+BOOST_AUTO_TEST_CASE(r6_erasure_claims_need_what_backs_them)
+{
+    using namespace modelnet;
+    ErasureManifest m;
+    std::string err;
+
+    // The file goes on past both listed stripes, so the last one is full and
+    // its one real piece earns no free slots.
+    UniValue beyond = ManJsonRaw(kK, kN, kShardBytes, {Range(0, 16), {0}}, 1, ERASURE_PROFILE_CAUCHY_16_20_V1,
+                                 ERASURE_FIELD_POLYNOMIAL, HonestSize(kK, kShardBytes, 2, 16) + 1);
+    BOOST_CHECK(!ParseErasureManifest(beyond, m, err));
+    BOOST_CHECK_EQUAL(err, "final_real_piece_count");
+    ErasureManifest forged = ManIdx(16, 20, 2, {{0, Range(0, 16)}, {1, {0}}}, 1);
+    forged.profile = ERASURE_PROFILE_CAUCHY_16_20_V1;
+    forged.shard_bytes = kShardBytes;
+    forged.file_size_bytes = HonestSize(kK, kShardBytes, 2, 16) + 1;
+    BOOST_CHECK(!ErasureGeometryConsistent(forged));
+    BOOST_CHECK(ErasureTailPaddingSlots(forged).empty());
+    BOOST_CHECK(!ErasureManifestReconstructable(forged));
+    // Every listed stripe full still parses.
+    UniValue full = ManJsonRaw(kK, kN, kShardBytes, {Range(0, 16), Range(0, 16)}, 16, ERASURE_PROFILE_CAUCHY_16_20_V1,
+                               ERASURE_FIELD_POLYNOMIAL, HonestSize(kK, kShardBytes, 2, 16) + 1);
+    BOOST_CHECK_MESSAGE(ParseErasureManifest(full, m, err), err);
+
+    // The largest file size: rounding up must not wrap to a small stripe count.
+    UniValue wrapped = ManJson({Range(0, 16)}, 16);
+    wrapped.pushKV("file_size_bytes", std::string("18446744073709551615"));
+    BOOST_CHECK(!ParseErasureManifest(wrapped, m, err));
+    BOOST_CHECK_EQUAL(err, "file_size_bytes");
+
+    // One stripe that stores positions 0..15: a repair without a stripe_index
+    // is held to that stripe, so parity positions it does not store are refused.
+    const auto one = Man(16, 20, {Range(0, 16)}, 16);
+    const auto data = DataShards(16, 8);
+    std::vector<std::vector<unsigned char>> coded;
+    BOOST_REQUIRE(EncodeShards(data, 20, coded, err));
+    std::vector<int> foreign = Range(0, 12);
+    for (int p : {16, 17, 18, 19}) foreign.push_back(p);
+    std::vector<std::vector<unsigned char>> foreign_shards;
+    for (int p : foreign) foreign_shards.push_back(coded[static_cast<size_t>(p)]);
+    std::vector<std::vector<unsigned char>> out;
+    BOOST_CHECK(!RepairCanonicalFromShards(one, foreign_shards, foreign, out, err, -1));
+    BOOST_CHECK_EQUAL(err, "stripe position");
+    std::vector<std::vector<unsigned char>> stored(coded.begin(), coded.begin() + 16);
+    BOOST_CHECK_MESSAGE(RepairCanonicalFromShards(one, stored, Range(0, 16), out, err, -1), err);
+    BOOST_CHECK_EQUAL(out.size(), 16U);
+
+    // A short one-stripe file: five real pieces, eleven proven dummy zeros. Its
+    // padding slots repair as all-zero shards, not as any other bytes.
+    auto shortfile = ManIdx(16, 20, 1, {{0, {0, 1, 2, 3, 4, 16, 17, 18, 19}}}, 5);
+    shortfile.file_size_bytes = 5 * static_cast<uint64_t>(shortfile.shard_bytes);
+    BOOST_REQUIRE_EQUAL(ErasureTailPaddingSlots(shortfile).size(), 11U);
+    auto short_data = DataShards(16, 8);
+    for (size_t i = 5; i < 16; ++i) std::fill(short_data[i].begin(), short_data[i].end(), 0);
+    std::vector<std::vector<unsigned char>> short_coded;
+    BOOST_REQUIRE(EncodeShards(short_data, 20, short_coded, err));
+    std::vector<std::vector<unsigned char>> padded(short_data.begin(), short_data.end());
+    BOOST_CHECK_MESSAGE(RepairCanonicalFromShards(shortfile, padded, Range(0, 16), out, err, -1), err);
+    padded[7][0] = 1;
+    BOOST_CHECK(!RepairCanonicalFromShards(shortfile, padded, Range(0, 16), out, err, -1));
+    BOOST_CHECK_EQUAL(err, "stripe position");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/dt_rl/dt_rl.h>
 
 #include <algorithm>
@@ -11,18 +12,18 @@
 namespace modelnet {
 namespace {
 
-bool FitsInt64(__int128 v)
+bool FitsInt64(btx::I128 v)
 {
-    return v <= static_cast<__int128>(std::numeric_limits<int64_t>::max()) &&
-           v >= static_cast<__int128>(std::numeric_limits<int64_t>::min());
+    return v <= static_cast<btx::I128>(std::numeric_limits<int64_t>::max()) &&
+           v >= static_cast<btx::I128>(std::numeric_limits<int64_t>::min());
 }
 
-__int128 Gcd128(__int128 a, __int128 b)
+btx::I128 Gcd128(btx::I128 a, btx::I128 b)
 {
     if (a < 0) a = -a;
     if (b < 0) b = -b;
     while (b != 0) {
-        const __int128 t = a % b;
+        const btx::I128 t = a % b;
         a = b;
         b = t;
     }
@@ -35,10 +36,10 @@ struct Frac {
 };
 
 /** Reduce num/den into int64 with a positive denominator. */
-bool ReduceToInt64(__int128 num, __int128 den, Frac& out)
+bool ReduceToInt64(btx::I128 num, btx::I128 den, Frac& out)
 {
     if (den == 0) return false;
-    const __int128 g = Gcd128(num, den);
+    const btx::I128 g = Gcd128(num, den);
     num /= g;
     den /= g;
     if (den < 0) {
@@ -131,7 +132,7 @@ bool DtRl::Advantage(const std::string& group, std::string& err)
     }
 
     std::vector<Sample*> eligible;
-    __int128 sum = 0;
+    btx::I128 sum = 0;
     for (const std::string& id : git->second.order) {
         Sample& sample = m_samples[id];
         if (!sample.complete) continue;
@@ -161,7 +162,7 @@ bool DtRl::Advantage(const std::string& group, std::string& err)
     std::vector<Pending> pending;
     pending.reserve(eligible.size());
     for (Sample* sample : eligible) {
-        const __int128 num = static_cast<__int128>(sample->reward) * n - sum;
+        const btx::I128 num = static_cast<btx::I128>(sample->reward) * n - sum;
         Pending row;
         row.sample = sample;
         if (!ReduceToInt64(num, n, row.advantage)) {
@@ -224,9 +225,9 @@ double DtRl::Clip(double ratio, double advantage, std::string& err) const
     const int64_t r = std::llround(r_scaled);
     const int64_t a = std::llround(a_scaled);
     const int64_t clamped = std::min(std::max(r, kLo), kHi);
-    const __int128 unclipped = static_cast<__int128>(r) * static_cast<__int128>(a);
-    const __int128 clipped = static_cast<__int128>(clamped) * static_cast<__int128>(a);
-    const __int128 chosen = unclipped < clipped ? unclipped : clipped;
+    const btx::I128 unclipped = static_cast<btx::I128>(r) * static_cast<btx::I128>(a);
+    const btx::I128 clipped = static_cast<btx::I128>(clamped) * static_cast<btx::I128>(a);
+    const btx::I128 chosen = unclipped < clipped ? unclipped : clipped;
     err.clear();
     return static_cast<double>(chosen) / (kScale * kScale);
 }

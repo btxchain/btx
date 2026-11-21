@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
+from test_framework.util import unix_socket_path
 
 
 class CapabilitydFileModesTest(BitcoinTestFramework):
@@ -32,7 +33,7 @@ class CapabilitydFileModesTest(BitcoinTestFramework):
         if not capd.exists():
             raise SkipTest(f"{capd} not built")
         modeldir = Path(self.options.tmpdir) / "capdir"
-        sock = Path(self.options.tmpdir) / "cap.sock"
+        sock = unix_socket_path(Path(self.options.tmpdir) / "cap.sock")
         old = os.umask(0o022)
         try:
             proc = subprocess.Popen([str(capd), f"-modeldir={modeldir}", f"-capabilitysocket={sock}"],

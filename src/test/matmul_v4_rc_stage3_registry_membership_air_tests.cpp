@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
@@ -330,9 +331,9 @@ BOOST_AUTO_TEST_CASE(
         // Goldilocks p == 1 (mod 2^32): decompose x+p as a raw u64.
         // Its low 32 bits differ from x by one, while FromU64(x+p)
         // aliases x. The pinned u32 recomposition therefore rejects it.
-        const unsigned __int128 alias =
-            static_cast<unsigned __int128>(x) +
-            static_cast<unsigned __int128>(gf::kP);
+        const btx::U128 alias =
+            static_cast<btx::U128>(x) +
+            static_cast<btx::U128>(gf::kP);
         const uint32_t low =
             static_cast<uint32_t>(alias);
         for (uint32_t bit = 0;

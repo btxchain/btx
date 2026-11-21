@@ -1,0 +1,218 @@
+FFF....FFFFF....                                                         [100%]
+=================================== FAILURES ===================================
+_ test_original_refund_automatically_recovers_through_timeout_and_restart[connect] _
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/repair-runtime-before/test_original_refund_automatic0')
+mode = 'connect'
+
+    @pytest.mark.parametrize('mode',['connect','headers','body'])
+    def test_original_refund_automatically_recovers_through_timeout_and_restart(tmp_path,mode):
+        with funded_pair(tmp_path/'pair') as p,timeout_endpoint(tmp_path,mode) as (client,remote,recover):
+            before=identities(p)
+            # Verify transport timeout shape, not a fabricated SwapError label.
+            with pytest.raises(SwapError) as error:client('getblockcount')
+            cause=error.value.__cause__
+            if mode=='connect':
+                assert isinstance(cause,urllib.error.URLError) and isinstance(cause.reason,TimeoutError)
+            else:assert isinstance(cause,TimeoutError)
+            c=wire(p,client);c.tick()
+>           assert p.state('alice')['stage']=='refund_broadcast'
+E           AssertionError: assert 'funded' == 'refund_broadcast'
+E             
+E             - refund_broadcast
+E             + funded
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:71: AssertionError
+_ test_original_refund_automatically_recovers_through_timeout_and_restart[headers] _
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/repair-runtime-before/test_original_refund_automatic1')
+mode = 'headers'
+
+    @pytest.mark.parametrize('mode',['connect','headers','body'])
+    def test_original_refund_automatically_recovers_through_timeout_and_restart(tmp_path,mode):
+        with funded_pair(tmp_path/'pair') as p,timeout_endpoint(tmp_path,mode) as (client,remote,recover):
+            before=identities(p)
+            # Verify transport timeout shape, not a fabricated SwapError label.
+            with pytest.raises(SwapError) as error:client('getblockcount')
+            cause=error.value.__cause__
+            if mode=='connect':
+                assert isinstance(cause,urllib.error.URLError) and isinstance(cause.reason,TimeoutError)
+            else:assert isinstance(cause,TimeoutError)
+            c=wire(p,client);c.tick()
+>           assert p.state('alice')['stage']=='refund_broadcast'
+E           AssertionError: assert 'funded' == 'refund_broadcast'
+E             
+E             - refund_broadcast
+E             + funded
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:71: AssertionError
+_ test_original_refund_automatically_recovers_through_timeout_and_restart[body] _
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/repair-runtime-before/test_original_refund_automatic2')
+mode = 'body'
+
+    @pytest.mark.parametrize('mode',['connect','headers','body'])
+    def test_original_refund_automatically_recovers_through_timeout_and_restart(tmp_path,mode):
+        with funded_pair(tmp_path/'pair') as p,timeout_endpoint(tmp_path,mode) as (client,remote,recover):
+            before=identities(p)
+            # Verify transport timeout shape, not a fabricated SwapError label.
+            with pytest.raises(SwapError) as error:client('getblockcount')
+            cause=error.value.__cause__
+            if mode=='connect':
+                assert isinstance(cause,urllib.error.URLError) and isinstance(cause.reason,TimeoutError)
+            else:assert isinstance(cause,TimeoutError)
+            c=wire(p,client);c.tick()
+>           assert p.state('alice')['stage']=='refund_broadcast'
+E           AssertionError: assert 'funded' == 'refund_broadcast'
+E             
+E             - refund_broadcast
+E             + funded
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:71: AssertionError
+_____________ test_timeout_keeps_original_refund_fences[reference] _____________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/repair-runtime-before/test_timeout_keeps_original_re4')
+guard = 'reference'
+
+    @pytest.mark.parametrize('guard',['immature','incoming','secret','conflicting','reference','script'])
+    def test_timeout_keeps_original_refund_fences(tmp_path,guard):
+        with funded_pair(tmp_path/'pair') as p,timeout_endpoint(tmp_path,'connect') as (client,remote,recover):
+            c=wire(p,client);rev,s=c.journal.load(p.sid)
+            if guard=='immature':p.a.height-=1
+            if guard=='incoming':s['refs']['b']={'txid':'99'*32,'vout':0}
+            if guard=='secret':s['secret_exposed']=True
+            if guard=='conflicting':s['observations']={'b':{'conflicting':True}}
+            if guard=='reference':s['refs']['a']['vout']+=1
+            if guard=='script':
+                rpc=c.drivers[A].rpc
+                def badscript(method,*args):
+                    value=rpc(method,*args)
+                    if method=='gettxout':value['scriptPubKey']['hex']='00'
+                    return value
+                c.drivers[A].rpc=badscript
+            c._save(p.sid,s,rev);before=identities(p);c.tick()
+            assert p.state('alice')['stage']=='funded'
+            expected='RECOVERY_CONFLICT' if guard in {'reference','script'} else 'RPC_UNAVAILABLE'
+>           assert p.state('alice')['last_error']['code']==expected
+E           AssertionError: assert 'RPC_UNAVAILABLE' == 'RECOVERY_CONFLICT'
+E             
+E             - RECOVERY_CONFLICT
+E             + RPC_UNAVAILABLE
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:105: AssertionError
+______________ test_timeout_keeps_original_refund_fences[script] _______________
+
+tmp_path = PosixPath('<workspace>/work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/repair-runtime-before/test_timeout_keeps_original_re5')
+guard = 'script'
+
+    @pytest.mark.parametrize('guard',['immature','incoming','secret','conflicting','reference','script'])
+    def test_timeout_keeps_original_refund_fences(tmp_path,guard):
+        with funded_pair(tmp_path/'pair') as p,timeout_endpoint(tmp_path,'connect') as (client,remote,recover):
+            c=wire(p,client);rev,s=c.journal.load(p.sid)
+            if guard=='immature':p.a.height-=1
+            if guard=='incoming':s['refs']['b']={'txid':'99'*32,'vout':0}
+            if guard=='secret':s['secret_exposed']=True
+            if guard=='conflicting':s['observations']={'b':{'conflicting':True}}
+            if guard=='reference':s['refs']['a']['vout']+=1
+            if guard=='script':
+                rpc=c.drivers[A].rpc
+                def badscript(method,*args):
+                    value=rpc(method,*args)
+                    if method=='gettxout':value['scriptPubKey']['hex']='00'
+                    return value
+                c.drivers[A].rpc=badscript
+            c._save(p.sid,s,rev);before=identities(p);c.tick()
+            assert p.state('alice')['stage']=='funded'
+            expected='RECOVERY_CONFLICT' if guard in {'reference','script'} else 'RPC_UNAVAILABLE'
+>           assert p.state('alice')['last_error']['code']==expected
+E           AssertionError: assert 'RPC_UNAVAILABLE' == 'RECOVERY_CONFLICT'
+E             
+E             - RECOVERY_CONFLICT
+E             + RPC_UNAVAILABLE
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:105: AssertionError
+___________ test_only_transport_timeout_is_classified[wrapped_open] ____________
+
+stage = 'wrapped_open'
+
+    @pytest.mark.parametrize('stage',['wrapped_open','direct_open','read'])
+    def test_only_transport_timeout_is_classified(stage):
+        client=LocalRPC('http://127.0.0.1:1',timeout=1)
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def read(self,*args):raise TimeoutError('read stalled')
+        class Opener:
+            def open(self,*args,**kwargs):
+                if stage=='wrapped_open':raise urllib.error.URLError(TimeoutError('connect stalled'))
+                if stage=='direct_open':raise TimeoutError('headers stalled')
+                return Response()
+        client.opener=Opener()
+        with pytest.raises(SwapError) as error:client('getblockcount')
+>       assert type(error.value).__name__=='RPCTransportTimeout'
+E       AssertionError: assert 'SwapError' == 'RPCTransportTimeout'
+E         
+E         - RPCTransportTimeout
+E         + SwapError
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:122: AssertionError
+____________ test_only_transport_timeout_is_classified[direct_open] ____________
+
+stage = 'direct_open'
+
+    @pytest.mark.parametrize('stage',['wrapped_open','direct_open','read'])
+    def test_only_transport_timeout_is_classified(stage):
+        client=LocalRPC('http://127.0.0.1:1',timeout=1)
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def read(self,*args):raise TimeoutError('read stalled')
+        class Opener:
+            def open(self,*args,**kwargs):
+                if stage=='wrapped_open':raise urllib.error.URLError(TimeoutError('connect stalled'))
+                if stage=='direct_open':raise TimeoutError('headers stalled')
+                return Response()
+        client.opener=Opener()
+        with pytest.raises(SwapError) as error:client('getblockcount')
+>       assert type(error.value).__name__=='RPCTransportTimeout'
+E       AssertionError: assert 'SwapError' == 'RPCTransportTimeout'
+E         
+E         - RPCTransportTimeout
+E         + SwapError
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:122: AssertionError
+_______________ test_only_transport_timeout_is_classified[read] ________________
+
+stage = 'read'
+
+    @pytest.mark.parametrize('stage',['wrapped_open','direct_open','read'])
+    def test_only_transport_timeout_is_classified(stage):
+        client=LocalRPC('http://127.0.0.1:1',timeout=1)
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+            def read(self,*args):raise TimeoutError('read stalled')
+        class Opener:
+            def open(self,*args,**kwargs):
+                if stage=='wrapped_open':raise urllib.error.URLError(TimeoutError('connect stalled'))
+                if stage=='direct_open':raise TimeoutError('headers stalled')
+                return Response()
+        client.opener=Opener()
+        with pytest.raises(SwapError) as error:client('getblockcount')
+>       assert type(error.value).__name__=='RPCTransportTimeout'
+E       AssertionError: assert 'SwapError' == 'RPCTransportTimeout'
+E         
+E         - RPCTransportTimeout
+E         + SwapError
+
+work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py:122: AssertionError
+=========================== short test summary info ============================
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_original_refund_automatically_recovers_through_timeout_and_restart[connect]
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_original_refund_automatically_recovers_through_timeout_and_restart[headers]
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_original_refund_automatically_recovers_through_timeout_and_restart[body]
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_timeout_keeps_original_refund_fences[reference]
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_timeout_keeps_original_refund_fences[script]
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_only_transport_timeout_is_classified[wrapped_open]
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_only_transport_timeout_is_classified[direct_open]
+FAILED work/btx-lanes/session-1/swapnet-bitcoin-rpc-timeout-recovery/test_timeout_refund_recovery.py::test_only_transport_timeout_is_classified[read]
+8 failed, 8 passed in 17.10s

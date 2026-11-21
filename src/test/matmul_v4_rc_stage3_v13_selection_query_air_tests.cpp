@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_air_recurse.h>
@@ -196,8 +197,8 @@ BOOST_AUTO_TEST_CASE(
             why);
         const uint64_t c0 = gf::Canonical(candidate.c0);
         const uint64_t c1 = gf::Canonical(candidate.c1);
-        const unsigned __int128 wide =
-            (static_cast<unsigned __int128>(c1) << 64) | c0;
+        const btx::U128 wide =
+            (static_cast<btx::U128>(c1) << 64) | c0;
         const uint32_t native =
             static_cast<uint32_t>(wide % input.n_lde);
         // Since n_lde is a power of two no larger than 2^31, 2^64 is zero
@@ -292,8 +293,8 @@ BOOST_AUTO_TEST_CASE(
     // selection would be unchanged absent the explicit canonical bit rule.
     const uint64_t canonical = 11;
     BOOST_REQUIRE((
-        static_cast<unsigned __int128>(canonical) + gf::kP <
-        static_cast<unsigned __int128>(
+        static_cast<btx::U128>(canonical) + gf::kP <
+        static_cast<btx::U128>(
             std::numeric_limits<uint64_t>::max()) + 1));
     input.ood_candidate[0].coordinate[0] =
         canonical + gf::kP;

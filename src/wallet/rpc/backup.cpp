@@ -886,6 +886,12 @@ public:
         return m_path;
     }
 
+    //! Keep the directory: the work that needed cleanup on failure is complete.
+    void Release()
+    {
+        m_path.clear();
+    }
+
     void CleanupNow()
     {
         if (m_path.empty()) return;
@@ -1113,6 +1119,10 @@ static WalletBundleExportArtifacts ExportWalletBundleToDirectory(CWallet& wallet
     WalletBundleUnlockSession unlock_session(wallet, wallet_passphrase, need_unlock, rpc_name);
 
     EnsureFreshDirectory(bundle_dir);
+    // A failed export removes the directory it just created, so a retry to the
+    // same destination is not refused as "already exists" and no partial
+    // bundle is left behind.
+    ScopedCleanupDirectory cleanup_on_failure(bundle_dir);
     const fs::path key_dir = bundle_dir / "shielded_viewing_keys";
     EnsureFreshDirectory(key_dir);
 
@@ -1223,6 +1233,7 @@ static WalletBundleExportArtifacts ExportWalletBundleToDirectory(CWallet& wallet
                                             artifacts.integrity, artifacts.warnings));
     note_file(manifest_path);
 
+    cleanup_on_failure.Release();
     return artifacts;
 }
 
@@ -1444,6 +1455,10 @@ static WalletBundleArchivePayload DecryptWalletBundleArchivePayload(const Wallet
     }
     if (envelope.salt.size() != WALLET_CRYPTO_SALT_SIZE) {
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Wallet bundle archive salt is invalid");
+    }
+    if (envelope.derivation_iterations < 1 ||
+        envelope.derivation_iterations > WALLET_BUNDLE_ARCHIVE_DERIVATION_ITERATIONS) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Wallet bundle archive derivation work is outside the supported range");
     }
 
     unsigned char key[WALLET_CRYPTO_KEY_SIZE];
@@ -1704,6 +1719,41 @@ static std::vector<unsigned char> ReadWalletPQMasterSeedForExport(CWallet& walle
 
     WalletBatch batch(wallet.GetDatabase());
 
+    const auto descriptor_seed = [](const auto& spkms) {
+        std::optional<std::array<unsigned char, 32>> seed;
+        for (const auto* spkm : spkms) {
+            const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
+            if (!desc_spkm) continue;
+
+            std::string desc_str;
+            if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
+
+            FlatSigningProvider keys;
+            std::string error;
+            auto parsed_descs = Parse(desc_str, keys, error, /*require_checksum=*/true);
+            for (const auto& desc : parsed_descs) {
+                for (const auto& entry : desc->ExtractAllPQSeeds()) {
+                    if (!seed) {
+                        seed = entry.second;
+                    } else if (*seed != entry.second) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Wallet contains multiple PQ master seeds; exportwalletbundle only supports single-seed browser wallet exports");
+                    }
+                }
+            }
+        }
+        return seed;
+    };
+
+    // The wallet's own seed is the one behind its active P2MR pair. A non-blank importwalletbundle keeps the
+    // previous pair as inactive descriptors, which must not make the export refuse the wallet.
+    std::vector<const ScriptPubKeyMan*> active_p2mr;
+    for (const bool internal : {false, true}) {
+        if (const auto* spkm = wallet.GetScriptPubKeyMan(OutputType::P2MR, internal)) active_p2mr.push_back(spkm);
+    }
+    if (const auto seed = descriptor_seed(active_p2mr)) {
+        return std::vector<unsigned char>(seed->begin(), seed->end());
+    }
+
     uint256 iv;
     std::vector<unsigned char> encrypted_seed;
     if (batch.ReadCryptedPQMasterSeed(iv, encrypted_seed) && !encrypted_seed.empty()) {
@@ -1731,29 +1781,9 @@ static std::vector<unsigned char> ReadWalletPQMasterSeedForExport(CWallet& walle
         return seed;
     }
 
-    std::optional<std::array<unsigned char, 32>> descriptor_seed;
-    for (const auto& spkm : wallet.GetAllScriptPubKeyMans()) {
-        const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
-        if (!desc_spkm) continue;
-
-        std::string desc_str;
-        if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
-
-        FlatSigningProvider keys;
-        std::string error;
-        auto parsed_descs = Parse(desc_str, keys, error, /*require_checksum=*/true);
-        for (const auto& desc : parsed_descs) {
-            for (const auto& entry : desc->ExtractAllPQSeeds()) {
-                if (!descriptor_seed) {
-                    descriptor_seed = entry.second;
-                } else if (*descriptor_seed != entry.second) {
-                    throw JSONRPCError(RPC_WALLET_ERROR, "Wallet contains multiple PQ master seeds; exportwalletbundle only supports single-seed browser wallet exports");
-                }
-            }
-        }
-    }
-    if (descriptor_seed) {
-        return std::vector<unsigned char>(descriptor_seed->begin(), descriptor_seed->end());
+    // As before cee61a97: with no active P2MR pair and no stored record, any single descriptor seed.
+    if (const auto any_seed = descriptor_seed(wallet.GetAllScriptPubKeyMans())) {
+        return std::vector<unsigned char>(any_seed->begin(), any_seed->end());
     }
 
     throw JSONRPCError(RPC_WALLET_ERROR, "Wallet does not contain an exportable PQ master seed");
@@ -3360,7 +3390,7 @@ UniValue ProcessDescriptorImport(CWallet& wallet, const UniValue& data, const in
     return ProcessDescriptorImport(wallet, data, timestamp, master_keys, EMPTY_PQ_MASTER_SEEDS);
 }
 
-static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWalletBundle& bundle, const bool rescan)
+static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWalletBundle& bundle, const bool rescan, const bool new_wallet = false)
 {
     wallet.BlockUntilSyncedToCurrentChain();
 
@@ -3386,9 +3416,50 @@ static UniValue ImportBtxWalletBundleIntoWallet(CWallet& wallet, const BtxWallet
     {
         LOCK(wallet.cs_wallet);
         EnsureWalletIsUnlocked(wallet);
-        WalletBatch batch(wallet.GetDatabase());
-        wallet.SetupImportedPQWalletBundle(batch, Span<const unsigned char>{bundle.master_seed.data(), bundle.master_seed.size()}, bundle.birthday);
+
+        // Importing the bundle replaces the wallet PQ seed, and shielded spending
+        // keys derive from it. If the wallet already holds shielded key material
+        // of its own, replacing the seed would make those notes unspendable, so
+        // refuse before overwriting anything (cs_wallet before cs_shielded, as
+        // everywhere else; MaybeRehydrateSpendingKeys loads the state first so the
+        // check sees the wallet's real key sets, notes and issued indices).
+        if (wallet.m_shielded_wallet) {
+            LOCK(wallet.m_shielded_wallet->cs_shielded);
+            // A newly created blank restore destination has no persisted shielded
+            // authority to load. Deriving an unrelated seed here can retain search
+            // keys on pruned history and falsely reject the fresh restore. Still
+            // check material already present, including any issued concurrently.
+            if (!new_wallet) wallet.m_shielded_wallet->MaybeRehydrateSpendingKeys();
+            if (wallet.m_shielded_wallet->HasShieldedKeyMaterial()) {
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                                   "this wallet already has shielded keys or notes; importing a bundle would replace its PQ seed and make them unusable. Restore the bundle into a new wallet with restorewalletbundle");
+            }
+        }
+
+        {
+            WalletBatch batch(wallet.GetDatabase());
+            wallet.SetupImportedPQWalletBundle(batch, Span<const unsigned char>{bundle.master_seed.data(), bundle.master_seed.size()}, bundle.birthday);
+        }
         wallet.ConnectScriptPubKeyManNotifiers();
+
+        // Only now that SetupImportedPQWalletBundle has succeeded: the wallet had
+        // no shielded key material (checked above under cs_wallet, which no address
+        // creation can bypass), so the only persisted shielded state is the old
+        // seed's completed empty-gap result. PersistState deliberately refuses to
+        // overwrite an encrypted blob with empty key sets, so ResetEmptyGapForImportedSeed
+        // erases that state; then derive and scan the imported seed's notes, exactly
+        // as a fresh restorewalletbundle wallet would, so they appear without a
+        // restart. Re-check under the same lock that no key material exists first.
+        // Only encrypted wallets derive shielded keys and run the empty-gap
+        // search with the old seed; an unencrypted wallet has only tree-only
+        // shielded state and nothing to re-derive, so leave it untouched.
+        if (wallet.m_shielded_wallet && wallet.IsCrypted()) {
+            LOCK(wallet.m_shielded_wallet->cs_shielded);
+            if (!wallet.m_shielded_wallet->HasShieldedKeyMaterial()) {
+                wallet.m_shielded_wallet->ResetEmptyGapForImportedSeed();
+                wallet.m_shielded_wallet->MaybeRehydrateSpendingKeys();
+            }
+        }
     }
 
     if (rescan) {
@@ -3817,7 +3888,7 @@ RPCHelpMan restorewalletbundle()
             }
             relock = true;
         }
-        UniValue result = ImportBtxWalletBundleIntoWallet(*wallet, bundle, rescan);
+        UniValue result = ImportBtxWalletBundleIntoWallet(*wallet, bundle, rescan, /*new_wallet=*/true);
         if (relock) wallet->Lock();
         result.pushKV("name", wallet->GetName());
         PushWarnings(warnings, result);

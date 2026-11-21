@@ -373,15 +373,6 @@ bool WaitFd(int fd, short events, int timeout_ms, std::string& err)
     }
 }
 
-void ApplySocketTimeouts(int fd, int timeout_ms)
-{
-    timeval tv{};
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-}
-
 // Winsock SOCKETs are not CRT file descriptors, even when stored as int.
 void CloseS3Socket(int fd)
 {
@@ -469,7 +460,7 @@ bool ConnectTcp(const ParsedS3Endpoint& ep, bool allow_http_loopback, bool allow
             continue;
         }
         if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-        ApplySocketTimeouts(fd, kS3HttpsTimeoutMs);
+        SetSocketTimeoutsMs(fd, kS3HttpsTimeoutMs);
         int nodelay = 1;
         (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
         freeaddrinfo(raw);
@@ -543,8 +534,14 @@ bool SendAll(int fd, SSL* ssl, const unsigned char* data, size_t n, std::string&
         if (ssl) {
             const int w = SSL_write(ssl, data + off, static_cast<int>(chunk));
             if (w <= 0) {
+                // The socket blocks with SO_SNDTIMEO: a write that wants to be
+                // retried has hit that timeout. Retrying waited forever on a
+                // server that stopped reading.
                 const int e = SSL_get_error(ssl, w);
-                if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) continue;
+                if (e == SSL_ERROR_WANT_WRITE || e == SSL_ERROR_WANT_READ) {
+                    err = FailCloud("s3 https write timed out");
+                    return false;
+                }
                 err = FailCloud("s3 https write failed");
                 return false;
             }
@@ -575,7 +572,12 @@ bool RecvSome(int fd, SSL* ssl, unsigned char* data, size_t n, size_t& got, std:
         if (r == 0) return true;
         if (r < 0) {
             const int e = SSL_get_error(ssl, r);
-            if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return true;
+            // As for a write: a read past SO_RCVTIMEO is not the end of the
+            // body, which a response without Content-Length takes it for.
+            if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+                err = FailCloud("s3 https read timed out");
+                return false;
+            }
             if (e == SSL_ERROR_ZERO_RETURN) return true;
             err = FailCloud("s3 https read failed");
             return false;
@@ -831,9 +833,11 @@ bool PerformS3Http(const S3ClientConfig& cfg, SigV4Request req, Span<const unsig
         return false;
     }
 
-    uint64_t remaining = res.has_content_length ? res.content_length : max_body;
+    // Without Content-Length the body ends at EOF: read one byte past the limit
+    // so a longer body is refused below instead of cut to the limit.
+    uint64_t remaining = res.has_content_length ? res.content_length : max_body + 1;
     if (!leftover.empty()) {
-        if (leftover.size() > remaining) {
+        if (leftover.size() > (res.has_content_length ? remaining : max_body)) {
             err = FailCloud("s3 https object too large for unchunked GET");
             cleanup();
             return false;
@@ -910,6 +914,44 @@ std::string HostPortKey(const ParsedS3Endpoint& p)
 }
 
 } // namespace
+
+bool S3MultipartCompletionSucceeded(std::string_view xml)
+{
+    // S3 may send 200 before completion fails. Recognize the success envelope,
+    // not an arbitrary success tag inside an Error message. This is not a
+    // general XML validator; the transport already bounds the control body.
+    if (xml.starts_with("\xef\xbb\xbf")) xml.remove_prefix(3);
+    auto skip_misc = [](std::string_view& text) {
+        for (;;) {
+            const auto nonspace = text.find_first_not_of(" \t\r\n");
+            if (nonspace == std::string_view::npos) { text = {}; return true; }
+            text.remove_prefix(nonspace);
+            const bool comment = text.starts_with("<!--");
+            if (!comment && !text.starts_with("<?")) return true;
+            const auto end = text.find(comment ? "-->" : "?>", comment ? 4 : 2);
+            if (end == std::string_view::npos) return false;
+            text.remove_prefix(end + (comment ? 3 : 2));
+        }
+    };
+    if (!skip_misc(xml) || !xml.starts_with("<")) return false;
+    const auto name_end = xml.find_first_of(" \t\r\n>/", 1);
+    if (name_end == std::string_view::npos) return false;
+    const auto qualified = xml.substr(1, name_end - 1);
+    const auto colon = qualified.find(':');
+    const auto local = colon == std::string_view::npos ? qualified : qualified.substr(colon + 1);
+    if (local != "CompleteMultipartUploadResult" || colon == 0 ||
+        (colon != std::string_view::npos && qualified.find(':', colon + 1) != std::string_view::npos)) return false;
+    const auto open_end = xml.find('>', name_end);
+    if (open_end == std::string_view::npos || xml[open_end - 1] == '/') return false;
+    const std::string close = "</" + std::string(qualified);
+    const auto close_start = xml.rfind(close);
+    if (close_start == std::string_view::npos || close_start <= open_end) return false;
+    auto tail = xml.substr(close_start + close.size());
+    const auto close_end = tail.find_first_not_of(" \t\r\n");
+    if (close_end == std::string_view::npos || tail[close_end] != '>') return false;
+    tail.remove_prefix(close_end + 1);
+    return skip_misc(tail) && tail.empty();
+}
 
 bool S3HttpRedirectRefused(int status)
 {
@@ -2000,6 +2042,11 @@ bool S3Client::PutStream(const std::string& key, std::istream& body, uint64_t co
             err = FailCloud(err, m_write_secret.empty() ? m_secret : m_write_secret);
             return false;
         }
+        const std::string response(res.body.begin(), res.body.end());
+        if (!S3MultipartCompletionSucceeded(response)) {
+            err = FailCloud("s3 https multipart completion response is not successful");
+            return false;
+        }
         return true;
     };
 
@@ -2411,6 +2458,26 @@ UniValue S3Client::ConfigJson() const
 size_t S3Client::LastPutMaxBufferBytes() const
 {
     return m_last_put_max_buffer;
+}
+
+void SetSocketTimeoutsMs(int fd, int timeout_ms, bool send)
+{
+    // 0 means no timeout on both platforms; a deadline that has passed is the
+    // shortest one instead.
+    if (timeout_ms < 1) timeout_ms = 1;
+#ifdef WIN32
+    // Winsock reads SO_RCVTIMEO and SO_SNDTIMEO as a DWORD of milliseconds,
+    // not as a timeval: a timeval of 5 s would be read as 5 ms.
+    const DWORD ms = static_cast<DWORD>(timeout_ms);
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &ms, sizeof(ms));
+    if (send) (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &ms, sizeof(ms));
+#else
+    timeval tv{};
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (send) (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 }
 
 } // namespace modelnet

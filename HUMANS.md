@@ -1,6 +1,6 @@
 # HUMANS.md
 
-**Candidate and evidence:** this source tree is **0.35.0rc1** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=1`); the last shipping tag recorded here is **v0.34.15**. A release-build flag is not native qualification. See [native participation and release evidence](doc/modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
+**Candidate and evidence:** this source tree is **0.34.17** (`CLIENT_VERSION_IS_RELEASE=true`, `CLIENT_VERSION_RC=0`); the latest stable tag is **v0.34.16**. A release-build flag is not native qualification. See [native participation and release evidence](doc/modelnet/swarm/16_NATIVE_EXECUTION_AND_RELEASE_EVIDENCE.md) for the current defaults, RPC observations, complete helper build, and remaining hardware/deployment gates. Older version-labelled sections below describe their historical surface introduction.
 
 This file is for **people**: researchers, communities, enterprises, independent
 labs, creators, hosts, and anyone who wants to use BTX without becoming a
@@ -107,15 +107,16 @@ path. Machine sequences belong in [AGENTS.md](AGENTS.md).
 
 ### 1. Run the current line
 
-This tree is **0.35.0rc1**. `btxd -version` prints `v0.35.0rc1`. It is not
-the shipping tag `v0.35.0`. The last shipping tag remains **v0.34.15**.
-For a validating node that becomes useful without waiting for a full
-historical sync, the fast-start snapshot is **assumeutxo-219000**.
+This tree reports **v0.34.17**. Choose the
+[v0.34.16 stable archive](https://github.com/btxchain/btx/releases/tag/v0.34.16)
+or the [v0.34.17 prerelease](https://github.com/btxchain/btx/releases/tag/v0.34.17)
+for testing. For a fresh mainnet chainstate, the fast-start snapshot is
+**assumeutxo-228000**. [Install and first-run guide](doc/btx-download-and-go.md).
 
-Install and first-run: [doc/btx-download-and-go.md](doc/btx-download-and-go.md).
-This candidate: [doc/release-notes/release-notes-0.35.0.md](doc/release-notes/release-notes-0.35.0.md)
-and [doc/modelnet/swarm/00_THIS_TREE.md](doc/modelnet/swarm/00_THIS_TREE.md).
-The previous shipping line: [doc/release-notes/release-notes-0.34.15.md](doc/release-notes/release-notes-0.34.15.md).
+Release notes: [0.34.17](doc/release-notes-0.34.17.md). Historical notes:
+[0.35.0rc1](doc/release-notes/release-notes-0.35.0.md),
+[0.35 lab tree](doc/modelnet/swarm/00_THIS_TREE.md), and
+[v0.34.15](doc/release-notes/release-notes-0.34.15.md).
 
 End-to-end host / search / retrieve / run / bounty:
 [doc/modelnet/end-to-end.md](doc/modelnet/end-to-end.md).
@@ -316,7 +317,7 @@ search when you do not want the query to leave this node.
 
 ## Current line
 
-- **Candidate:** **0.35.0rc1**; last shipping tag **v0.34.15**; native release qualification is separate. Registry independence, host/load/generate, assumeutxo persist, on-chain bounty/WRC. Native
+- **Candidate:** **0.34.17**; latest stable tag **v0.34.16**; native release qualification is separate. Registry independence, host/load/generate, assumeutxo persist, on-chain bounty/WRC. Native
   Model Network first-run, HCP, JIT capability, search, release campaigns,
   and creation bounties remain.
 - Host / seed / search / share / watch / doctor / load / generate / bounty:
@@ -335,7 +336,7 @@ search when you do not want the query to leave this node.
   [doc/modelnet/hcp/](doc/modelnet/hcp/). Cognitive Reserve v1.1 is a
   negotiated HCP/1 extension of that same plane (not a fifth plane; 34 HCP
   ops preserved): [doc/modelnet/crf/](doc/modelnet/crf/).
-- **Fast-start snapshot:** **assumeutxo-219000**. Do not load withdrawn
+- **Fast-start snapshot:** **assumeutxo-228000**. Do not load withdrawn
   assumeutxo-199299 / assumeutxo-199300 snapshots.
 
 Further reading:

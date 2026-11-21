@@ -612,6 +612,9 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
         self.log.info("Fresh shielded-capable peers should see the same mixed v2_send and v2_ingress_batch families re-announced after a mine/reorg cycle")
         mined_block = self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)[0]
         assert_equal(node.getrawmempool(), [])
+        # The announcement of mined_block is queued; let it reach the peers that are about to go,
+        # or the fresh peers below get an inv for the block this step invalidates.
+        node.syncwithvalidationinterfacequeue()
 
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
@@ -649,6 +652,7 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
         self.log.info("Mine the resurrected mixed v2_send/v2_ingress mempool before exercising rebalance and settlement-anchor relay")
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
         assert_equal(node.getrawmempool(), [])
+        node.syncwithvalidationinterfacequeue()
 
         self.log.info("Build live wallet-signed v2_rebalance and reserve-bound v2_settlement_anchor relay fixtures")
         relay_utxos = [
@@ -703,6 +707,7 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
         self.log.info("Mine v2_rebalance so the netting manifest becomes anchorable")
         rebalance_block = self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)[0]
         assert_equal(node.getrawmempool(), [])
+        node.syncwithvalidationinterfacequeue()
 
         self.log.info("Shielded-capable peers should receive live reserve-bound v2_settlement_anchor announcements once the manifest is anchored")
         node.disconnect_p2ps()
@@ -742,6 +747,7 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
         self.log.info("Fresh shielded-capable peers should see the settlement-anchor family re-announced after reorg while the manifest anchor stays active")
         settlement_block = self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)[0]
         assert_equal(node.getrawmempool(), [])
+        node.syncwithvalidationinterfacequeue()
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
         node.invalidateblock(settlement_block)
@@ -778,6 +784,7 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
         self.log.info("Re-mine the reserve-bound settlement anchor so live v2_egress_batch relay can bind to an active anchor")
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
         assert_equal(node.getrawmempool(), [])
+        node.syncwithvalidationinterfacequeue()
 
         self.log.info("Build deterministic bare v2_egress_batch relay fixture and prioritise it for mempool admission")
         egress_fixture = build_unsigned_shielded_relay_fixture_tx(
@@ -819,6 +826,7 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
         self.log.info("Fresh shielded-capable peers should see live v2_egress_batch re-announced after a mine/reorg cycle while the settlement anchor stays active")
         egress_block = self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)[0]
         assert_equal(node.getrawmempool(), [])
+        node.syncwithvalidationinterfacequeue()
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
         # Bare v2_egress_batch relay uses a local fee delta rather than a
@@ -860,6 +868,7 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
         self.log.info("Mine the resurrected v2_egress_batch before dropping the rebalance anchor")
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
         assert_equal(node.getrawmempool(), [])
+        node.syncwithvalidationinterfacequeue()
 
         self.log.info("Dropping the rebalance anchor should evict the settlement-anchor family and only resurrect v2_rebalance")
         node.disconnect_p2ps()

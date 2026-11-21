@@ -55,6 +55,7 @@
 #include <wallet/model_funding.h>
 #include <wallet/rpc/util.h>
 #include <wallet/wallet.h>
+#include <wallet/walletdb.h>
 #include <wallet/context.h>
 #endif
 
@@ -1514,6 +1515,18 @@ static RPCHelpMan submitmodelfunding()
                         it->second.mapValue["model_output_vout"] = std::to_string(funding_vout);
                         if (!frozen.key_hash_hex.empty()) it->second.mapValue["model_key_hash"] = ToLower(frozen.key_hash_hex);
                         if (!frozen.release_id.empty()) it->second.mapValue["model_release_id"] = frozen.release_id;
+                        // remember_funding runs on every submit path (broadcast,
+                        // duplicate, already-in-UTXO), so persist the HTLC refund
+                        // terms here for all of them. Only the preparemodelfunding
+                        // JSON held them before; without this a failed campaign is
+                        // not refundable from the node. The duplicate path has no
+                        // CommitTransaction, so the explicit WriteTx is what makes
+                        // the fields durable across a restart.
+                        if (!frozen.descriptor.empty()) it->second.mapValue["model_descriptor"] = frozen.descriptor;
+                        if (!frozen.refund_key.empty()) it->second.mapValue["model_refund_pubkey"] = frozen.refund_key;
+                        if (frozen.refund_height > 0) it->second.mapValue["model_refund_height"] = std::to_string(frozen.refund_height);
+                        if (!frozen.claimant_key.empty()) it->second.mapValue["model_claimant"] = frozen.claimant_key;
+                        wallet::WalletBatch(pwallet->GetDatabase()).WriteTx(it->second);
                     }
                 }
                 UniValue rec(UniValue::VOBJ);
@@ -1815,6 +1828,53 @@ static RPCHelpMan exportmodelrecovery()
                 options = request.params[1];
             }
             wallet::FrozenFundingQuote q = QuoteFromRequest(release_id, options);
+            // The helper (MergeHelperCampaign) carries no refund terms, so when
+            // neither the options nor a helper card supplied them, recover the
+            // terms submitmodelfunding persisted on the funding transaction. This
+            // lets a funder who kept only release_id/txid still reclaim a failed
+            // campaign, instead of needing the preparemodelfunding JSON.
+            bool ambiguous = false;
+            if (q.descriptor.empty() && !release_id.empty()) {
+                std::string found_descriptor;
+                wallet::mapValue_t terms;
+                for (const auto& w : WalletsForObservation(request)) {
+                    if (!w) continue;
+                    LOCK(w->cs_wallet);
+                    for (const auto& [id, wtx] : w->mapWallet) {
+                        (void)id;
+                        const auto rit = wtx.mapValue.find("model_release_id");
+                        if (rit == wtx.mapValue.end() || rit->second != release_id) continue;
+                        const auto dit = wtx.mapValue.find("model_descriptor");
+                        if (dit == wtx.mapValue.end() || dit->second.empty()) continue;
+                        if (found_descriptor.empty()) {
+                            found_descriptor = dit->second;
+                            terms = wtx.mapValue;
+                        } else if (found_descriptor != dit->second) {
+                            // Same release_id funded under different descriptors: do
+                            // not guess which one the caller wants.
+                            ambiguous = true;
+                        }
+                    }
+                    if (ambiguous) break;
+                }
+                if (!ambiguous && !found_descriptor.empty()) {
+                    q.descriptor = found_descriptor;
+                    const auto fill = [&](const char* key, std::string& dst) {
+                        if (!dst.empty()) return;
+                        const auto it = terms.find(key);
+                        if (it != terms.end()) dst = it->second;
+                    };
+                    fill("model_key_hash", q.key_hash_hex);
+                    fill("model_refund_pubkey", q.refund_key);
+                    fill("model_claimant", q.claimant_key);
+                    if (q.refund_height == 0) {
+                        const auto it = terms.find("model_refund_height");
+                        if (it != terms.end()) {
+                            q.refund_height = static_cast<uint32_t>(LocaleIndependentAtoi<int64_t>(it->second));
+                        }
+                    }
+                }
+            }
             std::string err;
             if (q.descriptor.empty() && !q.key_hash_hex.empty() && !q.claimant_key.empty() &&
                 !q.refund_key.empty() && q.refund_height > 0) {
@@ -1829,7 +1889,9 @@ static RPCHelpMan exportmodelrecovery()
                 q.descriptor = canonical;
             }
             UniValue out = wallet::ExportModelRecoveryJson(q);
-            if (q.descriptor.empty() && q.key_hash_hex.empty()) {
+            if (ambiguous) {
+                out.pushKV("error", "release_id was funded under several descriptors; pass the descriptor of the funding output");
+            } else if (q.descriptor.empty() && q.key_hash_hex.empty()) {
                 out.pushKV("error", "no public recovery material; pass descriptor/key_hash or a known release_id");
             }
             return out;
@@ -2185,11 +2247,68 @@ static RPCHelpMan NamedBountySubmit(const std::string& name)
             CMutableTransaction mtx;
             const std::string hex = o.exists("hex") ? o["hex"].get_str() : o.exists("signed_transaction") ? o["signed_transaction"].get_str() : "";
             if (!wallet::DecodeFundingTxHex(hex, mtx, err)) throw JSONRPCError(RPC_DESERIALIZATION_ERROR, err);
+            // submitbountyfunding may get the plan that signbountyfunding returned.
+            // Keep its escrow terms with the wallet transaction, as
+            // submitmodelfunding does: after refund_height the refund needs the
+            // descriptor and the refund key, and preparebountyfunding may have
+            // created that key, so only the prepare/sign JSON held them. The
+            // terms are rebuilt from the plan and kept only when this
+            // transaction pays the rebuilt escrow script.
+            wallet::BountyEscrowPlan plan;
+            int escrow_vout{-1};
+            bool staged{false};
+            if (request.strMethod == "submitbountyfunding") {
+                std::string plan_err;
+                if (wallet::ParseBountyPlan(o, plan, plan_err)) {
+                    plan.output_script.clear();
+                    staged = plan.mode == "STAGED_RELEASE" || (!plan.hashlock_hex.empty() && !plan.claimant_key.empty());
+                    if (staged ? wallet::BuildStagedHtlcDescriptor(plan, plan_err) : wallet::BuildBountyEscrowDescriptor(plan, plan_err)) {
+                        for (size_t i = 0; i < mtx.vout.size(); ++i) {
+                            if (!plan.output_script.empty() && mtx.vout[i].scriptPubKey == plan.output_script) escrow_vout = static_cast<int>(i);
+                        }
+                    }
+                }
+            }
             node::NodeContext& node = EnsureAnyNodeContext(request.context);
             std::string err_string;
             const CTransactionRef tx = MakeTransactionRef(mtx);
+            // With terms to keep, wait until the wallet has seen the transaction.
             const node::TransactionError err_code = node::BroadcastTransaction(
-                node, tx, err_string, node::DEFAULT_MAX_RAW_TX_FEE_RATE, /*relay=*/true, /*wait_callback=*/false);
+                node, tx, err_string, node::DEFAULT_MAX_RAW_TX_FEE_RATE, /*relay=*/true, /*wait_callback=*/escrow_vout >= 0);
+            if (escrow_vout >= 0 && (err_code == node::TransactionError::OK || err_code == node::TransactionError::ALREADY_IN_UTXO_SET)) {
+                std::shared_ptr<wallet::CWallet> pwallet;
+                try {
+                    pwallet = WalletForModelFunding(request);
+                } catch (const UniValue&) {
+                    pwallet = nullptr;
+                }
+                if (pwallet) {
+                    LOCK(pwallet->cs_wallet);
+                    auto it = pwallet->mapWallet.find(tx->GetHash().ToUint256());
+                    if (it != pwallet->mapWallet.end()) {
+                        auto& mv = it->second.mapValue;
+                        mv["bounty_output_vout"] = std::to_string(escrow_vout);
+                        mv["bounty_descriptor"] = plan.descriptor;
+                        mv["bounty_refund_pubkey"] = plan.refund_key;
+                        mv["bounty_refund_height"] = std::to_string(plan.refund_height);
+                        if (!plan.bounty_id.empty()) mv["bounty_id"] = plan.bounty_id;
+                        if (!plan.lot_id.empty()) mv["bounty_lot_id"] = plan.lot_id;
+                        if (staged) {
+                            mv["bounty_hashlock"] = ToLower(plan.hashlock_hex);
+                            mv["bounty_claimant"] = plan.claimant_key;
+                        } else {
+                            mv["bounty_award_height"] = std::to_string(plan.award_height);
+                            mv["bounty_threshold"] = std::to_string(plan.threshold);
+                            std::string keys;
+                            for (const auto& k : plan.council_keys) keys += (keys.empty() ? "" : ",") + k;
+                            mv["bounty_council_keys"] = keys;
+                        }
+                        // The wallet added this transaction from the mempool
+                        // without these fields; WriteTx makes them durable.
+                        wallet::WalletBatch(pwallet->GetDatabase()).WriteTx(it->second);
+                    }
+                }
+            }
             UniValue out(UniValue::VOBJ);
             out.pushKV("txid", tx->GetHash().GetHex());
             out.pushKV("submitted", err_code == node::TransactionError::OK);

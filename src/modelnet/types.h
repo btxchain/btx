@@ -160,6 +160,10 @@ enum class FileRole : uint8_t {
 bool FileRoleFromName(const std::string& name, FileRole& out);
 const char* FileRoleName(FileRole role);
 
+/** The first max_bytes bytes of s, fewer when byte max_bytes would cut a UTF-8
+ *  character in two. JSON written with a cut character is refused on read. */
+std::string CutUtf8(const std::string& s, size_t max_bytes);
+
 } // namespace modelnet
 
 #endif // BITCOIN_MODELNET_TYPES_H

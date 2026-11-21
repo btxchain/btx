@@ -267,6 +267,13 @@ BOOST_AUTO_TEST_CASE(cnetaddr_basic)
     BOOST_CHECK(!addr.IsAddrV1Compatible());
     BOOST_CHECK_EQUAL(addr.ToStringAddr(), torv3_addr);
 
+    // TORv3, mixed case
+    const char* torv3_addr_mixed_case = "PG6Mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.ONION";
+    BOOST_REQUIRE(addr.SetSpecial(torv3_addr_mixed_case));
+    BOOST_REQUIRE(addr.IsValid());
+    BOOST_REQUIRE(addr.IsTor());
+    BOOST_CHECK_EQUAL(addr.ToStringAddr(), ToLower(torv3_addr_mixed_case));
+
     // TORv3, broken, with wrong checksum
     BOOST_CHECK(!addr.SetSpecial("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscsad.onion"));
 
@@ -706,6 +713,8 @@ BOOST_AUTO_TEST_CASE(get_local_addr_for_peer_port)
     //    he sees us as.
     // 2.1. For inbound connections we must override both the address and the port.
     // 2.2. For outbound connections we must override only the address.
+    // 3. A peer on a privacy network cannot see our address, so its view of us must not
+    //    be used, neither for inbound nor for outbound connections.
 
     // Pretend that we bound to this port.
     const uint16_t bind_port = 20001;
@@ -758,6 +767,40 @@ BOOST_AUTO_TEST_CASE(get_local_addr_for_peer_port)
     chosen_local_addr = GetLocalAddrForPeer(peer_in);
     BOOST_REQUIRE(chosen_local_addr);
     BOOST_CHECK(*chosen_local_addr == peer_us);
+
+    // An inbound privacy network peer claims to see us at a routable IPv4 address. Nothing is advertised.
+    CNetAddr i2p_addr;
+    BOOST_REQUIRE(i2p_addr.SetSpecial("udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p"));
+    CNode peer_in_i2p{/*id=*/0,
+                      /*sock=*/nullptr,
+                      /*addrIn=*/CAddress{CService{i2p_addr, I2P_SAM31_PORT}, NODE_NETWORK},
+                      /*nKeyedNetGroupIn=*/0,
+                      /*nLocalHostNonceIn=*/0,
+                      /*addrBindIn=*/CService{},
+                      /*addrNameIn=*/std::string{},
+                      /*conn_type_in=*/ConnectionType::INBOUND,
+                      /*inbound_onion=*/false,
+                      /*network_key=*/2};
+    peer_in_i2p.fSuccessfullyConnected = true;
+    peer_in_i2p.SetAddrLocal(peer_us);
+    BOOST_CHECK(!GetLocalAddrForPeer(peer_in_i2p));
+
+    // Same for an outbound privacy network peer
+    CNetAddr onion_addr;
+    BOOST_REQUIRE(onion_addr.SetSpecial("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"));
+    CNode peer_out_onion{/*id=*/0,
+                         /*sock=*/nullptr,
+                         /*addrIn=*/CAddress{CService{onion_addr, 8333}, NODE_NETWORK},
+                         /*nKeyedNetGroupIn=*/0,
+                         /*nLocalHostNonceIn=*/0,
+                         /*addrBindIn=*/CService{},
+                         /*addrNameIn=*/std::string{},
+                         /*conn_type_in=*/ConnectionType::OUTBOUND_FULL_RELAY,
+                         /*inbound_onion=*/false,
+                         /*network_key=*/3};
+    peer_out_onion.fSuccessfullyConnected = true;
+    peer_out_onion.SetAddrLocal(peer_us);
+    BOOST_CHECK(!GetLocalAddrForPeer(peer_out_onion));
 
     m_node.args->ForceSetArg("-bind", "");
 }
@@ -1655,11 +1698,25 @@ BOOST_AUTO_TEST_CASE(v2transport_test)
         tester.SendMessage(uint8_t(4), msg_data_1); // cmpctblock short id
         tester.SendMessage(0, {}); // Invalidly encoded message
         tester.SendMessage("tx", msg_data_2); // 12-character encoded message type
+        // Message type containing 0x7F (DEL): outside the printable-ASCII range
+        // accepted by the v1 transport, so must be rejected here as well.
+        tester.SendMessage(std::string{"t\x7f"}, msg_data_2);
+        // Message type containing 0x7E ('~'): at the boundary, still valid.
+        tester.SendMessage("t~", msg_data_2);
         ret = tester.Interact();
-        BOOST_REQUIRE(ret && ret->size() == 3);
-        BOOST_CHECK((*ret)[0] && (*ret)[0]->m_type == "cmpctblock" && std::ranges::equal((*ret)[0]->m_recv, MakeByteSpan(msg_data_1)));
+        BOOST_REQUIRE(ret);
+        BOOST_REQUIRE(ret->size() == 5);
+        BOOST_REQUIRE((*ret)[0]);
+        BOOST_CHECK((*ret)[0]->m_type == "cmpctblock");
+        BOOST_CHECK(std::ranges::equal((*ret)[0]->m_recv, MakeByteSpan(msg_data_1)));
         BOOST_CHECK(!(*ret)[1]);
-        BOOST_CHECK((*ret)[2] && (*ret)[2]->m_type == "tx" && std::ranges::equal((*ret)[2]->m_recv, MakeByteSpan(msg_data_2)));
+        BOOST_REQUIRE((*ret)[2]);
+        BOOST_CHECK((*ret)[2]->m_type == "tx");
+        BOOST_CHECK(std::ranges::equal((*ret)[2]->m_recv, MakeByteSpan(msg_data_2)));
+        BOOST_CHECK(!(*ret)[3]);
+        BOOST_REQUIRE((*ret)[4]);
+        BOOST_CHECK((*ret)[4]->m_type == "t~");
+        BOOST_CHECK(std::ranges::equal((*ret)[4]->m_recv, MakeByteSpan(msg_data_2)));
 
         // Then send a message with a bit error, expecting failure. It's possible this failure does
         // not occur immediately (when the length descriptor was modified), but it should come

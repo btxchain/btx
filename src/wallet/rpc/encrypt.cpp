@@ -253,9 +253,8 @@ RPCHelpMan encryptwallet()
                 "Use the walletpassphrase call for this, and then walletlock call.\n"
                 "If the wallet is already encrypted, use the walletpassphrasechange call.\n"
                 "** IMPORTANT **\n"
-                "For security reasons, the encryption process will generate a new HD seed, resulting\n"
-                "in the creation of a fresh set of active descriptors. Therefore, it is crucial to\n"
-                "securely back up the newly generated wallet file using the backupwallet RPC.\n",
+                "A legacy HD wallet replaces its HD seed. An existing P2MR descriptor seed is kept.\n"
+                "Back up the wallet with the backupwallet RPC after encrypting.\n",
                 {
                     {"passphrase", RPCArg::Type::STR, RPCArg::Optional::NO, "The pass phrase to encrypt the wallet with. It must be at least 1 character, but should be long."},
                 },
@@ -303,7 +302,7 @@ RPCHelpMan encryptwallet()
         throw JSONRPCError(RPC_WALLET_ENCRYPTION_FAILED, "Error: Failed to encrypt the wallet.");
     }
 
-    return "wallet encrypted; The keypool has been flushed and a new HD seed was generated. You need to make a new backup with the backupwallet RPC.";
+    return "wallet encrypted; The keypool has been flushed. A legacy HD seed is replaced and an existing P2MR seed is kept. You need to make a new backup with the backupwallet RPC.";
 },
     };
 }

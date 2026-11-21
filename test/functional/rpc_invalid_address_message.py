@@ -29,7 +29,9 @@ BECH32_TWO_ERRORS = 'btxrt1qtmp74ayg7p24uslctssvjm06q5phz4yrvxuxqd'
 BECH32_NO_SEPARATOR = 'btxrtqtmp74ayg7p24uslctssvjm06q5phz4yrvvuwqd'
 BECH32_INVALID_CHAR = 'btxrt1qtmpo4ayg7p24uslctssvjm06q5phz4yrvvuwqd'
 BECH32_MULTISIG_TWO_ERRORS = 'btxrt1qdg3myxgvzw7ml9qxejxhlkyxm7vl9r56yzkfgvzclrf4hkpx9yfqtu7g58'
-BECH32_WRONG_VERSION = 'btxrt1ptmp74ayg7p24uslctssvjm06q5phz4yrjwmfgy'
+# BECH32_VALID with its witness version changed from 0 to 1 and the checksum kept, as upstream builds it:
+# neither a Bech32 nor a Bech32m checksum matches.
+BECH32_WRONG_VERSION = 'btxrt1ptmp74ayg7p24uslctssvjm06q5phz4yrvvuwqd'
 
 BASE58_VALID = 'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn'
 BASE58_INVALID_PREFIX = '17VZNX1SN5NtKa8UQFxwQbFeFc3iqRYhem'
@@ -86,7 +88,7 @@ class InvalidAddressErrorMessageTest(BitcoinTestFramework):
         self.check_invalid(BECH32_INVALID_BECH32M, 'Version 0 witness address must use Bech32 checksum')
         self.check_invalid(BECH32_INVALID_VERSION, 'Invalid Bech32 address witness version')
         self.check_invalid(BECH32_INVALID_V0_SIZE, "Invalid Bech32 v0 address program size (21 bytes), per BIP141")
-        self.check_invalid(BECH32_TOO_LONG, 'Bech32 string too long', list(range(90, len(BECH32_TOO_LONG))))
+        self.check_invalid(BECH32_TOO_LONG, 'Bech32 string too long', [90])
         self.check_invalid(BECH32_ONE_ERROR, 'Invalid Bech32 checksum')
         self.check_invalid(BECH32_TWO_ERRORS, 'Invalid Bech32 checksum')
         self.check_invalid(BECH32_ONE_ERROR_CAPITALS, 'Invalid Bech32 checksum')
@@ -116,7 +118,7 @@ class InvalidAddressErrorMessageTest(BitcoinTestFramework):
         node = self.nodes[0]
 
         # Missing arg returns the help text
-        assert_raises_rpc_error(-1, "Return information about the given bitcoin address.", node.validateaddress)
+        assert_raises_rpc_error(-1, "Return information about the given BTX address.", node.validateaddress)
         # Explicit None is not allowed for required parameters
         assert_raises_rpc_error(-3, "JSON value of type null is not of expected type string", node.validateaddress, None)
 

@@ -84,6 +84,8 @@ public:
     void NoteVerifying(uint64_t request_id);
     void NoteCommitted(uint64_t request_id, uint64_t useful_bytes);
     void NoteFailed(uint64_t request_id);
+    /** A piece arrived: commit its request still in flight, fail the others. */
+    void NotePieceCommitted(const std::vector<uint64_t>& request_ids, uint64_t useful_bytes);
     void ObservePeer(const std::string& endpoint, const PeerMetrics& sample);
     bool GetRequest(uint64_t request_id, TransferRequest& out) const;
     std::map<std::string, PeerMetrics> Metrics() const;

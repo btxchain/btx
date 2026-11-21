@@ -148,7 +148,11 @@ void TransferSession::NoteCommitted(uint64_t request_id, uint64_t useful_bytes)
     std::lock_guard<std::mutex> lock(m_mu);
     for (auto& r : m_ledger) {
         if (r.request_id != request_id) continue;
-        if (r.generation != m_generation || r.phase == RequestPhase::COMMITTED || r.phase == RequestPhase::CANCELLED) return;
+        // A failed request already gave its credit back.
+        if (r.generation != m_generation || r.phase == RequestPhase::COMMITTED || r.phase == RequestPhase::CANCELLED ||
+            r.phase == RequestPhase::FAILED) {
+            return;
+        }
         r.phase = RequestPhase::COMMITTED;
         m_credit->Release(r.bytes);
         auto& m = m_metrics[r.endpoint];
@@ -167,7 +171,7 @@ void TransferSession::NoteFailed(uint64_t request_id)
     for (auto& r : m_ledger) {
         if (r.request_id != request_id) continue;
         if (r.generation != m_generation || r.phase == RequestPhase::COMMITTED ||
-            r.phase == RequestPhase::CANCELLED) {
+            r.phase == RequestPhase::CANCELLED || r.phase == RequestPhase::FAILED) {
             return;
         }
         r.phase = RequestPhase::FAILED;
@@ -178,6 +182,35 @@ void TransferSession::NoteFailed(uint64_t request_id)
         m.timeout_count += 1;
         m_outstanding.erase(std::tuple<std::string, uint32_t, uint32_t>{r.endpoint, r.file_index, r.piece_index});
         return;
+    }
+}
+
+void TransferSession::NotePieceCommitted(const std::vector<uint64_t>& request_ids, uint64_t useful_bytes)
+{
+    if (request_ids.empty()) return;
+    // A piece asked again after a failure keeps its failed request ids: the
+    // bytes came on the request still in flight, not on the first one.
+    uint64_t winner = request_ids.front();
+    {
+        std::lock_guard<std::mutex> lock(m_mu);
+        auto in_flight = [&](uint64_t id) {
+            for (const auto& r : m_ledger) {
+                if (r.request_id != id) continue;
+                return r.generation == m_generation && r.phase != RequestPhase::COMMITTED &&
+                       r.phase != RequestPhase::CANCELLED && r.phase != RequestPhase::FAILED;
+            }
+            return false;
+        };
+        for (uint64_t id : request_ids) {
+            if (in_flight(id)) {
+                winner = id;
+                break;
+            }
+        }
+    }
+    NoteCommitted(winner, useful_bytes);
+    for (uint64_t id : request_ids) {
+        if (id != winner) NoteFailed(id);
     }
 }
 

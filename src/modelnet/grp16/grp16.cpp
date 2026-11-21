@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/grp16/grp16.h>
 #include <modelnet/nifdt_contract/contract.h>
 
@@ -16,8 +17,8 @@ namespace {
 
 bool AddOk(int64_t a, int64_t b, int64_t& out)
 {
-    const __int128 s = static_cast<__int128>(a) + static_cast<__int128>(b);
-    if (s > static_cast<__int128>(INT64_MAX) || s < static_cast<__int128>(INT64_MIN)) return false;
+    const btx::I128 s = static_cast<btx::I128>(a) + static_cast<btx::I128>(b);
+    if (s > static_cast<btx::I128>(INT64_MAX) || s < static_cast<btx::I128>(INT64_MIN)) return false;
     out = static_cast<int64_t>(s);
     return true;
 }

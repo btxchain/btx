@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:participation-v1",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "enum": [
+        "observe",
+        "taker",
+        "maker",
+        "recovery"
+      ]
+    }
+  },
+  "required": [
+    "mode"
+  ],
+  "additionalProperties": false
+}

@@ -6,6 +6,10 @@
 #include <string>
 #include <cstdint>
 namespace swapnet {
+// Thrown when a native RPC reports one of the fixed not-found texts. The
+// Python bridge maps only this type to an absent object. Other failures stay
+// generic so a broadcast is not repeated over an unknown error.
+struct NativeAbsent {};
 struct Callbacks {
     std::function<std::string(const std::string&,const std::string&,const std::string&)> core;
     std::function<bool(std::int64_t,const std::string&,const std::string&)> send;

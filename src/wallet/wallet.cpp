@@ -1291,6 +1291,17 @@ bool CWallet::IsSpent(const COutPoint& outpoint) const
     return false;
 }
 
+//! Txids of the wallet transactions that spend outpoint, in any state. Unlike
+//! IsSpent, the caller filters by state (abandoned/conflicted/confirmed).
+std::vector<uint256> CWallet::GetSpendingTxids(const COutPoint& outpoint) const
+{
+    AssertLockHeld(cs_wallet);
+    std::vector<uint256> txids;
+    const auto range = mapTxSpends.equal_range(outpoint);
+    for (auto it = range.first; it != range.second; ++it) txids.push_back(it->second);
+    return txids;
+}
+
 void CWallet::AddToSpends(const COutPoint& outpoint, const uint256& wtxid, WalletBatch* batch)
 {
     mapTxSpends.insert(std::make_pair(outpoint, wtxid));
@@ -5858,6 +5869,31 @@ void CWallet::SetupImportedPQWalletBundle(WalletBatch& batch, Span<const unsigne
     memory_cleanse(seed_vec.data(), seed_vec.size());
 }
 
+std::optional<std::array<unsigned char, 32>> CWallet::GetDescriptorPQMasterSeed() const
+{
+    AssertLockHeld(cs_wallet);
+    std::optional<std::array<unsigned char, 32>> seed;
+    for (const auto& spkm : GetAllScriptPubKeyMans()) {
+        const auto* desc_spkm = dynamic_cast<const DescriptorScriptPubKeyMan*>(spkm);
+        if (!desc_spkm) continue;
+        std::string desc_str;
+        if (!desc_spkm->GetDescriptorString(desc_str, /*priv=*/true)) continue;
+        FlatSigningProvider keys;
+        std::string error;
+        const auto parsed = Parse(desc_str, keys, error, /*require_checksum=*/true);
+        for (const auto& desc : parsed) {
+            for (const auto& entry : desc->ExtractAllPQSeeds()) {
+                if (!seed) {
+                    seed = entry.second;
+                } else if (*seed != entry.second) {
+                    return std::nullopt;
+                }
+            }
+        }
+    }
+    return seed;
+}
+
 void CWallet::SetupOwnPQDescriptorScriptPubKeyMans(WalletBatch& batch)
 {
     AssertLockHeld(cs_wallet);
@@ -5873,10 +5909,6 @@ void CWallet::SetupOwnPQDescriptorScriptPubKeyMans(WalletBatch& batch)
             needs_new_p2mr = true;
         }
     }
-    if (!needs_new_p2mr) {
-        return;
-    }
-
     constexpr std::string_view kPQMasterSeedPurpose{"pqmasterseed"};
     auto persist_encrypted_seed = [&](const std::vector<unsigned char>& seed) {
         if (!IsCrypted()) return;
@@ -5902,6 +5934,35 @@ void CWallet::SetupOwnPQDescriptorScriptPubKeyMans(WalletBatch& batch)
             WalletLogPrintf("%s: failed to erase plaintext PQ master seed after encrypted migration\n", __func__);
         }
     };
+
+    if (!needs_new_p2mr) {
+        std::vector<unsigned char> plain;
+        uint256 existing_iv;
+        std::vector<unsigned char> existing_encrypted;
+        if (batch.ReadPQMasterSeed(plain) && !plain.empty()) {
+            if (plain.size() != 32) {
+                memory_cleanse(plain.data(), plain.size());
+                throw std::runtime_error(std::string(__func__) + ": stored PQ master seed has invalid length");
+            }
+            if (IsCrypted()) persist_encrypted_seed(plain);
+            memory_cleanse(plain.data(), plain.size());
+            return;
+        }
+        if (batch.ReadCryptedPQMasterSeed(existing_iv, existing_encrypted) && !existing_encrypted.empty()) {
+            return;
+        }
+        if (const auto copied{GetDescriptorPQMasterSeed()}) {
+            std::vector<unsigned char> copied_seed(copied->begin(), copied->end());
+            if (IsCrypted()) {
+                persist_encrypted_seed(copied_seed);
+            } else if (!batch.WritePQMasterSeed(copied_seed)) {
+                memory_cleanse(copied_seed.data(), copied_seed.size());
+                throw std::runtime_error(std::string(__func__) + ": writing PQ master seed failed");
+            }
+            memory_cleanse(copied_seed.data(), copied_seed.size());
+        }
+        return;
+    }
 
     // Reuse existing PQ master seed when present so shielded key derivation
     // remains stable across wallet encryption and descriptor manager refreshes.
@@ -5945,6 +6006,13 @@ void CWallet::SetupOwnPQDescriptorScriptPubKeyMans(WalletBatch& batch)
         }
         if (IsCrypted()) {
             persist_encrypted_seed(seed_vec);
+        }
+    } else if (const auto copied{GetDescriptorPQMasterSeed()}) {
+        seed_vec.assign(copied->begin(), copied->end());
+        if (IsCrypted()) {
+            persist_encrypted_seed(seed_vec);
+        } else if (!batch.WritePQMasterSeed(seed_vec)) {
+            throw std::runtime_error(std::string(__func__) + ": writing PQ master seed failed");
         }
     } else {
         std::array<unsigned char, 32> pq_seed{};

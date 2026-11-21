@@ -243,7 +243,9 @@ int GetnScore(const CService& addr)
 [[nodiscard]] static bool IsPeerAddrLocalGood(CNode *pnode)
 {
     CService addrLocal = pnode->GetAddrLocal();
-    return fDiscover && pnode->addr.IsRoutable() && addrLocal.IsRoutable() &&
+    // Tor/I2P peers can't see our clearnet address and the Tor/I2P address won't fit in addrMe (addrv1). so ignore it.
+    return fDiscover && !pnode->IsConnectedThroughPrivacyNet() &&
+           pnode->addr.IsRoutable() && addrLocal.IsRoutable() &&
            g_reachable_nets.Contains(addrLocal);
 }
 
@@ -1683,8 +1685,9 @@ std::optional<std::string> V2Transport::GetMessageType(Span<const uint8_t>& cont
 
     size_t msg_type_len{0};
     while (msg_type_len < CMessageHeader::MESSAGE_TYPE_SIZE && contents[msg_type_len] != 0) {
-        // Verify that message type bytes before the first 0x00 are in range.
-        if (contents[msg_type_len] < ' ' || contents[msg_type_len] > 0x7F) {
+        // Verify that message type bytes before the first 0x00 are in range. BIP324 specifies the
+        // long message type encoding as "an ASCII message type (as in the v1 P2P protocol)".
+        if (contents[msg_type_len] < ' ' || contents[msg_type_len] > 0x7E) {
             return {};
         }
         ++msg_type_len;

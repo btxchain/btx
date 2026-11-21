@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-connectswapinvite",
+  "type": "object",
+  "properties": {
+    "uri": {
+      "type": "string"
+    },
+    "endpoint_index": {
+      "type": "integer",
+      "default": 0
+    },
+    "allow_private": {
+      "type": "boolean",
+      "default": false
+    },
+    "allow_dns": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "uri"
+  ],
+  "additionalProperties": false
+}

@@ -459,6 +459,35 @@ bool ValidateMandate(const SubscriptionMandate& m, std::string& err)
     return true;
 }
 
+//! Every create, revoke and reserve saves all mandates again: the strings and
+//! lists of a new mandate have a size bound. Mandates already saved still load.
+static bool MandateFieldsBounded(const SubscriptionMandate& m, std::string& err)
+{
+    constexpr size_t MANDATE_ID_MAX{256};
+    constexpr size_t MANDATE_QUERY_MAX{4096};
+    constexpr size_t MANDATE_LIST_MAX{32};
+    if (m.mandate_id.size() > MANDATE_ID_MAX || m.collection_id.size() > MANDATE_ID_MAX) {
+        err = "mandate_id or collection_id too long";
+        return false;
+    }
+    if (m.query_filter.size() > MANDATE_QUERY_MAX) {
+        err = "query_filter too long";
+        return false;
+    }
+    if (m.allowed_kinds.size() > MANDATE_LIST_MAX || m.allowed_actions.size() > MANDATE_LIST_MAX ||
+        m.assurance_mode_restrictions.size() > MANDATE_LIST_MAX) {
+        err = "too many entries in a mandate list";
+        return false;
+    }
+    for (const auto& mode : m.assurance_mode_restrictions) {
+        if (mode.size() > MANDATE_ID_MAX) {
+            err = "assurance_mode_restrictions entry too long";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool MandateFromJson(const UniValue& src, SubscriptionMandate& m, std::string& err)
 {
     const UniValue& o = (src.exists("mandate") && src["mandate"].isObject()) ? src["mandate"] : src;
@@ -485,6 +514,13 @@ bool MandateFromJson(const UniValue& src, SubscriptionMandate& m, std::string& e
     m.publisher_id = StrField(o, "publisher_id");
     if (!ReadStringList(o, "allowed_kinds", m.allowed_kinds, err, true)) return false;
     if (!ReadStringList(o, "allowed_actions", m.allowed_actions, err, true)) return false;
+    // A restriction of the wrong type must not read as no restriction.
+    for (const char* k : {"collection_id", "query_filter"}) {
+        if (o.exists(k) && !o[k].isNull() && !o[k].isStr()) {
+            err = k;
+            return false;
+        }
+    }
     m.collection_id = StrField(o, "collection_id");
     m.query_filter = StrField(o, "query_filter");
     if (!o.exists("per_action_principal_limit_atoms") || !o.exists("total_principal_limit_atoms") ||
@@ -515,6 +551,10 @@ bool MandateFromJson(const UniValue& src, SubscriptionMandate& m, std::string& e
     if (o.exists("minimum_confirmations")) {
         if (!ReadCount(o, "minimum_confirmations", minc, err)) return false;
     } else {
+        err = "minimum_confirmations";
+        return false;
+    }
+    if (minc < 0 || minc > std::numeric_limits<int>::max()) {
         err = "minimum_confirmations";
         return false;
     }
@@ -1254,6 +1294,7 @@ bool SubscriptionStore::Dispatch(const std::string& method, const UniValue& para
     if (method == "createsubscriptionmandate") {
         SubscriptionMandate m;
         if (!MandateFromJson(a, m, err)) return fail("REJECTED", err);
+        if (!MandateFieldsBounded(m, err)) return fail("REJECTED", err);
         if (!m_node_network.empty() && m.network_id.Hex() != m_node_network) {
             return fail("REJECTED", "network_id");
         }
@@ -1346,6 +1387,12 @@ bool SubscriptionStore::Dispatch(const std::string& method, const UniValue& para
         }
         SubscriptionEvent ev;
         if (!EventFromJson(a, ev, err)) return fail("INVALID_PARAMETER", err);
+        // A reservation keeps the event_id, object_id and terms_id it was made
+        // for, and every reserve saves all mandates again: they have a size bound.
+        constexpr size_t RESERVATION_ID_MAX{256};
+        if (ev.event_id.size() > RESERVATION_ID_MAX || ev.object_id.size() > RESERVATION_ID_MAX) {
+            return fail("INVALID_PARAMETER", "event_id or object_id too long");
+        }
         ev.mandate_id = id;
         if (ev.action.empty()) ev.action = "FUND_WITH_MANDATE";
         SignedTerms terms;
@@ -1357,6 +1404,7 @@ bool SubscriptionStore::Dispatch(const std::string& method, const UniValue& para
                 terms.known = false;
             }
         }
+        if (terms.terms_id.size() > RESERVATION_ID_MAX) return fail("INVALID_PARAMETER", "terms_id too long");
         Reservation r;
         const int64_t actions_before = it->second->StatusJson()["action_count"].getInt<int64_t>();
         if (!it->second->EvaluateAndReserve(ev, terms, r, now_ms, err)) return fail("REJECTED", err);

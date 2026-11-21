@@ -68,6 +68,7 @@
 #include <txrequest.h>
 #include <dandelion.h>
 #include <util/check.h>
+#include <util/hasher.h>
 #include <util/strencodings.h>
 #include <util/thread.h>
 #include <util/time.h>
@@ -1284,6 +1285,10 @@ struct Peer {
     int m_matmul_protocol_ignored GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
     /** Consecutive unconnecting HEADERS messages. Reset when headers connect. */
     int m_unconnecting_headers GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
+    /** Last block this peer announced in a HEADERS message that did not
+     *  connect. Its body, pushed right after the header, is dropped like the
+     *  announcement rather than failed as BLOCK_MISSING_PREV. */
+    uint256 m_unconnecting_announced GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
 
     /** WP-8 / H9/H10: per-peer MMSKETCH ingress token bucket (see
      *  MATMUL_SKETCH_RECV_BUCKET_MAX), same lazy-refill idiom as the serve
@@ -2061,6 +2066,8 @@ private:
 
     FastRandomContext m_rng GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
+    /** Copied into short-lived tx INV deduplication sets to avoid generating salts per message. */
+    const SaltedTxidHasher m_txhash_hasher;
     FeeFilterRounder m_fee_filter_rounder GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
     const CChainParams& m_chainparams;
@@ -11411,10 +11418,14 @@ void PeerManagerImpl::HandleUnconnectingHeaders(CNode& pfrom, Peer& peer,
     // eventually get the headers - even from a different peer -
     // we can use this peer to download.
     WITH_LOCK(cs_main, UpdateBlockAvailability(pfrom.GetId(), headers.back().GetHash()));
+    peer.m_unconnecting_announced = headers.back().GetHash();
 
-    if (pfrom.PunishInvalidBlocks()) {
-        pfrom.fDisconnect = true;
-    }
+    // No connection-type disconnect here. A peer announces with HEADERS when
+    // it believes we have the parent, which it records from the headers it
+    // sent us; this node deliberately drops sent headers while keeping the
+    // peer (verification-budget deferral, the unauthenticated-lead cap), so
+    // the next announcement is benign. A compact block with an unknown parent
+    // is not punished either. The flood bound above applies to every peer.
 }
 
 bool PeerManagerImpl::CheckHeadersAreContinuous(const std::vector<CBlockHeader>& headers) const
@@ -15146,6 +15157,10 @@ std::optional<node::PackageToValidate> PeerManagerImpl::ProcessInvalidTx(NodeId 
 
     const auto& [add_extra_compact_tx, unique_parents, package_to_validate] = m_txdownloadman.MempoolRejectedTx(ptx, state, nodeid, first_time_failure);
 
+    if (peer && ptx->HasShieldedBundle() && state.GetRejectReason().find("bad-shielded-proof") != std::string::npos) {
+        Misbehaving(*peer, "invalid shielded proof");
+    }
+
     const size_t tx_dynamic_usage{RecursiveDynamicUsage(*ptx)};
     if (add_extra_compact_tx && tx_dynamic_usage < BLOCK_RECONSTRUCTION_EXTRA_TXN_PER_TXN_SIZE_LIMIT) {
         AddToCompactExtraTransactions(ptx, tx_dynamic_usage);
@@ -15230,7 +15245,8 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
                 }
                 case MempoolAcceptResult::ResultType::MEMPOOL_ENTRY:
                 {
-                    // AlreadyHaveTx() should be catching transactions that are already in mempool.
+                    // AlreadyHaveTx() catches a parent that is already in the mempool, and
+                    // Find1P1CPackage() skips children that are.
                     Assume(false);
                     break;
                 }
@@ -18594,7 +18610,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         if (!WITH_LOCK(cs_main, return IsBlockRequestedFromPeer(
                 manifest.block_hash, pfrom.GetId()))) {
-            Misbehaving(*peer, "unsolicited blkchnkman");
+            // The request may have been released after this peer was asked:
+            // another source delivered the block first (processing a new block
+            // releases its request for every peer), or an in-flight reclaim,
+            // timeout or getblockfrompeer moved it. That benign race cannot be
+            // told apart from a manifest that was never requested, and the
+            // full BLOCK path punishes neither. As in the global-pressure path
+            // below, the sender has begun an ordered stream: end it cleanly
+            // rather than discouraging the peer or treating its following
+            // chunks as misbehavior. No stream state was reserved for it.
+            LogDebug(BCLog::NET,
+                     "Dropping unsolicited blkchnkman %s, disconnecting peer=%d\n",
+                     manifest.block_hash.ToString(), pfrom.GetId());
+            pfrom.fDisconnect = true;
             return;
         }
         bool global_pressure{false};
@@ -19227,6 +19255,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         const bool reject_tx_invs{RejectIncomingTxs(pfrom)};
+        std::unordered_set<uint256, SaltedTxidHasher> seen_txids{0, m_txhash_hasher};
+        std::unordered_set<uint256, SaltedTxidHasher> seen_wtxids{0, m_txhash_hasher};
 
         LOCK2(cs_main, m_tx_download_mutex);
 
@@ -19265,6 +19295,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     pfrom.fDisconnect = true;
                     return;
                 }
+                // MSG_WITNESS_TX is treated as a txid, despite only being specified for getdata.
+                auto& seen_hashes{inv.IsMsgWtx() ? seen_wtxids : seen_txids};
+                if (!seen_hashes.insert(inv.hash).second) continue;
                 const GenTxid gtxid = ToGenTxid(inv);
                 AddKnownTx(*peer, inv.hash);
 
@@ -22767,6 +22800,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         const CBlockIndex* prev_block{WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock))};
 
+        // A peer that believes we hold the parent sends the next body right
+        // after its header (NewPoWValidBlock "next honest body", deferred fast
+        // bodies). If that header did not connect here, HandleUnconnectingHeaders
+        // already asked for the missing headers and noted the block for download,
+        // and the body cannot connect either. Drop it once, like that
+        // announcement, instead of failing it as BLOCK_MISSING_PREV, which
+        // disconnects an outbound peer. A block whose header was not announced
+        // this way, or the same body sent again, keeps the usual handling.
+        if (!prev_block && pblock->GetHash() == peer->m_unconnecting_announced) {
+            peer->m_unconnecting_announced.SetNull();
+            LogDebug(BCLog::NET, "Dropping block %s from peer=%d: its announced header did not connect\n",
+                     pblock->GetHash().ToString(), pfrom.GetId());
+            WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), pfrom.GetId()));
+            return;
+        }
+
         // Check for possible mutation if it connects to something we know so we can check for DEPLOYMENT_SEGWIT being active
         if (prev_block && IsBlockMutated(/*block=*/*pblock,
                            /*check_witness_root=*/DeploymentActiveAfter(prev_block, m_chainman, Consensus::DEPLOYMENT_SEGWIT))) {
@@ -23352,10 +23401,10 @@ bool PeerManagerImpl::MaybeDiscourageAndDisconnect(CNode& pnode, Peer& peer)
         return true;
     }
 
-    // Normal case: Disconnect the peer and discourage all nodes sharing the address
+    // Normal case: Disconnect the peer only, but discourage all nodes sharing the address
     LogDebug(BCLog::NET, "Disconnecting and discouraging peer %d!\n", peer.m_id);
     if (m_banman) m_banman->Discourage(pnode.addr);
-    m_connman.DisconnectNode(pnode.addr);
+    pnode.fDisconnect = true;
     return true;
 }
 
@@ -23542,7 +23591,14 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
 
     CNodeState &state = *State(pto.GetId());
 
-    if (!state.m_chain_sync.m_protect && pto.IsOutboundOrBlockRelayConn() && state.fSyncStarted) {
+    // The header-sync height gate (c5b53ce1, f175e710) never sets fSyncStarted
+    // for a peer whose best known block, or VERSION height, is below our tip.
+    // That is the peer stuck on an old chain, so out of IBD the chain-sync
+    // rule covers every outbound peer that can serve blocks, not only the ones
+    // header sync started with. The gate itself is unchanged.
+    const bool chain_sync_applies{state.fSyncStarted ||
+        (!m_chainman.IsInitialBlockDownload() && CanServeBlocks(peer))};
+    if (!state.m_chain_sync.m_protect && pto.IsOutboundOrBlockRelayConn() && chain_sync_applies) {
         // This is an outbound peer subject to disconnection if they don't
         // announce a block with as much work as the current tip within
         // CHAIN_SYNC_TIMEOUT + HEADERS_RESPONSE_TIME seconds (note: if
@@ -23587,13 +23643,15 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
                 pto.fDisconnect = true;
             } else {
                 assert(state.m_chain_sync.m_work_header);
-                // Here, we assume that the getheaders message goes out,
-                // because it'll either go out or be skipped because of a
-                // getheaders in-flight already, in which case the peer should
-                // still respond to us with a sufficiently high work chain tip.
+                // Bypass the send window. A background refresh or the
+                // best-known probe, anchored at our tip, can hold it on every
+                // pass and gets an empty reply from a synced peer; this request
+                // is anchored below the benchmark, so it is the one the peer
+                // must answer. It goes out at most once per peer per
+                // CHAIN_SYNC_TIMEOUT.
                 MaybeSendGetHeaders(pto,
                         GetLocator(state.m_chain_sync.m_work_header->pprev),
-                        peer);
+                        peer, /*bypass_send_window=*/true);
                 LogDebug(BCLog::NET, "sending getheaders to outbound peer=%d to verify chain work (current best known block:%s, benchmark blockhash: %s)\n", pto.GetId(), state.pindexBestKnownBlock != nullptr ? state.pindexBestKnownBlock->GetBlockHash().ToString() : "<none>", state.m_chain_sync.m_work_header->GetBlockHash().ToString());
                 state.m_chain_sync.m_sent_getheaders = true;
                 // Bump the timeout to allow a response, which could clear the timeout
@@ -24142,11 +24200,17 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
         }
         if (!consensus_ok) {
-            state.m_chain_sync.m_timeout = 0s;
-            state.m_chain_sync.m_work_header = nullptr;
-            state.m_chain_sync.m_sent_getheaders = false;
+            // Losing the tier releases chain-sync protection and restarts the
+            // chain-sync timer once, on that transition. Do not zero the timer
+            // on every pass: since 75a9d850 stopped rotating these peers, that
+            // reset let ConsiderEviction re-arm the 20-minute timeout forever,
+            // so an ineligible outbound peer that fell behind our tip was never
+            // evicted. The tier is a preference; lagging is judged by work.
             if (state.m_chain_sync.m_protect) {
                 state.m_chain_sync.m_protect = false;
+                state.m_chain_sync.m_timeout = 0s;
+                state.m_chain_sync.m_work_header = nullptr;
+                state.m_chain_sync.m_sent_getheaders = false;
                 int recomputed_count{0};
                 for (const auto& entry : m_node_states) {
                     recomputed_count += entry.second.m_chain_sync.m_protect;

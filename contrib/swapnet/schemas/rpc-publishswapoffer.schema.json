@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-publishswapoffer",
+  "type": "object",
+  "properties": {
+    "sell_asset": {
+      "type": "string"
+    },
+    "buy_asset": {
+      "type": "string"
+    },
+    "sizes": {
+      "type": "array"
+    },
+    "kind": {
+      "type": "string",
+      "default": "indicative"
+    },
+    "slots": {
+      "type": "integer",
+      "default": 1
+    },
+    "ttl": {
+      "type": "integer",
+      "default": 120
+    },
+    "offer_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "sell_asset",
+    "buy_asset",
+    "sizes"
+  ],
+  "additionalProperties": false
+}

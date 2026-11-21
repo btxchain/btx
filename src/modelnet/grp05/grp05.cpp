@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/grp05/grp05.h>
 #include <modelnet/nifdt_contract/contract.h>
 
@@ -25,11 +26,11 @@ bool ParseI64(const std::string& s, int64_t& out)
         i = 1;
         if (i == s.size()) return false;
     }
-    __int128 v = 0;
+    btx::I128 v = 0;
     for (; i < s.size(); ++i) {
         if (s[i] < '0' || s[i] > '9') return false;
         v = v * 10 + (s[i] - '0');
-        if (v > static_cast<__int128>(INT64_MAX)) return false;
+        if (v > static_cast<btx::I128>(INT64_MAX)) return false;
     }
     if (neg) v = -v;
     out = static_cast<int64_t>(v);
@@ -38,16 +39,16 @@ bool ParseI64(const std::string& s, int64_t& out)
 
 bool AddOk(int64_t a, int64_t b, int64_t& out)
 {
-    const __int128 s = static_cast<__int128>(a) + static_cast<__int128>(b);
-    if (s > static_cast<__int128>(INT64_MAX) || s < static_cast<__int128>(INT64_MIN)) return false;
+    const btx::I128 s = static_cast<btx::I128>(a) + static_cast<btx::I128>(b);
+    if (s > static_cast<btx::I128>(INT64_MAX) || s < static_cast<btx::I128>(INT64_MIN)) return false;
     out = static_cast<int64_t>(s);
     return true;
 }
 
 bool MulOk(int64_t a, int64_t b, int64_t& out)
 {
-    const __int128 s = static_cast<__int128>(a) * static_cast<__int128>(b);
-    if (s > static_cast<__int128>(INT64_MAX) || s < static_cast<__int128>(INT64_MIN)) return false;
+    const btx::I128 s = static_cast<btx::I128>(a) * static_cast<btx::I128>(b);
+    if (s > static_cast<btx::I128>(INT64_MAX) || s < static_cast<btx::I128>(INT64_MIN)) return false;
     out = static_cast<int64_t>(s);
     return true;
 }

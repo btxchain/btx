@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
 #include <hash.h>
@@ -1996,9 +1997,9 @@ BuildFiatShamirShaExecutionPlanV1(
             const Fp3 challenge =
                 gf::FromChallengeBytes3(
                     digest.data());
-            const unsigned __int128 wide =
+            const btx::U128 wide =
                 (static_cast<
-                     unsigned __int128>(
+                     btx::U128>(
                      gf::Canonical(
                          challenge.c1))
                  << 64) |
@@ -2359,8 +2360,8 @@ bool AlignAlgAirProofOodToBoundedShaScheduleV1(
                     challenge_digest(
                         "fra3_query", spec.index)
                         .data());
-            const unsigned __int128 wide =
-                (static_cast<unsigned __int128>(
+            const btx::U128 wide =
+                (static_cast<btx::U128>(
                      gf::Canonical(challenge.c1))
                  << 64) |
                 gf::Canonical(challenge.c0);
@@ -2668,8 +2669,8 @@ MeasureFiatShamirChallengeSelectionAirJoinV1(
                 challenge_digest("fra3_query", spec.index);
             const Fp3 challenge =
                 gf::FromChallengeBytes3(digest.data());
-            const unsigned __int128 wide =
-                (static_cast<unsigned __int128>(
+            const btx::U128 wide =
+                (static_cast<btx::U128>(
                      gf::Canonical(challenge.c1))
                  << 64) |
                 gf::Canonical(challenge.c0);

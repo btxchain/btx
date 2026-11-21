@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/swarm_paymesh.h>
 
 #include <modelnet/swarm_codec.h>
@@ -204,7 +205,7 @@ bool SwarmValidateSplit(const SwarmRewardSplit& split, std::string& err)
 int64_t SwarmPayShare(int64_t gross, int64_t ppm)
 {
     if (gross < 0 || ppm < 0) return 0;
-    return static_cast<int64_t>((static_cast<__int128>(gross) * static_cast<__int128>(ppm)) / SWARM_PPM_TOTAL);
+    return static_cast<int64_t>((static_cast<btx::I128>(gross) * static_cast<btx::I128>(ppm)) / SWARM_PPM_TOTAL);
 }
 
 bool SwarmWinnerTakeAll(const SwarmRewardSplit& split)
@@ -298,7 +299,7 @@ bool SwarmBuildPayout(SwarmChannelTx& tx, int64_t cumulative, int height, int re
         return false;
     }
     if (cumulative < 0 || tx.fee_reserve < 0 || tx.capacity < 0 ||
-        static_cast<__int128>(cumulative) + tx.fee_reserve > tx.capacity) {
+        static_cast<btx::I128>(cumulative) + tx.fee_reserve > tx.capacity) {
         err = "CHANNEL_CAPACITY";
         return false;
     }
@@ -498,7 +499,7 @@ bool SwarmTaxOpenInference(bool open_license, bool local_execution, std::string&
 int64_t SwarmMassExit(int64_t closes, int64_t bytes_per_close, int64_t block_bytes)
 {
     if (closes < 0 || bytes_per_close < 0 || block_bytes <= 0) return 0;
-    const __int128 bytes = static_cast<__int128>(closes) * static_cast<__int128>(bytes_per_close);
+    const btx::I128 bytes = static_cast<btx::I128>(closes) * static_cast<btx::I128>(bytes_per_close);
     return static_cast<int64_t>((bytes + block_bytes - 1) / block_bytes);
 }
 

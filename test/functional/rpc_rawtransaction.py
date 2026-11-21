@@ -71,7 +71,9 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.extra_args = [
             ["-txindex"],
             ["-txindex"],
-            ["-fastprune", "-prune=1"],
+            # BTX keeps -datacarrier off by default; the maxburnamount tests
+            # below send OP_RETURN outputs through node 2.
+            ["-fastprune", "-prune=1", "-datacarrier=1"],
         ]
         # whitelist peers to speed up tx relay / mempool sync
         self.noban_tx_relay = True
@@ -83,11 +85,6 @@ class RawTransactionsTest(BitcoinTestFramework):
 
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
-        probe_tx_hex = self.wallet.create_self_transfer()["tx"].serialize().hex()
-        probe = self.nodes[0].testmempoolaccept([probe_tx_hex])[0]
-        if not probe.get("allowed", False) and probe.get("reject-reason") == "scriptpubkey":
-            self.run_btx_p2mr_rawtransaction_smoke()
-            return
 
         self.getrawtransaction_tests()
         self.createrawtransaction_tests()
@@ -96,39 +93,6 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.decoderawtransaction_tests()
         self.transaction_version_number_tests()
         self.getrawtransaction_verbosity_tests()
-
-    def run_btx_p2mr_rawtransaction_smoke(self):
-        self.log.info("BTX policy mode: MiniWallet default script type is non-standard; running rawtransaction smoke coverage.")
-
-        node0 = self.nodes[0]
-        node1 = self.nodes[1]
-
-        # Mine a block and exercise getrawtransaction with explicit blockhash.
-        [block_hash] = self.generate(node1, 1)
-        coinbase_txid = node1.getblock(block_hash, 2)["tx"][0]["txid"]
-        coinbase_hex = node0.getrawtransaction(coinbase_txid, False, block_hash)
-        assert_equal(node0.getrawtransaction(coinbase_txid, True, block_hash)["txid"], coinbase_txid)
-        assert_equal(node0.decoderawtransaction(coinbase_hex)["txid"], coinbase_txid)
-
-        # OP_RETURN construction is disabled, while financial output
-        # creation/decoding remains available.
-        assert_raises_rpc_error(
-            -8,
-            'OP_RETURN "data" outputs are disabled on BTX',
-            node0.createrawtransaction,
-            [],
-            {"data": "01"},
-        )
-        node0.createwallet(wallet_name="rawtransaction_smoke", descriptors=True)
-        destination = node0.get_wallet_rpc("rawtransaction_smoke").getnewaddress(address_type="p2mr")
-        raw = node0.createrawtransaction([], {destination: 1})
-        decoded_raw = node0.decoderawtransaction(raw)
-        assert_equal(decoded_raw["vin"], [])
-        assert_equal(decoded_raw["vout"][0]["scriptPubKey"]["address"], destination)
-
-        # Invalid-raw submission path remains deterministic.
-        assert_raises_rpc_error(-22, "TX decode failed", node0.sendrawtransaction, "00")
-
 
     def getrawtransaction_tests(self):
         tx = self.wallet.send_self_transfer(from_node=self.nodes[0])
@@ -326,14 +290,17 @@ class RawTransactionsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-3, "JSON value of type string is not of expected type array", self.nodes[0].createrawtransaction, [], 'foo')
         self.nodes[0].createrawtransaction(inputs=[], outputs={})  # Should not throw for backwards compatibility
         self.nodes[0].createrawtransaction(inputs=[], outputs=[])
-        assert_raises_rpc_error(-8, "Data must be hexadecimal string", self.nodes[0].createrawtransaction, [], {'data': 'foo'})
-        assert_raises_rpc_error(-5, "Invalid Bitcoin address", self.nodes[0].createrawtransaction, [], {'foo': 0})
+        # BTX refuses "data" (OP_RETURN) outputs in createrawtransaction.
+        data_disabled = 'OP_RETURN "data" outputs are disabled on BTX'
+        assert_raises_rpc_error(-8, data_disabled, self.nodes[0].createrawtransaction, [], {'data': 'foo'})
+        assert_raises_rpc_error(-8, data_disabled, self.nodes[0].createrawtransaction, [], {'data': '99'})
+        assert_raises_rpc_error(-5, "Invalid BTX address", self.nodes[0].createrawtransaction, [], {'foo': 0})
         assert_raises_rpc_error(-3, "Invalid amount", self.nodes[0].createrawtransaction, [], {address: 'foo'})
         assert_raises_rpc_error(-3, "Amount out of range", self.nodes[0].createrawtransaction, [], {address: -1})
         assert_raises_rpc_error(-8, "Invalid parameter, duplicated address: %s" % address, self.nodes[0].createrawtransaction, [], multidict([(address, 1), (address, 1)]))
         assert_raises_rpc_error(-8, "Invalid parameter, duplicated address: %s" % address, self.nodes[0].createrawtransaction, [], [{address: 1}, {address: 1}])
-        assert_raises_rpc_error(-8, "Invalid parameter, duplicate key: data", self.nodes[0].createrawtransaction, [], [{"data": 'aa'}, {"data": "bb"}])
-        assert_raises_rpc_error(-8, "Invalid parameter, duplicate key: data", self.nodes[0].createrawtransaction, [], multidict([("data", 'aa'), ("data", "bb")]))
+        assert_raises_rpc_error(-8, data_disabled, self.nodes[0].createrawtransaction, [], [{"data": 'aa'}, {"data": "bb"}])
+        assert_raises_rpc_error(-8, data_disabled, self.nodes[0].createrawtransaction, [], multidict([("data", 'aa'), ("data", "bb")]))
         assert_raises_rpc_error(-8, "Invalid parameter, key-value pair must contain exactly one key", self.nodes[0].createrawtransaction, [], [{'a': 1, 'b': 2}])
         assert_raises_rpc_error(-8, "Invalid parameter, key-value pair not an object as expected", self.nodes[0].createrawtransaction, [], [['key-value pair1'], ['2']])
 
@@ -365,13 +332,9 @@ class RawTransactionsTest(BitcoinTestFramework):
             tx.serialize().hex(),
             self.nodes[2].createrawtransaction(inputs=[{'txid': TXID, 'vout': 9}], outputs=[{address: 99}, {address2: 99}]),
         )
-        # Multiple mixed outputs
-        tx = tx_from_hex(self.nodes[2].createrawtransaction(inputs=[{'txid': TXID, 'vout': 9}], outputs=multidict([(address, 99), (address2, 99), ('data', '99')])))
-        assert_equal(len(tx.vout), 3)
-        assert_equal(
-            tx.serialize().hex(),
-            self.nodes[2].createrawtransaction(inputs=[{'txid': TXID, 'vout': 9}], outputs=[{address: 99}, {address2: 99}, {'data': '99'}]),
-        )
+        # Multiple mixed outputs: a "data" output is refused in either form
+        assert_raises_rpc_error(-8, data_disabled, self.nodes[2].createrawtransaction, [{'txid': TXID, 'vout': 9}], multidict([(address, 99), (address2, 99), ('data', '99')]))
+        assert_raises_rpc_error(-8, data_disabled, self.nodes[2].createrawtransaction, [{'txid': TXID, 'vout': 9}], [{address: 99}, {address2: 99}, {'data': '99'}])
 
     def sendrawtransaction_tests(self):
         self.log.info("Test sendrawtransaction with missing input")

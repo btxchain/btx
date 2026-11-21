@@ -1,27 +1,27 @@
 # BTX Download-and-Go Guide
 
-> **Current line:** **v0.34.9** (shipping). See
-> [0.34.9 release notes](release-notes/release-notes-0.34.9.md) and
-> [release notes](release-notes.md). The GitHub tag that resolves is
-> [`v0.34.9`](https://github.com/btxchain/btx/releases/tag/v0.34.9).
-> **Installer:** `contrib/faststart/btx-agent-setup.py --release-tag v0.34.9`
-> when that tag publishes `btx-release-manifest.json`. Otherwise unpack the
-> GitHub archive directly (below). Historical prereleases
-> [`v0.34.8-rc4`](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc4) and
-> [`v0.34.9-dev.pr198.2`](https://github.com/btxchain/btx/releases/tag/v0.34.9-dev.pr198.2)
-> remain on GitHub and are not recut.
-> Historical 0.34.5 convergence notes:
-> [release-notes-0.34.5.md](release-notes/release-notes-0.34.5.md).
-> Epoch A is live at height 185000. EncDr stall recovery at 199299 is
-> withdrawn. Fast-start snapshot:
+> **Downloads:** [v0.34.16 stable](https://github.com/btxchain/btx/releases/tag/v0.34.16)
+> and [v0.34.17 prerelease](https://github.com/btxchain/btx/releases/tag/v0.34.17).
+> Start with the [manual archive verification](#download-and-verify-the-archive).
+> For a fresh mainnet chainstate, use the compiled
+> [assumeutxo-228000](https://github.com/btxchain/btx/releases/tag/assumeutxo-228000)
+> snapshot with `loadtxoutset`. A node with a usable chainstate can continue
+> after upgrading without loading a snapshot.
+
+> **Historical notes:** v0.34.9 was the shipping line described by the
+> [0.34.9 release notes](release-notes/release-notes-0.34.9.md).
+> [v0.34.8-rc4](https://github.com/btxchain/btx/releases/tag/v0.34.8-rc4) and
+> [v0.34.9-dev.pr198.2](https://github.com/btxchain/btx/releases/tag/v0.34.9-dev.pr198.2)
+> are historical prereleases and are not recut. See the
+> [0.34.5 convergence notes](release-notes/release-notes-0.34.5.md).
+> Epoch A began at height 185000.
 > [assumeutxo-219000](https://github.com/btxchain/btx/releases/tag/assumeutxo-219000)
-> (closed-shielded section is loadable as of `18cc8bd6` / issue 129).
-> Do not load assumeutxo-199299 / assumeutxo-199300 (withdrawn 0.34.1 branch,
-> [issue 127](https://github.com/btxchain/btx/issues/127)); those datadirs
-> need a resync from empty. Use `loadtxoutset` (not `loadtxoutsetattested`)
-> on a fresh chainstate. A node that already has a usable chainstate and
-> has only fallen behind recovers on binary upgrade; it does not need
-> snapshot surgery.
+> remains a compiled pin (closed-shielded section loadable since
+> `18cc8bd6` / [#129](https://github.com/btxchain/btx/issues/129)).
+> The 199299 and 199300 snapshots are withdrawn
+> ([#127](https://github.com/btxchain/btx/issues/127)). Datadirs that used them
+> need a resync from empty. For this workflow, use `loadtxoutset` on a fresh
+> chainstate.
 
 This guide is the shortest path from a precompiled BTX binary to:
 
@@ -47,27 +47,51 @@ paths, see [BTX Mining Node Snapshot Runbook](btx-mining-node-snapshot-runbook.m
 
 ## 1. Fast-sync with Assumeutxo
 
-### v0.34.8: unpack the GitHub archive
+### Download and verify the archive
+
+Both release pages currently offer Linux x86-64 CPU and CUDA 13 archives.
+The uploads omit Qt, macOS and Windows binaries. The stable upload also
+explicitly omits Atlas. CUDA 13 requires a compatible NVIDIA driver on the
+host. The v0.34.17 prerelease requires GLIBC 2.38, GLIBCXX 3.4.32 and
+CXXABI 1.3.15. Ubuntu 22.04 is below that glibc floor. Review the compatibility
+notes on the release page for the exact asset.
+
+Run the example in a fresh download directory to keep archive contents separate.
+It selects the stable CPU archive. To test the prerelease, change
+`release_tag` to `v0.34.17`. For CUDA 13, set `archive_variant=-cuda13`.
 
 ```bash
-# CPU-only. The cuda12 tarball on this tag is Blackwell-only
-# (sm_100a / sm_120 / sm_120a SASS, sm_120 PTX); do not use it on
-# Ampere / Ada / Hopper. See linux-release-builds.md.
-curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8/btx-0.34.8-x86_64-linux-gnu.tar.gz
-curl -fsSL -O https://github.com/btxchain/btx/releases/download/v0.34.8/SHA256SUMS
-sha256sum -c SHA256SUMS --ignore-missing
-tar xzf btx-0.34.8-x86_64-linux-gnu.tar.gz
+(
+  set -eu
+  release_tag=v0.34.16
+  archive_variant=""
+  asset="btx-${release_tag#v}-x86_64-linux-gnu${archive_variant}.tar.gz"
+  release_url="https://github.com/btxchain/btx/releases/download/$release_tag"
+  curl -fsSLO "$release_url/$asset"
+  curl -fsSLO "$release_url/SHA256SUMS"
+  awk -v asset="$asset" '$2 == asset { print; found = 1 } END { if (!found) exit 1 }' \
+    SHA256SUMS > "$asset.sha256"
+  sha256sum -c "$asset.sha256"
+  tar -xzf "$asset"
+)
 ```
 
-The GitHub tag `v0.34.8` is the shipping release. Historical `v0.34.8-rc4`,
-`v0.34.8-rc2`, and `v0.34.8-rc1` remain on GitHub and are superseded.
+Both `SHA256SUMS` files are unsigned. A matching checksum checks that the
+file matches GitHub's published bytes. It does not authenticate a signer.
+The stable upload has no release manifest. The prerelease has a manifest
+with no detached checksum signature. Use the manual steps for either upload.
+Run the shipped `bin/btxd` and `bin/btx-cli` from the extracted directory.
+The following examples assume that directory’s `bin/` is on your path.
 
-Continue from the datadir / snapshot steps below using the unpacked `bin/`.
+Historical archive note: the v0.34.8 CUDA 12 build targeted Blackwell
+(sm_100a / sm_120 / sm_120a SASS, sm_120 PTX), and was not for Ampere, Ada,
+or Hopper. The v0.34.8-rc4, v0.34.8-rc2, and v0.34.8-rc1 tags are historical.
 
 ### Signed final releases: `btx-agent-setup.py`
 
-When a GitHub release **does** publish `btx-release-manifest.json` and
-`SHA256SUMS.asc`, the shortest unattended flow is:
+When a GitHub release publishes `btx-release-manifest.json` and a detached
+`SHA256SUMS.asc` verifiable with your trusted release key, and advertises a
+matching snapshot manifest, the unattended flow is:
 
 ```bash
 export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
@@ -148,7 +172,7 @@ When `--preset miner` is used, that summary also includes
 `mining_results_dir` so an unattended installer can immediately hand off to the
 local mining supervisor without guessing paths.
 
-### Linux userspace (glibc / libstdc++)
+### Historical Linux userspace notes (v0.34.8-rc1)
 
 The published `*-x86_64-linux-gnu*.tar.gz` archives for v0.34.8-rc1 are linked
 against **GLIBC_2.38** and **GLIBCXX_3.4.32**. They load on Ubuntu 24.04
@@ -171,7 +195,7 @@ the raw loader error (`version 'GLIBC_2.38' not found`) is what you see. Its
 apt hint also prints the Ubuntu 24.04 package spelling (`libevent-2.1-7t64`);
 on 22.04 the libevent names have no `t64` suffix (`libevent-2.1-7`).
 
-This RC does not ship a glibc-2.35 tarball. Building from source on the LTS
+That RC did not ship a glibc-2.35 tarball. Building from source on the LTS
 host is the supported path. An unprivileged workaround proven on Debian 12
 (no rebuild, no root), using Debian 13 `libc6` / `libstdc++6` / `libgcc-s1`
 extracted into a private prefix:
@@ -193,16 +217,24 @@ That is a lab/agent sideload, not "download and go". `bin/btxd` honors
 `BTX_GLIBC_PREFIX` by exec'ing that prefix's `ld-linux-x86-64.so.2` with
 `--library-path`.
 
-If you prefer to run the bootstrap steps yourself:
+### Load the current mainnet snapshot manually
 
-1. Download the BTX binary release (rc tags: unpack the GitHub tarball as
-   above; do not wait for `btx-release-manifest.json`).
-2. Download the latest matching `snapshot.dat` and `snapshot.manifest.json`.
-   Signed finals also publish `btx-release-manifest.json`; rc tags may not.
-3. Verify `SHA256SUMS`. Signed finals also publish `SHA256SUMS.asc`.
-4. Check that the manifest's `snapshot_sha256`, height, and base block hash
-   match the release notes or `m_assumeutxo_data`, and keep
-   `snapshot_file_version` as the troubleshooting record.
+1. Use an archive verified above and a fresh mainnet chainstate.
+2. Download and verify the published 228000 snapshot. This snapshot release
+   supplies the data file directly. The digest below is from its release page.
+3. Keep the verified file's absolute path for `loadtxoutset`.
+4. Use the compiled base block `0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87`.
+
+```bash
+(
+  set -eu
+  curl -fsSLO https://github.com/btxchain/btx/releases/download/assumeutxo-228000/assumeutxo-228000.dat
+  printf '%s  %s\n' \
+    45392da4550a66ccd4ed949cc0e47cb2197dbf2fd238f79367c921adf8508890 \
+    assumeutxo-228000.dat | sha256sum -c -
+)
+```
+
 5. Create a miner-oriented `btx.conf` under the datadir:
 
 ```ini
@@ -229,12 +261,10 @@ miningmaxheaderlag=8
 ```
 
 6. Start the daemon.
-7. Wait until the manifest's base block hash is known in the local header
-   chain:
+7. Wait until the snapshot base is known in the local header chain:
 
 ```bash
-SNAPSHOT_BLOCKHASH="$(jq -r .blockhash /path/to/snapshot.manifest.json)"
-btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
+btx-cli getblockheader 0104909051a017c9045faf7382627e89c5b83c4bbd3c1270706d5d2ef2ab0c87 false
 ```
 
 The full snapshot base block does not need to be downloaded before loading the
@@ -244,7 +274,7 @@ retry after header sync advances.
 8. Load the snapshot:
 
 ```bash
-btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
+btx-cli -rpcclienttimeout=0 loadtxoutset /absolute/path/to/assumeutxo-228000.dat
 ```
 
 9. Monitor background validation:
@@ -265,8 +295,8 @@ When checking readiness manually, pass a BIP 9 template-request object:
 btx-cli getblocktemplate '{"rules":["segwit"]}'
 ```
 
-If you prefer a one-command bootstrap flow, the scripts under
-`contrib/faststart/` can consume the same published bundle directly.
+For releases that publish the required signed manifest assets, the scripts
+under `contrib/faststart/` can install and bootstrap from that bundle.
 The wrapper tolerates the case where a reachable peer advances the active
 chainstate past the snapshot before `loadtxoutset` runs, and it mirrors
 daemon-side RPC connection overrides such as `-rpcport` into its own bootstrap

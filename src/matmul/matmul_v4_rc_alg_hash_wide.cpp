@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_alg_hash_wide.h>
 
 #include <matmul/matmul_v4_rc_fri_ext3.h>
@@ -150,22 +151,22 @@ template <typename Predicate>
 
 [[nodiscard]] uint64_t InverseSboxExponent()
 {
-    const unsigned __int128 modulus = kP - 1;
-    __int128 old_r = 7;
-    __int128 r = static_cast<__int128>(modulus);
-    __int128 old_s = 1;
-    __int128 s = 0;
+    const btx::U128 modulus = kP - 1;
+    btx::I128 old_r = 7;
+    btx::I128 r = static_cast<btx::I128>(modulus);
+    btx::I128 old_s = 1;
+    btx::I128 s = 0;
     while (r != 0) {
-        const __int128 quotient = old_r / r;
-        const __int128 next_r = old_r - quotient * r;
+        const btx::I128 quotient = old_r / r;
+        const btx::I128 next_r = old_r - quotient * r;
         old_r = r;
         r = next_r;
-        const __int128 next_s = old_s - quotient * s;
+        const btx::I128 next_s = old_s - quotient * s;
         old_s = s;
         s = next_s;
     }
     assert(old_r == 1);
-    if (old_s < 0) old_s += static_cast<__int128>(modulus);
+    if (old_s < 0) old_s += static_cast<btx::I128>(modulus);
     return static_cast<uint64_t>(old_s);
 }
 

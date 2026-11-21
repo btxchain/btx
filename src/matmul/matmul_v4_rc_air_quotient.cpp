@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_air_quotient.h>
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
@@ -1209,10 +1210,12 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
         streamed_trace_row_cache;
     // Per-column trace NTT (interpolate + coset shift): each column is an
     // independent transform writing distinct coeffs[c]/shifted[c].
+    // MSVC OpenMP 2.0 rejects an unsigned loop index.
+    const int64_t trace_columns = static_cast<int64_t>(W);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
 #endif
-    for (uint32_t c = 0; c < W; ++c) {
+    for (int64_t c = 0; c < trace_columns; ++c) {
         coeffs[c] = AirInterpolate(columns[c]);
         shifted[c] = coeffs[c];
         AirCosetShiftCoeffs(shifted[c]);
@@ -1449,11 +1452,12 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
             const Fp twist = AirPowBase(omega_M, s);
             // Per-column coset NTT (size N): independent, distinct slab[c].
             // slab[c] is reused across cosets, so this reallocates only on
-            // the first pass.
+            // the first pass. MSVC OpenMP 2.0 rejects an unsigned loop index.
+            const int64_t slab_columns = static_cast<int64_t>(W);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
 #endif
-            for (uint32_t c = 0; c < W; ++c) {
+            for (int64_t c = 0; c < slab_columns; ++c) {
                 AirEvalOnCosetInto<F>(coeffs[c], N, twist, slab[c]);
             }
             // cur/nxt are allocated ONCE PER THREAD PER COSET (not per row).
@@ -1462,10 +1466,12 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
 #endif
             {
                 std::vector<F> cur(W), nxt(W);
+                const int64_t row_count = static_cast<int64_t>(N);
 #if defined(_OPENMP)
 #pragma omp for schedule(static)
 #endif
-                for (uint32_t t = 0; t < N; ++t) {
+                for (int64_t t_index = 0; t_index < row_count; ++t_index) {
+                    const uint32_t t = static_cast<uint32_t>(t_index);
                     const uint32_t tn = (t + 1u == N) ? 0u : t + 1u;
                     const uint32_t j = s + stepM * t;
                     const Fp y_base =
@@ -1495,11 +1501,12 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
         // it on real workloads. Do not use at real width — 17.6 GiB.
         std::vector<std::vector<F>> ldeM(W);
         // Per-column extended-domain NTT (size M): independent, distinct
-        // ldeM[c].
+        // ldeM[c]. MSVC OpenMP 2.0 rejects an unsigned loop index.
+        const int64_t dense_columns = static_cast<int64_t>(W);
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
 #endif
-        for (uint32_t c = 0; c < W; ++c) {
+        for (int64_t c = 0; c < dense_columns; ++c) {
             ldeM[c] = AirEvalOnSubgroup(coeffs[c], M);
             if (!keep_coeffs_for_dump) {
                 std::vector<F>().swap(coeffs[c]);
@@ -1513,10 +1520,12 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
 #endif
         {
             std::vector<F> cur(W), nxt(W);
+            const int64_t dense_rows = static_cast<int64_t>(M);
 #if defined(_OPENMP)
 #pragma omp for schedule(static)
 #endif
-            for (uint32_t j = 0; j < M; ++j) {
+            for (int64_t j_index = 0; j_index < dense_rows; ++j_index) {
+                const uint32_t j = static_cast<uint32_t>(j_index);
                 const Fp y_base =
                     AirPowBase(omega_M, j);
                 const uint32_t jn = (j + stepM) % M;
@@ -4972,9 +4981,9 @@ bool SplitRapCodecShape(
         }
     }
 
-    unsigned __int128 bytes =
+    btx::U128 bytes =
         4 + 4 + 4 + 4 +
-        static_cast<unsigned __int128>(
+        static_cast<btx::U128>(
             proof.base_column_indices.size()) *
             4 +
         24 + 4 + batch_bytes + 4;
@@ -4984,11 +4993,11 @@ bool SplitRapCodecShape(
         for (const auto& row : next) {
             bytes +=
                 4 +
-                static_cast<unsigned __int128>(
+                static_cast<btx::U128>(
                     row.values.size()) *
                     24 +
                 4 +
-                static_cast<unsigned __int128>(
+                static_cast<btx::U128>(
                     row.siblings.size()) *
                     32;
         }

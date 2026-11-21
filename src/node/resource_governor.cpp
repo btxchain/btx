@@ -7,6 +7,7 @@
 #include <logging.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
+#include <util/strencodings.h>
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +17,11 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+
+#ifdef __linux__
+#include <sys/statfs.h>
+#include <unistd.h>
+#endif
 
 namespace node {
 
@@ -58,6 +64,91 @@ int ModeMiningCap(GovernorMode m, int configured)
     if (m == GovernorMode::BALANCED) return std::min(configured, 50);
     return configured;
 }
+
+
+#ifdef __linux__
+std::optional<int64_t> ReadCgroupBytes(const fs::path& directory, const char* name)
+{
+    std::ifstream file(directory / name);
+    std::string value, extra;
+    if (!(file >> value) || (file >> extra)) return std::nullopt;
+    const auto bytes = ToIntegral<int64_t>(value);
+    if (bytes && *bytes >= 0) return bytes;
+    return std::nullopt;
+}
+
+std::optional<fs::path> CurrentMemoryCgroup()
+{
+    static const fs::path root{"/sys/fs/cgroup"};
+    // CGROUP2_SUPER_MAGIC from Linux's uapi/linux/magic.h.
+    constexpr long cgroup2_magic{0x63677270};
+    std::ifstream membership("/proc/self/cgroup");
+    std::string line;
+    while (std::getline(membership, line)) {
+        if (!line.starts_with("0::/")) continue;
+        const fs::path relative = fs::PathFromString(line.substr(4));
+        if (relative.is_absolute()) return std::nullopt;
+        for (const auto& component : relative) {
+            if (component == ".." || component == ".") return std::nullopt;
+        }
+        const fs::path directory = relative.empty() ? root : root / relative;
+        struct statfs filesystem {};
+        if (statfs(directory.c_str(), &filesystem) != 0 || filesystem.f_type != cgroup2_magic) {
+            return std::nullopt;
+        }
+        // A namespace-relative path only makes sense in the matching mount.
+        std::ifstream processes(directory / "cgroup.procs");
+        int64_t pid;
+        while (processes >> pid) {
+            if (pid == getpid()) return directory;
+        }
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+void SampleCgroupMemory(SystemSignals& signals)
+{
+    static const fs::path root{"/sys/fs/cgroup"};
+    const auto leaf = CurrentMemoryCgroup();
+    if (!leaf) return;
+
+    bool has_swap_limit{false};
+    bool swap_pressure{false};
+    // Every visible ancestor can impose a tighter limit than the leaf.
+    for (fs::path directory = *leaf;; directory = directory.parent_path()) {
+        const auto memory_limit = ReadCgroupBytes(directory, "memory.max");
+        if (memory_limit) {
+            const auto memory_used = ReadCgroupBytes(directory, "memory.current");
+            if (memory_used) {
+                const int64_t available = *memory_limit - std::min(*memory_limit, *memory_used);
+                if (signals.memory_available_bytes < 0 || available < signals.memory_available_bytes) {
+                    signals.memory_available_bytes = available;
+                }
+                // Match the host thresholds without overflowing byte counters.
+                const long double used_pct = *memory_limit > 0
+                    ? 100.0L * (*memory_limit - available) / *memory_limit : 100.0L;
+                const auto pressure = used_pct >= 96 ? PressureState::CRITICAL
+                    : used_pct >= 86 ? PressureState::HIGH : PressureState::OK;
+                signals.memory_pressure = std::max(signals.memory_pressure, pressure);
+            }
+        }
+
+        const auto swap_limit = ReadCgroupBytes(directory, "memory.swap.max");
+        if (swap_limit) {
+            const auto swap_used = ReadCgroupBytes(directory, "memory.swap.current");
+            if (swap_used) {
+                has_swap_limit = true;
+                const int64_t free = *swap_limit - std::min(*swap_limit, *swap_used);
+                swap_pressure |= *swap_limit == 0 ? *swap_used > 0 : free < *swap_limit / 10.0L;
+            }
+        }
+        if (directory == root) break;
+    }
+    // Unlimited or unavailable cgroup swap remains subject to the host rule.
+    if (has_swap_limit) signals.swap_pressure = swap_pressure;
+}
+#endif
 
 } // namespace
 
@@ -772,9 +863,9 @@ bool ResourceGovernor::WritePermitFile(const std::string& path) const
     o.pushKV("pause_reason_seed", PauseReasonName(m_seed_reason));
     o.pushKV("pause_reason_preserve", PauseReasonName(m_preserve_reason));
     o.pushKV("automatic_spend_atoms", 0);
-    // btx-modeld reads this file before each seeded piece and treats a file it
-    // cannot parse as "no governor". Write a temporary file and rename it over
-    // the permit, so a reader sees either the old permit or the new one.
+    // Write a temporary file and rename it over the permit, so a successful
+    // read sees the complete old or new permit. The helper refuses optional
+    // work when an existing permit cannot be read or parsed.
     const fs::path target = fs::PathFromString(path);
     const fs::path tmp = fs::PathFromString(path + ".tmp");
     {
@@ -823,6 +914,7 @@ SystemSignals SampleHostSignals()
         }
         s.swap_pressure = swap_total > 0 && swap_free >= 0 && swap_free * 10 < swap_total;
     }
+    SampleCgroupMemory(s);
     {
         const char* ps_c = std::getenv("BTX_POWER_SUPPLY_DIR");
         const std::string ps = (ps_c && ps_c[0]) ? std::string(ps_c) : std::string("/sys/class/power_supply");

@@ -33,7 +33,7 @@ class WalletEncryptionTest(BitcoinTestFramework):
 
         # Make sure the wallet isn't encrypted first
         msg = "test message"
-        address = self.nodes[0].getnewaddress(address_type='legacy')
+        address = self.nodes[0].getnewaddress(address_type='p2mr')
         sig = self.nodes[0].signmessage(address, msg)
         assert self.nodes[0].verifymessage(address, sig, msg)
         assert_raises_rpc_error(-15, "Error: running with an unencrypted wallet, but walletpassphrase was called", self.nodes[0].walletpassphrase, 'ff', 1)

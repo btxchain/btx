@@ -158,6 +158,15 @@ std::vector<std::string> AdvertisedNativeHttpPaths();
 
 bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& result, std::string& err_code, std::string& err, std::atomic<bool>* stop = nullptr, bool include_wallet_observation = true);
 
+/** The participation tick saves the search records it pulls at most this often. */
+inline constexpr int64_t SEARCH_GOSSIP_SAVE_INTERVAL_MS{60 * 1000};
+/** Store the records of a peer's ext/search reply as the participation tick
+ *  does. Returns whether search-index.json was saved. */
+bool StoreGossipSearchReply(ModelCatalog& cat, const UniValue& reply, const std::string& endpoint, int64_t now_ms);
+/** Save what the tick stored and has not saved yet, once the interval is over
+ *  or at once with `force` (at shutdown). Returns whether it saved. */
+bool FlushGossipSearchIndex(ModelCatalog& cat, int64_t now_ms, bool force);
+
 bool IsNetwork02HelperMethod(const std::string& method);
 bool DispatchNetwork02Rpc(ModelCatalog& cat, const std::string& method, const UniValue& params, UniValue& result,
                          std::string& err_code, std::string& err);

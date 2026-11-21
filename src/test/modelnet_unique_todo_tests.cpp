@@ -247,6 +247,41 @@ BOOST_AUTO_TEST_CASE(unique_todo_a2_modelindex)
     BOOST_TEST_MESSAGE("HONEST_NOT_RUN -modelindex as a product flag; helper/modeld reject");
 }
 
+// Every search copies the index peers and queries at most SEARCH_FANOUT_MAX
+// of them: addmodelindex keeps at most 32, each at most 256 bytes.
+BOOST_AUTO_TEST_CASE(model_index_peers_are_bounded)
+{
+    modelnet::ModelCatalog cat{m_path_root / "index-peers-bound", 1 << 20};
+    std::string code, err;
+    UniValue result;
+    const auto call = [&](const std::string& method, const std::string& endpoint) {
+        UniValue p(UniValue::VARR);
+        p.push_back(endpoint);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return modelnet::DispatchHelperRpc(cat, Rpc(method, p), result, code, err);
+    };
+    // Other cases in this binary may have left index peers in the helper's index.
+    BOOST_REQUIRE_MESSAGE(call("removemodelindex", "127.0.0.1:1"), err);
+    const int before = result["index_peers"].getInt<int>();
+    BOOST_REQUIRE_LT(before, 32);
+    BOOST_CHECK(!call("addmodelindex", std::string(257, 'h')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    std::vector<std::string> added;
+    for (int i = before; i < 32; ++i) {
+        added.push_back("127.0.0.1:" + std::to_string(30000 + i));
+        BOOST_REQUIRE_MESSAGE(call("addmodelindex", added.back()), err);
+    }
+    BOOST_CHECK_EQUAL(result["index_peers"].getInt<int>(), 32);
+    BOOST_CHECK(!call("addmodelindex", "127.0.0.1:29999"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // An endpoint already there is still answered at the limit.
+    BOOST_CHECK_MESSAGE(call("addmodelindex", added.back()), err);
+    for (const auto& endpoint : added) BOOST_REQUIRE_MESSAGE(call("removemodelindex", endpoint), err);
+    BOOST_CHECK_EQUAL(result["index_peers"].getInt<int>(), before);
+}
+
 BOOST_AUTO_TEST_CASE(unique_todo_build_gui)
 {
 #if defined(ENABLE_QT)
@@ -806,8 +841,8 @@ BOOST_AUTO_TEST_CASE(unique_todo_gpu_attestor_untouched)
 {
     BOOST_CHECK_EQUAL(CLIENT_VERSION_MAJOR, 0);
     BOOST_CHECK_EQUAL(CLIENT_VERSION_MINOR, 34);
-    BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 16);
-    BOOST_CHECK_EQUAL(std::string(CLIENT_VERSION_STRING), "0.34.16");
+    BOOST_CHECK_EQUAL(CLIENT_VERSION_BUILD, 17);
+    BOOST_CHECK_EQUAL(std::string(CLIENT_VERSION_STRING), "0.34.17");
     BOOST_CHECK(CLIENT_VERSION_IS_RELEASE);
 #ifdef MODELNET_BTXD_PATH
     const std::string p = MODELNET_BTXD_PATH;

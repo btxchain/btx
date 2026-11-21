@@ -12,10 +12,14 @@ import json
 import time
 from .canonical import dumps, loads, hex32, digest, atoms, integer
 from .errors import require, SwapError
+from .store import apply_script
 
 MIGRATION = '''
 CREATE TABLE IF NOT EXISTS sn_settings(k TEXT PRIMARY KEY, body BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS sn_inbox(id TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sn_inbox_broadcast(id TEXT PRIMARY KEY, sender TEXT NOT NULL, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sn_commit_receipts(
+ id TEXT PRIMARY KEY REFERENCES sn_inbox(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS sn_outbox(id TEXT PRIMARY KEY, recipient TEXT NOT NULL,
  command TEXT NOT NULL, body BLOB NOT NULL, next_try INTEGER NOT NULL,
  attempts INTEGER NOT NULL DEFAULT 0, acknowledged INTEGER NOT NULL DEFAULT 0);
@@ -54,10 +58,14 @@ class Journal:
     def __init__(self,store):
         self.store=store
         with store.lock:
-            require(store.db.execute('PRAGMA user_version').fetchone()[0] in (0,2),
+            version = store.db.execute('PRAGMA user_version').fetchone()[0]
+            require(version in (0,2),
                     'SCHEMA_VERSION','Financial journal requires an explicitly supported migration')
-            store.db.executescript(MIGRATION)
-            store.db.execute('PRAGMA user_version=2')
+            apply_script(store.db, MIGRATION)
+            # Writing the same user_version again changes the schema cookie and
+            # invalidates a SELECT that was already prepared.
+            if version != 2:
+                store.db.execute('PRAGMA user_version=2')
     def setting(self,key,default=None):
         with self.store.lock:
             r=self.store.db.execute('SELECT body FROM sn_settings WHERE k=?',(key,)).fetchone()
@@ -69,18 +77,49 @@ class Journal:
         with self.store.transaction() as db:
             db.execute('INSERT INTO sn_sequences VALUES(?,1) ON CONFLICT(identity) DO UPDATE SET n=n+1',(identity,))
             return db.execute('SELECT n FROM sn_sequences WHERE identity=?',(identity,)).fetchone()[0]
-    def seen(self,mid,expires,now):
-        """Return True only for an already processed message; bounded disk admission."""
+    def seen(self,mid,expires,now,*,sender='',broadcast=False):
+        """Return True for prior admission, not necessarily completed handling.
+
+        A broadcast row can be dropped to keep room for a directed packet.
+        Directed rows are not dropped to admit more broadcasts.
+        """
         hex32(mid)
+        sender=sender if type(sender) is str else ''
+        if len(sender)>128:sender=sender[:128]
         with self.store.transaction() as db:
             db.execute('DELETE FROM sn_inbox WHERE expires<?',(now,))
+            db.execute('DELETE FROM sn_inbox_broadcast WHERE id NOT IN (SELECT id FROM sn_inbox)')
             if db.execute('SELECT 1 FROM sn_inbox WHERE id=?',(mid,)).fetchone():return True
-            require(db.execute('SELECT count(*) FROM sn_inbox').fetchone()[0]<8192,'INBOX_LIMIT','Replay cache full')
+            if broadcast and sender:
+                rows=db.execute('SELECT id FROM sn_inbox_broadcast WHERE sender=? ORDER BY expires',(sender,)).fetchall()
+                if len(rows)>=32:
+                    db.execute('DELETE FROM sn_inbox WHERE id=?',(rows[0][0],))
+                    db.execute('DELETE FROM sn_inbox_broadcast WHERE id=?',(rows[0][0],))
+            while db.execute('SELECT count(*) FROM sn_inbox').fetchone()[0]>=8192:
+                old=db.execute('SELECT id FROM sn_inbox_broadcast ORDER BY expires LIMIT 1').fetchone()
+                require(old is not None,'INBOX_LIMIT','Replay cache full')
+                db.execute('DELETE FROM sn_inbox WHERE id=?',(old[0],))
+                db.execute('DELETE FROM sn_inbox_broadcast WHERE id=?',(old[0],))
             db.execute('INSERT INTO sn_inbox VALUES(?,?)',(mid,expires))
+            if broadcast:db.execute('INSERT INTO sn_inbox_broadcast VALUES(?,?,?)',(mid,sender,expires))
         return False
     def forget_message(self,mid):
         # A message whose processing raised before commit may be retried safely.
-        with self.store.transaction() as db:db.execute('DELETE FROM sn_inbox WHERE id=?',(mid,))
+        with self.store.transaction() as db:
+            db.execute('DELETE FROM sn_inbox WHERE id=?',(mid,))
+            db.execute('DELETE FROM sn_inbox_broadcast WHERE id=?',(mid,))
+    def commit_completed(self,mid):
+        """Negotiation completion; retain the historical commit-named API/table."""
+        hex32(mid)
+        with self.store.lock:
+            return self.store.db.execute('SELECT 1 FROM sn_commit_receipts WHERE id=?',(mid,)).fetchone() is not None
+    def complete_commit(self,mid):
+        """Persist successful handling before ACK, bounded by the admitted inbox."""
+        hex32(mid)
+        with self.store.transaction() as db:
+            require(db.execute('SELECT 1 FROM sn_inbox WHERE id=?',(mid,)).fetchone() is not None,
+                    'INBOX_MISSING','Negotiation completion requires inbox admission')
+            db.execute('INSERT OR IGNORE INTO sn_commit_receipts VALUES(?)',(mid,))
     def enqueue(self,recipient,command,packet,now):
         mid=digest('BTX/SWAPNET/PACKET/2',packet)
         with self.store.transaction() as db:
@@ -91,6 +130,18 @@ class Journal:
         with self.store.lock:
             rows=self.store.db.execute('SELECT id,recipient,command,body,attempts FROM sn_outbox WHERE acknowledged=0 AND next_try<=? ORDER BY next_try LIMIT ?',(now,limit)).fetchall()
         return [(r[0],r[1],r[2],loads(r[3]),r[4]) for r in rows]
+    def has_proposal(self,sid,recipient,proposal,now):
+        """An exact queued proposal, including acknowledged/not-due rows."""
+        hex32(sid);found=False
+        with self.store.lock:
+            rows=self.store.db.execute("SELECT recipient,body FROM sn_outbox WHERE command='swterms'")
+            for queued_recipient,raw in rows:
+                body=loads(raw)['body']
+                if body['kind']!='proposal' or body['swap_id']!=sid:continue
+                require(queued_recipient==recipient and body['recipient']==recipient and body['payload']==proposal,
+                        'RECOVERY_CONFLICT','Queued proposal differs from saved intent')
+                if body['expires_at']>now:found=True
+        return found
     def sent(self,mid,now):
         with self.store.transaction() as db:
             row=db.execute('SELECT attempts FROM sn_outbox WHERE id=?',(mid,)).fetchone()
@@ -145,6 +196,47 @@ class Journal:
                        (sid,rev,body['principal'],body['peer'],body['stage'],local_dump(body)))
             self.store._audit(db,{'type':'swap_v2_saved','id':sid,'revision':rev,'stage':body['stage']})
         return rev
+    def close_unfunded_terminal(self, sid, body, expected):
+        """Atomically close an unfunded session, including old partial closeouts."""
+        require(body['stage'] in {'cancelled','rejected'}, 'SESSION_STATE', 'Expected unfunded terminal state')
+        with self.store.transaction() as db:
+            current = db.execute('SELECT revision,body FROM sn_negotiations WHERE id=?', (sid,)).fetchone()
+            require(current and current[0] == expected, 'REVISION_CONFLICT', 'Concurrent swap update')
+            state = local_load(current[1])
+            rid = state.get('reservation_id')
+            require(body.get('reservation_id') == rid, 'RECOVERY_CONFLICT', 'Reservation changed')
+            require(not any(state.get(k) for k in ('funding_prepared','funding_broadcast',
+                    'recovery_ready','secret_exposed','fund_op','refund_op','evm_refund_plan')),
+                    'FUNDS_LOCKED', 'Prepared/funded swaps require refund recovery')
+            own = 'a' if state['role'] == 'initiator' else 'b'
+            require(not state.get('refs', {}).get(own), 'FUNDS_LOCKED', 'Local funding reference requires recovery')
+            require(not db.execute('SELECT 1 FROM sn_operations WHERE swap_id=?', (sid,)).fetchone(),
+                    'FUNDS_LOCKED', 'Durable operations require recovery')
+            if rid:
+                require(not db.execute('SELECT 1 FROM coinlocks WHERE reservation_id=?', (rid,)).fetchone(),
+                        'FUNDS_LOCKED', 'Reserved inputs require recovery')
+            grants = db.execute('SELECT id,principal,body,consumed FROM sn_grants WHERE swap_id=?', (sid,)).fetchall()
+            for gid, principal, raw, consumed in grants:
+                grant = local_load(raw)
+                require(not consumed, 'FUNDS_LOCKED', 'Consumed funding grant requires recovery')
+                require(principal == state['principal'] and grant['principal'] == principal
+                        and grant['swap_id'] == sid and grant['reservation_id'] == rid,
+                        'RECOVERY_CONFLICT', 'Signing grant does not match session reservation')
+            require(not state.get('grant_id') or any(g[0] == state['grant_id'] for g in grants),
+                    'RECOVERY_CONFLICT', 'Saved signing grant missing')
+            if rid:
+                reservation = db.execute('SELECT principal,state FROM reservations WHERE id=?', (rid,)).fetchone()
+                require(reservation and reservation[0] == state['principal'],
+                        'RECOVERY_CONFLICT', 'Reservation does not match session owner')
+                require(reservation[1] in {'held','closed'}, 'FUNDS_LOCKED', 'Funded reservation requires recovery')
+                if reservation[1] == 'held':
+                    self.store._settle_reservation(db, rid, 0)
+                # Old code could commit release but fail the session write.
+                # Complete only the terminal state without touching mandate
+                # counters again or weakening global settlement guards.
+            db.execute('UPDATE sn_grants SET revoked=1 WHERE swap_id=?', (sid,))
+            return self.save(sid, body, expected, db=db)
+
     def close_unfunded_responder(self, sid, body, expected):
         """Release an unfunded responder after the caller verifies the remote refund."""
         rid = body["reservation_id"]
@@ -186,6 +278,34 @@ class Journal:
         with self.store.lock:r=self.store.db.execute('SELECT revision,body FROM sn_negotiations WHERE id=?',(sid,)).fetchone()
         require(r is not None,'NOT_FOUND','Swap not found')
         return r[0],local_load(r[1])
+    def scheduled(self, *, terminal, after='', limit=4):
+        """Bounded keyset rotation over eligible rows, not a display/history page."""
+        integer(limit,lo=1,hi=4)
+        stages = "stage IN ('complete','refunded')" if terminal else "stage NOT IN ('complete','refunded','cancelled','rejected')"
+        with self.store.lock:
+            rows=self.store.db.execute('SELECT id,revision,body FROM sn_negotiations WHERE '+stages+' AND id>? ORDER BY id LIMIT ?', (after,limit)).fetchall()
+            if after and len(rows)<limit:
+                rows+=self.store.db.execute('SELECT id,revision,body FROM sn_negotiations WHERE '+stages+' AND id<=? ORDER BY id LIMIT ?', (after,limit-len(rows))).fetchall()
+        return [(r[0],r[1],local_load(r[2])) for r in rows]
+    def active_asset_in_use(self, asset):
+        # Reorgs can reopen terminal rows beyond the new-session active cap.
+        # Stream all active agreements; do not apply a display/session limit.
+        with self.store.lock:
+            rows=self.store.db.execute("SELECT body FROM sn_negotiations WHERE stage NOT IN ('complete','refunded','cancelled','rejected')")
+            while True:
+                batch=rows.fetchmany(64)
+                if not batch:return False
+                for (raw,) in batch:
+                    agreement=local_load(raw).get('agreement',{})
+                    if asset in (agreement.get('long_leg',{}).get('asset'),agreement.get('short_leg',{}).get('asset')):return True
+    def owned_session_ids(self, principal, ids):
+        # Callers supply only IDs referenced by one bounded audit page.
+        ids=tuple({sid for sid in ids if type(sid) is str})
+        require(len(ids)<=500,'EVENT_LIMIT','Too many event session references')
+        if not ids:return set()
+        with self.store.lock:
+            rows=self.store.db.execute('SELECT id FROM sn_negotiations WHERE principal=? AND id IN ('+','.join('?' for _ in ids)+')',(principal,*ids)).fetchall()
+        return {r[0] for r in rows}
     def all(self,principal=None,limit=512):
         integer(limit,lo=1,hi=4096)
         with self.store.lock:

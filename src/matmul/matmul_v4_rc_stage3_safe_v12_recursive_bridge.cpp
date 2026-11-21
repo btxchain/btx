@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/wide128.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_recursive_bridge.h>
 
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
@@ -2874,8 +2875,8 @@ bool BuildNativeFri3AlgTypedSafeScheduleV13(
                     why,
                     "v13_native_schedule_query_modulus");
             }
-            const unsigned __int128 wide =
-                (static_cast<unsigned __int128>(
+            const btx::U128 wide =
+                (static_cast<btx::U128>(
                      gf::Canonical(
                          event.consumed_fp3.c1))
                  << 64) |
@@ -3474,8 +3475,8 @@ bool BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
             Fri3AlgSafeV13Consumer::QueryIndex) {
             const uint32_t n_lde =
                 proof.n_coeffs * kRCFriBlowup;
-            const unsigned __int128 wide =
-                (static_cast<unsigned __int128>(
+            const btx::U128 wide =
+                (static_cast<btx::U128>(
                      gf::Canonical(
                          event.consumed_fp3.c1))
                  << 64) |

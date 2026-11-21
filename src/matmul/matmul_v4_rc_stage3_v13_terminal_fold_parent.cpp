@@ -1147,12 +1147,15 @@ bool AppendLiteralAliasesV1(
                     next[carrier],
                     current[carrier]);
             });
+        // Locals, not the structured binding. Clang with OpenMP rejects a
+        // lambda that captures the binding, including an init-capture.
+        const auto source_column = source.column;
+        const auto sink_column = sink.column;
         AddConstraint(
             parent_cs,
             "stage3.v13_terminal_parent.alias_source",
             aq::AirKind::kEverywhere, 2,
-            [carrier, source_selector,
-             source_column = source.column](
+            [carrier, source_selector, source_column](
                 const auto& current,
                 const auto&) {
                 return gf::Mul(
@@ -1165,8 +1168,7 @@ bool AppendLiteralAliasesV1(
             parent_cs,
             "stage3.v13_terminal_parent.alias_sink",
             aq::AirKind::kEverywhere, 2,
-            [carrier, sink_selector,
-             sink_column = sink.column](
+            [carrier, sink_selector, sink_column](
                 const auto& current,
                 const auto&) {
                 return gf::Mul(

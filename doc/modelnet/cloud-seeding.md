@@ -33,9 +33,22 @@ Hostname `*.r2.cloudflarestorage.com` **or** explicit `CLOUDFLARE_R2` →
 - `cloud_object_layout = SOURCE_FILES`
 - `cloud_read_strategy = STREAM_FILE`
 
-One origin GET (or long Range) of the **source file**, then split at
-`PIECE_SIZE` on the node. Do **not** issue one GET per piece against R2
-AUTO. `PIECE_OBJECTS` on R2 requires `--allow-request-heavy-cloud-layout`
+The recorded layout is `SOURCE_FILES` and `STREAM_FILE`. For an existing,
+admitted catalog entry whose local pieces are missing or incomplete, ordinary
+`getmodel` can hydrate from the configured, ready cloud store without
+`direct_seed` or `direct_seed_fetch`. This uses the retained file metadata and
+does not reconstruct a missing catalog from bucket objects alone.
+
+For `SOURCE_FILES`, an unresumed file up to 8 MiB uses a whole-object GET.
+Larger files and resumed reads use bounded range reads; the current stream
+reader requests at most 64 KiB per read. These reads pass through the cloud
+request/byte budgets and integrity checks before complete content is admitted.
+Stream progress counters describe logical stream operations, not the number of
+underlying HTTP requests; use cloud budget counters for accounted origin reads.
+
+The separate direct-seed fetch described below requires `direct_seed` and
+`direct_seed_fetch`. Those flags are not required for ordinary local recovery.
+`PIECE_OBJECTS` on R2 requires `--allow-request-heavy-cloud-layout`
 (CLI) / `allow_request_heavy_cloud_layout` (RPC).
 
 ## Direct seed

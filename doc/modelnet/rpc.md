@@ -7,6 +7,8 @@ the supervised helper's Unix socket (or an explicit `-modelrpcsocket`). If the h
 methods are available directly on the helper unix socket (researcher
 profile, no `btxd`).
 
+A wallet-restricted `-rpcauth` user is refused the server-path methods (`importmodel`, `hostmodel`, `previewmodelimport`, `exportmodellink`, `qualifymodel`, `scanmodelwatch`, `executemodelimport`, `resumemodelimport`, the `btx` package, plan, and execute methods, `setcloudstorage`, `addmodelstorage`, `preparebountyevaluation`, `runbountyevaluation`, `ensurebtxcapability`) and `modelsecurity`. Directory, search, feed, and release reads are rewritten to the restricted view and are joined only to that wallet. Other model and bounty helper methods still reach the shared helper. Spend RPCs can use only the named wallet.
+
 **Coverage rule:** Search and directory methods return `schema_version: 2` and a
 `coverage` object with **`complete: false`** (and usually `global_complete: false`).
 The `note` / `coverage_disclaimer` strings state **current network view; not a
@@ -840,7 +842,7 @@ Watches: [watches.md](watches.md). Profiles/mirror: [mirroring.md](mirroring.md)
 | `getmodelmirror` / `setmodelmirror` | Declarative keep/follow; no auto-spend | same |
 | `executemodelimport` / `getmodelimport` | ImportPlan staging until VerifiedManifest. HF/torrent integrity ≠ authorship. **No live HF HTTP** | same |
 | `createbtxpackage` / `inspectbtxpackage` / `exportbtxbundle` | Core v2 unsigned REGTEST/TESTNET `.btx` (BTX-PJSON1). `exportmodellink` stays the JSON magnet analog. MAINNET unsigned create is rejected. | same |
-| `verifybtxpackage` | Fail-closed: UNSIGNED_PACKAGE / SIGNATURE_FAIL. Inspect remains available without a signature. | same |
+| `verifybtxpackage` | Fail-closed: UNSIGNED_PACKAGE / SIGNATURE_FAIL, and the payload error (NONCANONICAL_PAYLOAD, for example) when the payload does not validate. Inspect remains available without a signature. | same |
 | `getbtxpackagedocument` | Inert escaped virtual document (`document` / `document_path`). Never writes project or home `AGENTS.md`. | same |
 | `getbtxpackagecapabilities` | `BTXPKG_CORE_V2`, `AGENT_HANDOFF_V1`, `wallet_sign=false`, `automatic_spend_atoms=0`, `writes_project_agents_md=false`, `remote_inference=false`. GUI DEFERRED. | same |
 | `planbtxacquisition` / `executebtxacquisition` / `getbtxacquisition` / `cancelbtxacquisition` | FREE_ONLY + NATIVE_ONLY plan. Execute does not forge `manifest_verified`. No auto-spend. | same |

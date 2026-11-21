@@ -13,6 +13,7 @@
 #include <rpc/util.h>
 #include <script/pqm.h>
 #include <script/script.h>
+#include <util/overflow.h>
 #include <util/rbf.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
@@ -1789,8 +1790,27 @@ RPCHelpMan sendall()
             pwallet->BlockUntilSyncedToCurrentChain();
 
             UniValue options{request.params[4].isNull() ? UniValue::VOBJ : request.params[4]};
-            InterpretFeeEstimationInstructions(/*conf_target=*/request.params[1], /*estimate_mode=*/request.params[2], /*fee_rate=*/request.params[3], options);
             PreventOutdatedOptions(options);
+            RPCTypeCheckObj(options,
+                {
+                    {"add_to_wallet", UniValueType(UniValue::VBOOL)},
+                    {"fee_rate", UniValueType()},
+                    {"include_watching", UniValueType(UniValue::VBOOL)},
+                    {"inputs", UniValueType(UniValue::VARR)},
+                    {"locktime", UniValueType(UniValue::VNUM)},
+                    {"lock_unspents", UniValueType(UniValue::VBOOL)},
+                    {"psbt", UniValueType(UniValue::VBOOL)},
+                    {"send_max", UniValueType(UniValue::VBOOL)},
+                    {"minconf", UniValueType(UniValue::VNUM)},
+                    {"maxconf", UniValueType(UniValue::VNUM)},
+                    {"conf_target", UniValueType(UniValue::VNUM)},
+                    {"estimate_mode", UniValueType(UniValue::VSTR)},
+                    {"replaceable", UniValueType(UniValue::VBOOL)},
+                    {"solving_data", UniValueType(UniValue::VOBJ)},
+                    {"preferred_pq_algo", UniValueType(UniValue::VSTR)},
+                },
+                /*fAllowNull=*/true, /*fStrict=*/true);
+            InterpretFeeEstimationInstructions(/*conf_target=*/request.params[1], /*estimate_mode=*/request.params[2], /*fee_rate=*/request.params[3], options);
 
 
             std::set<std::string> addresses_without_amount;
@@ -1931,9 +1951,16 @@ RPCHelpMan sendall()
                 throw JSONRPCError(RPC_WALLET_ERROR, "Transaction too large.");
             }
 
+            // Each specified amount is in MoneyRange, but many of them can add up
+            // past the range of CAmount. Such a sum is more than the inputs can
+            // hold, so it is refused like any other excess.
             CAmount output_amounts_claimed{0};
             for (const CTxOut& out : rawTx.vout) {
-                output_amounts_claimed += out.nValue;
+                const auto sum{CheckedAdd(output_amounts_claimed, out.nValue)};
+                if (!sum) {
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Assigned more value to outputs than available funds.");
+                }
+                output_amounts_claimed = *sum;
             }
 
             if (output_amounts_claimed > total_input_value) {

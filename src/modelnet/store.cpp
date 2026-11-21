@@ -68,7 +68,7 @@ bool ReadBoundedPiece(const fs::path& path, std::vector<unsigned char>& out, std
 bool IsPortableRelPath(const std::string& path, std::string& err)
 {
     static const std::regex re{R"(^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$)"};
-    if (!std::regex_match(path, re) || path.size() > 240) {
+    if (path.size() > 240 || !std::regex_match(path, re)) {
         err = "unsafe path";
         return false;
     }

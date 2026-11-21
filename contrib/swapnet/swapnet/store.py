@@ -15,6 +15,19 @@ from .errors import require, SwapError
 from .policy import Mandate
 from .quote import Quote
 
+def apply_script(db, script):
+    """Run one statement at a time.
+
+    sqlite3.executescript() prepares the leftover empty tail and steps it.
+    That is a null statement, and the process-wide SQLite log records
+    SQLITE_MISUSE on every SwapNet start.
+    """
+    for statement in script.split(";"):
+        statement = statement.strip()
+        if statement:
+            db.execute(statement)
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS metadata(k TEXT PRIMARY KEY,v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mandates(id TEXT PRIMARY KEY,body BLOB NOT NULL,held TEXT NOT NULL,used TEXT NOT NULL,revoked INTEGER NOT NULL);
@@ -41,11 +54,14 @@ class Store:
         if os.name != "nt":
             require(not path.stat().st_mode & 0o077, "DATABASE_PERMISSIONS", "Database must be private (0600)")
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, timeout=5, isolation_level=None, check_same_thread=False)
+        # No statement cache. A later CREATE would otherwise step a prepared
+        # SELECT and SQLite reports SQLITE_SCHEMA on every start.
+        self.db = sqlite3.connect(path, timeout=5, isolation_level=None, check_same_thread=False,
+                                  cached_statements=0)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.executescript(SCHEMA)
+        apply_script(self.db, SCHEMA)
         row = self.db.execute("SELECT v FROM metadata WHERE k='schema'").fetchone()
         require(row is None or row[0] == '1', "SCHEMA_VERSION", "Database needs an explicit migration")
         self.db.execute("INSERT OR IGNORE INTO metadata VALUES('schema','1')")
@@ -118,11 +134,14 @@ class Store:
             require(mandate.principal == principal and quote.sell_asset == mandate.asset,"MANDATE_SCOPE","Mandate does not authorize this principal/asset")
             require(atoms(quote.sell_atoms) <= atoms(mandate.max_trade_atoms) and fee <= atoms(mandate.max_fee_atoms),"BUDGET_LIMIT","Trade or fee exceeds cap")
             held,used=atoms(row[1]),atoms(row[2])
-            require(held+used+cost <= atoms(mandate.max_total_atoms),"BUDGET_LIMIT","Cumulative cap exceeded")
+            from .public_market import reserved_budget,transfer_to_reservation
+            public_held=reserved_budget(db,mandate_id,quote,now)
+            require(held+used+cost+public_held <= atoms(mandate.max_total_atoms),"BUDGET_LIMIT","Cumulative cap exceeded")
             if check_only:
                 return rid
             db.execute("INSERT INTO reservations VALUES(?,?,?,?,?,'held',?)",(rid,quote.id,mandate_id,principal,str(cost),dumps(asdict(quote))))
             db.execute("UPDATE mandates SET held=? WHERE id=?",(str(held+cost),mandate_id))
+            transfer_to_reservation(db,mandate_id,quote,rid,now)
             self._audit(db,{"type":"reserved","id":rid,"quote_id":quote.id,"cost_atoms":str(cost)})
         return rid
 

@@ -8,11 +8,16 @@
 // Coordinator wires DispatchCapabilityRpc to these symbols.
 
 #include <modelnet/capability.h>
+#ifdef _WIN32
+#include <modelnet/security_v2/common.h>
+#endif
 #include <modelnet/resource_uri.h>
 #include <modelnet/transfer_session.h>
 
 #include <crypto/common.h>
+#include <crypto/sha256.h>
 #include <util/fs.h>
+#include <util/strencodings.h>
 #include <util/time.h>
 
 #include <atomic>
@@ -20,10 +25,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
+#include <deque>
 #include <fcntl.h>
 #include <map>
 #include <mutex>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -44,25 +52,34 @@ struct TtcTrace {
     bool overlapped{true};
 };
 
+// What an idempotency key keeps: the SHA-256 of its request and the reply as text.
 struct IdempotentEnsure {
     std::string payload;
-    UniValue result;
+    std::string reply;
 };
 
 struct UpdateIdem {
     std::string payload;
-    UniValue result;
+    std::string reply;
 };
 
 struct CapEvent {
     int64_t seq{0};
     UniValue body;
+    size_t bytes{0}; //!< size of the body as JSON text
 };
 
 std::map<std::string, TtcTrace> g_ttc;
 std::map<std::string, IdempotentEnsure> g_ensure_idem;
 std::map<std::string, UpdateIdem> g_update_idem;
-std::vector<CapEvent> g_events;
+//! Any caller adds an event with each planbtxcapabilityupdate, and the log was
+//! trimmed only up to the cursor a reader passes to getbtxcapabilityevents.
+//! Keep the newest events within a bound, oldest out first; a reader behind
+//! them gets a gap, as after a compaction.
+constexpr size_t CAPABILITY_EVENTS_MAX{4096};
+constexpr size_t CAPABILITY_EVENT_BYTES_MAX{4 << 20};
+std::deque<CapEvent> g_events;
+size_t g_event_bytes{0};
 int64_t g_next_seq{1};
 int64_t g_compacted_upto{0};
 
@@ -116,6 +133,40 @@ bool FailResult(UniValue& result, std::string& err_code, std::string& err, const
     Fail(err_code, err, code, msg);
     FillError(result, err_code, err, stage);
     return false;
+}
+
+//! Create dir with mode 0700, or use it if it is already a directory of this
+//! user; then only this user may reach it. A fixed name under a shared temp
+//! directory can be created first by another local account, which could then
+//! choose where files written below it go. Refuse a symlink or a directory of
+//! another user there.
+bool EnsurePrivateDir(const fs::path& dir, std::string& err)
+{
+#ifdef _WIN32
+    try {
+        security::EnsurePrivateDirectory(dir);
+        return true;
+    } catch (const security::Error& e) {
+        err = "cannot make private: " + fs::PathToString(dir) + ": " + e.code;
+        return false;
+    }
+#else
+    const std::string path{fs::PathToString(dir)};
+    if (::mkdir(path.c_str(), 0700) != 0 && errno != EEXIST) {
+        err = "cannot create " + path;
+        return false;
+    }
+    struct stat st {};
+    if (::lstat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != ::geteuid()) {
+        err = "not a directory of this user: " + path;
+        return false;
+    }
+    if ((st.st_mode & 077) != 0 && ::chmod(path.c_str(), 0700) != 0) {
+        err = "cannot make private: " + path;
+        return false;
+    }
+    return true;
+#endif
 }
 
 int64_t ParseI64(const UniValue& v, int64_t fallback = 0)
@@ -175,6 +226,13 @@ std::string IdempotencyScope(const UniValue& request, const std::string& idem)
     return caller + '\n' + idem;
 }
 
+std::string CapabilityIdemHash(const std::string& text)
+{
+    unsigned char hash[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(reinterpret_cast<const unsigned char*>(text.data()), text.size()).Finalize(hash);
+    return HexStr(hash);
+}
+
 std::string PayloadFingerprint(const UniValue& request)
 {
     UniValue body(UniValue::VOBJ);
@@ -185,6 +243,61 @@ std::string PayloadFingerprint(const UniValue& request)
         }
     }
     return body.write();
+}
+
+// planbtxcapabilityupdate and ensurebtxcapability keep their idempotency keys
+// for the newest CAPABILITY_IDEM_KEYS_MAX keys within CAPABILITY_IDEM_BYTES_MAX
+// of reply text each, oldest out first; a reply over that alone is not kept. A
+// request under a key that went runs again, as under a new key. g_ensure_mu
+// must be held for all of it.
+constexpr size_t CAPABILITY_IDEM_KEYS_MAX{4096};
+constexpr size_t CAPABILITY_IDEM_BYTES_MAX{4 << 20};
+
+struct IdemLedger {
+    std::map<uint64_t, std::string> order; // key by age, oldest first
+    size_t bytes{0};                       // capacity of the kept reply texts
+    uint64_t clock{0};
+};
+IdemLedger g_ensure_ledger;
+IdemLedger g_update_ledger;
+
+template <typename Kept>
+const Kept* FindIdem(const std::map<std::string, Kept>& kept, const std::string& scope)
+{
+    const auto it = kept.find(CapabilityIdemHash(scope));
+    return it == kept.end() ? nullptr : &it->second;
+}
+
+template <typename Kept>
+void KeepIdem(std::map<std::string, Kept>& kept, IdemLedger& ledger, const std::string& scope,
+              const std::string& payload_fp, const UniValue& reply)
+{
+    const std::string key = CapabilityIdemHash(scope);
+    // A concurrent request under the same key ran too; the reply kept first stays.
+    if (kept.count(key)) return;
+    Kept rec;
+    rec.payload = CapabilityIdemHash(payload_fp);
+    rec.reply = reply.write();
+    rec.reply.shrink_to_fit();
+    const size_t bytes = rec.reply.capacity();
+    if (bytes > CAPABILITY_IDEM_BYTES_MAX) return;
+    const auto placed = ledger.order.emplace(++ledger.clock, key).first;
+    try {
+        kept.emplace(key, std::move(rec));
+    } catch (...) {
+        ledger.order.erase(placed);
+        throw;
+    }
+    ledger.bytes += bytes;
+    while ((kept.size() > CAPABILITY_IDEM_KEYS_MAX || ledger.bytes > CAPABILITY_IDEM_BYTES_MAX) && !ledger.order.empty()) {
+        const auto oldest = ledger.order.begin();
+        const auto it = kept.find(oldest->second);
+        if (it != kept.end()) {
+            ledger.bytes -= it->second.reply.capacity();
+            kept.erase(it);
+        }
+        ledger.order.erase(oldest);
+    }
 }
 
 bool SpendForbidden(const UniValue& o, UniValue& result, std::string& err_code, std::string& err)
@@ -353,7 +466,14 @@ bool AppendCapabilityEvent(const UniValue& event)
     CapEvent e;
     e.seq = g_next_seq++;
     e.body = EventCopy(event, e.seq);
+    e.bytes = e.body.write().size();
     g_events.push_back(std::move(e));
+    g_event_bytes += g_events.back().bytes;
+    while ((g_events.size() > CAPABILITY_EVENTS_MAX || g_event_bytes > CAPABILITY_EVENT_BYTES_MAX) &&
+           g_events.size() > 1) {
+        g_event_bytes -= g_events.front().bytes;
+        g_events.pop_front();
+    }
     return true;
 }
 
@@ -362,16 +482,12 @@ bool CompactCapabilityEvents(int64_t cursor, UniValue& out)
     out = UniValue(UniValue::VOBJ);
     std::lock_guard<std::mutex> lock(g_ensure_mu);
     int64_t dropped = 0;
-    std::vector<CapEvent> kept;
-    kept.reserve(g_events.size());
-    for (auto& e : g_events) {
-        if (e.seq <= cursor) {
-            ++dropped;
-            continue;
-        }
-        kept.push_back(std::move(e));
+    // The log is in seq order.
+    while (!g_events.empty() && g_events.front().seq <= cursor) {
+        g_event_bytes -= g_events.front().bytes;
+        g_events.pop_front();
+        ++dropped;
     }
-    g_events.swap(kept);
     if (cursor > g_compacted_upto) g_compacted_upto = cursor;
     int64_t first = 0;
     int64_t last = cursor;
@@ -487,16 +603,17 @@ bool PlanCapabilityUpdate(const UniValue& request, UniValue& result, std::string
     if (!idem.empty()) {
         const std::string scope = IdempotencyScope(request, idem);
         std::lock_guard<std::mutex> lock(g_ensure_mu);
-        auto it = g_update_idem.find(scope);
-        if (it != g_update_idem.end()) {
-            if (it->second.payload != payload_fp) {
+        if (const auto* kept = FindIdem(g_update_idem, scope)) {
+            if (kept->payload != CapabilityIdemHash(payload_fp)) {
                 return FailResult(result, err_code, err, "IDEMPOTENCY_CONFLICT",
                                   "idempotency_key reused with a different payload", "update");
             }
-            result = it->second.result;
-            result.pushKV("idempotent", true);
-            PushZero(result);
-            return true;
+            if (result.read(kept->reply) && result.isObject()) {
+                result.pushKV("idempotent", true);
+                PushZero(result);
+                return true;
+            }
+            result = UniValue(UniValue::VOBJ);
         }
     }
 
@@ -539,10 +656,7 @@ bool PlanCapabilityUpdate(const UniValue& request, UniValue& result, std::string
 
     if (!idem.empty()) {
         std::lock_guard<std::mutex> lock(g_ensure_mu);
-        UpdateIdem rec;
-        rec.payload = payload_fp;
-        rec.result = result;
-        g_update_idem[IdempotencyScope(request, idem)] = std::move(rec);
+        KeepIdem(g_update_idem, g_update_ledger, IdempotencyScope(request, idem), payload_fp, result);
     }
     return true;
 }
@@ -609,16 +723,17 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
     if (!idem.empty()) {
         const std::string scope = IdempotencyScope(request, idem);
         std::lock_guard<std::mutex> lock(g_ensure_mu);
-        auto it = g_ensure_idem.find(scope);
-        if (it != g_ensure_idem.end()) {
-            if (it->second.payload != payload_fp) {
+        if (const auto* kept = FindIdem(g_ensure_idem, scope)) {
+            if (kept->payload != CapabilityIdemHash(payload_fp)) {
                 return FailResult(result, err_code, err, "IDEMPOTENCY_CONFLICT",
                                   "idempotency_key reused with a different payload", "admit");
             }
-            result = it->second.result;
-            result.pushKV("idempotent", true);
-            PushZero(result);
-            return true;
+            if (result.read(kept->reply) && result.isObject()) {
+                result.pushKV("idempotent", true);
+                PushZero(result);
+                return true;
+            }
+            result = UniValue(UniValue::VOBJ);
         }
     }
 
@@ -677,7 +792,8 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
     }
 
     const fs::path dest_dir{fs::temp_directory_path() / "btx-capability-ensure"};
-    fs::create_directories(dest_dir);
+    std::string dir_err;
+    if (!EnsurePrivateDir(dest_dir, dir_err)) return FailResult(result, err_code, err, "IO", dir_err, "materialize");
     const Generation16 file_gen = NewGeneration();
     static std::atomic<uint64_t> dest_seq{0};
     const std::string dest_name = std::to_string(::getpid()) + "-" + std::to_string(dest_seq.fetch_add(1)) + "-" +
@@ -778,9 +894,12 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
     }
     bool used_catalog = false;
     if (have_catalog && runtime_id != "synthetic-cpu-fixture") {
-        fs::path checkout = fs::temp_directory_path();
-        checkout /= fs::PathFromString(std::string("btx-ensure-") + catalog_e.artifact_id.Hex().substr(0, 24));
+        // Check out below the helper's own directory, not under the shared temp
+        // directory, where another local account could create the folder first.
+        const fs::path checkout_root{cat.Store().Root().parent_path() / "capability-checkout"};
         std::string merr;
+        if (!EnsurePrivateDir(checkout_root, merr)) return FailResult(result, err_code, err, "IO", merr, "materialize");
+        const fs::path checkout{checkout_root / fs::PathFromString(catalog_e.artifact_id.Hex().substr(0, 24))};
         if (!cat.MaterializeCheckout(catalog_e.model_id, checkout, merr)) {
             return FailResult(result, err_code, err, "IO", merr, "materialize");
         }
@@ -894,10 +1013,7 @@ bool EnsureCapability(ModelCatalog& cat, const UniValue& request, UniValue& resu
 
     if (!idem.empty()) {
         std::lock_guard<std::mutex> lock(g_ensure_mu);
-        IdempotentEnsure rec;
-        rec.payload = payload_fp;
-        rec.result = result;
-        g_ensure_idem[IdempotencyScope(request, idem)] = std::move(rec);
+        KeepIdem(g_ensure_idem, g_ensure_ledger, IdempotencyScope(request, idem), payload_fp, result);
     }
     return true;
 }

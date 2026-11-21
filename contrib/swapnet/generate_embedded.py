@@ -27,7 +27,13 @@ class _SwapNetFrozenImporter(importlib.abc.MetaPathFinder, importlib.abc.Loader)
 sys.meta_path.insert(0,_SwapNetFrozenImporter())
 ''' % repr(json.dumps(mapping,separators=(',',':')))
     delim='SN'+hashlib.sha256(bootstrap.encode()).hexdigest()[:12]
-    text='#pragma once\nnamespace swapnet {\ninline constexpr const char* FROZEN_BOOTSTRAP = R"'+delim+'('+bootstrap+')'+delim+'";\n}\n'
+    # MSVC rejects a single string literal of this size. Adjacent raw-string
+    # pieces concatenate to the same bootstrap.
+    pieces=[]
+    step=8000
+    for i in range(0, len(bootstrap), step):
+        pieces.append('R"'+delim+'('+bootstrap[i:i+step]+')'+delim+'"')
+    text='#pragma once\nnamespace swapnet {\ninline constexpr const char* FROZEN_BOOTSTRAP =\n'+'\n'.join(pieces)+';\n}\n'
     out=Path(out);out.parent.mkdir(parents=True,exist_ok=True);out.write_text(text)
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('source');p.add_argument('out');a=p.parse_args();generate(a.source,a.out)

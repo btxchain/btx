@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/compute_economy.h>
 
 #include <modelnet/bounty.h>
@@ -124,12 +125,12 @@ bool CeilMulDiv(uint64_t a, uint64_t b, uint64_t d, uint64_t& out, std::string& 
         err = "COMPUTE_RECORD_INVALID";
         return false;
     }
-    const unsigned __int128 prod = static_cast<unsigned __int128>(a) * b;
+    const btx::U128 prod = static_cast<btx::U128>(a) * b;
     if (a != 0 && prod / a != b) {
         err = "COMPUTE_CREDIT_OVERFLOW";
         return false;
     }
-    const unsigned __int128 q = (prod + static_cast<unsigned __int128>(d) - 1) / d;
+    const btx::U128 q = (prod + static_cast<btx::U128>(d) - 1) / d;
     if (q > std::numeric_limits<uint64_t>::max()) {
         err = "COMPUTE_CREDIT_OVERFLOW";
         return false;

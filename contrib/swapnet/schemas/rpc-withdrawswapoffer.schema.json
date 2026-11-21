@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:btx:swapnet:rpc-withdrawswapoffer",
+  "type": "object",
+  "properties": {
+    "offer_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "offer_id"
+  ],
+  "additionalProperties": false
+}

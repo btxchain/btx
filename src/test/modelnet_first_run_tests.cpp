@@ -652,6 +652,73 @@ BOOST_AUTO_TEST_CASE(fund_with_mandate_watch_drain_unsigned)
     BOOST_CHECK(saw);
 }
 
+BOOST_AUTO_TEST_CASE(cancelmodeljob_save_failure_preserves_stop_and_retries)
+{
+    const fs::path tmp = m_path_root / "cancel-save-retry";
+    fs::create_directories(tmp);
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    const std::string target = "cancel-save-target";
+    const std::string other = "cancel-save-other";
+    const fs::path path = tmp / "retrieve_jobs.json";
+    const fs::path fault = tmp / "retrieve_jobs.json.tmp";
+    UniValue jobs(UniValue::VARR);
+    for (const auto& id : {target, other}) {
+        UniValue row(UniValue::VOBJ);
+        row.pushKV("job_id", id);
+        row.pushKV("model_id", std::string(96, id == target ? 'a' : 'b'));
+        row.pushKV("status", "queued");
+        row.pushKV("created_ms", 42);
+        jobs.push_back(row);
+    }
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("schema_version", 1);
+    root.pushKV("jobs", jobs);
+    { std::ofstream out{path}; out << root.write() << "\n"; BOOST_REQUIRE(out.good()); }
+    auto bytes = [&] {
+        std::ifstream in{path};
+        return std::string(std::istreambuf_iterator<char>{in}, {});
+    };
+    auto params = [](const std::string& id) { UniValue p(UniValue::VARR); p.push_back(id); return p; };
+    const std::string before = bytes();
+    const auto queued = Dispatch(cat, Rpc("getmodeljob", params(target)));
+    BOOST_REQUIRE_EQUAL(queued["jobs"].size(), 1U);
+    BOOST_REQUIRE(fs::create_directory(fault));
+    // The directory refuses the real temporary-file open on POSIX and Windows.
+    auto failed_cancel = [&](const std::string& id) {
+        UniValue result;
+        std::string code, err;
+        const bool ok = modelnet::DispatchHelperRpc(cat, Rpc("cancelmodeljob", params(id)), result, code, err);
+        BOOST_CHECK_MESSAGE(!ok, "cancelmodeljob falsely accepted an unsaved snapshot");
+        BOOST_CHECK_EQUAL(code, "IO_ERROR");
+        BOOST_CHECK_MESSAGE(err.find("retry cancelmodeljob") != std::string::npos, err);
+        BOOST_CHECK_EQUAL(bytes(), before);
+    };
+    failed_cancel(target);
+    auto live = Dispatch(cat, Rpc("getmodeljob", params(target)));
+    BOOST_REQUIRE_EQUAL(live["jobs"].size(), 1U);
+    BOOST_CHECK_EQUAL(live["jobs"][0]["status"].get_str(), "cancelled");
+    failed_cancel(target); // Same request remains a persistence retry.
+    failed_cancel("not-retained"); // An absent ID must not claim the snapshot was saved.
+    const auto listed = Dispatch(cat, Rpc("cancelmodeljob")); // Empty ID remains a read.
+    BOOST_CHECK(listed["jobs"].isArray());
+    BOOST_CHECK_EQUAL(bytes(), before);
+    BOOST_REQUIRE(fs::remove(fault));
+    const auto retried = Dispatch(cat, Rpc("cancelmodeljob", params(target)));
+    BOOST_CHECK(!retried["cancelled"].get_bool()); // No new live transition (661).
+    UniValue saved;
+    BOOST_REQUIRE(saved.read(bytes()));
+    bool saw_other = false;
+    for (const auto& row : saved["jobs"].getValues()) {
+        BOOST_CHECK(row["job_id"].get_str() != target);
+        saw_other |= row["job_id"].get_str() == other;
+    }
+    BOOST_CHECK(saw_other);
+    const auto absent = Dispatch(cat, Rpc("cancelmodeljob", params("not-retained")));
+    BOOST_CHECK(!absent["cancelled"].get_bool());
+    const auto other_cancelled = Dispatch(cat, Rpc("cancelmodeljob", params(other)));
+    BOOST_CHECK(other_cancelled["cancelled"].get_bool());
+}
+
 // cancelmodeljob answered cancelled:true for any known job, also one that had
 // already ended; only the status of a queued or running job changes.
 BOOST_AUTO_TEST_CASE(cancelmodeljob_reports_only_a_real_cancel)
@@ -1511,6 +1578,70 @@ BOOST_AUTO_TEST_CASE(remaining_identity_policy_circle_release_ops)
     }
 }
 
+// importmodelindex, like the alias and tombstone RPCs, saves search-index.json.
+// When it was the first RPC to touch the index after a helper start, it saved
+// the index in memory, which had not read this directory's file, over it.
+BOOST_AUTO_TEST_CASE(import_into_a_fresh_helper_keeps_the_saved_policy)
+{
+    const fs::path root_src = m_path_root / "import-policy-src";
+    fs::create_directories(root_src / "m");
+    {
+        const auto st = MinimalSafeTensors();
+        std::ofstream out(root_src / "m" / "toy.safetensors", std::ios::binary);
+        out.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+    }
+    modelnet::ModelCatalog cat_src{root_src, 8 << 20};
+    UniValue hp(UniValue::VARR);
+    hp.push_back(fs::PathToString(root_src / "m"));
+    Dispatch(cat_src, Rpc("hostmodel", hp));
+    const UniValue exported = Dispatch(cat_src, Rpc("exportmodelindex"));
+    BOOST_REQUIRE_GE(exported["records"].size(), 1U);
+
+    const fs::path root_dst = m_path_root / "import-policy-dst";
+    modelnet::ModelCatalog cat_dst{root_dst, 8 << 20};
+    const fs::path index = cat_dst.Store().Root().parent_path() / "search-index.json";
+    fs::create_directories(index.parent_path());
+    const std::string muted(96, 'd');
+    std::string err;
+    {
+        modelnet::SearchIndex saved;
+        saved.MutePublisher(muted, true);
+        BOOST_REQUIRE_MESSAGE(saved.Save(index, err), err);
+    }
+
+    UniValue body(UniValue::VOBJ);
+    body.pushKV("records", exported["records"]);
+    UniValue ip(UniValue::VARR);
+    ip.push_back(body);
+    const UniValue imported = Dispatch(cat_dst, Rpc("importmodelindex", ip));
+    BOOST_REQUIRE_GE(imported["imported"].getInt<int>(), 1);
+
+    modelnet::SearchIndex reread;
+    BOOST_REQUIRE(reread.Load(index, 1, err));
+    BOOST_CHECK_MESSAGE(reread.Muted(muted), "importmodelindex replaced the saved policy");
+    BOOST_CHECK_GE(reread.Size(), 1U);
+
+    // With a file that cannot be read the import is refused, not answered as
+    // done while it lives in memory only.
+    const fs::path root_cut = m_path_root / "import-policy-cut";
+    modelnet::ModelCatalog cat_cut{root_cut, 8 << 20};
+    const fs::path cut_index = cat_cut.Store().Root().parent_path() / "search-index.json";
+    fs::create_directories(cut_index.parent_path());
+    const std::string cut{"{\"records\": ["};
+    {
+        std::ofstream out(cut_index, std::ios::binary | std::ios::trunc);
+        out << cut;
+    }
+    UniValue result;
+    std::string code;
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat_cut, Rpc("importmodelindex", ip), result, code, err));
+    BOOST_CHECK_EQUAL(code, "INTERNAL");
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    std::ifstream in(cut_index, std::ios::binary);
+    const std::string left((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    BOOST_CHECK(left == cut);
+}
+
 // setmodelalias, removemodelalias, removemodelsearchrecord and importmodelindex
 // changed the search index in memory only. search-index.json is what the helper
 // loads after a restart, so each change must be in that file.
@@ -1589,6 +1720,90 @@ BOOST_AUTO_TEST_CASE(search_index_changes_are_saved)
     const UniValue imported = Dispatch(cat_a, Rpc("importmodelindex", ip));
     BOOST_REQUIRE_GE(imported["imported"].getInt<int>(), 1);
     BOOST_CHECK_MESSAGE(has_alias(saved_record(dir_a, model_id), "r16-saved-alias"), "importmodelindex not saved");
+}
+
+
+BOOST_AUTO_TEST_CASE(rejected_policy_save_keeps_live_settings_and_allows_retry)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "rejected-policy-save";
+    ModelCatalog cat{dir, 8 << 20};
+    const auto request = [&](const std::string& method, const UniValue& patch, UniValue& out, std::string& code, std::string& err) {
+        UniValue req(UniValue::VOBJ), args(UniValue::VARR);
+        req.pushKV("method", method);
+        if (!patch.isNull()) args.push_back(patch);
+        req.pushKV("params", args);
+        return DispatchHelperRpc(cat, req, out, code, err);
+    };
+    UniValue out, initial(UniValue::VOBJ);
+    std::string code, err;
+    initial.pushKV("seed", "off");
+    initial.pushKV("preserve_rare", false);
+    initial.pushKV("follow_configured_peers", false);
+    initial.pushKV("upload_bps", 1024);
+    BOOST_REQUIRE(request("setmodelpolicy", initial, out, code, err));
+    const UniValue before = out;
+    const auto bytes = [&]() {
+        std::ifstream f(dir / "policy.json");
+        return std::string(std::istreambuf_iterator<char>(f), {});
+    };
+    const std::string saved = bytes();
+    fs::create_directory(dir / "policy.json.tmp");
+    UniValue patch(UniValue::VOBJ);
+    patch.pushKV("preserve_rare", true);
+    BOOST_CHECK(!request("setmodelpolicy", patch, out, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(!err.empty());
+    BOOST_CHECK_EQUAL(bytes(), saved);
+    BOOST_REQUIRE(request("getmodelpolicy", UniValue(), out, code, err));
+    BOOST_CHECK_EQUAL(out.write(), before.write());
+    BOOST_CHECK(!cat.Policy().preserve_rare);
+    fs::remove(dir / "policy.json.tmp");
+    BOOST_REQUIRE(request("setmodelpolicy", patch, out, code, err));
+    BOOST_CHECK(out["preserve_rare"].get_bool());
+    BOOST_CHECK_EQUAL(out["seed"].get_str(), "off");
+    BOOST_CHECK(!out["follow_configured_peers"].get_bool());
+    BOOST_CHECK_EQUAL(out["upload_bps"].getInt<uint64_t>(), 1024U);
+    UniValue persisted;
+    BOOST_REQUIRE(persisted.read(bytes()));
+    BOOST_CHECK(persisted["preserve_rare"].get_bool());
+    BOOST_CHECK_EQUAL(persisted["upload_bps"].getInt<uint64_t>(), 1024U);
+    const std::string healthy = out.write(), healthy_file = bytes();
+    for (const auto& field : {"auto_pay", "automatic_spend_atoms"}) {
+        UniValue bad(UniValue::VOBJ);
+        if (std::string(field) == "auto_pay") bad.pushKV(field, true);
+        else bad.pushKV(field, 1);
+        BOOST_CHECK(!request("setmodelpolicy", bad, out, code, err));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+        BOOST_REQUIRE(request("getmodelpolicy", UniValue(), out, code, err));
+        BOOST_CHECK_EQUAL(out.write(), healthy);
+        BOOST_CHECK_EQUAL(bytes(), healthy_file);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(saved_policy_quota_matches_catalog_normalization)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "normalized-policy-save";
+    constexpr uint64_t hard = 8 << 20;
+    ModelCatalog cat{dir, hard};
+    for (const uint64_t requested : {uint64_t{0}, hard + 1, hard / 2}) {
+        UniValue req(UniValue::VOBJ), args(UniValue::VARR), patch(UniValue::VOBJ), out;
+        patch.pushKV("storage_quota_bytes", requested);
+        args.push_back(patch);
+        req.pushKV("method", "setmodelpolicy");
+        req.pushKV("params", args);
+        std::string code, err;
+        BOOST_REQUIRE(DispatchHelperRpc(cat, req, out, code, err));
+        const auto normalized = requested == 0 || requested > hard ? hard : requested;
+        BOOST_CHECK_EQUAL(out["storage_quota_bytes"].getInt<uint64_t>(), normalized);
+        BOOST_CHECK_EQUAL(cat.Policy().storage_quota_bytes, normalized);
+        std::ifstream in(dir / "policy.json");
+        UniValue saved;
+        BOOST_REQUIRE(saved.read(std::string(std::istreambuf_iterator<char>(in), {})));
+        BOOST_CHECK_EQUAL(saved["storage_quota_bytes"].getInt<uint64_t>(), normalized);
+        BOOST_CHECK_EQUAL(saved["automatic_spend_atoms"].getInt<int64_t>(), 0);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

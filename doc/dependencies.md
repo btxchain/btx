@@ -38,7 +38,7 @@ Bitcoin Core requires one of the following compilers.
 | [ZeroMQ](../depends/packages/zeromq.mk) (notifications) | [link](https://github.com/zeromq/libzmq/releases) | [4.3.4](https://github.com/bitcoin/bitcoin/pull/23956) | 4.0.0 | No |
 | [Berkeley DB](../depends/packages/bdb.mk) (legacy wallet) | [link](https://www.oracle.com/technetwork/database/database-technologies/berkeleydb/downloads/index.html) | 4.8.30 | 4.8.x | No |
 | [SQLite](../depends/packages/sqlite.mk) (wallet) | [link](https://sqlite.org) | [3.38.5](https://github.com/bitcoin/bitcoin/pull/25378) | [3.7.17](https://github.com/bitcoin/bitcoin/pull/19077) | No |
-| Python (scripts, tests) | [link](https://www.python.org) | N/A | [3.10](https://github.com/bitcoin/bitcoin/pull/30527) | No |
+| Python (scripts, tests, and the SwapNet runtime linked into `btxd`) | [link](https://www.python.org) | 3.11 | 3.11 | Yes |
 | [systemtap](../depends/packages/systemtap.mk) ([tracing](tracing.md)) | [link](https://sourceware.org/systemtap/) | [4.8](https://github.com/bitcoin/bitcoin/pull/26945)| N/A | No |
 | [OpenSSL](https://www.openssl.org/) (Native Model Network, `-DWITH_MODELNET=ON`) | [link](https://github.com/openssl/openssl/releases) | 3.5+ for PQ1 helper | [3.5](https://github.com/openssl/openssl) with ML-KEM-768 and ML-DSA-44 | Yes (helper TLS / PQ1) |
 

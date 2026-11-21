@@ -277,6 +277,8 @@ class TestNode():
             extra_args.append(f"-bind=127.0.0.1:{tor_port(self.index)}=onion")
 
         self.use_v2transport = "-v2transport=1" in extra_args or (self.default_to_v2 and "-v2transport=0" not in extra_args)
+        # MiniWallet's default mode follows this (see test_framework/wallet.py).
+        self.accept_nonstd_txn = accepts_nonstd_txn(self.args + extra_args)
 
         # Add a new stdout and stderr file each time bitcoind is started
         if stderr is None:
@@ -1005,6 +1007,20 @@ class TestNodeCLIAttr:
 
     def get_request(self, *args, **kwargs):
         return lambda: self(*args, **kwargs)
+
+
+def accepts_nonstd_txn(args):
+    """Whether bitcoind started with these command-line args relays non-standard txs (last -acceptnonstdtxn wins)."""
+    accept = False
+    for arg in map(str, args):
+        if arg == "-noacceptnonstdtxn":
+            accept = False
+        elif arg == "-acceptnonstdtxn":
+            accept = True
+        elif arg.startswith("-acceptnonstdtxn="):
+            value = arg.split("=", 1)[1]
+            accept = value == "" or (value.isdigit() and int(value) != 0)
+    return accept
 
 
 def arg_to_cli(arg):

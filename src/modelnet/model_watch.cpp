@@ -583,6 +583,10 @@ bool SearchRecordMatchesWatch(const ModelWatch& watch, const ModelSearchRecord& 
 bool ModelWatchStore::PersistWatchesLocked(std::string& err) const
 {
     if (m_watch_path.empty()) return true;
+    if (m_watches_unreadable) {
+        err = "watches.json cannot be read; it is kept and not replaced";
+        return false;
+    }
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", 1);
     UniValue arr(UniValue::VARR);
@@ -594,6 +598,10 @@ bool ModelWatchStore::PersistWatchesLocked(std::string& err) const
 bool ModelWatchStore::PersistChannelsLocked(std::string& err) const
 {
     if (m_channel_path.empty()) return true;
+    if (m_channels_unreadable) {
+        err = "channels.json cannot be read; it is kept and not replaced";
+        return false;
+    }
     UniValue o(UniValue::VOBJ);
     o.pushKV("schema_version", 1);
     UniValue arr(UniValue::VARR);
@@ -611,9 +619,16 @@ bool ModelWatchStore::LoadLocked(std::string& err)
 {
     m_watches.clear();
     m_channels.clear();
+    m_watches_unreadable = false;
+    m_channels_unreadable = false;
+    // A file that is there but cannot be opened or parsed is kept: saving the
+    // empty store over it would drop every watch or channel (and the channel
+    // sequences that refuse a rollback).
     if (!m_watch_path.empty() && fs::exists(m_watch_path)) {
         UniValue o;
-        if (ReadJson(m_watch_path, o) && o.isObject() && o.exists("watches") && o["watches"].isArray()) {
+        const bool readable = ReadJson(m_watch_path, o) && o.isObject();
+        m_watches_unreadable = !readable;
+        if (readable && o.exists("watches") && o["watches"].isArray()) {
             for (const auto& wj : o["watches"].getValues()) {
                 if (!wj.isObject()) continue;
                 ModelWatch w;
@@ -642,7 +657,9 @@ bool ModelWatchStore::LoadLocked(std::string& err)
     }
     if (!m_channel_path.empty() && fs::exists(m_channel_path)) {
         UniValue o;
-        if (ReadJson(m_channel_path, o) && o.isObject() && o.exists("channels") && o["channels"].isArray()) {
+        const bool readable = ReadJson(m_channel_path, o) && o.isObject();
+        m_channels_unreadable = !readable;
+        if (readable && o.exists("channels") && o["channels"].isArray()) {
             for (const auto& cj : o["channels"].getValues()) {
                 if (!cj.isObject()) continue;
                 SignedChannel ch;
@@ -674,8 +691,28 @@ ModelWatchStore::ModelWatchStore(fs::path modeldir, size_t action_cap) : m_actio
     }
 }
 
+namespace {
+//! A watch as saved, without its id and creation time.
+std::string WatchSelector(const ModelWatch& w)
+{
+    const UniValue o = ModelWatchToJson(w);
+    UniValue rest(UniValue::VOBJ);
+    for (const std::string& k : o.getKeys()) {
+        if (k != "watch_id" && k != "created_at") rest.pushKV(k, o[k]);
+    }
+    return rest.write();
+}
+} // namespace
+
 bool ModelWatchStore::PutWatch(ModelWatch& w, std::string& err)
 {
+    const bool random_id = w.watch_id.empty();
+    for (const std::string* id : {&w.publisher_id, &w.collection_id, &w.model_id, &w.mandate_id, &w.query_text}) {
+        if (id->size() > MODEL_WATCH_ID_MAX) {
+            err = "watch target too long";
+            return false;
+        }
+    }
     if (w.watch_id.empty()) w.watch_id = RandHex(8);
     if (w.created_at <= 0) w.created_at = NowMs();
     if (w.kind == WatchKind::PUBLISHER && w.publisher_id.empty()) {
@@ -699,8 +736,30 @@ bool ModelWatchStore::PutWatch(ModelWatch& w, std::string& err)
         return false;
     }
     std::lock_guard<std::mutex> lock(m_mu);
-    m_watches[w.watch_id] = w;
-    return PersistWatchesLocked(err);
+    // Every model event is matched against every watch, and the watches are
+    // saved together: the same watch again keeps the one there is, and the
+    // number of watches is bounded, also for a caller that names its own id
+    // (setmodelmirror). A mirror's watch is not handed to another caller.
+    if (random_id) {
+        const std::string selector = WatchSelector(w);
+        for (const auto& [id, kept] : m_watches) {
+            if (id.rfind("mirror-", 0) == 0) continue;
+            if (WatchSelector(kept) == selector) {
+                w = kept;
+                return true;
+            }
+        }
+    }
+    if (!m_watches.count(w.watch_id) && m_watches.size() >= MODEL_WATCHES_MAX) {
+        err = "too many model watches; remove one with unwatchmodel";
+        return false;
+    }
+    auto previous = m_watches.extract(w.watch_id);
+    m_watches.emplace(w.watch_id, w);
+    if (PersistWatchesLocked(err)) return true;
+    m_watches.erase(w.watch_id);
+    if (!previous.empty()) m_watches.insert(std::move(previous));
+    return false;
 }
 
 bool ModelWatchStore::GetWatch(const std::string& watch_id, ModelWatch& out) const
@@ -832,8 +891,13 @@ bool ModelWatchStore::ApplySignedChannel(SignedChannel ch, std::string& err)
                 return false;
             }
         }
-        m_channels[key] = ch;
-        if (!PersistChannelsLocked(err)) return false;
+        auto previous = m_channels.extract(key);
+        m_channels.emplace(key, ch);
+        if (!PersistChannelsLocked(err)) {
+            m_channels.erase(key);
+            if (!previous.empty()) m_channels.insert(std::move(previous));
+            return false;
+        }
     }
     if (!m_journal) return true;
     ev.event_type = ModelEventType::CHANNEL_UPDATED;
@@ -910,6 +974,14 @@ bool IsModelWatchHelperMethod(const std::string& method)
         "listmodelchannels",
     };
     return k.count(method) > 0;
+}
+
+//! Events after cursor that compaction dropped: the first event returned (or,
+//! with none, the oldest one kept) is not the one right after cursor.
+static bool EventsLostAfter(const ModelEventJournal& journal, uint64_t cursor, const std::vector<ModelEvent>& items)
+{
+    const uint64_t next = items.empty() ? journal.FirstSequence() : items.front().local_sequence;
+    return cursor + 1 < next && cursor < journal.Cursor();
 }
 
 bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, UniValue& result, std::string& err_code,
@@ -1046,7 +1118,8 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         for (const auto& ev : items) arr.push_back(ModelEventToJson(ev));
         result.pushKV("events", arr);
         result.pushKV("cursor", std::to_string(NextEventCursor(journal, cursor, items)));
-        result.pushKV("gap", false);
+        // Compaction dropped events after the caller's cursor.
+        result.pushKV("gap", EventsLostAfter(journal, cursor, items));
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }
@@ -1073,6 +1146,7 @@ bool DispatchModelWatchRpc(const std::string& method, const UniValue& params, Un
         result.pushKV("cursor", std::to_string(NextEventCursor(journal, cursor, items)));
         result.pushKV("interrupted", interrupted);
         result.pushKV("timeout", items.empty() && !interrupted);
+        result.pushKV("gap", EventsLostAfter(journal, cursor, items));
         result.pushKV("automatic_spend_atoms", 0);
         return true;
     }

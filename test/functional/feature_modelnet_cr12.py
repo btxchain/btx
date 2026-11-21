@@ -254,9 +254,13 @@ class ModelNetCr12Journeys(BitcoinTestFramework):
         self._honest("J01", "PlanLocal/EnsureLocal are native/helper, not hcpd HTTP")
 
     def _j02(self, tok_a, tok_b):
-        ba, st = self._req(PORT_A, tok_a, "POST", "/layer/bindings", {"role": "DISCOVERY", "binding_id": "bind-j02-a"})
+        ba, st = self._req(PORT_A, tok_a, "POST", "/layer/bindings", {
+            "role": "DISCOVERY", "binding_id": "bind-j02-a", "owner_consent": True,
+        })
         assert st == 201
-        bb, st = self._req(PORT_B, tok_b, "POST", "/layer/bindings", {"role": "CUSTODY", "binding_id": "bind-j02-b"})
+        bb, st = self._req(PORT_B, tok_b, "POST", "/layer/bindings", {
+            "role": "CUSTODY", "binding_id": "bind-j02-b", "owner_consent": True,
+        })
         assert st == 201
         stolen, st = self._req(PORT_B, tok_a, "POST", "/institutional/instructions", {"instruction_id": "ins-j02-x"}, expect_error=True)
         assert st >= 400

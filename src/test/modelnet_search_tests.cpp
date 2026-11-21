@@ -9,13 +9,18 @@
 #include <modelnet/provider_route.h>
 #include <modelnet/qualification.h>
 #include <modelnet/search.h>
+#include <random.h>
 #include <span.h>
 #include <test/util/setup_common.h>
 #include <util/fs.h>
+#include <util/time.h>
 
 #include <boost/test/unit_test.hpp>
 #include <chrono>
 #include <fstream>
+#ifndef WIN32
+#include <unistd.h>
+#endif
 #include <string>
 
 BOOST_FIXTURE_TEST_SUITE(modelnet_search_tests, BasicTestingSetup)
@@ -229,6 +234,21 @@ BOOST_AUTO_TEST_CASE(search_dir_01_to_10)
     BOOST_CHECK_EQUAL(static_cast<int>(h3.klass), static_cast<int>(AvailabilityClass::UNKNOWN));
     BOOST_CHECK(!h3.reconstructable || !h3.reconstructable_known);
 
+    ProviderObservation unnamed;
+    unnamed.provider_id = "dd";
+    unnamed.complete = true;
+    auto h4 = ComputeSwarmHealth(0, 0, {unnamed});
+    BOOST_CHECK_EQUAL(static_cast<int>(h4.klass), static_cast<int>(AvailabilityClass::HIGH));
+    BOOST_CHECK(h4.reconstructable_known);
+    BOOST_CHECK(h4.reconstructable);
+    ProviderObservation partial_only;
+    partial_only.provider_id = "ee";
+    partial_only.complete = false;
+    auto h5 = ComputeSwarmHealth(0, 0, {partial_only});
+    BOOST_CHECK_EQUAL(static_cast<int>(h5.klass), static_cast<int>(AvailabilityClass::HIGH));
+    BOOST_CHECK(h5.reconstructable_known);
+    BOOST_CHECK(!h5.reconstructable);
+
     SearchHit card;
     card.rec.display_name = "x";
     card.local.pinned = true;
@@ -239,6 +259,154 @@ BOOST_AUTO_TEST_CASE(search_dir_01_to_10)
     BOOST_CHECK(d["local"]["pinned"].get_bool());
     BOOST_CHECK_EQUAL(d["release"]["state"].get_str(), "PUBLIC");
     BOOST_CHECK(d.exists("publisher"));
+}
+
+BOOST_AUTO_TEST_CASE(search_health_walks_only_the_model_pieces)
+{
+    using namespace modelnet;
+    // Same counts as a walk over every piece and every range.
+    const auto reference = [](uint32_t total, const std::vector<ProviderObservation>& obs) {
+        std::vector<int> sources(total, 0);
+        for (const auto& o : obs) {
+            for (uint32_t i = 0; i < total; ++i) {
+                for (const auto& r : o.ranges) {
+                    if (RangeCovers(r, i)) {
+                        ++sources[i];
+                        break;
+                    }
+                }
+            }
+        }
+        SwarmHealth h;
+        h.min_piece_sources = total == 0 ? 0 : *std::min_element(sources.begin(), sources.end());
+        for (const int n : sources) {
+            if (n == 0) ++h.pieces_with_0_sources;
+            else if (n == 1) ++h.pieces_with_1_source;
+            else if (n == 2) ++h.pieces_with_2_sources;
+        }
+        return h;
+    };
+    FastRandomContext rng{/*fDeterministic=*/true};
+    for (int round = 0; round < 2000; ++round) {
+        const uint32_t total = 1 + rng.randrange(40);
+        std::vector<ProviderObservation> obs(rng.randrange(5));
+        for (size_t p = 0; p < obs.size(); ++p) {
+            obs[p].provider_id = "p" + std::to_string(p);
+            obs[p].ranges.resize(rng.randrange(6));
+            for (auto& r : obs[p].ranges) {
+                r.first = rng.randrange(50);
+                r.count = 1 + rng.randrange(60);
+            }
+        }
+        const SwarmHealth got = ComputeSwarmHealth(total, 0, obs);
+        const SwarmHealth want = reference(total, obs);
+        BOOST_REQUIRE_EQUAL(got.min_piece_sources, want.min_piece_sources);
+        BOOST_REQUIRE_EQUAL(got.pieces_with_0_sources, want.pieces_with_0_sources);
+        BOOST_REQUIRE_EQUAL(got.pieces_with_1_source, want.pieces_with_1_source);
+        BOOST_REQUIRE_EQUAL(got.pieces_with_2_sources, want.pieces_with_2_sources);
+        BOOST_REQUIRE_EQUAL(got.missing_piece_count, static_cast<uint32_t>(want.pieces_with_0_sources));
+        BOOST_REQUIRE_EQUAL(got.reconstructable, want.pieces_with_0_sources == 0);
+        BOOST_REQUIRE_EQUAL(got.reconstructable, UnionCoversAll(total, [&] {
+            std::vector<std::vector<PieceRange>> all;
+            for (const auto& o : obs) all.push_back(o.ranges);
+            return all;
+        }()));
+    }
+    // Ranges to the end of the piece index space, overlapping within one provider.
+    ProviderObservation wide;
+    wide.provider_id = "wide";
+    wide.ranges = {{0, 0xFFFFFFFFu}, {7, 0xFFFFFFFFu - 7}};
+    ProviderObservation narrow;
+    narrow.provider_id = "narrow";
+    narrow.ranges = {{3, 4}, {12, 100}};
+    const SwarmHealth spanned = ComputeSwarmHealth(10, 0, {wide, narrow});
+    const SwarmHealth spanned_want = reference(10, {wide, narrow});
+    BOOST_CHECK_EQUAL(spanned.min_piece_sources, 1);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_1_source, 6);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_2_sources, 4);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_1_source, spanned_want.pieces_with_1_source);
+    BOOST_CHECK_EQUAL(spanned.pieces_with_2_sources, spanned_want.pieces_with_2_sources);
+    BOOST_CHECK(spanned.reconstructable);
+    // Empty and wrapping ranges cover nothing, as in RangeCovers, and a provider
+    // named twice counts once.
+    ProviderObservation odd;
+    odd.provider_id = "odd";
+    odd.ranges = {{5, 0}, {1, 0xFFFFFFFFu}, {0xFFFFFFF0u, 0x20}};
+    const SwarmHealth odd_health = ComputeSwarmHealth(10, 0, {odd, narrow, narrow});
+    const SwarmHealth odd_want = reference(10, {odd, narrow});
+    BOOST_CHECK_EQUAL(odd_health.providers_observed, 2);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_0_sources, 6);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_1_source, 4);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_0_sources, odd_want.pieces_with_0_sources);
+    BOOST_CHECK_EQUAL(odd_health.pieces_with_1_source, odd_want.pieces_with_1_source);
+    BOOST_CHECK(!odd_health.reconstructable);
+
+    // A peer's provider record may announce ranges far longer than the model.
+    // Only the model's pieces count, and the work does not follow the span.
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    };
+    const fs::path root = m_path_root / "health-span";
+    fs::create_directories(root);
+    const fs::path model = root / "span.safetensors";
+    std::string header = R"({"weight":{"dtype":"F32","shape":[256],"data_offsets":[0,1024]}})";
+    header.append((8 - header.size() % 8) % 8, ' ');
+    {
+        std::ofstream file(model, std::ios::binary);
+        const uint64_t header_size = header.size();
+        for (int i = 0; i < 8; ++i) file.put(static_cast<char>(header_size >> (8 * i)));
+        file << header << std::string(1024, '\x03');
+        BOOST_REQUIRE(file.good());
+    }
+    ModelCatalog cat{root / "models", 1 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(model), false, entry, err), err);
+    BOOST_REQUIRE(cat.Seed(entry.model_id, false, err));
+    auto rpc = [&](const std::string& method, const UniValue& params) {
+        UniValue req(UniValue::VOBJ), result;
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        std::string code;
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), code + ": " + err);
+        return result;
+    };
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    ProviderRecord record;
+    record.resource = entry.model_id;
+    record.pubkey = pk;
+    record.seq = 1;
+    record.reachability_kind = "direct";
+    record.endpoints = {"192.0.2.11:29447"};
+    record.ranges.assign(PROVIDER_MAX_RANGES, PieceRange{0, 0xFFFFFFFFu});
+    record.expiry_ms = now_ms() + 300000;
+    BOOST_REQUIRE(SignProviderRecord(record, Span<const unsigned char>{sk.data(), sk.size()}, err));
+    NativeRequest put;
+    put.method = "POST";
+    put.path = std::string(MODEL_HTTP_ROOT) + "ext/providers/put";
+    put.body = ProviderRecordToJson(record).write();
+    put.peer_addr = "span-fixture";
+    NativeResponse response;
+    BOOST_REQUIRE(HandleNativeRequest(cat, put, response));
+    BOOST_REQUIRE_MESSAGE(response.status == 200, response.body);
+    UniValue query(UniValue::VOBJ), search_params(UniValue::VARR), id_params(UniValue::VARR);
+    query.pushKV("scope", "LOCAL");
+    search_params.push_back(query);
+    id_params.push_back(entry.model_id.Hex());
+    const auto started = std::chrono::steady_clock::now();
+    const auto search = rpc("searchmodels", search_params);
+    const auto avail = rpc("getmodelavailability", id_params);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    BOOST_REQUIRE_EQUAL(search["results"].size(), 1);
+    BOOST_CHECK_EQUAL(search["results"][0]["availability"]["providers_partial"].getInt<int>(), 1);
+    BOOST_CHECK(avail["reconstructable"].get_bool());
+    BOOST_CHECK_EQUAL(avail["min_piece_sources"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(avail["pieces_with_0_sources"].getInt<int>(), 0);
+    // Walking each announced range piece by piece took about 27 s per call here.
+    BOOST_CHECK_MESSAGE(elapsed < std::chrono::seconds{5},
+                        "health took " << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << " ms");
 }
 
 BOOST_AUTO_TEST_CASE(search_index_01_to_10)
@@ -281,6 +449,93 @@ BOOST_AUTO_TEST_CASE(search_index_01_to_10)
     ModelSearchRecord bad;
     BOOST_CHECK(!SearchRecordFromJson(junk, bad, err));
     BOOST_CHECK(!SearchTouchesMonetaryConsensus());
+}
+
+// search-index.json also holds the operator's search policy (hidden models,
+// muted publishers), and signed records from peers trigger saves. A file that
+// is there but cannot be read must be kept, not replaced by the next save.
+BOOST_AUTO_TEST_CASE(search_index_unreadable_file_is_kept)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "search-index-unreadable";
+    fs::create_directories(dir);
+    const fs::path path = dir / "search-index.json";
+    const auto read_all = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const auto write_all = [](const fs::path& p, const std::string& data) {
+        std::ofstream out(p, std::ios::binary | std::ios::trunc);
+        out << data;
+    };
+    const std::string muted(96, 'a');
+    std::string err;
+    SearchIndex idx;
+    idx.MutePublisher(muted, true);
+    BOOST_REQUIRE_MESSAGE(idx.Save(path, err), err);
+    const std::string saved{read_all(path)};
+    BOOST_REQUIRE(saved.find(muted) != std::string::npos);
+
+    const std::string cut{saved.substr(0, saved.size() / 2)};
+    write_all(path, cut);
+    SearchIndex reloaded;
+    BOOST_CHECK(reloaded.Load(path, 1, err));
+    BOOST_CHECK(reloaded.Unreadable());
+    BOOST_CHECK(!reloaded.Muted(muted));
+    BOOST_CHECK(!reloaded.Save(path, err));
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    BOOST_CHECK(read_all(path) == cut);
+
+    write_all(path, saved);
+    SearchIndex repaired;
+    BOOST_CHECK(repaired.Load(path, 1, err));
+    BOOST_CHECK(!repaired.Unreadable());
+    BOOST_CHECK(repaired.Muted(muted));
+    BOOST_CHECK(repaired.Save(path, err));
+
+#ifndef WIN32
+    // The same for a file that is there but cannot be opened.
+    if (::geteuid() != 0) {
+        fs::permissions(path, fs::perms::none);
+        SearchIndex locked;
+        BOOST_CHECK(locked.Load(path, 1, err));
+        BOOST_CHECK(locked.Unreadable());
+        BOOST_CHECK(!locked.Save(path, err));
+        fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write);
+        SearchIndex reopened;
+        BOOST_CHECK(reopened.Load(path, 1, err));
+        BOOST_CHECK(reopened.Muted(muted));
+    }
+#endif
+    // A missing file still loads as an empty index that can be saved.
+    SearchIndex fresh;
+    BOOST_CHECK(fresh.Load(dir / "absent.json", 1, err));
+    BOOST_CHECK(!fresh.Unreadable());
+    BOOST_CHECK(fresh.Save(dir / "absent.json", err));
+
+    // A file without records still holds the policy.
+    const fs::path policy_only = dir / "policy-only.json";
+    {
+        std::ofstream out(policy_only, std::ios::binary | std::ios::trunc);
+        out << "{\"muted_publishers\":[\"" << muted << "\"]}";
+    }
+    SearchIndex policy;
+    BOOST_CHECK(policy.Load(policy_only, 1, err));
+    BOOST_CHECK(!policy.Unreadable());
+    BOOST_CHECK(policy.Muted(muted));
+
+    // A policy list of another type cannot be read, so the file is kept.
+    const fs::path odd = dir / "odd-policy.json";
+    const std::string odd_text{"{\"records\":[],\"hidden\":\"not a list\"}"};
+    {
+        std::ofstream out(odd, std::ios::binary | std::ios::trunc);
+        out << odd_text;
+    }
+    SearchIndex odd_index;
+    BOOST_CHECK(odd_index.Load(odd, 1, err));
+    BOOST_CHECK(odd_index.Unreadable());
+    BOOST_CHECK(!odd_index.Save(odd, err));
+    BOOST_CHECK(read_all(odd) == odd_text);
 }
 
 BOOST_AUTO_TEST_CASE(search_net_01_to_13)
@@ -356,6 +611,85 @@ BOOST_AUTO_TEST_CASE(search_net_01_to_13)
     BOOST_CHECK_GE(jmerge.hits.size(), 1);
 }
 
+// The participation tick stores the records of a peer's ext/search reply. The
+// peer decides how often that reply holds a change, and each save writes the
+// whole index, so the tick saves at most once per interval.
+BOOST_AUTO_TEST_CASE(search_gossip_saves_the_index_at_most_once_per_interval)
+{
+    using namespace modelnet;
+    const fs::path root = m_path_root / "gossip-save";
+    fs::create_directories(root);
+    ModelCatalog cat{root / "models", 1 << 20};
+    const fs::path index = cat.Store().Root().parent_path() / "search-index.json";
+    std::vector<unsigned char> pk, sk;
+    std::string err;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    Digest48 first;
+    // The same 16 models each time, signed again with a higher sequence.
+    const auto reply_at = [&](uint64_t sequence) {
+        UniValue records(UniValue::VARR);
+        for (int i = 0; i < 16; ++i) {
+            ModelSearchRecord r;
+            r.model_id.data[0] = 0x67;
+            r.model_id.data[1] = static_cast<unsigned char>(i + 1);
+            r.artifact_id = r.model_id;
+            r.canonical_name = "gossip-" + std::to_string(i);
+            r.display_name = r.canonical_name;
+            r.pubkey = pk;
+            r.published_at = 1;
+            r.metadata_sequence = sequence;
+            BOOST_REQUIRE_MESSAGE(SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err), err);
+            if (i == 0) first = r.model_id;
+            records.push_back(SearchRecordToJson(r));
+        }
+        UniValue reply(UniValue::VOBJ);
+        reply.pushKV("records", records);
+        return reply;
+    };
+    // The sequence of the first model as search-index.json holds it.
+    const auto saved_sequence = [&]() -> int64_t {
+        std::ifstream in(index, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        UniValue snap;
+        if (!snap.read(text) || !snap.exists("records")) return -1;
+        for (const auto& rec : snap["records"].getValues()) {
+            if (rec["model_id"].get_str() == first.Hex()) return rec["metadata_sequence"].getInt<int64_t>();
+        }
+        return -1;
+    };
+    // Ten minutes ahead, so a save by another case in this process is over an interval ago.
+    const int64_t t0 = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count() + 10 * 60 * 1000;
+    BOOST_CHECK(StoreGossipSearchReply(cat, reply_at(1), "gossip-fixture", t0));
+    BOOST_CHECK_EQUAL(saved_sequence(), 1);
+    // A pull every 5 s that always brings changed records saves no more than once a minute.
+    for (int k = 1; k < 12; ++k) {
+        BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(1 + k), "gossip-fixture", t0 + k * 5000));
+    }
+    BOOST_CHECK_EQUAL(saved_sequence(), 1);
+    // The first pull after the interval saves what came before, also when it brings nothing new.
+    BOOST_CHECK(StoreGossipSearchReply(cat, reply_at(12), "gossip-fixture", t0 + SEARCH_GOSSIP_SAVE_INTERVAL_MS));
+    BOOST_CHECK_EQUAL(saved_sequence(), 12);
+    // Nothing new and nothing left to save: no save.
+    BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(12), "gossip-fixture", t0 + 3 * SEARCH_GOSSIP_SAVE_INTERVAL_MS));
+    // A clock that went back saves a change at once.
+    BOOST_CHECK(StoreGossipSearchReply(cat, reply_at(13), "gossip-fixture", t0 + 1000));
+    BOOST_CHECK_EQUAL(saved_sequence(), 13);
+    // Without another pull, the helper's loop saves once the interval is over.
+    const int64_t t1 = t0 + 1000;
+    BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(14), "gossip-fixture", t1 + 1000));
+    BOOST_CHECK(!FlushGossipSearchIndex(cat, t1 + 30000, /*force=*/false));
+    BOOST_CHECK_EQUAL(saved_sequence(), 13);
+    BOOST_CHECK(FlushGossipSearchIndex(cat, t1 + SEARCH_GOSSIP_SAVE_INTERVAL_MS, /*force=*/false));
+    BOOST_CHECK_EQUAL(saved_sequence(), 14);
+    // A stop saves what is left at once, and then nothing is left.
+    const int64_t t2 = t1 + SEARCH_GOSSIP_SAVE_INTERVAL_MS;
+    BOOST_CHECK(!StoreGossipSearchReply(cat, reply_at(15), "gossip-fixture", t2 + 5000));
+    BOOST_CHECK(FlushGossipSearchIndex(cat, t2 + 6000, /*force=*/true));
+    BOOST_CHECK_EQUAL(saved_sequence(), 15);
+    BOOST_CHECK(!FlushGossipSearchIndex(cat, t2 + 7000, /*force=*/true));
+}
+
 BOOST_AUTO_TEST_CASE(search_scale_unsigned_2k)
 {
     using namespace modelnet;
@@ -380,6 +714,55 @@ BOOST_AUTO_TEST_CASE(search_scale_unsigned_2k)
     const auto hits = idx.Search(q, 1);
     BOOST_CHECK_GE(hits.size(), 1);
     BOOST_CHECK_LE(hits.size(), 25);
+}
+
+// Every search keeps its job (with its hits) for getsearchstatus; a runtime
+// keeps the newest SEARCH_JOBS_KEPT of them.
+BOOST_AUTO_TEST_CASE(search_jobs_are_bounded)
+{
+    using namespace modelnet;
+    SearchIndex local, peer;
+    SearchRuntime rt;
+    rt.Bind(&local);
+    SearchQuery q;
+    q.text = "qwen";
+    q.scope = SearchScope::NETWORK;
+    SearchJob st;
+    std::vector<std::string> ids;
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT + 8; ++i) {
+        auto job = rt.Start(q, {&peer}, 1);
+        ids.push_back(job.query_id);
+        rt.Finish(job);
+    }
+    for (size_t i = 0; i < 8; ++i) BOOST_CHECK(!rt.Status(ids[i], st));
+    for (size_t i = 8; i < ids.size(); ++i) BOOST_CHECK(rt.Status(ids[i], st));
+
+    // A running search stays while finished ones can go, so it can still be
+    // cancelled.
+    auto running = rt.Start(q, {&peer}, 1);
+    BOOST_CHECK_EQUAL(static_cast<int>(running.state), static_cast<int>(SearchJobState::RUNNING));
+    BOOST_CHECK(!rt.Status(ids[8], st));
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT; ++i) {
+        auto job = rt.Start(q, {&peer}, 1);
+        ids.push_back(job.query_id);
+        rt.Finish(job);
+    }
+    BOOST_CHECK(rt.Status(running.query_id, st));
+    BOOST_CHECK(!rt.Status(ids[ids.size() - SEARCH_JOBS_KEPT], st));
+    BOOST_CHECK(rt.Status(ids[ids.size() - SEARCH_JOBS_KEPT + 1], st));
+
+    // When all kept jobs run, the oldest goes; it is kept again, as the
+    // newest, when it finishes, and the oldest other one goes.
+    std::vector<SearchJob> runs;
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT; ++i) runs.push_back(rt.Start(q, {&peer}, 1));
+    BOOST_CHECK(!rt.Status(running.query_id, st));
+    BOOST_CHECK(rt.Status(runs.front().query_id, st));
+    rt.Finish(running);
+    BOOST_CHECK(rt.Status(running.query_id, st));
+    BOOST_CHECK_EQUAL(static_cast<int>(st.state), static_cast<int>(SearchJobState::COMPLETE));
+    BOOST_CHECK(!rt.Status(runs.front().query_id, st));
+    BOOST_CHECK(rt.Status(runs.back().query_id, st));
+    BOOST_CHECK(rt.Cancel(runs.back().query_id));
 }
 
 BOOST_AUTO_TEST_CASE(search_rpc_more_methods)
@@ -413,6 +796,55 @@ BOOST_AUTO_TEST_CASE(search_rpc_more_methods)
     NativeResponse nresp;
     BOOST_CHECK(HandleNativeRequest(cat, nreq, nresp));
     BOOST_CHECK_EQUAL(nresp.status, 200);
+}
+
+// Finish counts each search once: a LOCAL search that Start counted as
+// complete is not counted again (and does not lower the running count), and
+// a search cancelled while it ran stays cancelled.
+BOOST_AUTO_TEST_CASE(search_finish_counts_each_search_once)
+{
+    using namespace modelnet;
+    SearchIndex local, peer;
+    SearchRuntime rt;
+    rt.Bind(&local);
+    SearchQuery net;
+    net.text = "qwen";
+    net.scope = SearchScope::NETWORK;
+    SearchQuery loc = net;
+    loc.scope = SearchScope::LOCAL;
+
+    auto running = rt.Start(net, {&peer}, 1);
+    BOOST_CHECK_EQUAL(rt.Running(), 1);
+    auto local_job = rt.Start(loc, {}, 1);
+    BOOST_CHECK_EQUAL(rt.Completed(), 1);
+    rt.Finish(local_job);
+    BOOST_CHECK_EQUAL(rt.Completed(), 1);
+    BOOST_CHECK_EQUAL(rt.Running(), 1);
+
+    BOOST_REQUIRE(rt.Cancel(running.query_id));
+    BOOST_CHECK_EQUAL(rt.Running(), 0);
+    rt.Finish(running);
+    BOOST_CHECK_EQUAL(rt.Running(), 0);
+    BOOST_CHECK_EQUAL(rt.Completed(), 1);
+    SearchJob st;
+    BOOST_REQUIRE(rt.Status(running.query_id, st));
+    BOOST_CHECK_EQUAL(static_cast<int>(st.state), static_cast<int>(SearchJobState::CANCELLED));
+
+    auto other = rt.Start(net, {&peer}, 1);
+    rt.Finish(other);
+    BOOST_CHECK_EQUAL(rt.Running(), 0);
+    BOOST_CHECK_EQUAL(rt.Completed(), 2);
+
+    // A search cancelled while it ran whose job was dropped (all kept jobs
+    // run) is still counted once.
+    auto dropped = rt.Start(net, {&peer}, 1);
+    BOOST_REQUIRE(rt.Cancel(dropped.query_id));
+    for (size_t i = 0; i < SEARCH_JOBS_KEPT; ++i) (void)rt.Start(net, {&peer}, 1);
+    BOOST_CHECK(!rt.Status(dropped.query_id, st));
+    BOOST_CHECK_EQUAL(rt.Running(), static_cast<int>(SEARCH_JOBS_KEPT));
+    rt.Finish(dropped);
+    BOOST_CHECK_EQUAL(rt.Running(), static_cast<int>(SEARCH_JOBS_KEPT));
+    BOOST_CHECK_EQUAL(rt.Completed(), 2);
 }
 
 BOOST_AUTO_TEST_CASE(search_rpc_directory_entry)
@@ -512,6 +944,209 @@ BOOST_AUTO_TEST_CASE(search_quota_charges_the_signer)
     BOOST_CHECK_MESSAGE(idx.Put(claim(64), 1, err, "203.0.113.7:29447"), err);
     BOOST_CHECK(!idx.Put(claim(65), 1, err, "203.0.113.7:29447"));
     BOOST_CHECK_EQUAL(err, "publisher spam");
+}
+
+// The quota limits how many records one key keeps in the index. Records that
+// expired and were pruned counted on: 64 records seen since the start refused
+// every new model of that key until btx-modeld restarted.
+BOOST_AUTO_TEST_CASE(search_quota_counts_live_records)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> pk, sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    const auto rec = [&](int i, int64_t expires_at) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = 3;
+        r.model_id.data[1] = static_cast<unsigned char>(i);
+        r.canonical_name = "live" + std::to_string(i);
+        r.display_name = r.canonical_name;
+        r.pubkey = pk;
+        r.expires_at = expires_at;
+        BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        return r;
+    };
+    SearchIndex idx;
+    for (int i = 0; i < 64; ++i) BOOST_REQUIRE_MESSAGE(idx.Put(rec(i, 1000), 1, err, "203.0.113.7:29447"), err);
+    BOOST_CHECK(!idx.Put(rec(64, 1000), 1, err, "203.0.113.7:29447"));
+    BOOST_CHECK_EQUAL(err, "publisher spam");
+
+    // All 64 have expired; the next Put prunes them and the key may publish again.
+    BOOST_CHECK_MESSAGE(idx.Put(rec(65, 100'000), 2000, err, "203.0.113.7:29447"), err);
+    for (int i = 0; i < 64; ++i) BOOST_CHECK(idx.Get(rec(i, 1000).model_id) == nullptr);
+    BOOST_CHECK(idx.Get(rec(65, 100'000).model_id) != nullptr);
+
+    // 64 live records still fill the quota.
+    for (int i = 66; i < 129; ++i) BOOST_REQUIRE_MESSAGE(idx.Put(rec(i, 100'000), 2000, err, "203.0.113.7:29447"), err);
+    BOOST_CHECK(!idx.Put(rec(129, 100'000), 2000, err, "203.0.113.7:29447"));
+    BOOST_CHECK_EQUAL(err, "publisher spam");
+}
+
+// Put refuses an older sequence while the newer record is in the index. Once
+// that record expired and was pruned, or expired while the helper was down,
+// an older copy that had not expired yet was taken back.
+BOOST_AUTO_TEST_CASE(expired_record_sequence_is_not_taken_back)
+{
+    using namespace modelnet;
+    std::string err;
+    std::vector<unsigned char> pk, sk, other_pk, other_sk;
+    BOOST_REQUIRE(GenerateMlDsa44(pk, sk, err));
+    BOOST_REQUIRE(GenerateMlDsa44(other_pk, other_sk, err));
+    const auto rec = [&](uint8_t tag, uint64_t seq, int64_t expires_at, bool other = false) {
+        ModelSearchRecord r;
+        r.model_id.data[0] = tag;
+        r.canonical_name = "seq" + std::to_string(seq);
+        r.display_name = r.canonical_name;
+        r.metadata_sequence = seq;
+        r.expires_at = expires_at;
+        r.pubkey = other ? other_pk : pk;
+        const auto& key = other ? other_sk : sk;
+        BOOST_REQUIRE(SignSearchRecord(r, Span<const unsigned char>{key.data(), key.size()}, err));
+        return r;
+    };
+    const auto seq1 = rec(0x50, 1, 5'000'000);
+    const auto seq2 = rec(0x50, 2, 2'000'000);
+    const Digest48 signer = seq1.signer_id;
+    const fs::path dir = m_path_root / "search-seq-floor";
+    fs::create_directories(dir);
+
+    // Pruned at run time.
+    {
+        SearchIndex idx;
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq1, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq2, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x51, 1, 9'000'000), 3'000'000, err), err);
+        BOOST_REQUIRE(idx.Get(seq1.model_id) == nullptr);
+        BOOST_CHECK(!idx.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(seq1.model_id, signer), 2U);
+        // Another record under the expired one's sequence is not taken either.
+        auto twin = rec(0x50, 2, 9'000'000);
+        twin.display_name = "twin";
+        BOOST_REQUIRE(SignSearchRecord(twin, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        BOOST_CHECK(!idx.Put(twin, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        // This node's unsigned catalog stub for the model does not open the way.
+        ModelSearchRecord stub;
+        stub.model_id = seq1.model_id;
+        stub.canonical_name = "stub";
+        stub.display_name = stub.canonical_name;
+        stub.local_catalog = true;
+        BOOST_REQUIRE_MESSAGE(idx.Put(stub, 3'000'000, err), err);
+        BOOST_CHECK(!idx.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        BOOST_REQUIRE_MESSAGE(idx.Save(dir / "pruned.json", err), err);
+        SearchIndex reread;
+        BOOST_REQUIRE(reread.Load(dir / "pruned.json", 3'000'000, err));
+        BOOST_CHECK(!reread.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(seq1.model_id, signer), 2U);
+        // A newer record holds the sequence from then on.
+        BOOST_CHECK_MESSAGE(reread.Put(rec(0x50, 3, 9'000'000), 3'000'000, err), err);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(seq1.model_id, signer), 0U);
+        // A record at sequence 0 leaves no floor, as SequenceFloor reads 0 as none.
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x53, 0, 3'500'000), 3'000'000, err), err);
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x54, 1, 9'000'000), 4'000'000, err), err);
+        BOOST_CHECK(reread.Get(rec(0x53, 0, 3'500'000).model_id) == nullptr);
+        auto zero = rec(0x53, 0, 9'000'000);
+        zero.display_name = "zero again";
+        BOOST_REQUIRE(SignSearchRecord(zero, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        BOOST_CHECK_MESSAGE(reread.Put(zero, 4'000'000, err), err);
+    }
+    // Expired while the helper was down.
+    {
+        SearchIndex idx;
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq2, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Save(dir / "offline.json", err), err);
+        SearchIndex reread;
+        BOOST_REQUIRE(reread.Load(dir / "offline.json", 3'000'000, err));
+        BOOST_CHECK(reread.Get(seq2.model_id) == nullptr);
+        BOOST_CHECK(!reread.Put(seq1, 3'000'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+    }
+    // Another key has its own floor: it cannot raise or clear this one.
+    {
+        SearchIndex idx;
+        BOOST_REQUIRE_MESSAGE(idx.Put(seq2, 1, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x51, 1, 9'000'000), 3'000'000, err), err);
+        const auto high = rec(0x50, 1'000'000, 4'000'000, /*other=*/true);
+        BOOST_REQUIRE_MESSAGE(idx.Put(high, 3'000'000, err), err);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x52, 1, 9'000'000), 4'500'000, err), err);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(seq1.model_id, high.signer_id), 1'000'000U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(seq1.model_id, signer), 2U);
+        BOOST_CHECK(!idx.Put(seq1, 4'500'000, err));
+        BOOST_CHECK_EQUAL(err, "sequence rollback");
+        BOOST_CHECK_MESSAGE(idx.Put(rec(0x50, 3, 9'000'000), 4'500'000, err), err);
+    }
+    // Floors from peer records are bounded like the index; the oldest go
+    // first, also after a restart. The floor of this node's own record stays.
+    {
+        const auto model = [](uint8_t tag) {
+            Digest48 id;
+            id.data[0] = tag;
+            return id;
+        };
+        SearchIndex idx;
+        auto own = rec(0x5f, 9, 1000);
+        own.local_catalog = true;
+        BOOST_REQUIRE_MESSAGE(idx.Put(own, 1, err), err);
+        for (uint8_t i = 0; i < 6; ++i) BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x60 + i, 7, 1000 + i), 1, err), err);
+        idx.SetCap(4);
+        BOOST_REQUIRE_MESSAGE(idx.Put(rec(0x70, 1, 9'000'000), 1'000'000, err), err);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x5f), signer), 9U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x61), signer), 0U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x62), signer), 7U);
+        BOOST_CHECK_EQUAL(idx.SequenceFloor(model(0x65), signer), 7U);
+        BOOST_REQUIRE_MESSAGE(idx.Save(dir / "bound.json", err), err);
+        SearchIndex reread;
+        reread.SetCap(4);
+        BOOST_REQUIRE(reread.Load(dir / "bound.json", 1'500'000, err));
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x66, 7, 2'000'000), 1'500'000, err), err);
+        BOOST_REQUIRE_MESSAGE(reread.Put(rec(0x71, 1, 9'000'000), 2'500'000, err), err);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x62), signer), 0U);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x63), signer), 7U);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x66), signer), 7U);
+        BOOST_CHECK_EQUAL(reread.SequenceFloor(model(0x5f), signer), 9U);
+    }
+}
+
+// The helper's own publish paths sign with this node's key. After its own
+// record expired and was pruned, publishing the model again was refused.
+BOOST_AUTO_TEST_CASE(own_record_published_again_after_expiry)
+{
+    using namespace modelnet;
+    const fs::path tmp = m_path_root / "search-own-floor";
+    fs::create_directories(tmp);
+    ModelCatalog cat{tmp, 1 << 20};
+    const auto now_ms = [] {
+        return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    };
+    const auto publish = [&](const std::string& id, int64_t expires_at, std::string& e) {
+        UniValue meta(UniValue::VOBJ);
+        meta.pushKV("display_name", "Floor Model");
+        meta.pushKV("canonical_name", "Floor Model");
+        if (expires_at) meta.pushKV("expires_at", expires_at);
+        UniValue params(UniValue::VARR);
+        params.push_back(id);
+        params.push_back(meta);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "publishmodelsearchrecord");
+        req.pushKV("params", params);
+        UniValue result;
+        std::string code;
+        if (!DispatchHelperRpc(cat, req, result, code, e, nullptr)) return int64_t{-1};
+        return result["sequence"].getInt<int64_t>();
+    };
+    const std::string model(96, 'f');
+    std::string e;
+    const int64_t expiry = now_ms() + 3000;
+    const int64_t first = publish(model, expiry, e);
+    BOOST_REQUIRE_MESSAGE(first > 0, e);
+    BOOST_REQUIRE_EQUAL(publish(model, expiry, e), first + 1);
+    while (now_ms() <= expiry) UninterruptibleSleep(std::chrono::milliseconds{50});
+    // Another publish prunes the expired record.
+    BOOST_REQUIRE_MESSAGE(publish(std::string(95, 'f') + "e", 0, e) > 0, e);
+    BOOST_CHECK_EQUAL(publish(model, 0, e), first + 2);
 }
 
 BOOST_AUTO_TEST_CASE(search_unsigned_expiry_quota_and_save)
@@ -755,6 +1390,102 @@ BOOST_AUTO_TEST_CASE(search_refreshes_signed_provider_observations)
         rpc("searchmodels", search_params);
         BOOST_CHECK_EQUAL(rpc("getmodelproviders", id_params)["providers"][0]["complete"].get_bool(), !initially_complete);
     }
+}
+
+BOOST_AUTO_TEST_CASE(search_provider_observations_end_with_their_record)
+{
+    using namespace modelnet;
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    };
+    const fs::path root = m_path_root / "observation-expiry";
+    fs::create_directories(root);
+    const fs::path model = root / "expiry.safetensors";
+    std::string header = R"({"weight":{"dtype":"F32","shape":[256],"data_offsets":[0,1024]}})";
+    header.append((8 - header.size() % 8) % 8, ' ');
+    {
+        std::ofstream file(model, std::ios::binary);
+        const uint64_t header_size = header.size();
+        for (int i = 0; i < 8; ++i) file.put(static_cast<char>(header_size >> (8 * i)));
+        file << header << std::string(1024, '\x04');
+        BOOST_REQUIRE(file.good());
+    }
+    ModelCatalog cat{root / "models", 1 << 20};
+    CatalogEntry entry;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(model), false, entry, err), err);
+    BOOST_REQUIRE(cat.Seed(entry.model_id, false, err));
+    auto rpc = [&](const std::string& method, const UniValue& params) {
+        UniValue req(UniValue::VOBJ), result;
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        std::string code;
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), code + ": " + err);
+        return result;
+    };
+    struct Key {
+        std::vector<unsigned char> pk, sk;
+    };
+    Key short_key, long_key, swap_key;
+    for (Key* k : {&short_key, &long_key, &swap_key}) BOOST_REQUIRE(GenerateMlDsa44(k->pk, k->sk, err));
+    auto put = [&](const std::string& peer, const Key& key, uint64_t seq, int64_t expiry_ms) {
+        const auto& pk = key.pk;
+        const auto& sk = key.sk;
+        ProviderRecord record;
+        record.resource = entry.model_id;
+        record.pubkey = pk;
+        record.seq = seq;
+        record.complete = true;
+        record.reachability_kind = "direct";
+        record.endpoints = {"192.0.2.12:29447"};
+        record.ranges = {{0, 1}};
+        record.expiry_ms = expiry_ms;
+        BOOST_REQUIRE(SignProviderRecord(record, Span<const unsigned char>{sk.data(), sk.size()}, err));
+        NativeRequest req;
+        req.method = "POST";
+        req.path = std::string(MODEL_HTTP_ROOT) + "ext/providers/put";
+        req.body = ProviderRecordToJson(record).write();
+        req.peer_addr = peer;
+        NativeResponse response;
+        BOOST_REQUIRE(HandleNativeRequest(cat, req, response));
+        BOOST_REQUIRE_MESSAGE(response.status == 200, response.body);
+        return record.service_id.Hex();
+    };
+    // Two providers from two peers: one record ends in a few seconds, one in five minutes.
+    const int64_t short_expiry = now_ms() + 3000;
+    put("expiry-short-fixture", short_key, 1, short_expiry);
+    const std::string lasting = put("expiry-long-fixture", long_key, 1, now_ms() + 300000);
+    UniValue query(UniValue::VOBJ), search_params(UniValue::VARR), id_params(UniValue::VARR);
+    query.pushKV("scope", "LOCAL");
+    search_params.push_back(query);
+    id_params.push_back(entry.model_id.Hex());
+    rpc("searchmodels", search_params);
+    BOOST_REQUIRE_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 2);
+    BOOST_CHECK_EQUAL(rpc("getmodelavailability", id_params)["providers_complete"].getInt<int>(), 2);
+
+    while (now_ms() <= short_expiry) UninterruptibleSleep(std::chrono::milliseconds{50});
+    // The record has left the provider cache; its copy no longer counts either.
+    const auto providers = rpc("getmodelproviders", id_params)["providers"];
+    BOOST_REQUIRE_EQUAL(providers.size(), 1);
+    BOOST_CHECK_EQUAL(providers[0]["provider_id"].get_str(), lasting);
+    BOOST_CHECK_EQUAL(rpc("getmodelavailability", id_params)["providers_complete"].getInt<int>(), 1);
+    BOOST_CHECK_EQUAL(rpc("getmodelpeercount", id_params)["complete"].getInt<int>(), 1);
+    rpc("searchmodels", search_params);
+    BOOST_CHECK_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 1);
+
+    // A provider that replaces its record with one that ends sooner: once that
+    // record is gone from the cache, searchmodels drops the earlier copy too.
+    const std::string swapped = put("expiry-swap-fixture", swap_key, 1, now_ms() + 300000);
+    rpc("searchmodels", search_params);
+    BOOST_REQUIRE_EQUAL(rpc("getmodelproviders", id_params)["providers"].size(), 2);
+    const int64_t swap_expiry = now_ms() + 1000;
+    BOOST_CHECK_EQUAL(put("expiry-swap-fixture", swap_key, 2, swap_expiry), swapped);
+    while (now_ms() <= swap_expiry) UninterruptibleSleep(std::chrono::milliseconds{50});
+    rpc("searchmodels", search_params);
+    const auto after_swap = rpc("getmodelproviders", id_params)["providers"];
+    BOOST_REQUIRE_EQUAL(after_swap.size(), 1);
+    BOOST_CHECK_EQUAL(after_swap[0]["provider_id"].get_str(), lasting);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

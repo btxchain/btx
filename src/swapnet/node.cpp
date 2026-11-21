@@ -2,8 +2,10 @@
 #include <bitcoin-build-config.h>
 
 #include <swapnet/node.h>
+#include <swapnet/embed.h>
 #include <swapnet/runtime.h>
 #include <chainparams.h>
+#include <clientversion.h>
 #include <node/context.h>
 #include <interfaces/wallet.h>
 #include <rpc/protocol.h>
@@ -14,6 +16,9 @@
 #include <util/chaintype.h>
 #include <util/strencodings.h>
 #include <logging.h>
+#include <random.h>
+#include <shared_p2p/runtime.h>
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -62,12 +67,33 @@ std::string RequestWallet(const JSONRPCRequest& r) {
         } else out+=encoded[i];
     } return out;
 }
+bool NativeObjectAbsent(const UniValue& error) {
+    // Only the fixed not-found texts. A txindex that is still syncing uses a
+    // different sentence and must stay a failure, or a confirmed transaction
+    // would be broadcast again. The message itself is not returned to Python.
+    if (!error.isObject() || !error.exists("code") || !error["code"].isNum()) return false;
+    if (error["code"].getInt<int>() != RPC_INVALID_ADDRESS_OR_KEY) return false;
+    if (!error.exists("message") || !error["message"].isStr()) return false;
+    const std::string& message = error["message"].get_str();
+    static constexpr const char* kPrefixes[] = {
+        "Transaction not in mempool",
+        "Invalid or non-wallet transaction id",
+        "No such mempool or blockchain transaction",
+        "No such mempool transaction. Use -txindex",
+        "No such transaction found in the provided block",
+    };
+    for (const char* prefix : kPrefixes) {
+        const std::size_t n = std::char_traits<char>::length(prefix);
+        if (message.size() >= n && message.compare(0, n, prefix) == 0) return true;
+    }
+    return false;
+}
 const std::set<std::string> NATIVE_METHODS={
  "getblockchaininfo","getblockhash","getblockcount","getbestblockhash","getblockheader","getblock",
  "getrawtransaction","gettxout","scantxoutset","getmempoolentry","gettxspendingprevout","getdescriptorinfo","deriveaddresses","validateaddress",
  "decodescript","decodepsbt","decoderawtransaction","createpsbt","finalizepsbt","sendrawtransaction","testmempoolaccept",
  "listwallets","getwalletinfo","getnewaddress","getaddressinfo","listunspent","lockunspent","gettransaction","listtransactions",
- "exportpqkey","walletcreatefundedpsbt","walletprocesspsbt","importdescriptors","signmessage","verifymessage","_swapnet_import_htlc"};
+ "exportpqkey","walletcreatefundedpsbt","walletprocesspsbt","importdescriptors","signmessage","verifymessage","_swapnet_import_htlc","_swapnet_connect_peer","_shared_p2p"};
 std::string CoreCall(node::NodeContext& node,const std::string& wallet,const std::string& method,const std::string& params) {
     if (!NATIVE_METHODS.count(method)||params.size()>4*1024*1024) throw std::runtime_error("Native request rejected");
     JSONRPCRequest r; r.context=&node; r.strMethod=method; r.authUser="__swapnet_internal__";
@@ -78,22 +104,80 @@ std::string CoreCall(node::NodeContext& node,const std::string& wallet,const std
         r.m_wallet_restriction=wallet;
     } else if (method=="listwallets") r.m_wallet_restriction.clear();
     if (!r.params.read(params)||!r.params.isArray()) throw std::runtime_error("Invalid native parameters");
+    if (method=="_swapnet_connect_peer") {
+        if (!wallet.empty() || r.params.size()!=1 || !r.params[0].isStr()) throw std::runtime_error("Invalid peer request");
+        const std::string endpoint=r.params[0].get_str();
+        if (endpoint.empty() || endpoint.size()>300 || std::any_of(endpoint.begin(),endpoint.end(),
+            [](unsigned char c){return c<=32||c=='/'||c=='?'||c=='#'||c=='@'||c=='%'||c=='\\';}))
+            throw std::runtime_error("Unsafe endpoint");
+        r.strMethod="addnode";
+        r.params=UniValue(UniValue::VARR);
+        r.params.push_back(endpoint);
+        r.params.push_back("onetry");
+        auto text=tableRPC.execute(r).write();
+        if (text.size()>4*1024*1024) throw std::runtime_error("Native result exceeds bound");
+        return text;
+    }
+    if (method=="_shared_p2p") {
+        if (!wallet.empty() || r.params.size()!=2 || !r.params[0].isStr() || !r.params[1].isObject())
+            throw std::runtime_error("Invalid shared control request");
+        const auto op=r.params[0].get_str();
+        const auto& body=r.params[1];
+        auto& core=btx::p2p::AuthoritativeCore();
+        UniValue out(UniValue::VOBJ);
+        out.pushKV("available",core.Running());
+        out.pushKV("network",core.Network());
+        out.pushKV("wallet_authority",false);
+        if (op=="status") return out.write();
+        if (op=="learn") {
+            if (!body.exists("identity")||!body.exists("peer")||!body.exists("expires_at")) throw std::runtime_error("Missing route scope");
+            const auto now=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            out.pushKV("recorded",core.LearnRoute(btx::p2p::Service::SwapNet,body["identity"].get_str(),body["peer"].get_str(),body["expires_at"].getInt<int64_t>(),now));
+            return out.write();
+        }
+        if (op=="record") {
+            if (!body.exists("key") || !body.exists("sequence") || !body.exists("expires_at") || !body.exists("record"))
+                throw std::runtime_error("Missing local record fields");
+            if (!body["key"].isStr() || !body["record"].isStr() || body["record"].get_str().size()>24576)
+                throw std::runtime_error("Unbounded public record");
+            const auto now=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            btx::p2p::Record record{body["key"].get_str(),body["record"].get_str(),
+                static_cast<uint64_t>(body["sequence"].getInt<int64_t>()),body["expires_at"].getInt<int64_t>()};
+            out.pushKV("recorded",core.PublishVerified(btx::p2p::Service::SwapNet,record,now));
+            return out.write();
+        }
+        if (op=="routes") {
+            if (!body.exists("identity")||!body["identity"].isStr()) throw std::runtime_error("Missing identity");
+            const auto now=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            UniValue routes(UniValue::VARR);
+            for (const auto& peer:core.Routes(btx::p2p::Service::SwapNet,body["identity"].get_str(),now)) routes.push_back(peer);
+            out.pushKV("routes",routes);
+            return out.write();
+        }
+        throw std::runtime_error("Unsupported shared control request");
+    }
     UniValue result;
-    if (method=="_swapnet_import_htlc") {
-        WalletBridge bridge; {std::lock_guard<std::mutex> lock(g_mutex); bridge=g_wallet_bridge;}
-        if (!bridge||!node.wallet_loader) throw std::runtime_error("Wallet integration is unavailable");
-        // Wallet RPCs require WalletContext. The public table swaps it in;
-        // this internal bridge does not go through that table.
-        node.wallet_loader->assignContextHACK(r.context);
-        result=bridge(r);
-    } else result=tableRPC.execute(r);
+    try {
+        if (method=="_swapnet_import_htlc") {
+            WalletBridge bridge; {std::lock_guard<std::mutex> lock(g_mutex); bridge=g_wallet_bridge;}
+            if (!bridge||!node.wallet_loader) throw std::runtime_error("Wallet integration is unavailable");
+            // Wallet RPCs require WalletContext. The public table swaps it in;
+            // this internal bridge does not go through that table.
+            node.wallet_loader->assignContextHACK(r.context);
+            result=bridge(r);
+        } else result=tableRPC.execute(r);
+    } catch (const UniValue& error) {
+        if (NativeObjectAbsent(error)) throw NativeAbsent();
+        throw;
+    }
     auto text=result.write(); if(text.size()>4*1024*1024) throw std::runtime_error("Native result exceeds bound");
     return text;
 }
 }
 void SetWalletBridge(WalletBridge bridge) { std::lock_guard<std::mutex> lock(g_mutex);g_wallet_bridge=std::move(bridge); }
 void SetupArgs(ArgsManager& args) {
-    args.AddArg("-swapnet", "Enable native SwapNet discovery and recovery (default: 0). Spending requires an explicit mandate.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    args.AddArg("-swapnet", "Run native SwapNet so peers dogfood discovery and taker participation (default: 1). Set -swapnet=0 to leave it stopped. Spending requires an explicit mandate.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    args.AddArg("-swapnetmode=<observe|taker|maker|recovery>", "Participation override (default: taker when unset, and a saved owner choice is kept). taker can request quotes. maker publishes markets. observe is read-only. recovery keeps existing obligations and starts no new trades. Maker and taker still require an owner mandate.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     args.AddArg("-swapnetwallet=<name>", "Bind SwapNet to this already-loaded native wallet; otherwise require exactly one loaded wallet.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     args.AddArg("-swapnetowner=<rpcuser>", "Grant this authenticated RPC username owner-level SwapNet policy authority; repeatable. Cookie and local Qt console are owners.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
 }
@@ -103,14 +187,31 @@ bool StartNode(node::NodeContext& node) {
         return false;
     }
     auto& args=*node.args;
-    if(!args.GetBoolArg("-swapnet",false)) return true;
+    if (!args.GetBoolArg("-swapnet", true)) return true;
     try {
         UniValue config(UniValue::VOBJ); const auto genesis=Params().GenesisBlock().GetHash().GetHex();
         config.pushKV("network",genesis);
+        // An unset mode leaves the saved owner choice, or taker on a new journal.
+        // Passing a default here would wipe a maker or observe choice on every restart.
+        if (args.IsArgSet("-swapnetmode")) {
+            const std::string mode = args.GetArg("-swapnetmode", "taker");
+            if (mode!="observe" && mode!="taker" && mode!="maker" && mode!="recovery") {
+                LogPrintf("SwapNet: startup failed (unknown -swapnetmode). No funds were authorized by startup.\n");
+                return false;
+            }
+            config.pushKV("market_startup_mode", mode);
+        }
         // Chain class comes from local parameters. Startup must not call RPC:
         // the RPC server is still in warmup until this function returns.
         config.pushKV("chain",ChainTypeToString(args.GetChainType()));
+        // getswapvalidationinfo reports the build, since the SwapNet source version alone does not change per release.
+        config.pushKV("client_version",FormatFullVersion());
         config.pushKV("datadir",fs::PathToString(args.GetDataDirNet()));config.pushKV("wallet",args.GetArg("-swapnetwallet",""));
+        try {
+            btx::p2p::StartRuntime(genesis, fs::PathToString(args.GetDataDirNet() / "shared-p2p"), GetRandHash().GetHex());
+        } catch (const std::exception& e) {
+            LogPrintf("SwapNet: shared control plane did not start (%s). Peer discovery continues. No funds were authorized by startup.\n", e.what());
+        }
         Callbacks callbacks;
         callbacks.core=[&node](const auto& wallet,const auto& method,const auto& params){return CoreCall(node,wallet,method,params);};
 #if defined(SWAPNET_WITH_WALLET) && defined(USE_SQLITE)
@@ -123,17 +224,24 @@ bool StartNode(node::NodeContext& node) {
         {std::lock_guard<std::mutex> lock(g_mutex);g_owners.clear();for(const auto& user:args.GetArgs("-swapnetowner"))g_owners.insert(user);g_runtime=runtime;}
         LogPrintf("SwapNet: embedded runtime started; discovery enabled; no implicit spending authorization\n");return true;
     } catch (const UniValue& e) {
+        btx::p2p::StopRuntime();
         LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", e.write());
         return false;
     } catch (const std::exception& e) {
+        btx::p2p::StopRuntime();
         LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", e.what());
         return false;
-    } catch (...) {LogPrintf("SwapNet: startup failed; inspect local dependency/wallet/state configuration. No funds were authorized by startup.\n");return false;}
+    } catch (...) {
+        btx::p2p::StopRuntime();
+        LogPrintf("SwapNet: startup failed; inspect local dependency/wallet/state configuration. No funds were authorized by startup.\n");
+        return false;
+    }
 }
 void StopNode() {
     std::shared_ptr<Runtime> runtime;
     {std::lock_guard<std::mutex> lock(g_mutex);runtime=std::move(g_runtime);}
     if(runtime) runtime->Stop();
+    btx::p2p::StopRuntime();
 }
 void PeerReady(PeerId peer) {if(auto r=Current())r->Wire().PeerReady(peer,NowMS());}
 void PeerClosed(PeerId peer) {if(auto r=Current())r->Wire().PeerClosed(peer);}

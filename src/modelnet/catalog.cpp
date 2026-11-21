@@ -352,7 +352,8 @@ ModelCatalog::ModelCatalog(fs::path dir, uint64_t quota_bytes)
     m_policy.seed_upon_download = true;
     fs::create_directories(m_dir);
     std::string err;
-    LoadLocked(err);
+    // A catalog.json that loaded only in part is not saved over either.
+    if (!LoadLocked(err)) m_unreadable = true;
 }
 
 void ModelCatalog::DemandSeedLocked(CatalogEntry& e)
@@ -601,6 +602,10 @@ bool ModelCatalog::RemoveModel(const Digest48& model_id, Digest48& artifact_out,
 
 bool ModelCatalog::PersistLocked(std::string& err)
 {
+    if (m_unreadable) {
+        err = "catalog.json cannot be read; it is kept and not replaced";
+        return false;
+    }
     UniValue arr(UniValue::VARR);
     for (const auto& m : m_models) {
         UniValue o(UniValue::VOBJ);
@@ -666,11 +671,21 @@ bool ModelCatalog::LoadLocked(std::string& err)
 {
     m_models.clear();
     const fs::path path = m_dir / "catalog.json";
+    m_unreadable = false;
     std::ifstream in(path);
-    if (!in) return true;
+    if (!in) {
+        // A file that is there but cannot be opened is not an empty catalog:
+        // saving over it would drop every model entry and peer it holds.
+        std::error_code ec;
+        const bool regular{fs::is_regular_file(path, ec)};
+        m_unreadable = regular || (ec && ec != std::errc::no_such_file_or_directory);
+        if (m_unreadable) err = "catalog json";
+        return !m_unreadable;
+    }
     std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     UniValue root;
     if (!root.read(raw) || !root.isObject()) {
+        m_unreadable = true;
         err = "catalog json";
         return false;
     }
@@ -793,7 +808,10 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     bool has_weights = false;
     for (const auto& file : files) {
         const auto lower = ToLower(file.second);
-        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors") || lower.ends_with(".exl3")) {
+        // The same weight files RoleFromRelPath names, so the BtxEnc2
+        // ciphertext that createmodelrelease imports counts as weights.
+        if (lower.ends_with(".gguf") || lower.ends_with(".safetensors") || lower.ends_with(".exl3") ||
+            lower.ends_with(".btxenc")) {
             has_weights = true;
             break;
         }
@@ -866,25 +884,97 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     std::vector<unsigned char> aenc;
     if (!EncodeArtifactCore(ac, aenc, err)) return false;
     const Digest48 artifact_id = ArtifactCoreId(aenc);
+    // A fetch that did not finish (getmodel stopped, importbtxpackage) leaves an
+    // incomplete entry for this model, with or without some of its pieces. This
+    // import has every byte verified, so it completes that entry. Before, the
+    // catalog got a second entry with the same model id, or kept the partial
+    // pieces and answered as if the files had been imported.
+    CatalogEntry* partial = nullptr;
+    for (auto& m : m_models) {
+        if (m.incomplete && (m.model_id == model_id || m.artifact_id == artifact_id)) {
+            partial = &m;
+            break;
+        }
+    }
+    if (partial) {
+        for (const auto& m : m_models) {
+            if (!m.incomplete && (m.artifact_id == artifact_id || m.artifact_id == partial->artifact_id)) {
+                partial = nullptr;
+                break;
+            }
+        }
+    }
+    if (partial) {
+        if (m_active_artifacts.count(partial->artifact_id) || m_active_artifacts.count(artifact_id)) {
+            err = "a transfer of this model is running";
+            return false;
+        }
+        for (const Digest48& id : {partial->artifact_id, artifact_id}) {
+            if (!m_store.RemoveArtifact(id, err)) return false;
+            DropPieceTreeCache(id);
+        }
+        if (partial->artifact_id != artifact_id) m_store.Unpin(partial->artifact_id);
+    }
     if (!m_store.RenameArtifact(staging, artifact_id, err)) {
         if (err != "destination artifact exists") return false;
+        // Prefer the complete entry: a catalog written before ImportPath
+        // completed partial entries can hold an incomplete duplicate of it, in
+        // front of it. That duplicate is dropped (quota eviction erases every
+        // entry of a model id, so it would take the complete one along).
+        CatalogEntry* found = nullptr;
         for (auto& m : m_models) {
             if (m.artifact_id != artifact_id) continue;
-            if (pin && !m.pinned) {
+            if (!found || (found->incomplete && !m.incomplete)) found = &m;
+        }
+        std::vector<CatalogEntry> dropped;
+        if (found && !found->incomplete) {
+            const Digest48 keep_model = found->model_id;
+            std::vector<CatalogEntry> kept;
+            for (auto& m : m_models) {
+                if (m.incomplete && m.model_id == keep_model && m.artifact_id == artifact_id) {
+                    dropped.push_back(std::move(m));
+                } else {
+                    kept.push_back(std::move(m));
+                }
+            }
+            m_models = std::move(kept);
+            found = nullptr;
+            for (auto& m : m_models) {
+                if (m.artifact_id == artifact_id && !m.incomplete) {
+                    found = &m;
+                    break;
+                }
+            }
+        }
+        if (found) {
+            CatalogEntry& m = *found;
+            const bool promote_pin = pin && !m.pinned;
+            if (m.source_path != path || promote_pin || !dropped.empty()) {
+                const auto previous_source_path = m.source_path;
+                const bool previous_pin = m.pinned;
                 const auto previous_admission = m.admission;
                 const bool previous_verification = m.bytes_verified;
-                m.pinned = true;
-                m.admission = AdmissionLevel::PINNED;
-                m.bytes_verified = true;
+                // This import verified the same artifact at the caller's path.
+                // Keep that usable source across subsequent calls and restarts.
+                m.source_path = path;
+                if (promote_pin) {
+                    m.pinned = true;
+                    m.admission = AdmissionLevel::PINNED;
+                    m.bytes_verified = true;
+                }
                 if (!PersistLocked(err)) {
-                    m.pinned = false;
+                    m.source_path = previous_source_path;
+                    m.pinned = previous_pin;
                     m.admission = previous_admission;
                     m.bytes_verified = previous_verification;
+                    for (auto& d : dropped) m_models.push_back(std::move(d));
                     return false;
                 }
-                std::string pin_err;
-                m_store.Pin(model_id, pin_err);
-                m_store.Pin(artifact_id, pin_err);
+                if (promote_pin) {
+                    std::string pin_err;
+                    m_store.Pin(model_id, pin_err);
+                    m_store.Pin(artifact_id, pin_err);
+                }
             }
             err.clear();
             out = m;
@@ -942,6 +1032,32 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
     out.completed_at = out.imported_at;
     out.last_access_at = out.imported_at;
     out.incomplete = false;
+    if (partial) {
+        const CatalogEntry before = *partial;
+        out.pinned = pin || before.pinned;
+        out.admission = out.pinned ? AdmissionLevel::PINNED : AdmissionLevel::STRUCTURE_VERIFIED;
+        out.bytes_verified = out.pinned;
+        if (before.imported_at) out.imported_at = before.imported_at;
+        if (before.artifact_id == artifact_id) {
+            out.useful_bytes_served = before.useful_bytes_served;
+            out.useful_bytes_received = before.useful_bytes_received;
+            out.last_served_at = before.last_served_at;
+        }
+        DemandSeedLocked(out);
+        *partial = out;
+        if (!PersistLocked(err)) {
+            *partial = before;
+            std::string rollback_err;
+            if (m_store.RenameArtifact(artifact_id, staging, rollback_err)) commit_staging = false;
+            return false;
+        }
+        if (out.pinned) {
+            std::string pin_err;
+            m_store.Pin(model_id, pin_err);
+            m_store.Pin(artifact_id, pin_err);
+        }
+        return true;
+    }
     DemandSeedLocked(out);
     m_models.push_back(out);
     if (!PersistLocked(err)) {
@@ -968,8 +1084,14 @@ bool ModelCatalog::Seed(const Digest48& model_id, bool on, std::string& err)
 {
     std::lock_guard<std::mutex> lock(m_mu);
     for (auto& m : m_models) {
-        if (m.model_id == model_id) {
+        // As PinModel and RemoveModel: a model is found by its artifact id too.
+        if (m.model_id == model_id || m.artifact_id == model_id) {
             if (on) {
+                // An incomplete replica is not seeded, as in DemandSeedLocked.
+                if (m.incomplete) {
+                    err = "incomplete replica";
+                    return false;
+                }
                 std::string admission;
                 if (!CatalogRouteAllows(m, false, admission)) {
                     AssignRouteErr(admission, err);
@@ -1366,6 +1488,64 @@ bool ModelCatalog::GetVerifiedPiece(const Digest48& artifact, uint32_t file_inde
     return true;
 }
 
+CatalogFileStream::Buffer::Buffer(const ModelCatalog& catalog, const Digest48& artifact,
+                                      uint32_t file_index, const CoreFile& file)
+    : m_catalog(catalog), m_artifact(artifact), m_file_index(file_index), m_file(file)
+{
+    const uint64_t pieces = file.size / PIECE_SIZE + (file.size % PIECE_SIZE != 0);
+    if (pieces > std::numeric_limits<uint32_t>::max()) {
+        m_error = "too many upload pieces";
+    } else if (file.size == 0) {
+        Digest48 empty;
+        m_hash.Finalize(empty.data.data());
+        if (file.pieces_root != EmptyFileRoot() || file.sha384 != empty) {
+            m_error = "empty upload file identity mismatch";
+        }
+    }
+}
+
+CatalogFileStream::Buffer::int_type CatalogFileStream::Buffer::underflow()
+{
+    if (gptr() && gptr() < egptr()) return traits_type::to_int_type(*gptr());
+    if (!m_error.empty() || m_read == m_file.size) return traits_type::eof();
+    setg(nullptr, nullptr, nullptr);
+    std::vector<Digest48> proof;
+    uint64_t file_size{0};
+    if (!m_catalog.GetVerifiedPiece(m_artifact, m_file_index, m_next_piece,
+                                    m_bytes, proof, file_size, m_error)) {
+        if (m_error.empty()) m_error = "upload piece unavailable";
+        return traits_type::eof();
+    }
+    m_max_buffer = std::max(m_max_buffer, m_bytes.size());
+    const uint64_t expected = std::min<uint64_t>(PIECE_SIZE, m_file.size - m_read);
+    if (file_size != m_file.size || m_bytes.size() != expected ||
+        !VerifyPiece(m_file.pieces_root, m_file.size, m_next_piece, m_bytes, proof)) {
+        m_error = "upload piece does not match imported file";
+        return traits_type::eof();
+    }
+    m_hash.Write(m_bytes.data(), m_bytes.size());
+    m_read += m_bytes.size();
+    ++m_next_piece;
+    if (m_read == m_file.size) {
+        Digest48 digest;
+        m_hash.Finalize(digest.data.data());
+        if (digest != m_file.sha384) {
+            m_error = "upload file sha384 mismatch";
+            return traits_type::eof();
+        }
+    }
+    auto* data = reinterpret_cast<char*>(m_bytes.data());
+    setg(data, data, data + m_bytes.size());
+    return traits_type::to_int_type(*gptr());
+}
+
+CatalogFileStream::CatalogFileStream(const ModelCatalog& catalog, const Digest48& artifact,
+                                     uint32_t file_index, const CoreFile& file)
+    : std::istream(nullptr), m_buffer(catalog, artifact, file_index, file)
+{
+    rdbuf(&m_buffer);
+}
+
 bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                                      Span<const unsigned char> bytes, const std::vector<Digest48>& proof,
                                      uint64_t file_size, const Digest48& pieces_root, std::string& err)
@@ -1441,7 +1621,7 @@ bool ModelCatalog::PutFetchedPiece(const Digest48& artifact, uint32_t file_index
     return true;
 }
 
-bool ModelCatalog::AddPeer(const std::string& endpoint)
+bool ModelCatalog::AddPeer(const std::string& endpoint, std::string* save_error)
 {
     // There is no RPC to remove a contact, so one that cannot be dialed would
     // hold its slot for good.
@@ -1451,7 +1631,11 @@ bool ModelCatalog::AddPeer(const std::string& endpoint)
     if (m_peers.size() >= 64) return false;
     m_peers.push_back(endpoint);
     std::string err;
-    PersistLocked(err);
+    if (!PersistLocked(err)) {
+        m_peers.pop_back();
+        if (save_error) *save_error = std::move(err);
+        return false;
+    }
     return true;
 }
 
@@ -1512,7 +1696,18 @@ bool ModelCatalog::MaterializeCheckout(const Digest48& model_or_artifact, const 
     for (uint32_t i = 0; i < e.core.files.size(); ++i) {
         const CoreFile& f = e.core.files[i];
         if (!IsPortableRelPath(f.path, err)) return false;
-        const fs::path outp = dest / fs::PathFromString(f.path);
+        const fs::path rel{fs::PathFromString(f.path)};
+        // A directory of the checkout that is a symlink would put the file,
+        // and replace one, outside dest.
+        fs::path dir{dest};
+        for (const auto& part : rel.parent_path()) {
+            dir = dir / fs::path{part};
+            if (fs::is_symlink(dir, ec)) {
+                err = "checkout directory is a symlink";
+                return false;
+            }
+        }
+        const fs::path outp = dest / rel;
         fs::path prefer;
         if (!src_root.empty()) {
             std::error_code sec;
@@ -1574,11 +1769,38 @@ bool ModelCatalog::InstallFromManifest(const UniValue& manifest, std::string& er
     }
     for (auto& existing : m_models) {
         if (existing.model_id == e.model_id) {
-            const bool pinned = existing.pinned;
-            const int64_t imported = existing.imported_at;
+            // A fetch or a package import that only starts on a copy this node
+            // already holds whole and verified would turn it back into a
+            // partial one: no checkout, no serving, no seeding.
+            if (!complete && existing.artifact_id == e.artifact_id && !existing.incomplete &&
+                (existing.bytes_verified || AdmissionImpliesBytesVerified(existing.admission))) {
+                return true;
+            }
+            // A download of a model the catalog already lists (a repair, or the
+            // end of a partial fetch) replaces its files, not what this node
+            // recorded about it: the pin, the operator's label, and for the same
+            // artifact its source and its transfer counts (the give-back ratio
+            // reads them).
+            e.pinned = existing.pinned;
+            e.imported_at = existing.imported_at ? existing.imported_at : GetTime();
+            e.last_access_at = existing.last_access_at;
+            if (!existing.label.empty()) e.label = existing.label;
+            if (existing.artifact_id == e.artifact_id) {
+                e.source_path = existing.source_path;
+                e.observed_sources = existing.observed_sources;
+                e.last_served_at = existing.last_served_at;
+                e.useful_bytes_served = existing.useful_bytes_served;
+                e.useful_bytes_received = existing.useful_bytes_received;
+                if (existing.seeding_started_at) e.seeding_started_at = existing.seeding_started_at;
+            }
+            if (e.pinned) {
+                if (complete) e.admission = AdmissionLevel::PINNED;
+                std::string pin_err;
+                m_store.Pin(e.model_id, pin_err);
+                m_store.Pin(e.artifact_id, pin_err);
+                if (existing.artifact_id != e.artifact_id) m_store.Unpin(existing.artifact_id);
+            }
             existing = e;
-            existing.pinned = pinned;
-            existing.imported_at = imported ? imported : GetTime();
             return PersistLocked(err);
         }
     }

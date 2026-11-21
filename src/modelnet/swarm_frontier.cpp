@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/swarm_frontier.h>
 
 #include <modelnet/swarm_codec.h>
@@ -199,8 +200,8 @@ bool SwarmInfluenceCap(int64_t untrusted_weight, int64_t total_weight, int64_t c
         err = "INFLUENCE";
         return false;
     }
-    const __int128 ratio = static_cast<__int128>(untrusted_weight) * 1000000 / static_cast<__int128>(total_weight);
-    if (ratio > static_cast<__int128>(cap_ppm)) {
+    const btx::I128 ratio = static_cast<btx::I128>(untrusted_weight) * 1000000 / static_cast<btx::I128>(total_weight);
+    if (ratio > static_cast<btx::I128>(cap_ppm)) {
         err = "INFLUENCE_CAP";
         return false;
     }
@@ -210,9 +211,9 @@ bool SwarmInfluenceCap(int64_t untrusted_weight, int64_t total_weight, int64_t c
 
 bool SwarmAnomaly(int64_t score_ppm, int64_t median_ppm, int64_t max_deviation_ppm)
 {
-    const __int128 delta = static_cast<__int128>(score_ppm) - static_cast<__int128>(median_ppm);
-    const __int128 magnitude = delta < 0 ? -delta : delta;
-    return magnitude > static_cast<__int128>(max_deviation_ppm);
+    const btx::I128 delta = static_cast<btx::I128>(score_ppm) - static_cast<btx::I128>(median_ppm);
+    const btx::I128 magnitude = delta < 0 ? -delta : delta;
+    return magnitude > static_cast<btx::I128>(max_deviation_ppm);
 }
 
 void SwarmQuarantineDigest(SwarmQuarantineSet& quarantine, const std::string& digest)

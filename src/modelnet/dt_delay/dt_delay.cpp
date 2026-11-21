@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <compat/wide128.h>
 #include <modelnet/dt_delay/dt_delay.h>
 #include <modelnet/nifdt_contract/contract.h>
 
@@ -12,10 +13,10 @@
 namespace modelnet {
 namespace {
 
-bool FitsInt64(__int128 value)
+bool FitsInt64(btx::I128 value)
 {
-    return value <= static_cast<__int128>(std::numeric_limits<int64_t>::max()) &&
-           value >= static_cast<__int128>(std::numeric_limits<int64_t>::min());
+    return value <= static_cast<btx::I128>(std::numeric_limits<int64_t>::max()) &&
+           value >= static_cast<btx::I128>(std::numeric_limits<int64_t>::min());
 }
 
 } // namespace
@@ -46,7 +47,7 @@ bool DtDelay::Delay(int64_t delta, int64_t lag, std::string& err)
         err = DT_DELAY_STALE;
         return false;
     }
-    const __int128 sum = static_cast<__int128>(m_pending) + static_cast<__int128>(delta);
+    const btx::I128 sum = static_cast<btx::I128>(m_pending) + static_cast<btx::I128>(delta);
     if (!FitsInt64(sum)) {
         err = DT_DELAY_OVERFLOW;
         return false;
@@ -66,7 +67,7 @@ bool DtDelay::Resume(const std::string& id, std::string& err)
         err = DT_DELAY_UNCHANGED;
         return false;
     }
-    const __int128 sum = static_cast<__int128>(m_head) + static_cast<__int128>(m_pending);
+    const btx::I128 sum = static_cast<btx::I128>(m_head) + static_cast<btx::I128>(m_pending);
     if (!FitsInt64(sum)) {
         err = DT_DELAY_OVERFLOW;
         return false;

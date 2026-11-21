@@ -1213,7 +1213,7 @@
           "required": true
         }
       ],
-      "notes": "Broadcasts the given transaction as is. Wallet → Send checks (address, fee display, fee cap) do not apply. Use Wallet → Send for a normal payment.",
+      "notes": "Broadcasts the given transaction as is. Wallet \u2192 Send checks (address, fee display, fee cap) do not apply. Use Wallet \u2192 Send for a normal payment.",
       "wallet": false
     },
     {
@@ -1313,7 +1313,7 @@
           "default": "0.00000000"
         }
       ],
-      "notes": "Bypasses Wallet → Send: no address check, no fee display and no fee cap. Use Wallet → Send for a normal payment.",
+      "notes": "Bypasses Wallet \u2192 Send: no address check, no fee display and no fee cap. Use Wallet \u2192 Send for a normal payment.",
       "wallet": true
     },
     {
@@ -1335,7 +1335,7 @@
           "default": {}
         }
       ],
-      "notes": "Bypasses Wallet → Send: no address check, no fee display and no fee cap. Use Wallet → Send for a normal payment.",
+      "notes": "Bypasses Wallet \u2192 Send: no address check, no fee display and no fee cap. Use Wallet \u2192 Send for a normal payment.",
       "wallet": true
     },
     {
@@ -3347,6 +3347,801 @@
       ],
       "notes": "A missing signer or a failed enumeration is not success and is not hardware qualification. automatic_spend_atoms stays 0.",
       "wallet": true
+    },
+    {
+      "group": "Models",
+      "method": "getmodelsearchrecord",
+      "title": "Signed search record",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "This node's observation. Coverage is incomplete. Not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "listmodelsearchrecords",
+      "title": "Local search index",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Paginated local index. An omitted query stays on this node. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodeldirectory",
+      "title": "Model directory",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": false,
+          "default": {
+            "limit": 50
+          }
+        }
+      ],
+      "notes": "Local search index only. The handler searches the whole index; scope in this request is not a peer fan-out. Not a census. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelproviders",
+      "title": "Observed providers",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "Providers this node has observed. Not a global census. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelavailability",
+      "title": "Model availability",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "Swarm health from this node's observations. An observation is not byte verification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelpeercount",
+      "title": "Observed provider counts",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "Complete and partial counts this node has observed. Not a census. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getnetworkmodelstats",
+      "title": "Model-plane counters",
+      "risk": "read",
+      "args": [],
+      "notes": "This node's counters only. No central telemetry. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "browsemodels",
+      "title": "Browse models",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": false,
+          "default": {
+            "limit": 50
+          }
+        }
+      ],
+      "notes": "Local search index only. Sort defaults to availability on this node. This call does not dial peers. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "gettrendingmodels",
+      "title": "Trending models",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": false,
+          "default": {
+            "limit": 50
+          }
+        }
+      ],
+      "notes": "Local search index only. Trend is observed provider growth on this node, not a global rank. This call does not dial peers. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getsimilarmodels",
+      "title": "Similar models",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": false,
+          "default": {
+            "limit": 50
+          }
+        }
+      ],
+      "notes": "Local search index only. Optional family matches metadata. This call does not dial peers. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getnewmodels",
+      "title": "New models",
+      "risk": "read",
+      "args": [
+        {
+          "name": "query",
+          "kind": "json",
+          "required": false,
+          "default": {
+            "scope": "LOCAL",
+            "limit": 50
+          }
+        }
+      ],
+      "notes": "An omitted scope stays on this node's index. A non-local scope is forwarded to the feed and opens native review. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodellandiscovery",
+      "title": "LAN discovery",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Classifies an optional endpoint already known to this node. This read does not dial a peer. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getmodelfeedstatus",
+      "title": "Feed status",
+      "risk": "read",
+      "args": [],
+      "notes": "This node's observation. Coverage is incomplete. Not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getsearchpeers",
+      "title": "Search peers",
+      "risk": "read",
+      "args": [],
+      "notes": "Search and index peers this node already knows. Not a monetary peer list. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getpublisher",
+      "title": "Publisher profile",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "Public signed publisher profile. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "Models",
+      "method": "getcollection",
+      "title": "Collection",
+      "risk": "read",
+      "args": [
+        {
+          "name": "id",
+          "kind": "string",
+          "required": true
+        }
+      ],
+      "notes": "Signed collection detail. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswapnetworkinfo",
+      "title": "SwapNet network",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "listswapassets",
+      "title": "Swap assets",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "listswapproviders",
+      "title": "Swap providers",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional sell, buy, after, and limit. Local provider catalog. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "searchswaps",
+      "title": "Search swaps",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional sell, buy, after, and limit. Same local catalog as listswapproviders. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswapquotes",
+      "title": "Swap quotes",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "request_id": ""
+          }
+        }
+      ],
+      "notes": "Requires request_id. This read does not accept a quote. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "listswaps",
+      "title": "Swaps",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional limit. This node's swaps. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswap",
+      "title": "One swap",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id. This read does not resume, refund, or spend. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswaptranscript",
+      "title": "Swap transcript",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id. Audit read. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "listswapmandates",
+      "title": "Swap mandates",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "No request fields. Lists mandates. Creating or revoking one is a separate reviewed operation. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswapcapabilities",
+      "title": "Swap capabilities",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "listswapoperations",
+      "title": "Swap operations",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id. Audit read. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswaphealth",
+      "title": "SwapNet health",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswapbootstrapinfo",
+      "title": "SwapNet bootstrap",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswaprecoveryinfo",
+      "title": "Swap recovery status",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id. Status only. Recovery export is a separate reviewed operation. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "listswapmarkets",
+      "title": "Swap markets",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "listswapassetpolicies",
+      "title": "Swap asset policies",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswaprouteinfo",
+      "title": "Swap route",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswapevents",
+      "title": "Swap events",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional after and limit. Local event log. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswapvalidationinfo",
+      "title": "SwapNet validation",
+      "risk": "read",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "Optional request object. This read does not quote, accept, refund, or spend. source_version is not release qualification. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "requestswapquote",
+      "title": "Request a swap quote",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "sell_asset": "",
+            "buy_asset": "",
+            "sell_atoms": ""
+          }
+        }
+      ],
+      "notes": "Requires sell_asset, buy_asset, and sell_atoms. nonce is optional. Prepared for native review. This emits an RFQ. It does not reserve or fund. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "acceptswapquote",
+      "title": "Accept a swap quote",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "quote_id": "",
+            "mandate_id": "",
+            "max_local_fee_atoms": ""
+          }
+        }
+      ],
+      "notes": "Requires quote_id, mandate_id, and max_local_fee_atoms. refund_fee_atoms and claim_fee_atoms are optional. Prepared for native review. This can reserve inside an existing mandate. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "cancelswap",
+      "title": "Cancel a swap",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id. Prepared for native review. Refuses once funding is prepared or broadcast. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "createswapmandate",
+      "title": "Create a swap mandate",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "mandate": {
+              "principal": "",
+              "asset": "",
+              "max_total_atoms": "",
+              "max_trade_atoms": "",
+              "max_fee_atoms": "",
+              "expires_at": 0,
+              "nonce": ""
+            }
+          }
+        }
+      ],
+      "notes": "Requires mandate: principal, asset, max_total_atoms, max_trade_atoms, max_fee_atoms, expires_at, nonce. Prepared for native review. Installing a mandate does not broadcast. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "revokeswapmandate",
+      "title": "Revoke a swap mandate",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "mandate_id": ""
+          }
+        }
+      ],
+      "notes": "Requires mandate_id. Prepared for native review. Revokes the mandate and keeps recovery. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "resumeswap",
+      "title": "Resume a swap",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id. Prepared for native review. Resume can broadcast funding, a claim, or a refund. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "refundswap",
+      "title": "Refund a swap",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id. Prepared for native review. This can broadcast a refund. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "publishswapprovider",
+      "title": "Publish a swap provider",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "No request fields. Prepared for native review. This signs and sends the local advertisement. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "withdrawswapprovider",
+      "title": "Withdraw a swap provider",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": false
+        }
+      ],
+      "notes": "No request fields. Prepared for native review. Clears the local markets and advertisement. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "setswapmarket",
+      "title": "Set a swap market",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Requires market (sell_asset, buy_asset, numerator, denominator, maker_fee_atoms, max_receive_network_fee_atoms, max_input_atoms, expires_at), mandate_id, max_local_fee_atoms, refund_fee_atoms, and claim_fee_atoms. enabled defaults to true and then advertises. Prepared for native review. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "getswapwalletinfo",
+      "title": "Swap wallet info",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {}
+        }
+      ],
+      "notes": "Owner read of this node's identity and foreign-chain accounts. It does not create an address and does not spend. Prepared for native review. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "setswapassetpolicy",
+      "title": "Set a swap asset policy",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "policy": {
+              "asset": ""
+            }
+          }
+        }
+      ],
+      "notes": "Requires policy, and policy.asset. Prepared for native review. Stores the asset policy. automatic_spend_atoms stays 0.",
+      "wallet": false
+    },
+    {
+      "group": "SwapNet",
+      "method": "exportswaprecovery",
+      "title": "Export swap recovery",
+      "risk": "write",
+      "args": [
+        {
+          "name": "passphrase",
+          "kind": "secret",
+          "required": true,
+          "confirm": true
+        }
+      ],
+      "notes": "Requires passphrase. Prepared for native review. The approval dialog redacts passphrase. This template does not store one. automatic_spend_atoms stays 0.",
+      "wallet": false,
+      "request_object": true
+    },
+    {
+      "group": "SwapNet",
+      "method": "bumpswapfee",
+      "title": "Bump a swap fee",
+      "risk": "write",
+      "args": [
+        {
+          "name": "request",
+          "kind": "json",
+          "required": true,
+          "default": {
+            "swap_id": "",
+            "kind": "",
+            "new_fee_atoms": ""
+          }
+        }
+      ],
+      "notes": "Requires swap_id, kind (claim or refund), and new_fee_atoms. Prepared for native review. This can broadcast a replacement. automatic_spend_atoms stays 0.",
+      "wallet": false
     }
   ]
 }

@@ -164,14 +164,19 @@ class P2PBlockChunkTransportTest(BitcoinTestFramework):
         with receiver.assert_debug_log(["blkchunk without manifest"]):
             peer.send_and_ping(chunk)
 
-        self.log.info("Reject a manifest for a block not requested from this peer")
+        self.log.info("Drop a manifest for a block not requested from this peer")
         other = receiver.add_p2p_connection(BlockServingPeer())
         other.send_and_ping(msg_sendblkchnk())
-        with receiver.assert_debug_log(["unsolicited blkchnkman"]):
-            other.send_and_ping(manifest)
-        # The refused manifest opened no stream for that peer.
-        with receiver.assert_debug_log(["blkchunk without manifest"]):
-            other.send_and_ping(chunk)
+        other_id = max(p["id"] for p in receiver.getpeerinfo())
+        # The refused manifest opens no stream. It may be a benign late reply
+        # (see p2p_block_chunk_request_race.py), so the node ends the
+        # connection instead of classifying the peer as misbehaving; its
+        # following chunks are then never processed as misbehavior either.
+        with receiver.assert_debug_log(
+                ["unsolicited blkchnkman"],
+                unexpected_msgs=[f"Misbehaving: peer={other_id}: "]):
+            other.send_message(manifest)
+            other.wait_for_disconnect(timeout=30)
 
         self.log.info("Disconnect a chunk sender that did not negotiate chunks")
         legacy_chunk_peer = receiver.add_p2p_connection(P2PInterface())

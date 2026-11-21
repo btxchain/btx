@@ -35,8 +35,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
 #include <cstdint>
+#include <limits>
 #include <map>
+#include <random>
 #include <set>
 #include <string>
 #include <vector>
@@ -246,6 +249,141 @@ BOOST_AUTO_TEST_CASE(healer_rpc_range_ignores_a_caller_supplied_have_list)
 
     const auto again = Indices(HealerCall(cat, with_have)["endangered"]);
     BOOST_CHECK_EQUAL_COLLECTIONS(again.begin(), again.end(), plain.begin(), plain.end());
+}
+
+// piece_count comes from the caller; the healer walks every piece below it.
+// A count above the bound for piece index lists is refused at once, and the
+// bound itself is still answered.
+BOOST_AUTO_TEST_CASE(healer_refuses_a_piece_count_beyond_the_piece_list_bound)
+{
+    using namespace modelnet;
+    const fs::path tmp = m_path_root / "healer-piece-count";
+    ModelCatalog cat{tmp / "cat", 1 << 20};
+    const auto call = [&](uint64_t piece_count, std::string& code, std::string& err) {
+        UniValue arg(UniValue::VOBJ);
+        arg.pushKV("piece_count", piece_count);
+        UniValue params(UniValue::VARR);
+        params.push_back(WithN02Idempotency("setmodelswarmhealer", arg));
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "setmodelswarmhealer");
+        req.pushKV("params", params);
+        UniValue result(UniValue::VOBJ);
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    std::string code, err;
+    BOOST_CHECK(!call(MAX_PIECE_INDEX_LIST + 1, code, err));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK_EQUAL(err, "piece_count too large");
+    code.clear();
+    err.clear();
+    BOOST_CHECK(!call(std::numeric_limits<uint32_t>::max(), code, err));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    code.clear();
+    err.clear();
+    BOOST_CHECK_MESSAGE(call(MAX_PIECE_INDEX_LIST, code, err), err);
+}
+
+// The healer counted the sources of every piece one piece at a time, so its
+// work was piece_count times every source and range the caller sent. At the
+// largest count, with many sources, it now answers from the ranges.
+BOOST_AUTO_TEST_CASE(healer_answers_the_largest_count_with_many_sources)
+{
+    using namespace modelnet;
+    const fs::path tmp = m_path_root / "healer-many-sources";
+    ModelCatalog cat{tmp / "cat", 1 << 20};
+    const uint32_t half = MAX_PIECE_INDEX_LIST / 2;
+    UniValue files(UniValue::VARR);
+    for (int i = 0; i < 1022; ++i) {
+        UniValue f(UniValue::VOBJ);
+        f.pushKV("service_id", "s" + std::to_string(i));
+        f.pushKV("piece_count", half);
+        files.push_back(f);
+    }
+    for (const char* id : {"x", "y"}) {
+        UniValue f(UniValue::VOBJ);
+        f.pushKV("service_id", id);
+        f.pushKV("piece_count", half + 8);
+        files.push_back(f);
+    }
+    UniValue model(UniValue::VOBJ);
+    model.pushKV("files", files);
+    UniValue models(UniValue::VARR);
+    models.push_back(model);
+    UniValue availability(UniValue::VOBJ);
+    availability.pushKV("models", models);
+    UniValue arg(UniValue::VOBJ);
+    arg.pushKV("piece_count", MAX_PIECE_INDEX_LIST);
+    arg.pushKV("availability", availability);
+    UniValue params(UniValue::VARR);
+    params.push_back(WithN02Idempotency("setmodelswarmhealer", arg));
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", "setmodelswarmhealer");
+    req.pushKV("params", params);
+    UniValue result(UniValue::VOBJ);
+    std::string code, err;
+    const auto t0 = std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), err);
+    BOOST_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds{5});
+    // Only the eight pieces that x and y alone hold are endangered.
+    const auto& endangered = result["endangered"].getValues();
+    BOOST_REQUIRE_EQUAL(endangered.size(), 8U);
+    for (size_t i = 0; i < endangered.size(); ++i) {
+        BOOST_CHECK_EQUAL(endangered[i].getInt<uint32_t>(), half + i);
+    }
+}
+
+// EndangeredPieces must list the same pieces, in the same order, as asking
+// PieceRarity for every piece, whatever the sources hold.
+BOOST_AUTO_TEST_CASE(endangered_pieces_match_rarity_piece_by_piece)
+{
+    using namespace modelnet;
+    std::mt19937 rng{20261117};
+    const auto pick = [&](uint32_t n) { return static_cast<uint32_t>(rng() % n); };
+    const std::vector<std::string> endpoints{"a:1", "b:1", "c:1", "d:1"};
+    const std::vector<std::string> service_ids{"", "", "s1", "s2"};
+    constexpr int64_t now{10'000'000};
+    for (int round = 0; round < 3000; ++round) {
+        const uint32_t piece_count = pick(64);
+        const uint32_t file_index = pick(2);
+        PickConfig cfg;
+        cfg.preserve_rare = true;
+        cfg.now_ms = pick(2) ? now : 0;
+        std::vector<SourceAvailability> srcs;
+        for (uint32_t n = pick(7); n > 0; --n) {
+            SourceAvailability src;
+            src.peer.endpoint = endpoints[pick(endpoints.size())];
+            src.peer.service_id = service_ids[pick(service_ids.size())];
+            src.file_index = pick(2);
+            src.piece_count = pick(3) == 0 ? 0 : pick(80);
+            for (uint32_t r = pick(4); r > 0; --r) {
+                PieceRange range;
+                // Now and then a range whose end does not fit in 32 bits.
+                range.first = pick(6) == 0 ? std::numeric_limits<uint32_t>::max() - pick(8) : pick(80);
+                range.count = pick(6) == 0 ? std::numeric_limits<uint32_t>::max() - pick(8) : pick(20);
+                src.ranges.push_back(range);
+            }
+            src.last_update_ms = pick(4) == 0 ? 0 : (pick(3) == 0 ? now - cfg.stale_after_ms - 1 : now - pick(1000));
+            srcs.push_back(src);
+        }
+        std::map<std::string, PeerMetrics> metrics;
+        if (pick(3) == 0) metrics[endpoints[pick(endpoints.size())]].state = PeerXferState::FAILED;
+        if (pick(3) == 0) metrics[endpoints[pick(endpoints.size())]].invalid_piece_count = 2;
+        std::vector<uint32_t> have;
+        for (uint32_t n = pick(6); n > 0; --n) have.push_back(pick(70));
+
+        const std::set<uint32_t> held(have.begin(), have.end());
+        std::vector<uint32_t> expect;
+        std::vector<uint32_t> two;
+        for (uint32_t p = 0; p < piece_count; ++p) {
+            if (held.count(p)) continue;
+            const int r = PieceRarity(file_index, p, srcs, metrics, cfg);
+            if (r == 1) expect.push_back(p);
+            if (r == 2) two.push_back(p);
+        }
+        expect.insert(expect.end(), two.begin(), two.end());
+        const auto got = EndangeredPieces(file_index, piece_count, have, srcs, metrics, cfg);
+        BOOST_REQUIRE_MESSAGE(got == expect, "round " + std::to_string(round));
+    }
 }
 
 // Library level, where have is expressible. Rarity decides membership and

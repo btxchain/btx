@@ -14,8 +14,14 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
+
 #include <string>
 #include <vector>
+
+#ifndef WIN32
+#include <unistd.h>
+#endif
 
 using namespace modelnet;
 
@@ -104,6 +110,86 @@ BOOST_AUTO_TEST_CASE(hidden_models_and_muted_publishers_survive_a_reload)
     BOOST_CHECK(!again.Hidden(other.model_id));
     BOOST_CHECK_EQUAL(Hits(again, "spam"), 1U);
     BOOST_CHECK_EQUAL(Hits(again, "other"), 1U);
+}
+
+// hidesearchmodel and mutesearchpublisher saved the in-memory index without
+// loading this directory's search-index.json first, so the first change after a
+// helper start replaced the file and every earlier policy entry. With a file
+// there that cannot be read, a change is refused instead of being lost.
+BOOST_AUTO_TEST_CASE(hide_and_mute_keep_the_saved_policy)
+{
+    const fs::path dir = m_path_root / "search-local-policy-saved";
+    ModelCatalog cat{dir, 8 << 20};
+    const fs::path index = cat.Store().Root().parent_path() / "search-index.json";
+    const auto call = [&](const std::string& method, const std::string& arg, std::string& code) {
+        UniValue params(UniValue::VARR);
+        params.push_back(arg);
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        UniValue result(UniValue::VOBJ);
+        code.clear();
+        std::string err;
+        return DispatchHelperRpc(cat, req, result, code, err);
+    };
+    const std::string earlier(96, 'b');
+    const std::string later(96, 'c');
+    std::string err, code;
+    {
+        SearchIndex saved;
+        saved.MutePublisher(earlier, true);
+        BOOST_REQUIRE_MESSAGE(saved.Save(index, err), err);
+    }
+    BOOST_REQUIRE_MESSAGE(call("mutesearchpublisher", later, code), code);
+    {
+        SearchIndex reread;
+        BOOST_REQUIRE(reread.Load(index, 1, err));
+        BOOST_CHECK(reread.Muted(earlier));
+        BOOST_CHECK(reread.Muted(later));
+    }
+
+    const fs::path dir2 = m_path_root / "search-local-policy-cut";
+    ModelCatalog cat2{dir2, 8 << 20};
+    const fs::path index2 = cat2.Store().Root().parent_path() / "search-index.json";
+    fs::create_directories(index2.parent_path());
+    const std::string cut{"{\"records\": ["};
+    {
+        std::ofstream out(index2, std::ios::binary | std::ios::trunc);
+        out << cut;
+    }
+    UniValue params(UniValue::VARR);
+    params.push_back(later);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", "mutesearchpublisher");
+    req.pushKV("params", params);
+    UniValue result(UniValue::VOBJ);
+    BOOST_CHECK(!DispatchHelperRpc(cat2, req, result, code, err));
+    BOOST_CHECK_EQUAL(code, "INTERNAL");
+    BOOST_CHECK(err.find("cannot be read") != std::string::npos);
+    std::ifstream in(index2, std::ios::binary);
+    const std::string left((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    BOOST_CHECK(left == cut);
+
+#ifndef WIN32
+    // A save that fails for another reason: the change is answered with an
+    // error and not kept, so the next save does not write it either.
+    if (geteuid() == 0) return; // root writes to the directory anyway
+    const std::string third(96, 'd');
+    const fs::path helper_dir = index.parent_path();
+    fs::permissions(helper_dir, fs::perms::owner_read | fs::perms::owner_exec);
+    std::string code3;
+    const bool refused{!call("mutesearchpublisher", third, code3)};
+    fs::permissions(helper_dir, fs::perms::owner_all);
+    BOOST_CHECK(refused);
+    BOOST_CHECK_EQUAL(code3, "INTERNAL");
+    const std::string fourth(96, 'e');
+    BOOST_REQUIRE_MESSAGE(call("mutesearchpublisher", fourth, code3), code3);
+    SearchIndex after;
+    BOOST_REQUIRE(after.Load(index, 1, err));
+    BOOST_CHECK(after.Muted(earlier));
+    BOOST_CHECK(after.Muted(fourth));
+    BOOST_CHECK(!after.Muted(third));
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(hide_and_mute_refuse_an_id_they_cannot_apply)

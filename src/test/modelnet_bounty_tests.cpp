@@ -12,6 +12,7 @@
 #include <modelnet/http_bridge.h>
 #include <modelnet/identity.h>
 #include <modelnet/resource_uri.h>
+#include <modelnet/safety.h>
 #include <modelnet/search.h>
 #include <script/script.h>
 #include <span.h>
@@ -201,6 +202,98 @@ BOOST_AUTO_TEST_CASE(bounty_codec_golden_vectors)
     }
 }
 
+// Nominations and appointments are signed records saved with the bounty
+// store: the same nominee keeps one nomination, the nominee fields and an
+// appointment have a size bound, and a bounty takes at most 64 of each.
+BOOST_AUTO_TEST_CASE(bounty_council_records_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-council-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+
+    const auto nominate = [&](const std::string& identity, const std::string& key) {
+        UniValue n(UniValue::VOBJ);
+        n.pushKV("bounty_id", bounty);
+        n.pushKV("nominee_identity", identity);
+        n.pushKV("nominee_key", key);
+        return call("nominatebountyevaluator", n);
+    };
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    const std::string first = result.write();
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    BOOST_CHECK_EQUAL(result.write(), first);
+    BOOST_CHECK(!nominate(std::string(4097, 'x'), "key"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    for (int i = 1; i < 64; ++i) {
+        BOOST_REQUIRE_MESSAGE(nominate("nominee-" + std::to_string(i), "key-" + std::to_string(i)), err);
+    }
+    BOOST_CHECK(!nominate("nominee-64", "key-64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A nominee already there is still answered at the limit; the same
+    // identity with another key is another nomination.
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    BOOST_CHECK_EQUAL(result.write(), first);
+    BOOST_CHECK(!nominate("nominee-0", "key-other"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const auto appoint = [&](const std::string& note) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("terms_id", bounty);
+        UniValue appt(UniValue::VOBJ);
+        appt.pushKV("bounty_id", bounty);
+        appt.pushKV("note", note);
+        a.pushKV("appointment", appt);
+        return call("acceptbountyappointment", a);
+    };
+    {
+        // Over 16 KiB in all, with each string under the 8192 bytes a signed
+        // record takes.
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("terms_id", bounty);
+        UniValue appt(UniValue::VOBJ);
+        appt.pushKV("bounty_id", bounty);
+        for (int i = 0; i < 3; ++i) appt.pushKV("note" + std::to_string(i), std::string(6000, 'a'));
+        a.pushKV("appointment", appt);
+        BOOST_CHECK(!call("acceptbountyappointment", a));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    for (int i = 0; i < 64; ++i) BOOST_REQUIRE_MESSAGE(appoint("appointment " + std::to_string(i)), err);
+    BOOST_CHECK(!appoint("appointment 64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    // listbountyevaluators for an id the store does not know adds nothing
+    // that a later save keeps.
+    const std::string unknown(96, 'e');
+    UniValue list(UniValue::VOBJ);
+    list.pushKV("bounty_id", unknown);
+    BOOST_REQUIRE_MESSAGE(call("listbountyevaluators", list), err);
+    BOOST_CHECK_EQUAL(result["evaluators"].size(), 0U);
+    BOOST_REQUIRE_MESSAGE(nominate("nominee-0", "key-0"), err);
+    std::ifstream saved(dir / "bounty-store.json");
+    const std::string text((std::istreambuf_iterator<char>(saved)), std::istreambuf_iterator<char>());
+    BOOST_CHECK(!text.empty());
+    BOOST_CHECK(text.find(unknown) == std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_records_need_a_known_bounty)
 {
     // nominatebountyevaluator, pledgebounty and freezebountyfundinground
@@ -314,6 +407,49 @@ BOOST_AUTO_TEST_CASE(bounty_publish_checks_expected_terms_id)
 
     BOOST_CHECK_MESSAGE(publish(current), err);
     BOOST_CHECK(result.exists("bounty_id"));
+}
+
+// A funding round signs frozen_total_atoms, the sum of its lots. Each lot is
+// in MoneyRange, and so must the total be.
+BOOST_AUTO_TEST_CASE(bounty_funding_round_total_is_in_money_range)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-round-total";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    UniValue pub_params(UniValue::VARR);
+    pub_params.push_back(pub);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("publishbounty", pub_params, result, code, err), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto freeze = [&](const std::vector<std::string>& principals) {
+        UniValue lots(UniValue::VARR);
+        for (const auto& principal : principals) {
+            UniValue lot(UniValue::VOBJ);
+            lot.pushKV("principal_atoms", principal);
+            lots.push_back(lot);
+        }
+        UniValue round(UniValue::VOBJ);
+        round.pushKV("bounty_id", bounty);
+        round.pushKV("lots", lots);
+        UniValue params(UniValue::VARR);
+        params.push_back(round);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        return store.Dispatch("freezebountyfundinground", params, result, code, err);
+    };
+    const std::string max = std::to_string(MAX_MONEY_ATOMS);
+    BOOST_CHECK(!freeze({max, "1"}));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(freeze({std::to_string(MAX_MONEY_ATOMS - 1), "1"}), err);
+    BOOST_CHECK_EQUAL(result["frozen_total_atoms"].get_str(), max);
 }
 
 BOOST_AUTO_TEST_CASE(bounty_auth_001_to_030)
@@ -791,6 +927,87 @@ BOOST_AUTO_TEST_CASE(bounty_chain_facts_survive_a_store_restart)
     BOOST_CHECK_EQUAL(saved["chain"]["facts"].size(), 0U);
 }
 
+// bounty-store.json holds the drafts, bounties, mandates with their spent
+// budgets and the chain facts. When it was there but could not be parsed (a
+// write cut short, an edit by hand), the store started empty and the next
+// change saved that over the file.
+BOOST_AUTO_TEST_CASE(unreadable_bounty_store_is_not_replaced)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "bounty-store-unreadable";
+    fs::create_directories(dir);
+    const fs::path file = dir / "bounty-store.json";
+    std::string code, err;
+    UniValue result;
+    const auto one = [](const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        return params;
+    };
+    const auto draft = [&](BountyStore& store) {
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch("createbountydraft", one(DefaultTerms(ZeroNet())), result, code, err);
+    };
+    const auto facts = [&](BountyStore& store, const std::string& bounty_id) {
+        UniValue idp(UniValue::VARR);
+        idp.push_back(bounty_id);
+        BOOST_REQUIRE(store.Dispatch("getbountyfunding", idp, result, code, err));
+        return result["facts"].size();
+    };
+    const auto read = [&] {
+        std::ifstream in{file, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    };
+    std::string bounty_id;
+    {
+        BountyStore store;
+        store.Bind(dir, ZeroNet());
+        BOOST_REQUIRE_MESSAGE(draft(store), err);
+        UniValue pub(UniValue::VOBJ);
+        pub.pushKV("draft_id", result["draft_id"].get_str());
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("publishbounty", one(pub), result, code, err), err);
+        bounty_id = result["bounty_id"].get_str();
+        UniValue fact(UniValue::VOBJ);
+        fact.pushKV("outpoint", std::string(64, 'a') + ":0");
+        fact.pushKV("bounty_id", bounty_id);
+        fact.pushKV("lot_id", "lot1");
+        fact.pushKV("amount_atoms", "100000");
+        fact.pushKV("confirmations", 6);
+        fact.pushKV("height", 120);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("observebountychain", one(fact), result, code, err), err);
+    }
+    const std::string good{read()};
+    BOOST_REQUIRE(good.find(bounty_id) != std::string::npos);
+
+    BountyStore restarted;
+    for (const std::string broken : {"{", ""}) {
+        {
+            std::ofstream out{file, std::ios::trunc};
+            out << broken;
+        }
+        restarted.Bind(dir, ZeroNet());
+        BOOST_CHECK(!draft(restarted));
+        BOOST_CHECK_EQUAL(err, "bounty-store.json cannot be read; repair it before changing bounties");
+        BOOST_CHECK_EQUAL(read(), broken);
+    }
+
+    // Repaired while running: the next bind reads it, chain facts included,
+    // and changes save again.
+    {
+        std::ofstream out{file, std::ios::trunc};
+        out << good;
+    }
+    restarted.Bind(dir, ZeroNet());
+    BOOST_CHECK_EQUAL(facts(restarted, bounty_id), 1U);
+    BOOST_CHECK_MESSAGE(draft(restarted), err);
+    BountyStore again;
+    again.Bind(dir, ZeroNet());
+    BOOST_CHECK_EQUAL(facts(again, bounty_id), 1U);
+    BOOST_CHECK(read().find(bounty_id) != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_signed_records_survive_a_store_restart)
 {
     // The store saves drafts, bounties, submissions, jobs and awards, but kept
@@ -1015,6 +1232,58 @@ BOOST_AUTO_TEST_CASE(bounty_script_001_to_020)
 #endif
 }
 
+// Challenges are saved with the bounty store: a challenge has a size bound,
+// and a bounty takes at most 64 of them.
+BOOST_AUTO_TEST_CASE(bounty_challenges_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-challenges-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto challenge = [&](const std::string& reason) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        c.pushKV("reason", reason);
+        return call("createbountychallenge", c);
+    };
+    {
+        // Over 16 KiB in all, with each string under the 8192 bytes a signed
+        // record takes.
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        for (int i = 0; i < 3; ++i) c.pushKV("reason" + std::to_string(i), std::string(6000, 'r'));
+        BOOST_CHECK(!call("createbountychallenge", c));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    for (int i = 0; i < 64; ++i) BOOST_REQUIRE_MESSAGE(challenge("reason " + std::to_string(i)), err);
+    BOOST_CHECK(!challenge("reason 64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A challenge already there is still answered at the limit.
+    BOOST_REQUIRE_MESSAGE(challenge("reason 0"), err);
+    UniValue list(UniValue::VARR);
+    list.push_back(bounty);
+    BOOST_REQUIRE(store.Dispatch("listbountychallenges", list, result, code, err));
+    BOOST_CHECK_EQUAL(result["challenges"].size(), 64U);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_lists_return_only_the_requested_records)
 {
     // listbountyevaluations takes a submission id and listbountychallenges a
@@ -1114,6 +1383,54 @@ BOOST_AUTO_TEST_CASE(bounty_lists_return_only_the_requested_records)
     BOOST_CHECK(list("listbountychallenges", bounty_a, "challenges") == std::vector<std::string>{challenge_a});
     BOOST_CHECK(list("listbountychallenges", bounty_b, "challenges") == std::vector<std::string>{challenge_b});
     BOOST_CHECK(list("listbountyevaluations", std::string(96, 'f'), "evaluations").empty());
+}
+
+// Pledges are saved with the bounty store: a bounty takes at most 64 of
+// them.
+BOOST_AUTO_TEST_CASE(bounty_pledges_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-pledges-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto pledge = [&](int atoms) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("principal_atoms", std::to_string(atoms));
+        return call("pledgebounty", p);
+    };
+    for (int i = 1; i <= 64; ++i) BOOST_REQUIRE_MESSAGE(pledge(i), err);
+    BOOST_CHECK(!pledge(65));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A pledge already there is still answered at the limit, and
+    // withdrawbountypledge makes room.
+    BOOST_REQUIRE_MESSAGE(pledge(1), err);
+    UniValue withdraw(UniValue::VOBJ);
+    withdraw.pushKV("pledge_id", result["pledge_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("withdrawbountypledge", withdraw), err);
+    BOOST_REQUIRE_MESSAGE(pledge(65), err);
+    UniValue get(UniValue::VARR);
+    get.push_back(bounty);
+    BOOST_REQUIRE(store.Dispatch("getbountyfunding", get, result, code, err));
+    BOOST_CHECK_EQUAL(result["pledges"].size(), 64U);
 }
 
 BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
@@ -1308,6 +1625,54 @@ BOOST_AUTO_TEST_CASE(bounty_wallet_fund_001_to_024)
 #else
     BOOST_TEST_MESSAGE("ENABLE_WALLET off");
 #endif
+}
+
+// Agent mandates and their reservations are saved with the bounty store: a
+// mandate is at most 16 KiB of JSON, a reservation's idempotency_key at most
+// 256 bytes and its refund_key at most 4096.
+BOOST_AUTO_TEST_CASE(agent_mandate_fields_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "agent-mandate-fields";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    const auto mandate = [&](const std::string& note) {
+        UniValue m(UniValue::VOBJ);
+        m.pushKV("total_atoms", "100");
+        m.pushKV("per_action_atoms", "40");
+        m.pushKV("owner_approval_ref", "user-1");
+        m.pushKV("note", note);
+        return call("createagentmandate", m);
+    };
+    BOOST_CHECK(!mandate(std::string(16384, 'n')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(mandate("note"), err);
+    const std::string mid = result["mandate_id"].get_str();
+    const auto reserve = [&](const std::string& key, const std::string& refund) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("mandate_id", mid);
+        r.pushKV("idempotency_key", key);
+        r.pushKV("amount_atoms", 1);
+        r.pushKV("refund_key", refund);
+        return call("reservemandate", r);
+    };
+    BOOST_CHECK(!reserve(std::string(257, 'k'), "refund"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!reserve("key-1", std::string(4097, 'r')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(reserve(std::string(256, 'k'), std::string(4096, 'r')), err);
+    BOOST_CHECK_EQUAL(result["used"].getInt<int64_t>(), 1);
 }
 
 BOOST_AUTO_TEST_CASE(agent_mandate_budget_survives_a_store_restart)
@@ -1556,6 +1921,88 @@ BOOST_AUTO_TEST_CASE(bounty_fund_chain_eval_agent)
     BOOST_CHECK(!budget.Reserve("k5", 10, err));
 }
 
+// importbountyrecovery and observebountychain reach BountyChainIndex through
+// the helper proxy, also for a -rpcauth user limited to one wallet. Each
+// Observe() kept a copy of every fact for reorgbountychain, so one manifest of
+// N lots held N*(N-1)/2 facts, and the history never shrank before a restart.
+BOOST_AUTO_TEST_CASE(bounty_chain_undo_holds_only_what_changed)
+{
+    using namespace modelnet;
+    constexpr int LOTS{1000};
+    UniValue lots(UniValue::VARR);
+    for (int i = 0; i < LOTS; ++i) {
+        UniValue lot(UniValue::VOBJ);
+        lot.pushKV("outpoint", strprintf("%064x:%d", i, i % 4));
+        lot.pushKV("lot_id", strprintf("lot%d", i));
+        lot.pushKV("amount_atoms", "1");
+        lots.push_back(lot);
+    }
+    UniValue man(UniValue::VOBJ);
+    man.pushKV("bounty_id", "undo");
+    man.pushKV("lots", lots);
+    BountyChainIndex chain;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(chain.ImportManifest(man, err), err);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS);
+    // One step per lot, and none of them replaced a fact.
+    BOOST_CHECK_EQUAL(chain.UndoSteps(), static_cast<size_t>(LOTS));
+    BOOST_CHECK_EQUAL(chain.UndoFactsHeld(), 0U);
+
+    // Taking steps back still restores the state before each of them,
+    // both for a replaced fact and for a new one.
+    BountyChainFact first{*chain.Get(strprintf("%064x:%d", 0, 0))};
+    BountyChainFact spent{first};
+    spent.spent = true;
+    spent.confirmations = 7;
+    chain.Observe(spent);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS - 1);
+    BOOST_CHECK_EQUAL(chain.UndoFactsHeld(), 1U);
+    chain.DisconnectTip();
+    BOOST_REQUIRE(chain.Get(first.outpoint) != nullptr);
+    BOOST_CHECK(!chain.Get(first.outpoint)->spent);
+    BOOST_CHECK_EQUAL(chain.Get(first.outpoint)->confirmations, first.confirmations);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS);
+    chain.DisconnectTip();
+    BOOST_CHECK(chain.Get(strprintf("%064x:%d", LOTS - 1, (LOTS - 1) % 4)) == nullptr);
+    BOOST_CHECK_EQUAL(chain.ConfirmedAtoms("undo"), LOTS - 1);
+    BOOST_CHECK_EQUAL(chain.UndoSteps(), static_cast<size_t>(LOTS - 1));
+
+    // Repeated observations of one outpoint stay bounded too.
+    BountyChainIndex watched;
+    BountyChainFact f;
+    f.outpoint = "watched:0";
+    f.bounty_id = "watched";
+    f.amount_atoms = 5;
+    for (size_t i = 0; i < BountyChainIndex::MAX_UNDO_STEPS + 50; ++i) {
+        f.confirmations = static_cast<int>(i);
+        watched.Observe(f);
+    }
+    BOOST_CHECK_EQUAL(watched.UndoSteps(), BountyChainIndex::MAX_UNDO_STEPS);
+    BOOST_CHECK_EQUAL(watched.UndoFactsHeld(), BountyChainIndex::MAX_UNDO_STEPS);
+    watched.DisconnectTip();
+    BOOST_CHECK_EQUAL(watched.Get("watched:0")->confirmations,
+                      static_cast<int>(BountyChainIndex::MAX_UNDO_STEPS + 48));
+
+    // Large fields stay bounded in bytes, not only in steps.
+    BountyChainIndex wide;
+    BountyChainFact w;
+    w.outpoint = "wide:0";
+    w.bounty_id = "wide";
+    w.lot_id = std::string(64 * 1024, 'x');
+    for (int i = 0; i < 200; ++i) {
+        w.confirmations = i;
+        wide.Observe(w);
+    }
+    BOOST_CHECK(wide.UndoBytes() <= BountyChainIndex::MAX_UNDO_BYTES);
+    BOOST_CHECK(wide.UndoSteps() < 200U);
+    wide.DisconnectTip();
+    BOOST_CHECK_EQUAL(wide.Get("wide:0")->confirmations, 198);
+    wide.Clear();
+    BOOST_CHECK_EQUAL(wide.UndoSteps(), 0U);
+    BOOST_CHECK_EQUAL(wide.UndoBytes(), 0U);
+}
+
+
 #ifndef WIN32
 BOOST_AUTO_TEST_CASE(evaluation_report_larger_than_the_pipe_buffer_completes)
 {
@@ -1593,6 +2040,87 @@ BOOST_AUTO_TEST_CASE(evaluation_report_larger_than_the_pipe_buffer_completes)
 }
 #endif
 
+// Commitments and submissions are saved with the bounty store: both have a
+// size bound, a bounty takes at most 256 commitments, and a commitment is
+// revealed once, also when it is committed again.
+BOOST_AUTO_TEST_CASE(bounty_submissions_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-submissions-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto commit = [&](const std::string& digest) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        c.pushKV("digest", digest);
+        return call("commitbountysubmission", c);
+    };
+    const auto reveal = [&](const std::string& id, const std::string& note) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("commitment_id", id);
+        UniValue sub(UniValue::VOBJ);
+        sub.pushKV("note", note);
+        r.pushKV("submission", sub);
+        return call("revealbountysubmission", r);
+    };
+    // Over 64 KiB in all, with each string under the 8192 bytes a signed
+    // record takes.
+    const auto big = [](UniValue o) {
+        for (int i = 0; i < 10; ++i) o.pushKV("part" + std::to_string(i), std::string(7000, 'x'));
+        return o;
+    };
+    UniValue big_commit(UniValue::VOBJ);
+    big_commit.pushKV("bounty_id", bounty);
+    BOOST_CHECK(!call("commitbountysubmission", big(big_commit)));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(commit("digest-0"), err);
+    const std::string cid = result["commitment_id"].get_str();
+    UniValue big_reveal(UniValue::VOBJ);
+    big_reveal.pushKV("commitment_id", cid);
+    big_reveal.pushKV("submission", big(UniValue(UniValue::VOBJ)));
+    BOOST_CHECK(!call("revealbountysubmission", big_reveal));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(reveal(cid, "note-0"), err);
+    const std::string sid = result["submission_id"].get_str();
+    // The same reveal again returns it; another reveal of the commitment or
+    // of its submission is refused, also after the commitment came again.
+    BOOST_REQUIRE_MESSAGE(reveal(cid, "note-0"), err);
+    BOOST_CHECK_EQUAL(result["submission_id"].get_str(), sid);
+    BOOST_CHECK(!reveal(cid, "note-1"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(commit("digest-0"), err);
+    BOOST_CHECK_EQUAL(result["commitment_id"].get_str(), cid);
+    BOOST_CHECK(!reveal(cid, "note-1"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!reveal(sid, "note-1"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    for (int i = 1; i < 256; ++i) BOOST_REQUIRE_MESSAGE(commit("digest-" + std::to_string(i)), err);
+    BOOST_CHECK(!commit("digest-256"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A commitment already there is still answered at the limit.
+    BOOST_REQUIRE_MESSAGE(commit("digest-0"), err);
+    BOOST_CHECK_EQUAL(result["commitment_id"].get_str(), cid);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_idempotency_key_reused_for_another_request_is_refused)
 {
     modelnet::BountyStore store;
@@ -1625,6 +2153,102 @@ BOOST_AUTO_TEST_CASE(bounty_idempotency_key_reused_for_another_request_is_refuse
     std::string err;
     BOOST_REQUIRE(store.Dispatch("listbountydrafts", UniValue(UniValue::VARR), list, code, err));
     BOOST_CHECK_EQUAL(list["drafts"].size(), 2U);
+}
+
+// An award names a revealed submission that is still there: a commitment
+// that was never revealed gets none, and an award whose submission (or the
+// commitment it revealed) was withdrawn after the proposal is not approved.
+BOOST_AUTO_TEST_CASE(bounty_award_needs_a_revealed_submission)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-award-revealed";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    const auto commit = [&](const std::string& digest) {
+        UniValue c(UniValue::VOBJ);
+        c.pushKV("bounty_id", bounty);
+        c.pushKV("digest", digest);
+        BOOST_REQUIRE_MESSAGE(call("commitbountysubmission", c), err);
+        return result["commitment_id"].get_str();
+    };
+    const auto reveal = [&](const std::string& cid, const std::string& note) {
+        UniValue r(UniValue::VOBJ);
+        r.pushKV("commitment_id", cid);
+        UniValue sub(UniValue::VOBJ);
+        sub.pushKV("note", note);
+        r.pushKV("submission", sub);
+        BOOST_REQUIRE_MESSAGE(call("revealbountysubmission", r), err);
+        return result["submission_id"].get_str();
+    };
+    const auto propose = [&](const std::string& submission_id) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("submission_id", submission_id);
+        return call("proposebountyaward", p);
+    };
+    const auto approve = [&](const std::string& award_id) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("award_id", award_id);
+        return call("approvebountyaward", a);
+    };
+    const auto withdraw = [&](const std::string& id) {
+        UniValue w(UniValue::VOBJ);
+        w.pushKV("submission_id", id);
+        BOOST_REQUIRE_MESSAGE(call("withdrawbountysubmission", w), err);
+    };
+
+    const std::string unrevealed = commit("digest-unrevealed");
+    BOOST_CHECK(!propose(unrevealed));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const std::string sid = reveal(commit("digest-0"), "note-0");
+    BOOST_REQUIRE_MESSAGE(propose(sid), err);
+    const std::string award = result["award_id"].get_str();
+    withdraw(sid);
+    BOOST_CHECK(!approve(award));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const std::string cid2 = commit("digest-2");
+    const std::string sid2 = reveal(cid2, "note-2");
+    BOOST_REQUIRE_MESSAGE(propose(sid2), err);
+    const std::string award2 = result["award_id"].get_str();
+    withdraw(cid2);
+    BOOST_CHECK(!approve(award2));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    // An award named by the commitment id is not approved once its revealed
+    // submission is withdrawn, and no new one is proposed for it.
+    const std::string cid4 = commit("digest-4");
+    const std::string sid4 = reveal(cid4, "note-4");
+    BOOST_REQUIRE_MESSAGE(propose(cid4), err);
+    const std::string award4 = result["award_id"].get_str();
+    withdraw(sid4);
+    BOOST_CHECK(!approve(award4));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!propose(cid4));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    const std::string sid3 = reveal(commit("digest-3"), "note-3");
+    BOOST_REQUIRE_MESSAGE(propose(sid3), err);
+    BOOST_CHECK_MESSAGE(approve(result["award_id"].get_str()), err);
 }
 
 BOOST_AUTO_TEST_CASE(bounty_observe_amount_atoms_fail_closed)
@@ -1710,6 +2334,69 @@ BOOST_AUTO_TEST_CASE(bounty_observe_amount_atoms_fail_closed)
     AssertSpendZeroIfPresent(result);
 }
 
+// Chain facts are saved with the bounty store and held in its undo history:
+// the outpoint, bounty_id and lot_id of a fact are at most 256 bytes, for an
+// observed fact and for one from a recovery manifest.
+BOOST_AUTO_TEST_CASE(bounty_chain_fact_fields_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-chain-fact-fields";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    const auto observe = [&](const std::string& outpoint, const std::string& bounty_id, const std::string& lot_id) {
+        UniValue f(UniValue::VOBJ);
+        f.pushKV("outpoint", outpoint);
+        f.pushKV("bounty_id", bounty_id);
+        f.pushKV("lot_id", lot_id);
+        f.pushKV("amount_atoms", "1000");
+        return call("observebountychain", f);
+    };
+    const std::string outpoint = std::string(64, 'a') + ":0";
+    const std::string bounty(256, 'b');
+    BOOST_REQUIRE_MESSAGE(observe(outpoint, bounty, std::string(256, 'l')), err);
+    BOOST_CHECK(!observe(std::string(257, 'o'), bounty, "lot"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!observe(std::string(64, 'c') + ":0", std::string(257, 'b'), "lot"));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!observe(std::string(64, 'd') + ":0", bounty, std::string(257, 'l')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+
+    const auto import = [&](const std::string& outpoint, const std::string& lot_id) {
+        UniValue lot(UniValue::VOBJ);
+        lot.pushKV("outpoint", outpoint);
+        lot.pushKV("lot_id", lot_id);
+        lot.pushKV("amount_atoms", "1");
+        UniValue lots(UniValue::VARR);
+        lots.push_back(lot);
+        UniValue manifest(UniValue::VOBJ);
+        manifest.pushKV("bounty_id", bounty);
+        manifest.pushKV("lots", lots);
+        return call("importbountyrecovery", manifest);
+    };
+    BOOST_CHECK(!import(std::string(257, 'o'), "lot"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!import(std::string(64, 'e') + ":0", std::string(257, 'l')));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(import(std::string(64, 'f') + ":0", "lot"), err);
+
+    // Only the two facts within the bounds are kept.
+    UniValue id(UniValue::VARR);
+    id.push_back(bounty);
+    BOOST_REQUIRE(store.Dispatch("getbountyfunding", id, result, code, err));
+    BOOST_CHECK_EQUAL(result["facts"].size(), 2U);
+}
+
 BOOST_AUTO_TEST_CASE(bounty_observe_height_not_wrapped)
 {
     using namespace modelnet;
@@ -1755,6 +2442,98 @@ BOOST_AUTO_TEST_CASE(bounty_observe_height_not_wrapped)
     BOOST_CHECK_EQUAL(height_of("ten:0"), 10);
     BOOST_CHECK(!FactsHaveOutpoint(result, "wrap:0"));
     BOOST_CHECK(!FactsHaveOutpoint(result, "neg:0"));
+}
+
+// Awards are saved with the bounty store: a bounty takes at most 64 award
+// proposals, lot_ids has a size bound, the same proposal again keeps the
+// award there, and an award keeps the one approval this store signs.
+BOOST_AUTO_TEST_CASE(bounty_awards_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-awards-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto call = [&](const std::string& method, const UniValue& obj) {
+        UniValue params(UniValue::VARR);
+        params.push_back(obj);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+    UniValue draft_params(UniValue::VARR);
+    draft_params.push_back(DefaultTerms(ZeroNet()));
+    BOOST_REQUIRE(store.Dispatch("createbountydraft", draft_params, result, code, err));
+    UniValue pub(UniValue::VOBJ);
+    pub.pushKV("draft_id", result["draft_id"].get_str());
+    BOOST_REQUIRE_MESSAGE(call("publishbounty", pub), err);
+    const std::string bounty = result["bounty_id"].get_str();
+    UniValue commit(UniValue::VOBJ);
+    commit.pushKV("bounty_id", bounty);
+    commit.pushKV("digest", "digest-0");
+    BOOST_REQUIRE_MESSAGE(call("commitbountysubmission", commit), err);
+    UniValue reveal(UniValue::VOBJ);
+    reveal.pushKV("commitment_id", result["commitment_id"].get_str());
+    UniValue sub(UniValue::VOBJ);
+    sub.pushKV("note", "digest-0");
+    reveal.pushKV("submission", sub);
+    BOOST_REQUIRE_MESSAGE(call("revealbountysubmission", reveal), err);
+    const std::string submission = result["submission_id"].get_str();
+
+    const auto propose = [&](const std::string& lot) {
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("submission_id", submission);
+        UniValue lots(UniValue::VARR);
+        lots.push_back(lot);
+        p.pushKV("lot_ids", lots);
+        return call("proposebountyaward", p);
+    };
+    {
+        // Over 16 KiB of lot_ids, each id under the 8192 bytes a signed string takes.
+        UniValue p(UniValue::VOBJ);
+        p.pushKV("bounty_id", bounty);
+        p.pushKV("submission_id", submission);
+        UniValue lots(UniValue::VARR);
+        for (int i = 0; i < 3; ++i) lots.push_back(std::string(6000, 'l'));
+        p.pushKV("lot_ids", lots);
+        BOOST_CHECK(!call("proposebountyaward", p));
+        BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    }
+    std::string award, second;
+    for (int i = 0; i < 64; ++i) {
+        BOOST_REQUIRE_MESSAGE(propose("lot-" + std::to_string(i)), err);
+        if (i == 0) award = result["award_id"].get_str();
+        if (i == 1) second = result["award_id"].get_str();
+    }
+    BOOST_CHECK(!propose("lot-64"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // An award already there is still answered at the limit, and proposing it
+    // again keeps its decision: a rejected award stays rejected.
+    UniValue reject(UniValue::VOBJ);
+    reject.pushKV("award_id", second);
+    reject.pushKV("decision", "REJECT");
+    BOOST_REQUIRE_MESSAGE(call("approvebountyaward", reject), err);
+    BOOST_REQUIRE_MESSAGE(propose("lot-1"), err);
+    BOOST_CHECK_EQUAL(result["award_id"].get_str(), second);
+    UniValue approve_second(UniValue::VOBJ);
+    approve_second.pushKV("award_id", second);
+    BOOST_CHECK(!call("approvebountyaward", approve_second));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+
+    UniValue approve(UniValue::VOBJ);
+    approve.pushKV("award_id", award);
+    BOOST_REQUIRE_MESSAGE(call("approvebountyaward", approve), err);
+    const std::string first = result.write();
+    BOOST_REQUIRE_MESSAGE(call("approvebountyaward", approve), err);
+    BOOST_CHECK_EQUAL(result.write(), first);
+    UniValue get(UniValue::VARR);
+    get.push_back(award);
+    BOOST_REQUIRE(store.Dispatch("getbountyaward", get, result, code, err));
+    BOOST_CHECK_EQUAL(result["policy_approvals"].size(), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
@@ -2169,6 +2948,122 @@ BOOST_AUTO_TEST_CASE(bounty_search_health_feed_store_rpc)
     BOOST_CHECK(!IsBountyHelperMethod("preparebountyrefund"));
 }
 
+// Every bounty write adds an event, and getbountyevents reads them from
+// memory. The log keeps the newest events within a count and a byte bound; a
+// reader whose cursor is behind the oldest event kept gets a gap.
+BOOST_AUTO_TEST_CASE(bounty_event_log_is_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-events-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    UniValue terms(UniValue::VOBJ);
+    terms.pushKV("title", "event log");
+    UniValue create(UniValue::VARR);
+    create.push_back(terms);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", create, result, code, err), err);
+    const std::string draft_id = result["draft_id"].get_str();
+    const auto update = [&](const std::string& field, const std::string& value) {
+        UniValue patch(UniValue::VOBJ);
+        patch.pushKV("draft_id", draft_id);
+        patch.pushKV(field, value);
+        UniValue params(UniValue::VARR);
+        params.push_back(patch);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("updatebountydraft", params, result, code, err), err);
+    };
+    const auto page = [&](const std::string& cursor) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("cursor", cursor);
+        a.pushKV("limit", 100);
+        UniValue params(UniValue::VARR);
+        params.push_back(a);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("getbountyevents", params, out, code, err), err);
+        return out;
+    };
+    // Every event after `cursor`, and the size of their JSON.
+    const auto walk = [&](std::string cursor, size_t& bytes) {
+        std::vector<UniValue> events;
+        bytes = 0;
+        for (;;) {
+            const UniValue out = page(cursor);
+            for (const auto& e : out["events"].getValues()) {
+                events.push_back(e);
+                bytes += e.write().size();
+            }
+            if (out["events"].size() < 100) break;
+            cursor = out["cursor"].get_str();
+        }
+        return events;
+    };
+    const auto seq_of = [](const UniValue& e) { return e["seq"].getInt<int64_t>(); };
+    size_t bytes = 0;
+    const std::string start = page("0")["cursor"].get_str();
+    const int64_t start_seq = std::stoll(start);
+    BOOST_CHECK(!page(start)["gap"].get_bool());
+
+    // 4100 small writes: the newest 4096 events are kept, the reader that had
+    // seen all before gets a gap of four events.
+    for (int i = 0; i < 4100; ++i) update("title", "t" + std::to_string(i));
+    const UniValue behind = page(start);
+    BOOST_CHECK(behind["gap"].get_bool());
+    BOOST_CHECK_EQUAL(behind["gap_begin"].get_str(), std::to_string(start_seq + 1));
+    BOOST_CHECK_EQUAL(behind["gap_end"].get_str(), std::to_string(start_seq + 4));
+    std::vector<UniValue> kept = walk(start, bytes);
+    BOOST_REQUIRE_EQUAL(kept.size(), BOUNTY_EVENTS_MAX);
+    BOOST_CHECK_EQUAL(seq_of(kept.front()), start_seq + 5);
+    BOOST_CHECK_EQUAL(kept.back()["payload"]["title"].get_str(), "t4099");
+    const std::string after_small = std::to_string(seq_of(kept.back()));
+    BOOST_CHECK(!page(after_small)["gap"].get_bool());
+
+    // 20 writes of about 300 KiB each: only as many as fit in 4 MiB are kept,
+    // the newest among them.
+    const std::string note(300 << 10, 'n');
+    for (int i = 0; i < 20; ++i) update("notes", note + std::to_string(i));
+    kept = walk("0", bytes);
+    BOOST_CHECK_LE(bytes, BOUNTY_EVENT_BYTES_MAX);
+    BOOST_CHECK_LT(kept.size(), 20U);
+    BOOST_CHECK_EQUAL(kept.back()["payload"]["notes"].get_str(), note + "19");
+    BOOST_CHECK(page(after_small)["gap"].get_bool());
+
+    // One event larger than the budget is kept until the next one.
+    const std::string huge(5 << 20, 'h');
+    update("notes", huge);
+    kept = walk("0", bytes);
+    BOOST_REQUIRE_EQUAL(kept.size(), 1U);
+    BOOST_CHECK_EQUAL(kept.front()["payload"]["notes"].get_str().size(), huge.size());
+    const std::string at_huge = std::to_string(seq_of(kept.front()) - 1);
+    update("notes", "small again");
+    const UniValue after_huge = page(at_huge);
+    BOOST_CHECK(after_huge["gap"].get_bool());
+    BOOST_REQUIRE_EQUAL(after_huge["events"].size(), 1U);
+    BOOST_CHECK_EQUAL(after_huge["events"][0]["payload"]["notes"].get_str(), "small again");
+
+    // The log is not saved: after a restart the same reader gets a gap, also
+    // before the next event, and a cursor at the newest event gets none.
+    const std::string newest = after_huge["cursor"].get_str();
+    BountyStore restarted;
+    restarted.Bind(dir, ZeroNet());
+    const auto restarted_page = [&](const std::string& cursor) {
+        UniValue a(UniValue::VOBJ);
+        a.pushKV("cursor", cursor);
+        UniValue params(UniValue::VARR);
+        params.push_back(a);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(restarted.Dispatch("getbountyevents", params, out, code, err), err);
+        return out;
+    };
+    const UniValue lost = restarted_page(at_huge);
+    BOOST_CHECK(lost["gap"].get_bool());
+    BOOST_CHECK_EQUAL(lost["gap_end"].get_str(), newest);
+    BOOST_CHECK(!restarted_page(newest)["gap"].get_bool());
+    // A cursor at the end of its range does not wrap into a gap.
+    BOOST_CHECK(!restarted_page("18446744073709551615")["gap"].get_bool());
+}
+
 BOOST_AUTO_TEST_CASE(wrapped_terms_read_like_direct_terms)
 {
     // {"terms": {...}} is accepted as a wrapper. It must give the same
@@ -2222,6 +3117,66 @@ BOOST_AUTO_TEST_CASE(wrapped_terms_read_like_direct_terms)
     BOOST_CHECK_EQUAL(updated.result["terms"]["title"].get_str(), terms["title"].get_str());
 }
 
+// watchbounty saves each watch with the store, which every bounty write
+// writes again. A bounty keeps one watch, its id has a length bound, and the
+// number of watches is bounded.
+BOOST_AUTO_TEST_CASE(bounty_watches_are_bounded)
+{
+    using namespace modelnet;
+    const fs::path dir = m_path_root / "bounty-watches-bound";
+    fs::create_directories(dir);
+    BountyStore store;
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    const auto watch = [&](BountyStore& s, const std::string& bounty_id) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("bounty_id", bounty_id);
+        UniValue params(UniValue::VARR);
+        params.push_back(o);
+        code.clear();
+        err.clear();
+        return s.Dispatch("watchbounty", params, result, code, err);
+    };
+    const auto unwatch = [&](const std::string& watch_id) {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("watch_id", watch_id);
+        UniValue params(UniValue::VARR);
+        params.push_back(o);
+        return store.Dispatch("unwatchbounty", params, result, code, err);
+    };
+
+    BOOST_REQUIRE_MESSAGE(watch(store, "watched-0"), err);
+    const std::string first = result["watch_id"].get_str();
+    BOOST_REQUIRE_MESSAGE(watch(store, "watched-0"), err);
+    BOOST_CHECK_EQUAL(result["watch_id"].get_str(), first);
+
+    BOOST_CHECK(!watch(store, std::string(BOUNTY_WATCH_ID_MAX + 1, 'x')));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_CHECK(!watch(store, ""));
+    BOOST_CHECK_EQUAL(code, "INVALID_PARAMETER");
+    BOOST_REQUIRE_MESSAGE(watch(store, std::string(BOUNTY_WATCH_ID_MAX, 'y')), err);
+
+    for (size_t i = 2; i < BOUNTY_WATCHES_MAX; ++i) {
+        BOOST_REQUIRE_MESSAGE(watch(store, "watched-" + std::to_string(i)), err);
+    }
+    BOOST_CHECK(!watch(store, "one-too-many"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    // A bounty already watched still gets its watch at the limit.
+    BOOST_REQUIRE_MESSAGE(watch(store, "watched-0"), err);
+    BOOST_CHECK_EQUAL(result["watch_id"].get_str(), first);
+    // Removing one makes room for another.
+    BOOST_REQUIRE_MESSAGE(unwatch(first), err);
+    BOOST_REQUIRE_MESSAGE(watch(store, "one-too-many"), err);
+
+    // The saved store loads with the same watches, and the limit holds there too.
+    BountyStore reloaded;
+    reloaded.Bind(dir, ZeroNet());
+    BOOST_CHECK(!watch(reloaded, "watched-0"));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(watch(reloaded, "one-too-many"), err);
+}
+
 BOOST_AUTO_TEST_CASE(incomplete_bounty_draft_cannot_publish)
 {
     using namespace modelnet;
@@ -2263,6 +3218,99 @@ BOOST_AUTO_TEST_CASE(incomplete_bounty_draft_cannot_publish)
     BOOST_CHECK(!result["recipe_complete"].get_bool());
     BOOST_CHECK_EQUAL(result["missing_fields"].size(), missing_before);
     BOOST_CHECK_EQUAL(result["next_actions"][0].get_str().empty(), false);
+}
+
+// The bounty store keeps, per idempotency key, a hash of the request and the
+// reply: the newest keys, and replies within a byte budget. A key whose reply
+// went still refuses another request and answers that the write was done.
+BOOST_AUTO_TEST_CASE(bounty_idempotency_keys_are_bounded)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-idem-bound";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    UniValue result;
+    std::string code, err;
+    UniValue terms(UniValue::VOBJ);
+    terms.pushKV("title", "idempotency");
+    UniValue create(UniValue::VARR);
+    create.push_back(terms);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", create, result, code, err), err);
+    std::string draft_id = result["draft_id"].get_str();
+    // updatebountydraft with the key next to the draft id and the patch apart.
+    const auto update = [&](const std::string& key, const std::string& field, const std::string& value) {
+        UniValue head(UniValue::VOBJ);
+        head.pushKV("draft_id", draft_id);
+        head.pushKV("idempotency_key", key);
+        UniValue patch(UniValue::VOBJ);
+        patch.pushKV(field, value);
+        UniValue params(UniValue::VARR);
+        params.push_back(head);
+        params.push_back(patch);
+        code.clear();
+        err.clear();
+        return store.Dispatch("updatebountydraft", params, result, code, err);
+    };
+    const auto notes_now = [&]() {
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("draft_id", draft_id);
+        UniValue params(UniValue::VARR);
+        params.push_back(o);
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("getbountydraft", params, out, code, err), err);
+        return out["terms"]["notes"].get_str();
+    };
+
+    BOOST_REQUIRE_MESSAGE(update("first", "title", "a"), err);
+    BOOST_REQUIRE_MESSAGE(update("first", "title", "a"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "a");
+    BOOST_CHECK(!update("first", "title", "b"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // 20 replies of about 300 KiB: the oldest replies go, their keys stay.
+    const std::string note(300 << 10, 'n');
+    for (int i = 0; i < 20; ++i) {
+        BOOST_REQUIRE_MESSAGE(update("big-" + std::to_string(i), "notes", note + std::to_string(i)), err);
+    }
+    BOOST_REQUIRE_MESSAGE(update("big-19", "notes", note + "19"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["notes"].get_str(), note + "19");
+    BOOST_CHECK(!update("big-0", "notes", note + "0"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_REPLAY_UNAVAILABLE");
+    BOOST_CHECK(err.find("was done") != std::string::npos);
+    BOOST_CHECK_EQUAL(notes_now(), note + "19");
+    BOOST_CHECK(!update("big-0", "notes", "other"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_CHECK(!update("first", "title", "b"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // 4096 newer keys with small replies, on a small draft of their own, push
+    // out the oldest keys: under "first" another request now runs, as after a
+    // restart, which pushes out small-0 and its reply; small-1, now the oldest
+    // key left, still replays and refuses another request.
+    UniValue small_terms(UniValue::VOBJ);
+    small_terms.pushKV("title", "small");
+    UniValue small_create(UniValue::VARR);
+    small_create.push_back(small_terms);
+    BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", small_create, result, code, err), err);
+    const std::string large_draft = draft_id;
+    const std::string small_draft = result["draft_id"].get_str();
+    draft_id = small_draft;
+    for (int i = 0; i < 4096; ++i) {
+        BOOST_REQUIRE_MESSAGE(update("small-" + std::to_string(i), "title", "s" + std::to_string(i)), err);
+    }
+    draft_id = large_draft;
+    BOOST_REQUIRE_MESSAGE(update("first", "title", "b"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "b");
+    draft_id = small_draft;
+    // The newest reply is kept; the oldest key left refuses another request,
+    // whether or not its reply still fits; small-0 went and runs again.
+    BOOST_REQUIRE_MESSAGE(update("small-4095", "title", "s4095"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "s4095");
+    BOOST_CHECK(!update("small-1", "title", "other"));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+    BOOST_REQUIRE_MESSAGE(update("small-0", "title", "s0"), err);
+    BOOST_CHECK_EQUAL(result["terms"]["title"].get_str(), "s0");
 }
 
 BOOST_AUTO_TEST_CASE(bounty_award_proposal_and_decision_are_checked)
@@ -2375,6 +3423,75 @@ BOOST_AUTO_TEST_CASE(bounty_award_proposal_and_decision_are_checked)
     d.pushKV("award_id", result["award_id"].get_str());
     BOOST_REQUIRE_MESSAGE(call("approvebountyaward", d), err);
     BOOST_CHECK(!result["transaction_signature"].get_bool());
+}
+
+// Bounty drafts are saved with the store, which every bounty write writes
+// again: their number and their size in all are bounded.
+BOOST_AUTO_TEST_CASE(bounty_drafts_are_bounded)
+{
+    using namespace modelnet;
+    UniValue result;
+    std::string code, err;
+    const auto create = [&](BountyStore& store, const std::string& title, const std::string& notes) {
+        UniValue terms(UniValue::VOBJ);
+        terms.pushKV("title", title);
+        if (!notes.empty()) terms.pushKV("notes", notes);
+        UniValue params(UniValue::VARR);
+        params.push_back(terms);
+        code.clear();
+        err.clear();
+        return store.Dispatch("createbountydraft", params, result, code, err);
+    };
+    const auto call = [&](BountyStore& store, const std::string& method, const std::string& draft_id,
+                          const std::string& field, const std::string& value) {
+        UniValue patch(UniValue::VOBJ);
+        patch.pushKV("draft_id", draft_id);
+        if (!field.empty()) patch.pushKV(field, value);
+        UniValue params(UniValue::VARR);
+        params.push_back(patch);
+        code.clear();
+        err.clear();
+        return store.Dispatch(method, params, result, code, err);
+    };
+
+    // At most BOUNTY_DRAFTS_MAX drafts; deleting one makes room.
+    const fs::path many_dir = m_path_root / "bounty-drafts-many";
+    fs::create_directories(many_dir);
+    BountyStore many;
+    many.Bind(many_dir, ZeroNet());
+    std::string first;
+    for (size_t i = 0; i < BOUNTY_DRAFTS_MAX; ++i) {
+        BOOST_REQUIRE_MESSAGE(create(many, "draft " + std::to_string(i), ""), err);
+        if (i == 0) first = result["draft_id"].get_str();
+    }
+    BOOST_CHECK(!create(many, "one too many", ""));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(call(many, "deletebountydraft", first, "", ""), err);
+    BOOST_REQUIRE_MESSAGE(create(many, "one too many", ""), err);
+
+    // At most BOUNTY_DRAFT_BYTES_MAX of drafts in all, for a new draft and
+    // for an update that makes a draft larger.
+    const fs::path big_dir = m_path_root / "bounty-drafts-big";
+    fs::create_directories(big_dir);
+    BountyStore big;
+    big.Bind(big_dir, ZeroNet());
+    BOOST_REQUIRE_MESSAGE(create(big, "large", ""), err);
+    const std::string large = result["draft_id"].get_str();
+    const std::string fifteen(15 << 20, 'f');
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", fifteen), err);
+    BOOST_CHECK(!create(big, "too large", std::string(2 << 20, 't')));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_CHECK(!call(big, "updatebountydraft", large, "notes", std::string(17 << 20, 'g')));
+    BOOST_CHECK_EQUAL(code, "REJECTED");
+    BOOST_REQUIRE_MESSAGE(call(big, "getbountydraft", large, "", ""), err);
+    BOOST_CHECK_EQUAL(result["terms"]["notes"].get_str().size(), fifteen.size());
+    // An update is weighed without the draft it replaces: 10 MiB grows to
+    // 10 MiB and 1 KiB within the 16 MiB.
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", std::string(10 << 20, 'h')), err);
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", std::string((10 << 20) + 1024, 'i')), err);
+    // A smaller update and a small new draft still fit.
+    BOOST_REQUIRE_MESSAGE(call(big, "updatebountydraft", large, "notes", "short"), err);
+    BOOST_REQUIRE_MESSAGE(create(big, "fits again", std::string(2 << 20, 't')), err);
 }
 
 BOOST_AUTO_TEST_CASE(helper_observebountychain_reorg_recovery_unsigned)
@@ -2541,5 +3658,95 @@ BOOST_AUTO_TEST_CASE(bounty_store_keeps_its_state_when_a_save_is_cut_short)
                         "the first draft was lost from bounty-store.json: " + err);
 }
 #endif
+
+// The research identity signs this node's bounty, search, safety and service
+// records. A file that is there but cannot be parsed (a write cut short by a
+// crash, an edit by hand) must not be replaced by a new key: the old key would
+// be gone for good, and with it the control over what it signed.
+namespace {
+const char* const BROKEN_IDENTITY_FILES[]{"{", "{}", "{\"pk_hex\":1,\"sk_hex\":2}"};
+
+std::string ReadWhole(const fs::path& p)
+{
+    std::ifstream in{p, std::ios::binary};
+    return std::string{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(bounty_store_keeps_an_unreadable_research_identity)
+{
+    using namespace modelnet;
+    BountyStore store;
+    const fs::path dir = m_path_root / "bounty-identity-kept";
+    fs::create_directories(dir);
+    store.Bind(dir, ZeroNet());
+    const fs::path ident = dir / "research_identity.json";
+    UniValue result;
+    std::string code, err;
+    const auto publish = [&] {
+        UniValue draft_params(UniValue::VARR);
+        draft_params.push_back(DefaultTerms(ZeroNet()));
+        result = UniValue(UniValue::VOBJ);
+        BOOST_REQUIRE_MESSAGE(store.Dispatch("createbountydraft", draft_params, result, code, err), err);
+        UniValue pub(UniValue::VOBJ);
+        pub.pushKV("draft_id", result["draft_id"].get_str());
+        UniValue params(UniValue::VARR);
+        params.push_back(pub);
+        result = UniValue(UniValue::VOBJ);
+        code.clear();
+        err.clear();
+        return store.Dispatch("publishbounty", params, result, code, err);
+    };
+    // publishbounty signs with the identity and creates it when it is missing.
+    BOOST_REQUIRE(!fs::exists(ident));
+    BOOST_REQUIRE_MESSAGE(publish(), err);
+    BOOST_REQUIRE(fs::exists(ident));
+    for (const std::string broken : BROKEN_IDENTITY_FILES) {
+        {
+            std::ofstream out{ident, std::ios::trunc};
+            out << broken;
+        }
+        BOOST_CHECK(!publish());
+        BOOST_CHECK_EQUAL(err, "research identity unreadable");
+        BOOST_CHECK_EQUAL(ReadWhole(ident), broken);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(helper_keeps_an_unreadable_research_identity)
+{
+    using namespace modelnet;
+    // reportmodelmalicious keeps its local report in memory only while the
+    // safety registry is not bound, then signs an advisory with the identity.
+    GlobalSafety().ResetForTests();
+    const fs::path root = m_path_root / "helper-identity-kept";
+    ModelCatalog cat{root, 1 << 20};
+    const fs::path ident = root / "research_identity.json";
+    UniValue result;
+    const auto report = [&] {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "reportmodelmalicious");
+        UniValue params(UniValue::VARR);
+        params.push_back(std::string(96, 'a'));
+        req.pushKV("params", params);
+        std::string code, err;
+        result = UniValue(UniValue::VOBJ);
+        BOOST_REQUIRE_MESSAGE(DispatchHelperRpc(cat, req, result, code, err), err);
+    };
+    BOOST_REQUIRE(!fs::exists(ident));
+    report();
+    BOOST_REQUIRE(result["signed"].isTrue());
+    BOOST_REQUIRE(fs::exists(ident));
+    for (const std::string broken : BROKEN_IDENTITY_FILES) {
+        {
+            std::ofstream out{ident, std::ios::trunc};
+            out << broken;
+        }
+        report();
+        BOOST_CHECK(result["signed"].isFalse());
+        BOOST_CHECK_EQUAL(result.exists("sign_error") ? result["sign_error"].get_str() : "", "research identity unreadable");
+        BOOST_CHECK_EQUAL(ReadWhole(ident), broken);
+    }
+    GlobalSafety().ResetForTests();
+}
 
 BOOST_AUTO_TEST_SUITE_END()

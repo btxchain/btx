@@ -33,11 +33,35 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <vector>
 
-BOOST_FIXTURE_TEST_SUITE(modelnet_jit_ensure_tests, BasicTestingSetup)
+namespace modelnet {
+void ResetCapabilityStoreForTests();
+} // namespace modelnet
+
+namespace {
+//! The plan, job and lock store and the host broker are process-wide, and
+//! other cases and suites in the same test run leave theirs behind. With the
+//! fixed test seed, plan ids repeat from one case to the next, so a case found
+//! plans of an earlier case under its own ids, or a host budget an earlier
+//! suite had set. Each case here starts as a fresh process would: no kept
+//! plans, jobs or locks, and a broker with no limits and nothing reserved.
+void ResetCapabilityTestState()
+{
+    modelnet::ResetCapabilityStoreForTests();
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalCapabilityBroker().Configure(modelnet::MemoryLimits{}, err));
+}
+
+struct CapabilityTestingSetup : public BasicTestingSetup {
+    CapabilityTestingSetup() { ResetCapabilityTestState(); }
+};
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(modelnet_jit_ensure_tests, CapabilityTestingSetup)
 
 namespace {
 
@@ -321,6 +345,72 @@ BOOST_AUTO_TEST_CASE(JIT_API_06)
     BOOST_CHECK_EQUAL(reconnect["automatic_spend_atoms"].getInt<int>(), 0);
 }
 
+// Any caller adds an event with each planbtxcapabilityupdate, and the log was
+// trimmed only up to the cursor a reader passes. The newest events are kept
+// within a bound; a reader behind them gets a gap.
+BOOST_AUTO_TEST_CASE(capability_events_are_bounded)
+{
+    UniValue drain;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(std::numeric_limits<int64_t>::max() / 4, drain));
+    const auto append = [](size_t i, size_t pad) {
+        UniValue e(UniValue::VOBJ);
+        e.pushKV("kind", "plan");
+        e.pushKV("old_lock", "lock-" + std::to_string(i) + std::string(pad, 'x'));
+        BOOST_REQUIRE(modelnet::AppendCapabilityEvent(e));
+    };
+    // The cursor of a reader that has seen everything so far.
+    UniValue mark(UniValue::VOBJ);
+    mark.pushKV("kind", "mark");
+    BOOST_REQUIRE(modelnet::AppendCapabilityEvent(mark));
+    UniValue seen;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(0, seen));
+    const int64_t cursor = seen["next_cursor"].getInt<int64_t>();
+
+    // 4097 small events: the first is gone, the newest 4096 are there.
+    for (size_t i = 0; i <= 4096; ++i) append(i, 0);
+    UniValue got;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(cursor, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 4096U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str(), "lock-1");
+    BOOST_CHECK(got["gap"].get_bool());
+    BOOST_CHECK_EQUAL(got["gap_begin"].getInt<int64_t>(), cursor + 1);
+    BOOST_CHECK_EQUAL(got["gap_end"].getInt<int64_t>(), cursor + 1);
+    const int64_t after_small = got["next_cursor"].getInt<int64_t>();
+
+    // Events of 300 KiB each: the newest 13 fit in 4 MiB, the one before does not.
+    for (size_t i = 0; i < 20; ++i) append(1000 + i, 300 << 10);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(after_small, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 13U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str().substr(0, 9), "lock-1007");
+    BOOST_CHECK(got["gap"].get_bool());
+    BOOST_CHECK_EQUAL(got["gap_end"].getInt<int64_t>(), after_small + 7);
+
+    // A reader that takes them all frees their room for 13 new ones.
+    const int64_t after_large = got["next_cursor"].getInt<int64_t>();
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(after_large, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 0U);
+    for (size_t i = 0; i < 13; ++i) append(3000 + i, 300 << 10);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(after_large, got));
+    BOOST_CHECK_EQUAL(got["events"].size(), 13U);
+    BOOST_CHECK(!got["gap"].get_bool());
+
+    // One event larger than the bound is kept until the next one comes.
+    const int64_t before_big = got["next_cursor"].getInt<int64_t>();
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(before_big, got));
+    append(4000, 5 << 20);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(before_big, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 1U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str().size(), 9U + (5U << 20));
+    append(4001, 0);
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(before_big, got));
+    BOOST_REQUIRE_EQUAL(got["events"].size(), 1U);
+    BOOST_CHECK_EQUAL(got["events"][0]["old_lock"].get_str(), "lock-4001");
+    BOOST_CHECK(got["gap"].get_bool());
+
+    // Leave the log empty for later cases.
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(got["next_cursor"].getInt<int64_t>(), got));
+}
+
 BOOST_AUTO_TEST_CASE(JIT_UPDATE_01)
 {
     BOOST_TEST_MESSAGE("JIT-UPDATE-01 Prepare alongside active");
@@ -437,6 +527,67 @@ BOOST_AUTO_TEST_CASE(JIT_ENSURE_IDEMPOTENCY_KEY_PAYLOAD)
     BOOST_REQUIRE_MESSAGE(modelnet::EnsureCapability(cat, nokey_a, a, code, err), err);
     BOOST_REQUIRE_MESSAGE(modelnet::EnsureCapability(cat, nokey_b, b, code, err), err);
     BOOST_CHECK(a["job_id"].get_str() != b["job_id"].get_str());
+}
+
+// planbtxcapabilityupdate keeps, per idempotency key, a hash of the request and
+// the reply, for the newest keys and within a byte budget.
+BOOST_AUTO_TEST_CASE(capability_idempotency_keeps_the_newest_keys)
+{
+    std::string code, err;
+    const auto plan_update = [&](const std::string& key, const std::string& old_lock, UniValue& out) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("lock_id", old_lock);
+        req.pushKV("digest", "digest-bound");
+        req.pushKV("idempotency_key", key);
+        req.pushKV("smoke_passed", true);
+        return modelnet::PlanCapabilityUpdate(req, out, code, err);
+    };
+    UniValue first, replay, conflict;
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-0", "old-0", first), err);
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-0", "old-0", replay), err);
+    BOOST_CHECK(replay["idempotent"].get_bool());
+    BOOST_CHECK_EQUAL(replay["proposed_lock"].get_str(), first["proposed_lock"].get_str());
+    BOOST_CHECK_EQUAL(replay["automatic_spend_atoms"].getInt<int>(), 0);
+    BOOST_CHECK(!plan_update("bound-0", "old-other", conflict));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // 4096 newer keys push the first out: under it, another request now runs.
+    for (int i = 1; i <= 4096; ++i) {
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(plan_update("bound-" + std::to_string(i), "old-" + std::to_string(i), out), err);
+    }
+    UniValue again;
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-0", "old-other", again), err);
+    BOOST_CHECK(!again.exists("idempotent"));
+    // That pushed out bound-1, and running bound-1 again pushes out bound-2;
+    // bound-3, now the oldest key left, still holds.
+    UniValue gone, held;
+    BOOST_REQUIRE_MESSAGE(plan_update("bound-1", "old-other", gone), err);
+    BOOST_CHECK(!gone.exists("idempotent"));
+    BOOST_CHECK(!plan_update("bound-3", "old-other", held));
+    BOOST_CHECK_EQUAL(code, "IDEMPOTENCY_CONFLICT");
+
+    // A reply holds the old lock three times. With 200 KiB old locks, about 6
+    // replies fit in 4 MiB: of 20 keys the newest are kept and the oldest go.
+    const std::string big(200 << 10, 'b');
+    for (int i = 0; i < 20; ++i) {
+        UniValue out;
+        BOOST_REQUIRE_MESSAGE(plan_update("big-" + std::to_string(i), big + std::to_string(i), out), err);
+    }
+    // Six replies of about 600 KiB fit: big-14 is the oldest kept, big-13 is gone.
+    UniValue newest, last_kept, first_gone, oldest;
+    BOOST_REQUIRE_MESSAGE(plan_update("big-19", big + "19", newest), err);
+    BOOST_CHECK(newest["idempotent"].get_bool());
+    BOOST_REQUIRE_MESSAGE(plan_update("big-14", big + "14", last_kept), err);
+    BOOST_CHECK(last_kept["idempotent"].get_bool());
+    BOOST_REQUIRE_MESSAGE(plan_update("big-13", big + "other", first_gone), err);
+    BOOST_CHECK(!first_gone.exists("idempotent"));
+    BOOST_REQUIRE_MESSAGE(plan_update("big-0", big + "other", oldest), err);
+    BOOST_CHECK(!oldest.exists("idempotent"));
+
+    // Leave the capability event log as the next cases expect it.
+    UniValue drain;
+    BOOST_REQUIRE(modelnet::CompactCapabilityEvents(std::numeric_limits<int64_t>::max() / 4, drain));
 }
 
 BOOST_AUTO_TEST_CASE(hello_capability_objects_name_min_max)
@@ -700,6 +851,96 @@ BOOST_AUTO_TEST_CASE(JIT_JOURNEY_12)
     BOOST_CHECK_EQUAL(got["automatic_spend_atoms"].getInt<int>(), 0);
 }
 
+// Any caller makes a new plan with each planbtxcapability and a new lock with
+// each importbtxlock of a lock that differs, and each one was kept for the
+// life of the helper. The newest are kept within a bound, oldest out first.
+BOOST_AUTO_TEST_CASE(capability_plans_and_locks_are_bounded)
+{
+    modelnet::ModelCatalog cat{m_path_root / "cap-bounded", 1 << 20};
+    std::string code, err;
+    auto rpc = [](const std::string& method, const UniValue& params) {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", method);
+        req.pushKV("params", params);
+        return req;
+    };
+    const auto lock = [](size_t i, size_t pad) {
+        UniValue l(UniValue::VOBJ);
+        l.pushKV("recipe_id", std::string(96, 'a'));
+        l.pushKV("note", "lock-" + std::to_string(i) + std::string(pad, 'x'));
+        return l;
+    };
+    const auto import = [&](const UniValue& l) {
+        UniValue imported;
+        BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc("importbtxlock", l), imported, code, err), err);
+        BOOST_REQUIRE(imported["imported"].get_bool());
+        return imported["lock_id"].get_str();
+    };
+    modelnet::CapabilityLock kept;
+
+    // 1025 small locks: the first one is pushed out, the newest 1024 stay.
+    std::vector<std::string> ids;
+    for (size_t i = 0; i <= 1024; ++i) ids.push_back(import(lock(i, 0)));
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(ids.front(), kept));
+    BOOST_CHECK(modelnet::LookupCapabilityLock(ids[1], kept));
+    BOOST_REQUIRE(modelnet::LookupCapabilityLock(ids.back(), kept));
+    BOOST_CHECK_EQUAL(kept.json["note"].get_str(), "lock-1024");
+
+    // Locks of 200 KiB each: the newest 20 fit in 4 MiB, the one before does not.
+    ids.clear();
+    for (size_t i = 0; i < 25; ++i) ids.push_back(import(lock(2000 + i, 200 << 10)));
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(ids[4], kept));
+    for (size_t i = 5; i < ids.size(); ++i) {
+        BOOST_CHECK_MESSAGE(modelnet::LookupCapabilityLock(ids[i], kept), "lock " << i);
+    }
+
+    // map_id is not part of the lock_id: 30 small locks imported again, each
+    // with a large map_id under the same id, count as the newest locks and
+    // still fit the bound.
+    ids.clear();
+    for (size_t i = 0; i < 30; ++i) ids.push_back(import(lock(3000 + i, 0)));
+    for (size_t i = 0; i < 30; ++i) {
+        UniValue again = lock(3000 + i, 0);
+        again.pushKV("map_id", std::string(200 << 10, 'm'));
+        BOOST_REQUIRE_EQUAL(import(again), ids[i]);
+    }
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(ids[9], kept));
+    BOOST_REQUIRE(modelnet::LookupCapabilityLock(ids[10], kept));
+    BOOST_CHECK_EQUAL(kept.json["map_id"].get_str().size(), 200U << 10);
+    BOOST_CHECK(modelnet::LookupCapabilityLock(ids.back(), kept));
+
+    // One lock larger than the bound is kept until the next one comes.
+    const std::string big = import(lock(4000, 5 << 20));
+    BOOST_CHECK(modelnet::LookupCapabilityLock(big, kept));
+    const std::string after = import(lock(4001, 0));
+    BOOST_CHECK(!modelnet::LookupCapabilityLock(big, kept));
+    BOOST_CHECK(modelnet::LookupCapabilityLock(after, kept));
+
+    // 4097 plans: the first one is pushed out and can no longer be ensured.
+    UniValue plan_in(UniValue::VOBJ);
+    plan_in.pushKV("recipe", RecipeJson());
+    plan_in.pushKV("grant", GrantJson());
+    std::vector<std::string> plans;
+    for (size_t i = 0; i <= 4096; ++i) {
+        UniValue planned;
+        BOOST_REQUIRE_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc("planbtxcapability", plan_in), planned, code, err), err);
+        plans.push_back(planned["plan_id"].get_str());
+    }
+    modelnet::CapabilityPlan plan;
+    BOOST_CHECK(!modelnet::LookupCapabilityPlan(plans.front(), plan));
+    BOOST_CHECK(modelnet::LookupCapabilityPlan(plans[1], plan));
+    BOOST_CHECK(modelnet::LookupCapabilityPlan(plans.back(), plan));
+    UniValue ensure_in(UniValue::VOBJ);
+    ensure_in.pushKV("plan_id", plans.front());
+    ensure_in.pushKV("grant", GrantJson());
+    UniValue ensured;
+    BOOST_CHECK(!modelnet::DispatchHelperRpc(cat, rpc("ensurebtxcapability", ensure_in), ensured, code, err));
+    BOOST_CHECK_EQUAL(err, "unknown plan_id");
+    ensure_in.pushKV("plan_id", plans.back());
+    ensured = UniValue(UniValue::VOBJ);
+    BOOST_CHECK_MESSAGE(modelnet::DispatchHelperRpc(cat, rpc("ensurebtxcapability", ensure_in), ensured, code, err), err);
+}
+
 BOOST_AUTO_TEST_CASE(remaining_capability_rpc_surface)
 {
     modelnet::ModelCatalog cat{m_path_root / "cap-rpc-surface", 1 << 20};
@@ -870,6 +1111,67 @@ BOOST_AUTO_TEST_CASE(remaining_capability_rpc_surface)
     } else {
         BOOST_CHECK_EQUAL(code, "LEASE_HOLD");
     }
+}
+
+BOOST_AUTO_TEST_CASE(ensure_staging_dir_is_private)
+{
+    BOOST_TEST_MESSAGE("The fixed staging directory under the temp directory must be private to this user");
+    const char* old_tmpdir = std::getenv("TMPDIR");
+    const std::string saved_tmpdir{old_tmpdir ? old_tmpdir : ""};
+    modelnet::ModelCatalog cat{m_path_root / "ensure-cat", 1 << 20};
+    const auto plan = StorePlan();
+    const fs::path base = m_path_root / "ensure-tmpdir";
+    UniValue got;
+    std::string code, err;
+
+    // A symlink in its place is refused, and nothing is written where it points.
+    const fs::path link_tmp = base / "link";
+    const fs::path elsewhere = base / "elsewhere";
+    fs::create_directories(link_tmp);
+    fs::create_directories(elsewhere);
+    fs::create_directory_symlink(elsewhere, link_tmp / "btx-capability-ensure");
+    ::setenv("TMPDIR", fs::PathToString(link_tmp).c_str(), 1);
+    BOOST_CHECK(!modelnet::EnsureCapability(cat, EnsureReq(plan), got, code, err));
+    BOOST_CHECK_EQUAL(code, "IO");
+    BOOST_CHECK(fs::is_empty(elsewhere));
+
+    // A directory of this user that others may enter is made private and used.
+    const fs::path open_tmp = base / "open";
+    const fs::path staging = open_tmp / "btx-capability-ensure";
+    fs::create_directories(staging);
+    fs::permissions(staging, fs::perms::all);
+    ::setenv("TMPDIR", fs::PathToString(open_tmp).c_str(), 1);
+    got = UniValue{};
+    BOOST_CHECK_MESSAGE(modelnet::EnsureCapability(cat, EnsureReq(plan), got, code, err), err);
+    BOOST_CHECK((fs::status(staging).permissions() & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+
+    if (old_tmpdir) {
+        ::setenv("TMPDIR", saved_tmpdir.c_str(), 1);
+    } else {
+        ::unsetenv("TMPDIR");
+    }
+}
+
+// Plans and the host budget used to carry over from earlier cases and suites
+// in the same run: capability_plans_and_locks_are_bounded failed when an
+// earlier case had kept a plan under one of its ids, and ensure cases failed
+// with "host budget" after modelnet_jit_journey_tests had set an 8 MiB limit.
+BOOST_AUTO_TEST_CASE(each_case_starts_with_an_empty_capability_store)
+{
+    // What an earlier case could leave behind.
+    const auto plan = StorePlan();
+    modelnet::MemoryLimits lim;
+    lim.host_physical_bytes = 64;
+    std::string err;
+    BOOST_REQUIRE(modelnet::GlobalCapabilityBroker().Configure(lim, err));
+    BOOST_REQUIRE(!modelnet::GlobalCapabilityBroker().Reserve(1 << 20, 0, 0, false, err));
+
+    // What the next case's setup does.
+    ResetCapabilityTestState();
+    modelnet::CapabilityPlan kept;
+    BOOST_CHECK(!modelnet::LookupCapabilityPlan(plan.plan_id, kept));
+    BOOST_CHECK_MESSAGE(modelnet::GlobalCapabilityBroker().Reserve(1 << 20, 0, 0, false, err), err);
+    modelnet::GlobalCapabilityBroker().Release(1 << 20, 0, 0, false);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

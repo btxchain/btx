@@ -13,6 +13,7 @@
 #include <util/fs.h>
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <set>
 #include <string>
@@ -36,6 +37,8 @@ constexpr int SEARCH_FANOUT_MAX = 8;
 constexpr int SEARCH_PEER_TIMEOUT_MS = 1500;
 constexpr int SEARCH_TERMS_MAX = 16;
 constexpr size_t SEARCH_QUERY_BYTES_MAX = 4096;
+//! Search jobs a SearchRuntime keeps for getsearchstatus and cancelmodelsearch.
+constexpr size_t SEARCH_JOBS_KEPT = 64;
 
 enum class SearchScope { LOCAL = 0, PEERS = 1, NETWORK = 2, ALL = 3 };
 enum class SearchSort {
@@ -170,6 +173,8 @@ struct ProviderObservation {
     bool direct{true};
     bool relayed{false};
     int64_t last_seen_ms{0};
+    /** Expiry of the provider record behind a remote observation; 0 for local seeding. */
+    int64_t expires_ms{0};
     std::vector<PieceRange> ranges;
     std::string netgroup;
 };
@@ -281,10 +286,34 @@ class SearchIndex {
     std::map<std::string, ModelSearchRecord> m_by_model;
     std::set<std::string> m_hidden;
     std::set<std::string> m_muted_publishers;
+    //! Records in the index per publisher quota key (see Put()).
     std::map<std::string, int> m_pub_window;
+    //! The quota key each counted record was charged to, by model id. The key
+    //! is not always in the record ("ep:" names the peer that sent it).
+    std::map<std::string, std::string> m_pub_charge;
+    //! The highest sequence a signed record reached before it expired, by
+    //! model id and signer, so an older copy of that record that has not
+    //! expired yet is not taken back (see Put()). Each signer has its own
+    //! entry: one key cannot raise or clear another's. Saved with the index.
+    using SeqFloorKey = std::pair<Digest48, Digest48>;
+    struct SeqFloor {
+        uint64_t seq{0};
+        //! From a record this node signed; never dropped for the bound.
+        bool own{false};
+        //! Its key in m_seq_floor_order; only for a floor that is not own.
+        uint64_t stamp{0};
+    };
+    std::map<SeqFloorKey, SeqFloor> m_seq_floor;
+    //! Floors from peer records by when they were set, oldest first; at
+    //! most m_cap.
+    std::map<uint64_t, SeqFloorKey> m_seq_floor_order;
+    uint64_t m_seq_floor_stamp{0};
+    void NoteSequenceFloor(const Digest48& model_id, const Digest48& signer, uint64_t seq, bool own);
     size_t m_cap{100000};
     std::vector<std::string> m_index_peers;
     uint64_t m_seq{0};
+    //! search-index.json was there but could not be read: keep it, do not save over it.
+    bool m_unreadable{false};
 
 public:
     /**
@@ -295,7 +324,13 @@ public:
              const std::string& transport_endpoint = {});
     bool Tombstone(const Digest48& model_id, uint64_t seq, int64_t now_ms, std::string& err);
     const ModelSearchRecord* Get(const Digest48& model_id) const;
-    const ModelSearchRecord* FindByAlias(const std::string& alias) const;
+    //! Highest sequence a record of this model signed by \p signer reached
+    //! before it expired, or 0. A record this node publishes again after its
+    //! own expired starts above it.
+    uint64_t SequenceFloor(const Digest48& model_id, const Digest48& signer) const;
+    //! Own records first, then a live, shown peer record; nullptr (and
+    //! *ambiguous) when two peer records name the alias.
+    const ModelSearchRecord* FindByAlias(const std::string& alias, int64_t now_ms = 0, bool* ambiguous = nullptr) const;
     std::vector<ModelSearchRecord> List(int64_t updated_after, const std::string& cursor, int limit) const;
     std::vector<SearchHit> Search(const SearchQuery& q, int64_t now_ms) const;
     void Hide(const Digest48& model_id, bool on);
@@ -311,6 +346,8 @@ public:
     UniValue StatusJson() const;
     bool Save(const fs::path& path, std::string& err) const;
     bool Load(const fs::path& path, int64_t now_ms, std::string& err);
+    //! True after Load found a file it could not read; Save then refuses until it is repaired.
+    bool Unreadable() const { return m_unreadable; }
     std::vector<ModelSearchRecord> All() const;
     void SetCap(size_t cap) { m_cap = cap; }
     /** Drop records for a new helper dir. Index peers are kept. */
@@ -334,9 +371,14 @@ bool SearchHitFromCard(const UniValue& card, SearchHit& out, std::string& err);
 
 class SearchRuntime {
     std::map<std::string, SearchJob> m_jobs;
+    //! Query ids of m_jobs, oldest first.
+    std::deque<std::string> m_order;
+    //! Searches cancelled while they ran, until Finish; Keep may drop the job.
+    std::set<std::string> m_cancelled_running;
     SearchIndex* m_idx{nullptr};
     int m_running{0};
     int m_completed{0};
+    void Keep(const SearchJob& job);
 
 public:
     void Bind(SearchIndex* idx) { m_idx = idx; }

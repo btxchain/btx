@@ -91,6 +91,47 @@ const READ_METHODS: &[&str] = &[
     "listmodelwatches",
     "searchcollections",
     "searchpublishers",
+    "getmodelsearchrecord",
+    "listmodelsearchrecords",
+    "getmodeldirectory",
+    "getmodelproviders",
+    "getmodelavailability",
+    "getmodelpeercount",
+    "getnetworkmodelstats",
+    "browsemodels",
+    "gettrendingmodels",
+    "getsimilarmodels",
+    "getnewmodels",
+    "getmodellandiscovery",
+    "getmodelfeedstatus",
+    "getsearchpeers",
+    "getpublisher",
+    "getcollection",
+    "getswapnetworkinfo",
+    "listswapassets",
+    "listswapproviders",
+    "searchswaps",
+    "getswapquotes",
+    "listswaps",
+    "getswap",
+    "getswaptranscript",
+    "listswapmandates",
+    "getswapcapabilities",
+    "listswapoperations",
+    "getswaphealth",
+    "getswapbootstrapinfo",
+    "getswaprecoveryinfo",
+    "listswapmarkets",
+    "listswapassetpolicies",
+    "getswaprouteinfo",
+    "getswapevents",
+    "getswapvalidationinfo",
+    "getswapmode",
+    "getswapreadiness",
+    "getswapauthinfo",
+    "listswappublicoffers",
+    "inspectswapinvite",
+    "getsharedp2pinfo",
 ];
 const AGENT_READS: &[&str] = &[
     "getblockchaininfo",
@@ -100,6 +141,11 @@ const AGENT_READS: &[&str] = &[
     "getmininginfo",
     "listmodels",
     "getmodeltransfers",
+    "getswapnetworkinfo",
+    "getswapbootstrapinfo",
+    "getswapvalidationinfo",
+    "getnetworkmodelstats",
+    "getmodellandiscovery",
 ];
 const SECRET_METHODS: &[&str] = &[
     "walletpassphrase",
@@ -265,7 +311,11 @@ pub fn read_allowed(method: &str, params: &Value) -> bool {
     }
     if matches!(
         method,
-        "searchmodels" | "searchbounties" | "searchcollections" | "searchpublishers"
+        "searchmodels"
+            | "searchbounties"
+            | "searchcollections"
+            | "searchpublishers"
+            | "getnewmodels"
     ) {
         return search_stays_local(params);
     }
@@ -673,6 +723,33 @@ mod tests {
             assert!(!read_allowed(method, &json!([{"scope":"ALL"}])));
             assert!(!read_allowed(method, &json!([{"scope":""}])));
         }
+    }
+    #[test]
+    fn directory_and_swap_reads() {
+        // These four scan the local index. They do not forward a non-local scope.
+        for method in [
+            "browsemodels",
+            "gettrendingmodels",
+            "getsimilarmodels",
+            "getmodeldirectory",
+        ] {
+            assert!(read_allowed(method, &json!([])));
+            assert!(read_allowed(method, &json!([{"limit":50}])));
+        }
+        assert!(read_allowed("getnewmodels", &json!([])));
+        assert!(read_allowed("getnewmodels", &json!([{"scope":"LOCAL"}])));
+        assert!(!read_allowed("getnewmodels", &json!([{"scope":"NETWORK"}])));
+        assert!(read_allowed("getmodelavailability", &json!(["abc"])));
+        assert!(read_allowed("getnetworkmodelstats", &json!([])));
+        assert!(read_allowed("getmodellandiscovery", &json!([])));
+        assert!(read_allowed("getswapnetworkinfo", &json!([])));
+        assert!(read_allowed("getswapvalidationinfo", &json!([])));
+        assert!(!read_allowed("acceptswapquote", &json!([{}])));
+        assert!(!read_allowed("requestswapquote", &json!([])));
+        assert!(!read_allowed("refundswap", &json!([])));
+        assert!(!read_allowed("exportswaprecovery", &json!([])));
+        assert!(agent_read_allowed("getswapnetworkinfo"));
+        assert!(!agent_read_allowed("acceptswapquote"));
     }
     #[test]
     fn path_reads_need_approval() {
