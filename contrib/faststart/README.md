@@ -1,9 +1,10 @@
 # BTX Fast-Start Validating Nodes
 
 Fast-start changes sync mechanics, not consensus activation or verification
-authority. Current downloadable release is **v0.34.9**
-(`--release-tag v0.34.9`). Historical `v0.34.8-rc4` and `v0.34.9-dev.pr198*`
-remain on GitHub and are not recut.
+authority. Use [Download-and-Go](../../doc/btx-download-and-go.md) for
+the current stable and prerelease downloads and their manual installation
+steps. Historical `v0.34.8-rc4` and `v0.34.9-dev.pr198*` remain on GitHub and
+are not recut.
 Epoch A (height 185000) is live, and since 0.34.12 the highest compiled
 assumeutxo pin is height **228000** (219000 is still compiled). A near-tip
 claimed block
@@ -30,8 +31,9 @@ canonical snapshot distribution system for BTX. Instead, they support either:
 - the compact per-release `snapshot.manifest.json` emitted by
   `contrib/devtools/generate_assumeutxo.py`.
 
-For release installs, use the latest snapshot bundle published with the same
-BTX release as the binary. The compact manifest records `snapshot_file_version`
+For manual installs, use a snapshot that matches a pin compiled into the
+binary. Signed one-shot installs use the snapshot manifest advertised by the
+release manifest. The compact manifest records `snapshot_file_version`
 for troubleshooting; the wrapper and `loadtxoutset` read the snapshot file
 directly and do not require operators to choose a snapshot format manually.
 
@@ -168,18 +170,23 @@ the manifest's `attestation_assets` list. The installer ignores those
 provenance files, but they are part of the intended operator-facing release
 contract for reproducible major-architecture builds.
 
-One-shot install + bootstrap
+One-shot install + bootstrap for a signed release
+
+Use these examples only with a tag that publishes a release manifest,
+signed checksums and a matching snapshot manifest. Set `SIGNED_RELEASE_TAG`
+to that tag. For the current unsigned uploads, follow
+[the manual steps](../../doc/btx-download-and-go.md#download-and-verify-the-archive).
 
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.8 \
+  --release-tag "${SIGNED_RELEASE_TAG:?set a signed release tag}" \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
 
-The GitHub tag `v0.34.8` is the shipping release. Historical `v0.34.8-rc4`,
-`v0.34.8-rc2`, and `v0.34.8-rc1` remain on GitHub and are superseded.
+The `v0.34.8` example and its prereleases `v0.34.8-rc4`, `v0.34.8-rc2`, and
+`v0.34.8-rc1` are historical.
 
 For a self-custody miner, installation, verified snapshot bootstrap, wallet
 provisioning, and live-mining supervisor startup can be handed off in one
@@ -188,7 +195,7 @@ command:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.8 \
+  --release-tag "${SIGNED_RELEASE_TAG:?set a signed release tag}" \
   --preset miner \
   --datadir="$HOME/.btx" \
   --start-mining
@@ -235,7 +242,7 @@ handing off to mining or service automation:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.34.8 \
+  --release-tag "${SIGNED_RELEASE_TAG:?set a signed release tag}" \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"
