@@ -883,4 +883,26 @@ BOOST_AUTO_TEST_CASE(MempoolUnbroadcastMemoryUsage)
     BOOST_CHECK_EQUAL(pool.DynamicMemoryUsage(), usage_before);
 }
 
+// The shielded indexes of the mempool are memory the mempool holds; they
+// count toward DynamicMemoryUsage and so toward -maxmempool.
+BOOST_AUTO_TEST_CASE(dynamic_usage_counts_shielded_indexes)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(cs_main, pool.cs);
+    const size_t before = pool.DynamicMemoryUsage();
+    for (uint32_t i = 0; i < 1000; ++i) {
+        uint256 key;
+        key.data()[0] = static_cast<unsigned char>(i);
+        key.data()[1] = static_cast<unsigned char>(i >> 8);
+        pool.m_shielded_nullifiers.emplace(key, Txid::FromUint256(key));
+        pool.m_shielded_recovery_commitments.emplace(key, Txid::FromUint256(key));
+        pool.m_shielded_settlement_anchor_refs.insert(key);
+    }
+    const size_t after = pool.DynamicMemoryUsage();
+    BOOST_CHECK_GE(after, before + 3000 * 32);
+    pool.m_shielded_nullifiers.clear();
+    pool.m_shielded_recovery_commitments.clear();
+    pool.m_shielded_settlement_anchor_refs.clear();
+}
+
 BOOST_AUTO_TEST_SUITE_END()
