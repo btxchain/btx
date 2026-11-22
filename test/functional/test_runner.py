@@ -755,6 +755,7 @@ BTX_BASE_SCRIPTS = [
     'rpc_matmul_attestation_aliases.py',
     'rpc_matmul_attestation_blocklist.py',
     'feature_matmul_trusted_mirrors.py',
+    'p2p_outbound_eviction.py',
     'p2p_mirror_relay_to_signer.py',
     'feature_matmul_heard_serve.py',
     'feature_matmul_signer_node_ibd.py',
