@@ -4,6 +4,7 @@
 
 #include <crypto/common.h>
 #include <modelnet/catalog.h>
+#include <modelnet/file_stream.h>
 #include <modelnet/free_grant.h>
 #include <modelnet/helper.h>
 #include <modelnet/identity.h>
@@ -191,6 +192,51 @@ BOOST_AUTO_TEST_CASE(hosted_grant_is_bound_to_its_model_and_piece_range)
     // reason shows that the range check refused it.
     resp = get("/btx-model/2/files/" + two_pieces.artifact_id.Hex() + "/0");
     BOOST_CHECK(resp.body.find("grant does not cover whole file stream") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(whole_file_stream_refuses_files_over_the_stream_cap)
+{
+    // The retriever streams a whole file only up to FULL_FILE_STREAM_MAX_BYTES.
+    // A peer with a whole-file grant for a larger file must not get a stream
+    // that bypasses the piece path; a small file still streams.
+    const fs::path tmp = m_path_root / "authz-stream-cap";
+    modelnet::ModelCatalog cat{tmp, 192ull << 20};
+    const auto big = ImportSized(cat, "src-big", modelnet::FULL_FILE_STREAM_MAX_BYTES + 1, 0x33);
+    const auto small = ImportSized(cat, "src-small", 64, 0x44);
+
+    const auto whole_file_get = [&](const modelnet::CatalogEntry& model) {
+        modelnet::NativeRequest nreq;
+        nreq.method = "POST";
+        nreq.path = "/btx-model/2/ext/free/grant";
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("model_id", model.model_id.Hex());
+        nreq.body = req.write();
+        modelnet::NativeResponse nresp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+        BOOST_REQUIRE_EQUAL(nresp.status, 200);
+        UniValue gj;
+        BOOST_REQUIRE(gj.read(nresp.body));
+        modelnet::NativeRequest greq;
+        greq.method = "GET";
+        greq.path = "/btx-model/2/files/" + model.artifact_id.Hex() + "/0";
+        greq.headers = {
+            {"X-BTX-Grant-Payload", gj["payload_hex"].get_str()},
+            {"X-BTX-Grant-Sig", gj["sig_hex"].get_str()},
+            {"X-BTX-Grant-Pubkey", gj["pubkey_hex"].get_str()},
+        };
+        modelnet::NativeResponse gresp;
+        BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, greq, gresp));
+        return gresp;
+    };
+
+    const auto big_resp = whole_file_get(big);
+    BOOST_CHECK_EQUAL(big_resp.status, 413);
+    BOOST_CHECK(!big_resp.stream_verified_file);
+    BOOST_CHECK(big_resp.body.find("FILE_TOO_LARGE") != std::string::npos);
+
+    const auto small_resp = whole_file_get(small);
+    BOOST_CHECK_EQUAL(small_resp.status, 200);
+    BOOST_CHECK(small_resp.stream_verified_file);
 }
 
 BOOST_AUTO_TEST_CASE(typed_record_signer_must_match_key)
