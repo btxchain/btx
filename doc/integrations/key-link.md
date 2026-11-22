@@ -47,7 +47,7 @@ Key-Link / customer HSM / PKCS#11 / HTTPS / `-signer`
 | Addresses | Coordinator | `deriveexchangeaddress` from `importdepositpool` or signer-exported pubkeys (`GetPublicKey` / `getp2mrpubkeys`). Never a fake BIP32 xpub. |
 | Watch-only | Coordinator | Descriptor wallet, `disable_private_keys`, `-exchange-watchonly`. |
 | Deposits | Coordinator | ZMQ / wallet notify + `getdepositstatus`. |
-| Construction | Coordinator | `createpsbt` / `createexchangebatch` / `createconsolidationtx` → `prepareexternalsign` → `getsigningdigests`. |
+| Construction | Coordinator | Call `prepareexternalsign` in the watch-only wallet with recipients or outputs and the intended change address. It returns an unsigned BTXPSBT and signing digests. For batch/consolidation packages and supplied PSBT requirements, see [External signing](external-sign.md#supplied-psbts). |
 | Sign | External | `SignDigest(path, algorithm, digest)`. |
 | Insert / validate | Coordinator | `finalizeexternalsign` (no broadcast) → `testmempoolaccept` → `sendrawtransaction`. |
 
