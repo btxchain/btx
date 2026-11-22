@@ -1166,6 +1166,43 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.assertFalse(stale_file.exists())
             self.assertTrue(any(path.name == "btxd" for path in install_dir.rglob("btxd")))
 
+    def test_failed_force_replacement_preserves_existing_install(self):
+        for failure in ("extract", "promote"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmpdir:
+                root = pathlib.Path(tmpdir)
+                archive_path = self._build_fake_archive(root)
+                install_dir = root / "install"
+                install_dir.mkdir()
+                old_launcher = install_dir / "btxd"
+                old_launcher.write_text("previous launcher\n", encoding="utf-8")
+
+                def fail_extraction(_archive, staging):
+                    staging.mkdir(exist_ok=True)
+                    (staging / "partial").touch()
+                    raise OSError("replacement write failed")
+
+                real_replace = pathlib.Path.replace
+
+                def fail_promotion(source, destination):
+                    if destination == install_dir and source.name != "previous":
+                        raise OSError("replacement rename failed")
+                    return real_replace(source, destination)
+
+                fault = (
+                    mock.patch.object(self.module, "extract_archive", side_effect=fail_extraction)
+                    if failure == "extract"
+                    else mock.patch.object(pathlib.Path, "replace", fail_promotion)
+                )
+                with fault, self.assertRaisesRegex(OSError, "replacement .* failed"):
+                    self.module.install_archive(archive_path, install_dir, force=True)
+                self.assertEqual(old_launcher.read_text(encoding="utf-8"), "previous launcher\n")
+                self.assertEqual(list(root.glob("install.*")), [])
+
+                self.module.install_archive(archive_path, install_dir, force=True)
+                self.assertFalse(old_launcher.exists())
+                self.assertTrue((install_dir / "btx-29.2/bin/btxd").is_file())
+                self.assertEqual(list(root.glob("install.*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
