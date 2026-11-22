@@ -16,7 +16,7 @@ class RPCPQWalletTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [[]]
+        self.extra_args = [["-keypool=100"]]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -26,11 +26,18 @@ class RPCPQWalletTest(BitcoinTestFramework):
         node.createwallet(wallet_name="pqwallet", descriptors=True)
         wallet = node.get_wallet_rpc("pqwallet")
 
+        self.log.info("check the default P2MR receive and change descriptor pools")
+        active = [entry for entry in wallet.listdescriptors()["descriptors"] if entry["active"]]
+        assert_equal(sorted(entry["internal"] for entry in active), [False, True])
+        receive_desc, change_desc = [entry["desc"] for entry in sorted(active, key=lambda entry: entry["internal"])]
+        assert receive_desc.startswith("mr(") and change_desc.startswith("mr(")
+        assert receive_desc != change_desc
+        wallet_info = wallet.getwalletinfo()
+        assert_equal(wallet_info["keypoolsize"], 100)
+        assert_equal(wallet_info["keypoolsize_hd_internal"], 100)
+
         self.log.info("check getdescriptorinfo accepts mr() descriptors with key origin info")
-        descs = wallet.listdescriptors()["descriptors"]
-        assert len(descs) >= 1
-        mr_desc = descs[0]["desc"]
-        info = node.getdescriptorinfo(mr_desc)
+        info = node.getdescriptorinfo(receive_desc)
         assert_equal(info["descriptor"].startswith("mr("), True)
         assert_equal(info["isrange"], True)
         assert_equal(info["issolvable"], True)
@@ -55,6 +62,19 @@ class RPCPQWalletTest(BitcoinTestFramework):
         self.log.info("check getnewaddress default is p2mr")
         default_addr = wallet.getnewaddress()
         assert default_addr.startswith("btxrt1z")
+
+        self.log.info("check default receive and change use their own active descriptors")
+        receive_info = wallet.getaddressinfo(default_addr)
+        assert_equal(receive_info["ismine"], True)
+        assert_equal(receive_info["ischange"], False)
+        assert_equal(receive_info["parent_desc"], receive_desc)
+
+        change_addr = wallet.getrawchangeaddress()
+        change_info = wallet.getaddressinfo(change_addr)
+        assert_equal(change_info["ismine"], True)
+        assert_equal(change_info["ischange"], True)
+        assert_equal(change_info["witness_version"], 2)
+        assert_equal(change_info["parent_desc"], change_desc)
 
         self.log.info("check getnewaddress rejects legacy address types")
         assert_raises_rpc_error(
