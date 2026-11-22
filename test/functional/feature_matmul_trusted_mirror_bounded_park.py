@@ -220,8 +220,15 @@ class MatMulTrustedMirrorBoundedParkTest(BitcoinTestFramework):
         self.log.info("Winning headers and attestations, no bodies")
         winning = self._push_headers_and_attestations(authority, mirror, fork_hash, winning_tip)
         assert_equal(winning[0], fork_child)
-        self.wait_until(lambda: mirror.getblockchaininfo()["headers"] >= fork_height + WINNING_LEN,
-                        timeout=180)
+        # The signed frontier can advance before the fork's bodies make its
+        # headers eligible to lead the mirror's selected chain.
+        def winning_tip_indexed_and_signed():
+            frontier = mirror.getblockchaininfo().get("matmul_signed_frontier", {})
+            if frontier.get("hash") != winning_tip or frontier["height"] != fork_height + WINNING_LEN:
+                return False
+            return mirror.getblockheader(winning_tip)["height"] == frontier["height"]
+
+        self.wait_until(winning_tip_indexed_and_signed, timeout=180)
         assert_equal(mirror.getbestblockhash(), losing[-1])
 
         self.log.info("Depth-7 attested prefix alone: park once and return")
