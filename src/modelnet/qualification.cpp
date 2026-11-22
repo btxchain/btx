@@ -144,10 +144,15 @@ QualResult QualifySafeTensors(Span<const unsigned char> header_and_maybe_body, u
     uint64_t tensors = 0;
     uint64_t max_end = 8 + hlen;
     static const std::set<std::string> dtypes{"F32", "F16", "BF16", "F64", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "BOOL", "F8_E4M3", "F8_E5M2"};
-    for (const auto& key : header.getKeys()) {
-        if (key == "__metadata__") continue;
+    // Walk keys and values by index: header[key] scans the keys, which made
+    // this loop quadratic in the tensor count, and it returned the first entry
+    // of a repeated name each time.
+    const std::vector<std::string>& keys = header.getKeys();
+    const std::vector<UniValue>& values = header.getValues();
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (keys[i] == "__metadata__") continue;
         ++tensors;
-        const UniValue& t = header[key];
+        const UniValue& t = values[i];
         if (!t.isObject() || !t.exists("dtype") || !t.exists("shape") || !t.exists("data_offsets")) {
             report.detail = "tensor missing fields";
             report.result = QualResult::INVALID_MODEL;
