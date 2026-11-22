@@ -564,6 +564,35 @@ def validate_snapshot_chainstates(chainstates_info: dict[str, Any], manifest_ent
     )
 
 
+def wait_for_direct_snapshot_header(cli_cmd: list[str], path: Path, timeout_secs: int) -> None:
+    # SnapshotMetadata serializes magic, version, network magic, base hash,
+    # then coin count. The daemon validates the snapshot itself on load.
+    with path.open("rb") as snapshot:
+        metadata = snapshot.read(51)
+    if len(metadata) != 51 or metadata[:5] != b"utxo\xff":
+        raise ValueError("Invalid UTXO snapshot metadata")
+    version = int.from_bytes(metadata[5:7], "little")
+    if version not in range(2, 10):
+        raise ValueError(f"Unsupported UTXO snapshot version: {version}")
+    base_hash = metadata[11:43][::-1].hex()
+
+    deadline = time.monotonic() + timeout_secs
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            result = subprocess.run(
+                [*cli_cmd, "getblockheader", base_hash],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=remaining,
+            )
+        except subprocess.TimeoutExpired:
+            break
+        if result.returncode == 0:
+            return
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise TimeoutError(f"Timed out waiting for snapshot anchor header to reach the node (blockhash={base_hash})")
+
+
 def wait_for_snapshot_header(
     cli_cmd: list[str],
     manifest_entry: dict[str, Any],
@@ -839,7 +868,10 @@ def main(argv: list[str]) -> int:
     download_snapshot(snapshot_url, snapshot_path, snapshot_sha256)
     print(f"snapshot saved to: {snapshot_path}")
 
-    wait_for_snapshot_header(cli_cmd, snapshot_entry, args.header_wait_secs)
+    if args.snapshot_url:
+        wait_for_direct_snapshot_header(cli_cmd, snapshot_path, args.header_wait_secs)
+    else:
+        wait_for_snapshot_header(cli_cmd, snapshot_entry, args.header_wait_secs)
     load_result = None
     if snapshot_superseded_by_active_chain(cli_cmd, snapshot_entry):
         print("snapshot already superseded by active chainstate; skipping loadtxoutset")
