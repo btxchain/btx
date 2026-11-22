@@ -436,7 +436,7 @@ def adhoc_codesign_macos_binaries(install_dir: Path) -> None:
         print(f"warning: codesign failed for {failure}", file=sys.stderr)
 
 
-def install_archive(archive_path: Path, install_dir: Path, *, force: bool) -> None:
+def install_archive(archive_path: Path, install_dir: Path, *, force: bool) -> tuple[Path, Path]:
     parent_dir = install_dir.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
     def check_destination() -> bool:
@@ -458,6 +458,8 @@ def install_archive(archive_path: Path, install_dir: Path, *, force: bool) -> No
     previous = workspace / "previous"
     try:
         extract_archive(archive_path, staged)
+        daemon = find_binary(staged, ("btxd", "btxd.exe")).relative_to(staged)
+        cli = find_binary(staged, ("btx-cli", "btx-cli.exe")).relative_to(staged)
         if check_destination():
             install_dir.replace(previous)
         staged.replace(install_dir)
@@ -468,6 +470,7 @@ def install_archive(archive_path: Path, install_dir: Path, *, force: bool) -> No
         shutil.rmtree(workspace, ignore_errors=True)
         raise
     shutil.rmtree(workspace)
+    return install_dir / daemon, install_dir / cli
 
 
 def find_binary(install_dir: Path, names: tuple[str, ...]) -> Path:
@@ -817,11 +820,8 @@ def main(argv: list[str]) -> int:
             headers=github_asset_headers,
         )
 
-    install_archive(archive_path, install_dir, force=args.force)
+    btxd_path, btx_cli_path = install_archive(archive_path, install_dir, force=args.force)
     adhoc_codesign_macos_binaries(install_dir)
-
-    btxd_path = find_binary(install_dir, ("btxd", "btxd.exe"))
-    btx_cli_path = find_binary(install_dir, ("btx-cli", "btx-cli.exe"))
 
     summary: dict[str, Any] = {
         "manifest_source": manifest_source,
