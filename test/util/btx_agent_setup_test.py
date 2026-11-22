@@ -1240,5 +1240,37 @@ class BTXAgentSetupTest(unittest.TestCase):
                 self.assertEqual(list(root.glob("install.*")), [])
 
 
+    def test_missing_required_launcher_preserves_existing_install(self):
+        for missing in ("btxd", "btx-cli"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as tmpdir:
+                root = pathlib.Path(tmpdir)
+                complete = self._build_fake_archive(root)
+                install_dir = root / "install"
+                self.module.install_archive(complete, install_dir, force=False)
+                old_bin = install_dir / "btx-29.2" / "bin"
+                for launcher in ("btxd", "btx-cli"):
+                    (old_bin / launcher).write_text(f"previous-{launcher}\n", encoding="utf-8")
+
+                incomplete = root / "incomplete.tar.gz"
+                package = root / "package" / "btx-29.2"
+                (package / "bin" / missing).unlink()
+                with tarfile.open(incomplete, "w:gz") as archive:
+                    archive.add(package, arcname=package.name)
+
+                with self.assertRaisesRegex(FileNotFoundError, f"could not find any of {missing},"):
+                    self.module.install_archive(incomplete, install_dir, force=True)
+                for launcher in ("btxd", "btx-cli"):
+                    self.assertEqual(
+                        (old_bin / launcher).read_text(encoding="utf-8"),
+                        f"previous-{launcher}\n",
+                    )
+                self.assertEqual(list(root.glob("install.*")), [])
+
+                daemon, cli = self.module.install_archive(complete, install_dir, force=True)
+                self.assertEqual((daemon, cli), (old_bin / "btxd", old_bin / "btx-cli"))
+                self.assertTrue(daemon.is_file())
+                self.assertTrue(cli.is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
