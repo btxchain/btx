@@ -414,17 +414,51 @@ class UTXODriver:
         refunded=not claimed and spending.get('locktime',0)>=terms.lock_value
         return Report(LegObservation(True,exact,canonical and scanonical,sconf,False,claimed,refunded,
                                      not exact or not(claimed or refunded),now),clock,preimage,sblock)
+    def _relock_resolved(self, coin):
+        locked = self.wallet('listlockunspent')
+        if type(locked) is not list:
+            return False
+        if coin in locked:
+            return True
+
+        # A missing UTXO alone does not distinguish a spend from missing history.
+        tip = self.rpc('getbestblockhash')
+        parent = self.wallet('gettransaction', coin['txid'], True, True)
+        if type(parent) is not dict:
+            return False
+        confirmations = parent.get('confirmations')
+        decoded = parent.get('decoded')
+        if type(confirmations) is not int or confirmations < 1 or type(decoded) is not dict:
+            return False
+        outputs = decoded.get('vout')
+        if decoded.get('txid') != coin['txid'] or type(outputs) is not list:
+            return False
+        if not any(type(output) is dict and output.get('n') == coin['vout'] for output in outputs):
+            return False
+        # Without the mempool overlay, a null result here requires a chain spend.
+        return (type(tip) is str and len(tip) == 64
+                and self.rpc('gettxout', coin['txid'], coin['vout'], False) is None
+                and self.rpc('getbestblockhash') == tip)
+
     def relock(self):
         with self.journal.store.lock:
             rows=self.journal.store.db.execute('SELECT outpoint FROM coinlocks WHERE chain=?',(self.asset.id,)).fetchall()
-        if rows:
-            # A broadcast funding has spent its recorded inputs, and lockunspent
-            # refuses the whole call when one output is spent. Lock each input
-            # on its own so the inputs of a funding not yet broadcast stay
-            # reserved after a restart. A wallet that cannot be reached still
-            # fails here, before any lock is tried.
-            self.wallet('getwalletinfo')
-            for (v,) in rows:
-                coin={'txid':v.rsplit(':',1)[0],'vout':int(v.rsplit(':',1)[1])}
-                try:self.wallet('lockunspent',False,[coin])
-                except SwapError:pass
+        if not rows:
+            return
+        self.wallet('getwalletinfo')
+        unresolved = False
+        for (outpoint,) in rows:
+            txid, vout = outpoint.rsplit(':', 1)
+            coin = {'txid': txid, 'vout': int(vout)}
+            try:
+                if self.wallet('lockunspent', False, [coin]) is True:
+                    continue
+            except SwapError:
+                pass
+            try:
+                if self._relock_resolved(coin):
+                    continue
+            except SwapError:
+                pass
+            unresolved = True
+        require(not unresolved, 'COINLOCK', 'Reserved wallet outputs need another lock attempt')

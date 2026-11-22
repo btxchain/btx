@@ -31,7 +31,7 @@ from .recovery import export_bundle
 NATIVE_METHODS=frozenset({'getblockchaininfo','getblockhash','getblockcount','getbestblockhash','getblockheader','getblock',
  'getrawtransaction','gettxout','scantxoutset','getmempoolentry','gettxspendingprevout','getdescriptorinfo','deriveaddresses','validateaddress',
  'decodescript','decodepsbt','decoderawtransaction','createpsbt','finalizepsbt','sendrawtransaction','testmempoolaccept',
- 'listwallets','getwalletinfo','getnewaddress','getaddressinfo','listunspent','lockunspent','gettransaction','listtransactions',
+ 'listwallets','getwalletinfo','getnewaddress','getaddressinfo','listunspent','listlockunspent','lockunspent','gettransaction','listtransactions',
  'exportpqkey','walletcreatefundedpsbt','walletprocesspsbt','importdescriptors','signmessage','verifymessage','_swapnet_import_htlc','_swapnet_connect_peer','_shared_p2p'})
 
 class Host:
