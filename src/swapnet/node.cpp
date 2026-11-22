@@ -92,7 +92,7 @@ const std::set<std::string> NATIVE_METHODS={
  "getblockchaininfo","getblockhash","getblockcount","getbestblockhash","getblockheader","getblock",
  "getrawtransaction","gettxout","scantxoutset","getmempoolentry","gettxspendingprevout","getdescriptorinfo","deriveaddresses","validateaddress",
  "decodescript","decodepsbt","decoderawtransaction","createpsbt","finalizepsbt","sendrawtransaction","testmempoolaccept",
- "listwallets","getwalletinfo","getnewaddress","getaddressinfo","listunspent","lockunspent","gettransaction","listtransactions",
+ "listwallets","getwalletinfo","getnewaddress","getaddressinfo","listunspent","listlockunspent","lockunspent","gettransaction","listtransactions",
  "exportpqkey","walletcreatefundedpsbt","walletprocesspsbt","importdescriptors","signmessage","verifymessage","_swapnet_import_htlc","_swapnet_connect_peer","_shared_p2p"};
 std::string CoreCall(node::NodeContext& node,const std::string& wallet,const std::string& method,const std::string& params) {
     if (!NATIVE_METHODS.count(method)||params.size()>4*1024*1024) throw std::runtime_error("Native request rejected");
