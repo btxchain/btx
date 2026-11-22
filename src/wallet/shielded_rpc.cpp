@@ -7016,6 +7016,9 @@ void EnsureBridgeFeeHeadroomOrThrow(const BridgeFeeHeadroomAssessment& assessmen
                                              bool* mempool_rejected = nullptr,
                                              mapValue_t map_value = {})
 {
+    // Callers retry with the same string (z_shieldfunds halves its chunk);
+    // an error from an earlier attempt must not fail this one.
+    error.clear();
     if (mempool_rejected != nullptr) {
         *mempool_rejected = false;
     }
