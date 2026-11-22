@@ -28,6 +28,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -453,9 +454,33 @@ uint32_t Ipv4Netgroup(const sockaddr* sa, socklen_t len)
 int CountUnauthAndBump(uint32_t netgroup)
 {
     std::lock_guard<std::mutex> lock(g_unauth_mu);
-    auto& e = g_unauth[netgroup];
-    DecayUnauthLocked(e);
-    return ++e.count;
+    auto it = g_unauth.find(netgroup);
+    if (it == g_unauth.end()) {
+        // Every address that ever failed a handshake would otherwise keep an
+        // entry. At the cap, drop the entries whose window has passed, then
+        // the entry with the fewest failures (the oldest among equals), so
+        // that a netgroup at the limit is kept.
+        if (g_unauth.size() >= PQ1_UNAUTH_TRACKED_MAX) {
+            const auto now = std::chrono::steady_clock::now();
+            for (auto e = g_unauth.begin(); e != g_unauth.end();) {
+                if (now - e->second.window >= std::chrono::seconds(PQ1_UNAUTH_WINDOW_S)) {
+                    e = g_unauth.erase(e);
+                } else {
+                    ++e;
+                }
+            }
+            if (g_unauth.size() >= PQ1_UNAUTH_TRACKED_MAX) {
+                auto least = std::min_element(g_unauth.begin(), g_unauth.end(), [](const auto& a, const auto& b) {
+                    if (a.second.count != b.second.count) return a.second.count < b.second.count;
+                    return a.second.window < b.second.window;
+                });
+                g_unauth.erase(least);
+            }
+        }
+        it = g_unauth.emplace(netgroup, UnauthState{}).first;
+    }
+    DecayUnauthLocked(it->second);
+    return ++it->second.count;
 }
 
 int UnauthCount(uint32_t netgroup)
@@ -471,6 +496,12 @@ void ClearUnauth(uint32_t netgroup)
 {
     std::lock_guard<std::mutex> lock(g_unauth_mu);
     g_unauth.erase(netgroup);
+}
+
+size_t UnauthTrackedNetgroups()
+{
+    std::lock_guard<std::mutex> lock(g_unauth_mu);
+    return g_unauth.size();
 }
 
 bool ConnLimits::TryInbound(uint32_t netgroup)
