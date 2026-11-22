@@ -87,11 +87,12 @@ class EVMDriver:
         estimated=int(self.rpc('eth_estimateGas',req),16);gas=max(21000,(estimated*12+9)//10)
         priority,maximum=self._fees(cap)
         require(gas*maximum<=cap,'FEE_CAP','Estimated EVM transaction exceeds approved gas cap')
+        # Reject insufficient balance before allocating a durable nonce.
+        balance=int(self.rpc('eth_getBalance',sender,'pending'),16)
+        require(balance>=value+gas*maximum,'INSUFFICIENT_GAS','Local ETH account cannot fund value plus approved gas')
         pending=int(self.rpc('eth_getTransactionCount',sender,'pending'),16)
         operation=digest('BTX/SWAPNET/EVM-NONCE/2',{'swap_id':sid,'kind':kind,'data_hash':keccak256(data).hex()})
         nonce=(self.journal.reserve_nonce(self.asset.id,sender,operation,pending) if fixed_nonce is None else fixed_nonce)
-        balance=int(self.rpc('eth_getBalance',sender,'pending'),16)
-        require(balance>=value+gas*maximum,'INSUFFICIENT_GAS','Local ETH account cannot fund value plus approved gas')
         tx=Eip1559Transaction(self.asset.chain_id,nonce,priority,maximum,gas,address_bytes(to),value,data)
         raw=tx.sign(key,sender);txid=tx.validate_signed(raw,sender)
         metadata={'nonce':nonce,'gas':gas,'max_fee_per_gas':str(maximum),'priority_fee_per_gas':str(priority),'sender':sender,
