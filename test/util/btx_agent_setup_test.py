@@ -196,6 +196,42 @@ class BTXAgentSetupTest(unittest.TestCase):
 
         return fake_urlopen
 
+    def test_extract_accepts_hard_link_to_earlier_regular_member(self):
+        # The packager hard-links libexec/btx-guardd to btx-guardd.real (Linux and macOS). As in
+        # the published archives, btx-guardd is stored first and btx-guardd.real is the link entry.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            libexec = root / "src" / "btx-0.34.17" / "libexec"
+            libexec.mkdir(parents=True)
+            (libexec / "btx-guardd").write_bytes(b"guard")
+            os.link(libexec / "btx-guardd", libexec / "btx-guardd.real")
+            archive_path = root / "btx-0.34.17-x86_64-linux-gnu.tar.gz"
+            with tarfile.open(archive_path, "w:gz") as archive:
+                archive.add(libexec / "btx-guardd", arcname="btx-0.34.17/libexec/btx-guardd")
+                archive.add(libexec / "btx-guardd.real", arcname="btx-0.34.17/libexec/btx-guardd.real")
+            with tarfile.open(archive_path) as archive:
+                self.assertTrue(archive.getmember("btx-0.34.17/libexec/btx-guardd.real").islnk())
+            install_dir = root / "install"
+            self.module.extract_archive(archive_path, install_dir)
+            for name in ("btx-guardd", "btx-guardd.real"):
+                self.assertEqual((install_dir / "btx-0.34.17" / "libexec" / name).read_bytes(), b"guard")
+
+    def test_extract_refuses_other_link_entries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for kind, linkname in ((tarfile.LNKTYPE, "btx/missing"), (tarfile.SYMTYPE, "btx/target")):
+                archive_path = root / f"links-{kind!r}.tar.gz"
+                with tarfile.open(archive_path, "w:gz") as archive:
+                    target = tarfile.TarInfo("btx/target")
+                    target.size = 1
+                    archive.addfile(target, io.BytesIO(b"x"))
+                    link = tarfile.TarInfo("btx/link")
+                    link.type = kind
+                    link.linkname = linkname
+                    archive.addfile(link)
+                with self.assertRaisesRegex(ValueError, "unsupported link entry"):
+                    self.module.extract_archive(archive_path, root / f"out-{kind!r}")
+
     def test_install_from_local_release_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)

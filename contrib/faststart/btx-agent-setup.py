@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -345,10 +346,19 @@ def extract_archive(archive_path: Path, install_dir: Path) -> None:
     suffix = archive_path.name.lower()
     if suffix.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
         with tarfile.open(archive_path, "r:*") as archive:
+            regular = set()
             for member in archive.getmembers():
                 ensure_safe_extract_path(install_dir, member.name)
-                if member.issym() or member.islnk():
+                if member.issym():
                     raise ValueError(f"archive contains unsupported link entry: {member.name}")
+                if member.islnk():
+                    # The packager hard-links libexec/btx-guardd to btx-guardd.real (Linux and macOS).
+                    # Accept a hard link only when it names a regular file earlier in the archive.
+                    if posixpath.normpath(member.linkname) not in regular:
+                        raise ValueError(f"archive contains unsupported link entry: {member.name}")
+                    ensure_safe_extract_path(install_dir, member.linkname)
+                elif member.isfile():
+                    regular.add(posixpath.normpath(member.name))
             archive.extractall(install_dir)
         return
     if suffix.endswith(".zip"):
