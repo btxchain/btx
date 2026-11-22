@@ -678,4 +678,26 @@ BOOST_AUTO_TEST_CASE(download_quota_refused_before_eviction)
     }
 }
 
+BOOST_AUTO_TEST_CASE(pq1_unauth_table_stays_bounded)
+{
+    // One failed handshake from each of many netgroups, as from rotating IPv6 /64s.
+    const uint32_t base = 0x5a000000u;
+    const uint32_t total = static_cast<uint32_t>(modelnet::PQ1_UNAUTH_TRACKED_MAX) + 500;
+    const uint32_t offender = base - 1;
+    for (uint32_t i = 0; i < total; ++i) modelnet::ClearUnauth(base + i);
+    modelnet::ClearUnauth(offender);
+    BOOST_REQUIRE_LT(modelnet::UnauthTrackedNetgroups(), modelnet::PQ1_UNAUTH_TRACKED_MAX);
+    // A netgroup at the limit, counted before the others arrive.
+    for (int i = 0; i <= modelnet::PQ1_UNAUTH_HANDSHAKE_LIMIT; ++i) modelnet::CountUnauthAndBump(offender);
+    for (uint32_t i = 0; i < total; ++i) {
+        BOOST_CHECK_EQUAL(modelnet::CountUnauthAndBump(base + i), 1);
+    }
+    BOOST_CHECK_LE(modelnet::UnauthTrackedNetgroups(), modelnet::PQ1_UNAUTH_TRACKED_MAX);
+    // The netgroup at the limit stays refused, and the newest one is still counted.
+    BOOST_CHECK_EQUAL(modelnet::UnauthCount(offender), modelnet::PQ1_UNAUTH_HANDSHAKE_LIMIT + 1);
+    BOOST_CHECK_EQUAL(modelnet::UnauthCount(base + total - 1), 1);
+    for (uint32_t i = 0; i < total; ++i) modelnet::ClearUnauth(base + i);
+    modelnet::ClearUnauth(offender);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
