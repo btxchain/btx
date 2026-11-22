@@ -332,13 +332,16 @@ bool HeadersSyncState::ValidateAndAdvanceMatMulDifficulty(
     } else {
         AdvanceSyntheticIndexWindow(header, next_height, m_presync_last_index, m_presync_index_window);
     }
-    // Drop this peer's synthetic window once it passes a fixed byte budget.
-    // The difficulty check above already used the entries that are still present.
+    // Mainnet keeps the ASERT anchor at 50,000 until the epoch-A re-anchor at
+    // 185,000, so an honest presync holds that whole span. Two spans still
+    // bound the window. The difficulty check above already used the entries
+    // that are still present.
     const std::list<CBlockIndex>& window = redownload_phase ? m_redownload_index_window : m_presync_index_window;
-    constexpr size_t budget{8 * 1024 * 1024};
-    if (window.size() > budget / sizeof(CBlockIndex)) {
-        LogDebug(BCLog::NET, "Initial headers sync aborted with peer=%d: synthetic index window exceeded %u bytes\n",
-                 m_id, static_cast<unsigned>(budget));
+    constexpr uint64_t honest_anchor_span{185000 - 50000};
+    constexpr uint64_t max_entries{honest_anchor_span * 2};
+    if (window.size() > max_entries) {
+        LogDebug(BCLog::NET, "Initial headers sync aborted with peer=%d: synthetic index window exceeded %u entries\n",
+                 m_id, static_cast<unsigned>(max_entries));
         return false;
     }
     return true;
