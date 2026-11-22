@@ -8,6 +8,7 @@
 
 #include <crypto/common.h>
 #include <modelnet/catalog.h>
+#include <modelnet/file_stream.h>
 #include <modelnet/helper.h>
 #include <modelnet/pq1_runtime.h>
 #include <modelnet/protocol.h>
@@ -46,12 +47,15 @@ BOOST_FIXTURE_TEST_SUITE(modelnet_retrieve_peer_reply_tests, BasicTestingSetup)
 namespace {
 
 using Route = std::function<void(const modelnet::NativeRequest&, modelnet::NativeResponse&)>;
+/** Writes its own reply on the TLS stream; true means handled, close the connection. */
+using RawRoute = std::function<bool(SSL*, int, const modelnet::NativeRequest&, const std::atomic<bool>&)>;
 
 /** A PQ1 listener on 127.0.0.1 that answers native HTTP from a callback. */
 class FakePeer
 {
 public:
-    FakePeer(const fs::path& dir, Route route, int refuse_from = 0) : m_route(std::move(route)), m_refuse_from(refuse_from)
+    FakePeer(const fs::path& dir, Route route, int refuse_from = 0, RawRoute raw = {})
+        : m_route(std::move(route)), m_raw(std::move(raw)), m_refuse_from(refuse_from)
     {
         std::string err;
         BOOST_REQUIRE_MESSAGE(modelnet::LoadPq1Identity(m_pq, dir, err), err);
@@ -111,6 +115,7 @@ private:
                 if (raw.empty()) break;
                 modelnet::NativeRequest req;
                 if (!modelnet::ParseHttpRequest(raw, req, err)) break;
+                if (m_raw && m_raw(ssl, c, req, m_stop)) break;
                 modelnet::NativeResponse resp;
                 resp.status = 404;
                 resp.content_type = "application/json";
@@ -126,6 +131,7 @@ private:
 
     modelnet::Pq1Context m_pq;
     Route m_route;
+    RawRoute m_raw;
     int m_refuse_from{0};
     int m_accepted{0};
     int m_fd{-1};
@@ -259,6 +265,118 @@ std::string RetrieveWithSwarmSource(const fs::path& root, const SwarmRoute& swar
     return status;
 }
 
+/**
+ * One host that offers full_file_stream_v1. Its whole-file GET sends the
+ * headers and one piece of junk, then stalls, so the retriever falls back to
+ * piece GETs. Every other request is served honestly. Returns the job status
+ * and counts the whole-file GETs in `streams`.
+ */
+std::string RetrieveAfterJunkStream(const fs::path& root, std::atomic<int>& streams)
+{
+    fs::create_directories(root);
+    modelnet::ModelCatalog host_cat{root / "host", 256 << 20};
+    // Just under the 64 MiB stream cap: one 4 MiB piece is 1/16 of the file,
+    // so the measured rate falls short of PQ1_TRANSFER_MS after about 38 s.
+    const auto model = ImportModel(host_cat, root / "host-src", (64u << 20) - 4096);
+    UniValue manifest;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(host_cat.GetManifest(model.model_id, manifest, err), err);
+    const uint64_t file_size = manifest["files"][0]["size"].getInt<uint64_t>();
+    BOOST_REQUIRE_LE(file_size, modelnet::FULL_FILE_STREAM_MAX_BYTES);
+    const std::string stream_path = std::string(modelnet::MODEL_HTTP_ROOT) + "files/" + model.artifact_id.Hex() + "/0";
+
+    FakePeer host(
+        root / "host-peer",
+        [&](const modelnet::NativeRequest& req, modelnet::NativeResponse& resp) {
+            const std::string r{modelnet::MODEL_HTTP_ROOT};
+            if (req.path == r + "hello") {
+                return Json(resp, "{\"schema_version\":2,\"protocol\":2,\"full_file_stream_v1\":true}");
+            }
+            if (req.path == r + "manifests/" + model.model_id.Hex()) return Json(resp, manifest.write());
+            if (req.path == r + "ext/pex") return Json(resp, "{\"schema_version\":2}");
+            if (req.path == r + "availability") return Json(resp, "{\"local\":{\"models\":[]}}");
+            if (req.path == r + "ext/free/grant" || req.path.rfind(r + "transfers/", 0) == 0) {
+                (void)modelnet::HandleNativeRequest(host_cat, req, resp);
+            }
+        },
+        /*refuse_from=*/0,
+        [&](SSL* ssl, int c, const modelnet::NativeRequest& req, const std::atomic<bool>& stop) {
+            if (req.method != "GET" || req.path != stream_path) return false;
+            ++streams;
+            const std::string junk(modelnet::PIECE_SIZE, '\xaa');
+            const std::string head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
+                                     std::to_string(file_size) + "\r\n\r\n";
+            std::string werr;
+            std::atomic<bool> write_stop{false};
+            if (!modelnet::SslWriteAll(ssl, c, head + junk, 10000, &write_stop, werr)) return true;
+            // Stall until the retriever gives the stream up and closes.
+            while (!stop.load()) {
+                pollfd p{c, POLLIN, 0};
+                if (::poll(&p, 1, 200) <= 0) continue;
+                char b;
+                const int n = SSL_read(ssl, &b, 1);
+                if (n > 0) continue;
+                if (SSL_get_error(ssl, n) == SSL_ERROR_WANT_READ) continue;
+                break;
+            }
+            return true;
+        });
+
+    modelnet::HelperConfig cfg;
+    cfg.modeldir = root / "victim";
+    fs::create_directories(cfg.modeldir);
+    cfg.storage_mode = modelnet::StorageMode::FIXED;
+    cfg.quota_bytes = 256 << 20;
+    cfg.lan_discovery = false;
+    cfg.natpmp = false;
+    cfg.pwc_chain = "regtest";
+    cfg.peers = {host.Endpoint()};
+    char sock_dir[] = "/tmp/btx-sock-XXXXXX";
+    BOOST_REQUIRE(::mkdtemp(sock_dir) != nullptr);
+    cfg.rpc_socket = fs::PathFromString(sock_dir) / "modeld.sock";
+    std::atomic<bool> stop{false};
+    std::thread daemon([&] { modelnet::RunModelDaemon(cfg, &stop); });
+    auto finish = [&] {
+        stop.store(true);
+        if (daemon.joinable()) daemon.join();
+        ::unlink(fs::PathToString(cfg.rpc_socket).c_str());
+        ::rmdir(sock_dir);
+    };
+    std::string status = "running";
+    try {
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!fs::exists(cfg.rpc_socket) && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        BOOST_REQUIRE(fs::exists(cfg.rpc_socket));
+        UniValue params(UniValue::VARR);
+        params.push_back(model.model_id.Hex());
+        UniValue started;
+        BOOST_REQUIRE_MESSAGE(modelnet::CallUnixRpc(cfg.rpc_socket, "getmodel", params, started, err), err);
+        BOOST_REQUIRE_MESSAGE(started.exists("job_id") && started["job_id"].isStr(), started.write());
+        const std::string job_id = started["job_id"].get_str();
+        UniValue job;
+        const auto t1 = std::chrono::steady_clock::now();
+        while ((status == "running" || status == "queued") &&
+               std::chrono::steady_clock::now() - t1 < std::chrono::seconds(300)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            UniValue jp(UniValue::VARR);
+            jp.push_back(job_id);
+            UniValue res;
+            if (!modelnet::CallUnixRpc(cfg.rpc_socket, "getmodeljob", jp, res, err)) continue;
+            if (!res.exists("jobs") || !res["jobs"].isArray() || res["jobs"].empty()) continue;
+            job = res["jobs"][0];
+            if (job.exists("status") && job["status"].isStr()) status = job["status"].get_str();
+        }
+        BOOST_TEST_MESSAGE("retrieve job: " + job.write());
+    } catch (...) {
+        finish();
+        throw;
+    }
+    finish();
+    return status;
+}
+
 std::string ClaimPieceZero(const modelnet::CatalogEntry& model)
 {
     return "{\"local\":{\"models\":[{\"artifact_id\":\"" + model.artifact_id.Hex() +
@@ -305,6 +423,18 @@ BOOST_AUTO_TEST_CASE(swarm_availability_with_wrong_types_does_not_fail_the_retri
         BOOST_CHECK_GE(asked.load(), 1);
         BOOST_CHECK_MESSAGE(status == "done", "reply " + replies[k] + " left the job " + status);
     }
+}
+
+// A host streams one piece of junk and stalls. The retriever falls back to
+// piece GETs; that piece was never checked, so it must not stand in the live
+// store as if it were: the piece GETs fetch it with its proof and the model
+// completes from the same host.
+BOOST_AUTO_TEST_CASE(stream_fallback_does_not_keep_unchecked_pieces)
+{
+    std::atomic<int> streams{0};
+    const std::string status = RetrieveAfterJunkStream(m_path_root / "junk-stream", streams);
+    BOOST_CHECK_GE(streams.load(), 1);
+    BOOST_CHECK_EQUAL(status, "done");
 }
 
 // getmodel starts a retrieve job, with its own worker thread, for every model
