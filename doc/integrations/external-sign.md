@@ -15,9 +15,8 @@ BCP/1 adds an explicit **digest** lifecycle so `btxd` can construct a P2MR withd
 ## Lifecycle
 
 ```text
-createpsbt
-    → prepareexternalsign
-    → getsigningdigests
+prepareexternalsign (recipients or outputs)
+    → getsigningdigests (optional recheck)
     → external SignDigest(path, algorithm, digest)
     → finalizeexternalsign
     → testmempoolaccept
@@ -26,9 +25,8 @@ createpsbt
 
 | Step | Who | Notes |
 |---|---|---|
-| `createpsbt` (or `walletcreatefundedpsbt` / `createexchangebatch` / `createconsolidationtx`) | Coordinator | Unsigned BIP174 PSBT. Watch-only. |
-| `prepareexternalsign` | Coordinator | Accepts a package, a PSBT, or `{recipients\|outputs}`. Returns the encoded package, including `inputs[].digest` and top-level `digests`. No broadcast. No secrets. |
-| `getsigningdigests` | Coordinator | Repeats that fill on a package you already hold. |
+| `prepareexternalsign` | Coordinator | In the watch-only wallet, pass a `recipients` or `outputs` object and the intended `change_address`. Leave `sign` false (the default). The node selects eligible P2MR inputs and returns an unsigned BTXPSBT with `inputs[].digest` and top-level `digests`. No signing or broadcast. |
+| `getsigningdigests` | Coordinator | Optional recheck. Pass the full BTXPSBT to recompute and check the digests. |
 | `SignDigest` | External signer | ML-DSA-44 (or SLH-DSA-128s) over the digest. Keys never enter `btxd`. |
 | `finalizeexternalsign` | Coordinator | Inserts signatures; **validates** witness/digest binding locally; returns hex. **Does not send.** |
 | `testmempoolaccept` | Coordinator | Second validation: policy + consensus before broadcast. |
@@ -39,6 +37,17 @@ A package that is still being signed does not reserve its inputs: the next `crea
 Do not skip `testmempoolaccept`. A corrupt ML-DSA signature, wrong prevout, wrong network, or non-canonical witness must fail before send.
 
 Existing `walletprocesspsbt` + `<cmd> signtransaction` remains valid for command adapters. BCP/1 prefers `SignDigest` so raw-signing venues can attach without parsing a full PSBT on day one.
+
+### Supplied PSBTs
+
+You can pass an already enriched base64 PSBT to `prepareexternalsign`. For each input, include:
+
+- The previous output's amount and locking script, via its witness UTXO or the corresponding full previous transaction.
+- The selected P2MR leaf script, leaf version, and matching control block for that previous output.
+
+The RPC checks the supplied data and does not fill missing wallet metadata on this path. Bare `createpsbt` output lacks the previous outputs and fails with `MISSING_PREVOUT`. Adding UTXO data alone is insufficient without the P2MR leaf and control block.
+
+`createexchangebatch` and `createconsolidationtx` produce BTXPSBT packages. If you pass one to `prepareexternalsign` or `getsigningdigests`, keep the full package object, including its P2MR fields.
 
 ---
 

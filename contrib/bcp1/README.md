@@ -70,7 +70,7 @@ The script drives the compose stack (or an already-running local regtest) and pr
 | deposit detection | `getdepositstatus` → `MEMPOOL`; optional `-walletdepositnotify` `deposit.detected` |
 | 1→N confirmations | Depth 1 = included in a connected block; depth grows on further connects |
 | reorg handling | Disconnect → `REORGED`; credit logic un-credits without restart |
-| unsigned withdrawal | `createpsbt` → `prepareexternalsign` → `getsigningdigests` |
+| unsigned withdrawal | `prepareexternalsign` with recipients or outputs and the intended change address returns the unsigned BTXPSBT and digests. `getsigningdigests` can recheck them. See [supplied PSBT requirements](../../doc/integrations/external-sign.md#supplied-psbts). |
 | external PQ signature | OpenSSL CLI ML-DSA-44 `SignDigest` over the canonical P2MR digest (not a length-only stub) |
 | signature import | `finalizeexternalsign` returns `complete=true`, `broadcast=false`; no in-process wallet keys |
 | corrupt signature rejection | bit-flipped / wrong-digest / `--stub-signature` rejected as `CORRUPT_SIGNATURE`; consensus also rejects a cross-key witness |
