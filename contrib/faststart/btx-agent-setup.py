@@ -429,25 +429,35 @@ def adhoc_codesign_macos_binaries(install_dir: Path) -> None:
 def install_archive(archive_path: Path, install_dir: Path, *, force: bool) -> None:
     parent_dir = install_dir.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
-    if install_dir.exists():
+    def check_destination() -> bool:
+        if install_dir.is_symlink():
+            raise ValueError(f"Install path must not be a symlink: {install_dir}")
+        if not install_dir.exists():
+            return False
         if not install_dir.is_dir():
             raise NotADirectoryError(f"Install path is not a directory: {install_dir}")
-        if any(install_dir.iterdir()):
-            if not force:
-                raise FileExistsError(
-                    f"Install directory is not empty: {install_dir} (pass --force to replace it)"
-                )
-            shutil.rmtree(install_dir)
-        else:
-            install_dir.rmdir()
+        if any(install_dir.iterdir()) and not force:
+            raise FileExistsError(
+                f"Install directory is not empty: {install_dir} (pass --force to replace it)"
+            )
+        return True
 
-    temp_install_dir = Path(tempfile.mkdtemp(prefix=install_dir.name + ".", dir=str(parent_dir)))
+    check_destination()
+    workspace = Path(tempfile.mkdtemp(prefix=install_dir.name + ".", dir=str(parent_dir)))
+    staged = workspace / "replacement"
+    previous = workspace / "previous"
     try:
-        extract_archive(archive_path, temp_install_dir)
-        temp_install_dir.replace(install_dir)
-    except Exception:
-        shutil.rmtree(temp_install_dir, ignore_errors=True)
+        extract_archive(archive_path, staged)
+        if check_destination():
+            install_dir.replace(previous)
+        staged.replace(install_dir)
+    except BaseException:
+        # If restoration fails, leave the previous installation in the workspace.
+        if previous.exists():
+            previous.replace(install_dir)
+        shutil.rmtree(workspace, ignore_errors=True)
         raise
+    shutil.rmtree(workspace)
 
 
 def find_binary(install_dir: Path, names: tuple[str, ...]) -> Path:
