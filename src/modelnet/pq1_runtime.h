@@ -47,6 +47,8 @@ constexpr int PQ1_RELAY_SPLICE_MS = 30000;
 constexpr int PQ1_TRANSFER_MS = 600000;
 constexpr int PQ1_UNAUTH_HANDSHAKE_LIMIT = 4;
 constexpr int PQ1_UNAUTH_WINDOW_S = 60;
+/** Most netgroups whose failed handshakes are tracked at one time. */
+constexpr size_t PQ1_UNAUTH_TRACKED_MAX = 4096;
 constexpr int PQ1_PIECE_RETRIES = 8;
 /** A peer's 429 + Retry-After asks us to slow down, not to give up: waits allowed per piece or grant. */
 constexpr int PQ1_THROTTLE_WAITS = 120;
@@ -75,6 +77,8 @@ uint32_t Ipv4Netgroup(const sockaddr* sa, socklen_t len);
 int CountUnauthAndBump(uint32_t netgroup);
 int UnauthCount(uint32_t netgroup);
 void ClearUnauth(uint32_t netgroup);
+/** Netgroups currently tracked by CountUnauthAndBump (for tests). */
+size_t UnauthTrackedNetgroups();
 
 class ConnLimits {
     std::atomic<int> inbound{0};
