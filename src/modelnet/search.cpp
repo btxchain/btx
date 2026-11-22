@@ -354,6 +354,14 @@ bool VerifySearchRecord(const ModelSearchRecord& r, int64_t now_ms, std::string&
         err = "wrong signer";
         return false;
     }
+    // Watches, mutes, publisher pages and the feed take publisher_identity as
+    // the publisher. SignSearchRecord sets it to the signer; a record that
+    // names another publisher, or none, would let any key speak for one. (A
+    // v1 signature does not cover the field; Put sets it to the signer.)
+    if (r.record_version >= 2 && r.publisher_identity != r.signer_id) {
+        err = "publisher identity is not the signer";
+        return false;
+    }
     const bool v2 = r.record_version >= 2;
     const auto pre = v2 ? SearchRecordPreimageV2(r) : SearchRecordPreimageV1(r);
     const char* domain = v2 ? "BTX/ModelSearchRecord/v2" : "BTX/ModelSearchRecord/v1";
@@ -1136,6 +1144,7 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
                 const auto a = SearchRecordToJson(it->second).write();
                 ModelSearchRecord tmp = r;
                 tmp.signed_ok = it->second.signed_ok;
+                if (tmp.record_version < 2) tmp.publisher_identity = tmp.signer_id; // as stored
                 if (SearchRecordToJson(tmp).write() != a && !r.tombstone) {
                     err = "same sequence conflict";
                     return false;
@@ -1165,6 +1174,7 @@ bool SearchIndex::Put(const ModelSearchRecord& r, int64_t now_ms, std::string& e
     }
     ModelSearchRecord stored = r;
     stored.signed_ok = verified;
+    if (verified && stored.record_version < 2) stored.publisher_identity = stored.signer_id;
     // A newer version of a record this node signed (an alias change, for
     // example) is still its own. A record that only replaces the unsigned
     // catalog stub is not: any key may sign one for the same model.
