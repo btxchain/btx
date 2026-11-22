@@ -144,6 +144,68 @@ BOOST_AUTO_TEST_CASE(resolve_unix_rpc_matches_http_typed_lookup)
     BOOST_CHECK_EQUAL(as_model["ids"].size(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(resolve_http_hides_models_a_peer_may_not_list)
+{
+    const fs::path tmp = m_path_root / "resolve-peer-view";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::vector<unsigned char> st(10, 0);
+    WriteLE64(st.data(), 2);
+    st[8] = '{';
+    st[9] = '}';
+    auto import_dir = [&](const std::string& dir, const std::string& file, modelnet::CatalogEntry& out) {
+        const fs::path src = tmp / fs::PathFromString(dir);
+        fs::create_directories(src);
+        std::ofstream f(src / fs::PathFromString(file), std::ios::binary);
+        f.write(reinterpret_cast<const char*>(st.data()), static_cast<std::streamsize>(st.size()));
+        f.close();
+        std::string ierr;
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, out, ierr), ierr);
+    };
+    modelnet::CatalogEntry shared, held;
+    import_dir("shared-src", "shared.safetensors", shared);
+    import_dir("held-back-src", "held.safetensors", held);
+    BOOST_REQUIRE(shared.model_id != held.model_id);
+    std::string err;
+    BOOST_REQUIRE(cat.Seed(held.model_id, false, err));
+
+    modelnet::NativeRequest nreq;
+    nreq.method = "POST";
+    nreq.path = "/btx-model/2/ext/resolve";
+    nreq.body = "{}";
+    modelnet::NativeResponse nresp;
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    UniValue all;
+    BOOST_REQUIRE(all.read(nresp.body));
+    BOOST_REQUIRE(all["models"].isArray());
+    BOOST_CHECK_EQUAL(all["models"].size(), 1U);
+    BOOST_CHECK_EQUAL(all["models"][0]["model_id"].get_str(), shared.model_id.Hex());
+    BOOST_CHECK_EQUAL(all["local_count"].getInt<int>(), 1);
+    BOOST_CHECK(nresp.body.find(held.model_id.Hex()) == std::string::npos);
+    BOOST_CHECK(nresp.body.find(held.artifact_id.Hex()) == std::string::npos);
+    BOOST_CHECK(nresp.body.find("held-back-src") == std::string::npos);
+
+    nreq.body = "{\"kind\":0,\"digest48\":\"" + held.model_id.Hex() + "\"}";
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    UniValue one;
+    BOOST_REQUIRE(one.read(nresp.body));
+    BOOST_CHECK_EQUAL(one["ids"].size(), 0U);
+
+    // The local resolveresource RPC still sees the model that is not seeded.
+    UniValue query(UniValue::VOBJ);
+    query.pushKV("digest48", held.model_id.Hex());
+    query.pushKV("kind", 0);
+    UniValue params(UniValue::VARR);
+    params.push_back(query);
+    UniValue req(UniValue::VOBJ);
+    req.pushKV("method", "resolveresource");
+    req.pushKV("params", params);
+    UniValue local;
+    std::string code;
+    BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, req, local, code, err));
+    BOOST_REQUIRE_EQUAL(local["ids"].size(), 1U);
+    BOOST_CHECK_EQUAL(local["ids"][0].get_str(), held.model_id.Hex());
+}
+
 BOOST_AUTO_TEST_CASE(resolve_unsigned_announce_rejected)
 {
     const fs::path tmp = m_path_root / "resolve-unsigned";
