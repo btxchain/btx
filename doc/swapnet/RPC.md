@@ -135,6 +135,7 @@ No request fields.
 Scope: `trade`.
 
 - `swap_id` — required; string.
+- `failed_withdrawal_txid` — optional; owner-only opt-in to retry a canonical finalized native ETH withdrawal failure once. A repeat with the same failed transaction returns the recorded retry ID.
 
 ## refundswap
 

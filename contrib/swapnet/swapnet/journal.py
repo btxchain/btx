@@ -317,14 +317,14 @@ class Journal:
             row=db.execute('SELECT swap_id FROM sn_claimed_quotes WHERE quote_id=?',(qid,)).fetchone()
             require(not row or row[0]==sid,'QUOTE_ALREADY_ACCEPTED','Quote belongs to another swap')
             db.execute('INSERT OR IGNORE INTO sn_claimed_quotes VALUES(?,?)',(qid,sid))
-    def prepare(self,sid,asset,kind,txid,raw,metadata=None):
+    def prepare(self,sid,asset,kind,txid,raw,metadata=None,*,db=None):
         require(kind in {'fund','refund','claim','withdraw','approve','bump'},'OPERATION','Unknown operation')
         hex32(txid.removeprefix('0x'))
         require(type(raw) is str and 0<len(raw)<=4_000_000,'RAW_TX','Invalid signed transaction')
         try:bytes.fromhex(raw.removeprefix('0x'))
         except ValueError as e:raise SwapError('RAW_TX','Malformed signed transaction') from e
         oid=digest('BTX/SWAPNET/OPERATION/2',{'swap_id':sid,'asset':asset,'kind':kind,'txid':txid})
-        with self.store.transaction() as db:
+        with (self.store.transaction() if db is None else nullcontext(db)) as db:
             row=db.execute('SELECT raw FROM sn_operations WHERE id=?',(oid,)).fetchone()
             require(not row or row[0]==raw,'OPERATION_CHANGED','Immutable signed bytes changed')
             db.execute('INSERT OR IGNORE INTO sn_operations VALUES(?,?,?,?,?,?,\'prepared\',?)',(oid,sid,asset,kind,txid,raw,local_dump(metadata or {})))
@@ -352,9 +352,9 @@ class Journal:
             db.execute("UPDATE sn_operations SET state='broadcast' WHERE id=?",(oid,))
             self.store._audit(db,{'type':'operation_v2_broadcast','id':oid,'txid':result})
         return result
-    def reserve_nonce(self,asset,address,operation,pending_nonce):
+    def reserve_nonce(self,asset,address,operation,pending_nonce,*,db=None):
         integer(pending_nonce)
-        with self.store.transaction() as db:
+        with (self.store.transaction() if db is None else nullcontext(db)) as db:
             row=db.execute('SELECT nonce FROM sn_nonces WHERE operation=?',(operation,)).fetchone()
             if row:return row[0]
             row=db.execute('SELECT max(nonce) FROM sn_nonces WHERE asset=? AND address=?',(asset,address)).fetchone()

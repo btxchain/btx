@@ -657,6 +657,23 @@ class Coordinator:
         if s['stage']=='proposed' and Quote.parse(s['quote']['quote']).live(self.now()):
             self._retry_proposal(sid,s)
         return self._safe_view(sid,s)
+    def retry_withdrawal(self,ctx,sid,failed_txid):
+        _,s=self._owned(ctx,sid)
+        self.authority.owner(ctx)
+        self._require_effect(sid,s)
+        require(s['stage'] in {'withdrawing','complete','refunded'},'WITHDRAW_SCOPE',
+                'Swap has no recorded withdrawal to recover')
+        agr=Agreement.parse(s['agreement'])
+        own_name,own,in_name,incoming=self._own(s,agr)
+        action=s['last_action'] if s['stage']=='withdrawing' else s['stage']
+        require(action in {'complete','refunded'},'WITHDRAW_SCOPE','No settled local payout')
+        refund=action=='refunded'
+        name,leg,role=(own_name,own,'refund') if refund else (in_name,incoming,'claim')
+        driver=self._driver(leg.asset)
+        require(driver.family=='evm','WITHDRAW_SCOPE','Only native ETH withdrawals can be retried')
+        txid=driver.retry_withdrawal(sid,leg,s['refs'].get(name),s['keys'][role],failed_txid,
+                                    refund=refund,allow_new=s['stage']=='withdrawing')
+        return {**self._safe_view(sid,s),'withdrawal_retry_txid':txid}
     def request_refund(self,ctx,sid):
         _,s=self._owned(ctx,sid)
         self._require_effect(sid,s)

@@ -313,7 +313,14 @@ class Application:
         self.authority.revoke(ctx,mandate_id);return {'revoked':True,'recovery_preserved':True}
     def rpc_getswap(self,ctx,swap_id):return self.coordinator.get(ctx,hex32(swap_id))
     def rpc_listswaps(self,ctx,limit=100):return {'swaps':self.coordinator.list(ctx,limit)}
-    def rpc_resumeswap(self,ctx,swap_id):return self.coordinator.resume(ctx,hex32(swap_id))
+    def rpc_resumeswap(self,ctx,swap_id,failed_withdrawal_txid=None):
+        sid=hex32(swap_id)
+        if failed_withdrawal_txid is None:
+            return self.coordinator.resume(ctx,sid)
+        self.authority.owner(ctx)
+        require(isinstance(failed_withdrawal_txid,str) and failed_withdrawal_txid.startswith('0x'),
+                'PARAMS','Expected an ETH withdrawal transaction hash')
+        return self.coordinator.retry_withdrawal(ctx,sid,'0x'+hex32(failed_withdrawal_txid[2:]))
     def rpc_refundswap(self,ctx,swap_id):return self.coordinator.request_refund(ctx,hex32(swap_id))
     def rpc_cancelswap(self,ctx,swap_id):return self.coordinator.cancel(ctx,hex32(swap_id))
     def rpc_getswaptranscript(self,ctx,swap_id):
