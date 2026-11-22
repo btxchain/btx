@@ -3662,6 +3662,15 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         const uint64_t file_size = entry.core.files[file_index].size;
+        // The retriever asks for a whole-file stream only up to
+        // FULL_FILE_STREAM_MAX_BYTES. A larger file goes by piece GETs, which
+        // pass the upload scheduler; a stream would hold this worker for every
+        // piece of it.
+        if (file_size > FULL_FILE_STREAM_MAX_BYTES) {
+            resp.status = 413;
+            resp.body = JsonError("FILE_TOO_LARGE", "whole-file stream is limited to 64 MiB; fetch the pieces");
+            return true;
+        }
         const uint32_t n_pieces = file_size == 0 ? 1u : static_cast<uint32_t>((file_size + PIECE_SIZE - 1) / PIECE_SIZE);
         UniValue gbody;
         if (!CheckFreeGrantEntitlement(cat, req, entry, file_index, 0, /*whole_file=*/true, n_pieces, gbody, resp)) {
