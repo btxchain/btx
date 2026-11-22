@@ -12051,9 +12051,9 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                 freq.headers = sess.piece_headers.empty() ? grant_headers : sess.piece_headers;
             }
             // Files of 64 MiB or less used to buffer the whole GET for up to
-            // PQ1_TRANSFER_MS and drop it on timeout. Stream instead, keep each
-            // complete piece in the live store as it arrives, and fall back to
-            // piece GETs as soon as the measured rate cannot finish in time.
+            // PQ1_TRANSFER_MS and drop it on timeout. Stream instead and fall
+            // back to piece GETs as soon as the measured rate cannot finish in
+            // time.
             FileStreamHydration hyd(artifact, fi, size, cat.Store(), quarantine);
             if (f.exists("sha384") && f["sha384"].isStr()) {
                 Digest48 sha;
@@ -12084,26 +12084,16 @@ static bool RetrieveFreeFromPeerScoped(ModelCatalog& cat, Pq1Context& pq, const 
                 }
                 NoteRetrieveBytes(progress, model_bytes);
             };
-            auto keep_flushed_pieces = [&]() {
-                // Complete pieces already split out of the stream. The piece
-                // retriever skips these and continues the rest, instead of
-                // dropping the prefix when the whole-file GET cannot finish.
-                std::string kerr;
-                const uint32_t flushed = hyd.Progress().next_piece;
-                for (uint32_t i = 0; i < flushed; ++i) {
-                    if (cat.Store().HasPiece(artifact, fi, i)) continue;
-                    std::vector<unsigned char> bytes;
-                    if (!quarantine.GetPiece(artifact, fi, i, bytes, kerr)) return;
-                    const Digest48 leaf = ChunkLeaf(i, bytes);
-                    if (!cat.Store().PutVerifiedPiece(artifact, fi, i, bytes, leaf, kerr)) return;
-                }
-            };
             int http_status = 0;
             bool fell_back = false;
             const bool stream_read = sess.ReadFileStream(freq, size, on_body, http_status, fell_back, gerr);
             (void)http_status;
             if (!stream_read || fell_back) {
-                if (fell_back) keep_flushed_pieces();
+                // Pieces split out of the stream are checked only against the
+                // whole-file hash and pieces_root in Finish. Leave them in
+                // quarantine: the piece retriever fetches each piece with its
+                // proof, and an unchecked piece in the live store would be
+                // skipped there and fail the file digest on every retry.
                 note_stream_pieces();
                 stream_ok = false;
                 sess.Close();
