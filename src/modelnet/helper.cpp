@@ -1526,7 +1526,10 @@ bool KindFromJson(const UniValue& v, uint8_t& kind, std::string& err)
     return false;
 }
 
-UniValue TypedResolveJson(ModelCatalog& cat, uint8_t kind, std::string digest)
+// peer_visible is set for a remote peer: only the models POST /availability
+// would list are matched, listed or counted.
+UniValue TypedResolveJson(ModelCatalog& cat, uint8_t kind, std::string digest,
+                          const std::function<bool(const UniValue&)>& peer_visible = {})
 {
     digest = ToLower(digest);
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
@@ -1534,6 +1537,18 @@ UniValue TypedResolveJson(ModelCatalog& cat, uint8_t kind, std::string digest)
     UniValue record_ids(UniValue::VARR);
     UniValue listed;
     cat.List(listed);
+    if (peer_visible) {
+        UniValue visible(UniValue::VARR);
+        if (listed.exists("models")) {
+            for (const auto& m : listed["models"].getValues()) {
+                if (peer_visible(m)) visible.push_back(m);
+            }
+        }
+        UniValue filtered(UniValue::VOBJ);
+        filtered.pushKV("models", visible);
+        filtered.pushKV("local_count", static_cast<int>(visible.size()));
+        listed = std::move(filtered);
+    }
     if (!digest.empty() && listed.exists("models")) {
         for (const auto& m : listed["models"].getValues()) {
             if (kind == static_cast<uint8_t>(ResourceKind::ARTIFACT)) {
@@ -3315,6 +3330,34 @@ void ApplyInboundSafetyRecord(ModelCatalog& cat, const SignedRecordHint& h, int6
     }
 }
 
+namespace {
+// A local catalog row a remote peer may see: seeded, complete, verified, not
+// blocked, admitted to the live path and not held back by a release.
+bool PeerMayListModel(ModelCatalog& cat, const UniValue& m)
+{
+    if (!m.exists("seeded") || !m["seeded"].get_bool()) return false;
+    if (m.exists("incomplete") && m["incomplete"].get_bool()) return false;
+    if (m.exists("bytes_verified") && !m["bytes_verified"].get_bool()) return false;
+    if (m.exists("complete") && !m["complete"].get_bool()) return false;
+    if (m.exists("model_id") && m["model_id"].isStr() && GlobalSafety().SubjectBlocked(m["model_id"].get_str())) return false;
+    if (m.exists("artifact_id") && m["artifact_id"].isStr() && GlobalSafety().SubjectBlocked(m["artifact_id"].get_str())) return false;
+    if (m.exists("model_id") && m["model_id"].isStr()) {
+        std::string admission_code;
+        if (!LivePathAllowed(m["model_id"].get_str(), false, admission_code)) return false;
+    }
+    if (m.exists("artifact_id") && m["artifact_id"].isStr()) {
+        Digest48 aid;
+        std::string aerr;
+        CatalogEntry served;
+        if (Digest48::FromHex(m["artifact_id"].get_str(), aid, aerr) && cat.Find(aid, served) &&
+            !PlaintextServeAllowed(cat, served)) {
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
 bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResponse& resp)
 {
     resp = {};
@@ -3676,25 +3719,7 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         UniValue models(UniValue::VARR);
         if (listed.exists("models")) {
             for (const auto& m : listed["models"].getValues()) {
-                if (!m.exists("seeded") || !m["seeded"].get_bool()) continue;
-                if (m.exists("incomplete") && m["incomplete"].get_bool()) continue;
-                if (m.exists("bytes_verified") && !m["bytes_verified"].get_bool()) continue;
-                if (m.exists("complete") && !m["complete"].get_bool()) continue;
-                if (m.exists("model_id") && m["model_id"].isStr() && GlobalSafety().SubjectBlocked(m["model_id"].get_str())) continue;
-                if (m.exists("artifact_id") && m["artifact_id"].isStr() && GlobalSafety().SubjectBlocked(m["artifact_id"].get_str())) continue;
-                if (m.exists("model_id") && m["model_id"].isStr()) {
-                    std::string admission_code;
-                    if (!LivePathAllowed(m["model_id"].get_str(), false, admission_code)) continue;
-                }
-                if (m.exists("artifact_id") && m["artifact_id"].isStr()) {
-                    Digest48 aid;
-                    std::string aerr;
-                    CatalogEntry served;
-                    if (Digest48::FromHex(m["artifact_id"].get_str(), aid, aerr) && cat.Find(aid, served) &&
-                        !PlaintextServeAllowed(cat, served)) {
-                        continue;
-                    }
-                }
+                if (!PeerMayListModel(cat, m)) continue;
                 UniValue one = m;
                 if (one.exists("files") && one["files"].isArray()) {
                     UniValue files(UniValue::VARR);
@@ -4298,7 +4323,8 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         std::string digest;
         if (body.exists("digest48") && body["digest48"].isStr()) digest = body["digest48"].get_str();
         else if (body.exists("id") && body["id"].isStr()) digest = body["id"].get_str();
-        resp.body = TypedResolveJson(cat, kind, digest).write();
+        resp.body = TypedResolveJson(cat, kind, digest,
+                                     [&cat](const UniValue& m) { return PeerMayListModel(cat, m); }).write();
         return true;
     }
     if (req.path == root + "ext/objects/get" && req.method == "POST") {
