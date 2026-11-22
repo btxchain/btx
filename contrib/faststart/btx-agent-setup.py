@@ -787,12 +787,6 @@ def main(argv: list[str]) -> int:
         archive_sha256,
         headers=github_asset_headers,
     )
-    install_archive(archive_path, install_dir, force=args.force)
-    adhoc_codesign_macos_binaries(install_dir)
-
-    btxd_path = find_binary(install_dir, ("btxd", "btxd.exe"))
-    btx_cli_path = find_binary(install_dir, ("btx-cli", "btx-cli.exe"))
-
     snapshot_manifest_path: Path | None = None
     if snapshot_manifest_name:
         snapshot_manifest_asset = assets.get(snapshot_manifest_name, {})
@@ -802,6 +796,12 @@ def main(argv: list[str]) -> int:
             verified_asset_sha256(snapshot_manifest_name, snapshot_manifest_asset, checksums),
             headers=github_asset_headers,
         )
+
+    install_archive(archive_path, install_dir, force=args.force)
+    adhoc_codesign_macos_binaries(install_dir)
+
+    btxd_path = find_binary(install_dir, ("btxd", "btxd.exe"))
+    btx_cli_path = find_binary(install_dir, ("btx-cli", "btx-cli.exe"))
 
     summary: dict[str, Any] = {
         "manifest_source": manifest_source,

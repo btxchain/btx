@@ -511,6 +511,42 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.assertEqual(used_path.name, "snapshot.manifest.json")
             self.assertEqual(used_path.read_bytes(), snapshot_manifest_path.read_bytes())
 
+    def test_bad_snapshot_manifest_preserves_previous_install(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            archive_path = self._build_fake_archive(root)
+            manifest_path = self._write_manifest(root, archive_path)
+            companion = root / "snapshot.manifest.json"
+            expected = companion.read_bytes()
+            companion.write_bytes(b'{"chain":"wrong-fixture-chain"}\n')
+            install_dir = root / "install"
+            install_dir.mkdir()
+            old_launcher = install_dir / "btxd"
+            old_launcher.write_bytes(b"previous launcher\n")
+            args = [
+                "--release-manifest", str(manifest_path),
+                "--platform", "linux-x86_64",
+                "--install-dir", str(install_dir),
+                "--datadir", str(root / "regtest-data"),
+                "--force", "--preset", "service", "--json",
+            ]
+
+            with mock.patch.object(self.module, "run_logged_subprocess") as bootstrap:
+                with self.assertRaisesRegex(ValueError, "SHA256 mismatch for snapshot"):
+                    self.module.main(args)
+                bootstrap.assert_not_called()
+                self.assertEqual(old_launcher.read_bytes(), b"previous launcher\n")
+
+                companion.write_bytes(expected)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.module.main(args), 0)
+                bootstrap.assert_called_once()
+                command = bootstrap.call_args.args[0]
+                manifest_arg = next(arg for arg in command if arg.startswith("--snapshot-manifest="))
+                self.assertEqual(pathlib.Path(manifest_arg.split("=", 1)[1]).read_bytes(), expected)
+                self.assertFalse(old_launcher.exists())
+                self.assertTrue((install_dir / "btx-29.2/bin/btxd").is_file())
+
     def test_miner_json_summary_includes_direct_helper_commands(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = pathlib.Path(tmpdir)
