@@ -537,6 +537,34 @@ BOOST_AUTO_TEST_CASE(qualification_rejects_unsafe)
     BOOST_CHECK(modelnet::QualifyBytes("x.gguf", gguf, report) == modelnet::QualResult::STRUCTURE_VERIFIED);
 }
 
+BOOST_AUTO_TEST_CASE(qualification_checks_every_tensor_entry)
+{
+    const auto qualify = [](const std::string& header, size_t body_bytes, modelnet::QualReport& report) {
+        std::vector<unsigned char> st(8 + header.size() + body_bytes, 0);
+        WriteLE64(st.data(), header.size());
+        std::memcpy(st.data() + 8, header.data(), header.size());
+        return modelnet::QualifyBytes("x.safetensors", st, report);
+    };
+    modelnet::QualReport report;
+    // A repeated tensor name: the second entry has a dtype that is not allowed.
+    const std::string repeated{R"({"a":{"dtype":"U8","shape":[1],"data_offsets":[0,1]},)"
+                               R"("a":{"dtype":"PICKLE","shape":[1],"data_offsets":[0,1]}})"};
+    BOOST_CHECK(qualify(repeated, 1, report) == modelnet::QualResult::INVALID_MODEL);
+    BOOST_CHECK_EQUAL(report.detail, "unsupported dtype");
+
+    // Many small tensors still qualify, one entry each.
+    std::string many{"{"};
+    constexpr int count{20000};
+    for (int i = 0; i < count; ++i) {
+        if (i) many += ',';
+        many += strprintf(R"("t%d":{"dtype":"U8","shape":[1],"data_offsets":[%d,%d]})", i, i, i + 1);
+    }
+    many += '}';
+    modelnet::QualReport many_report;
+    BOOST_CHECK(qualify(many, count, many_report) == modelnet::QualResult::STRUCTURE_VERIFIED);
+    BOOST_CHECK_EQUAL(many_report.tensor_count, uint64_t{count});
+}
+
 BOOST_AUTO_TEST_CASE(store_recounts_used_bytes)
 {
     const fs::path tmp = m_args.GetDataDirBase() / "modelstore-recount";
