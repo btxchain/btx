@@ -6,6 +6,7 @@ funding; an actual nonce is reserved only when the refund is executable. ETH is
 credited by the contract and then withdrawn to the agreed local beneficiary.
 """
 from dataclasses import asdict
+import re
 import time
 from .assets import Asset
 from .canonical import atoms,digest,hashlock,hex32
@@ -13,7 +14,7 @@ from .errors import require,SwapError
 from .policy import ChainClock
 from .machine import LegObservation
 from .drivers import Prepared,Report
-from .evm import EVMAdapter,Eip1559Transaction,address_bytes,address_from_key,calldata,keccak256,lock_id
+from .evm import EVMAdapter,Eip1559Transaction,abi_word,address_bytes,address_from_key,calldata,keccak256,lock_id
 
 ZERO='0x'+'00'*20
 
@@ -151,7 +152,19 @@ class EVMDriver:
         ops=[o for o in self.journal.operations(sid,private=True) if o['asset']==self.asset.id and o['kind']=='withdraw']
         if ops:
             op=ops[-1]
-            if not self.has_transaction(op['txid']):self.journal.broadcast(op['id'],self)
+            if not self.has_transaction(op['txid']):
+                if 'retry_of' in op['metadata']:
+                    # A prepared retry can survive a crash before sending. Recheck
+                    # its authorization on the current chain before replaying it.
+                    require(len(ops)==2 and ops[0]['txid']==op['metadata']['retry_of'],
+                            'WITHDRAW_SCOPE','Original withdrawal record is unavailable')
+                    remaining,nonce,finalized,latest=self._withdrawal_retry_budget(
+                        sid,t,op['metadata']['retry_reference'],beneficiary,ops[0],
+                        refund=refund)
+                    require(op['metadata']['nonce']==nonce and atoms(op['metadata']['fee_atoms'])<=remaining,
+                            'WITHDRAW_SCOPE','Prepared withdrawal retry no longer fits')
+                    self._require_withdrawal_snapshot(finalized,latest)
+                self.journal.broadcast(op['id'],self)
             receipt=self.rpc('eth_getTransactionReceipt',op['txid'])
             if not receipt:return False
             require(int(receipt['status'],16)==1,'WITHDRAW_REVERTED','ETH withdrawal transaction reverted')
@@ -161,6 +174,112 @@ class EVMDriver:
                         calldata('withdrawAmount(address,address,uint256)',address_bytes(ZERO),address_bytes(beneficiary),atoms(t.amount_atoms)),str(cap))
         oid=self.journal.prepare(sid,self.asset.id,'withdraw',p.txid,p.raw,{**p.metadata,'fee_atoms':p.fee_atoms})
         self.journal.broadcast(oid,self);return False
+    def _retry_fee(self,op,failed_txid,finalized,sender,data,cap):
+        m=op['metadata']
+        require(m['sender']==sender and m['to']==self.contract and m['value']=='0'
+                and m['data']==data.hex(),'WITHDRAW_SCOPE','Saved withdrawal differs from approved payout')
+        gas,maximum=m['gas'],int(m['max_fee_per_gas'])
+        require(0<gas*maximum<=cap and gas*maximum==atoms(m['fee_atoms']),
+                'WITHDRAW_FEE_UNKNOWN','Saved withdrawal fee ceiling is invalid')
+        signed=Eip1559Transaction(self.asset.chain_id,m['nonce'],int(m['priority_fee_per_gas']),
+                                  maximum,gas,address_bytes(self.contract),0,data)
+        require(signed.validate_signed(bytes.fromhex(op['raw'].removeprefix('0x')),sender)==failed_txid,
+                'WITHDRAW_SCOPE','Signed withdrawal differs from journal')
+        receipt=self.rpc('eth_getTransactionReceipt',failed_txid)
+        require(receipt and receipt['transactionHash']==failed_txid and receipt['status']=='0x0'
+                and int(receipt['blockNumber'],16)<=int(finalized['number'],16),
+                'WITHDRAW_NOT_FINAL','Named withdrawal is not a finalized failure')
+        block=self.rpc('eth_getBlockByNumber',receipt['blockNumber'],False)
+        require(block and block['hash']==receipt['blockHash'],
+                'WITHDRAW_NOT_FINAL','Named withdrawal is not canonical')
+        fee_fields=(receipt.get('gasUsed'),receipt.get('effectiveGasPrice'))
+        require(all(isinstance(x,str) and re.fullmatch(r'0x[0-9a-f]{1,64}',x) for x in fee_fields),
+                'WITHDRAW_FEE_UNKNOWN','Finalized receipt lacks an exact gas charge')
+        used,price=(int(x,16) for x in fee_fields)
+        require(0<used<=gas and 0<price<=maximum
+                and price==min(maximum,int(block['baseFeePerGas'],16)+signed.priority_fee),
+                'WITHDRAW_FEE_UNKNOWN','Receipt gas differs from the signed terms and block price')
+        return used*price
+
+    def _verify_retry_credit(self,sid,t,ref,beneficiary,finalized,latest,*,refund):
+        require(ref is not None,'WITHDRAW_CREDIT_UNKNOWN','Original funding reference is unavailable')
+        self.verify_terms(t);self.verify_reference(sid,t,ref)
+        funding=self._funding_receipt(ref)
+        require(funding and int(funding['blockNumber'],16)<=int(finalized['number'],16)
+                and self.rpc('eth_getBlockByNumber',funding['blockNumber'],False)['hash']==funding['blockHash'],
+                'WITHDRAW_CREDIT_UNKNOWN','Original funding is not canonical and finalized')
+        expected=(bytes.fromhex(t.hashlock)+abi_word(address_bytes(ZERO))+
+                  abi_word(address_bytes(t.refund_key))+abi_word(address_bytes(t.claim_key))+
+                  abi_word(atoms(t.amount_atoms))+abi_word(t.lock_value)+abi_word(3 if refund else 2))
+        view='0x'+calldata('getSwap(bytes32)',bytes.fromhex(ref['lock_id'])).hex()
+        credit='0x'+calldata('credits(address,address)',address_bytes(beneficiary),address_bytes(ZERO)).hex()
+        for block in (finalized,latest):
+            self.adapter._runtime_at_block(block['number'],block['hash'])
+            require(self.rpc('eth_call',{'to':self.contract,'data':view},block['number'])=='0x'+expected.hex()
+                    and int(self.rpc('eth_call',{'to':self.contract,'data':credit},block['number']),16)==atoms(t.amount_atoms),
+                    'WITHDRAW_CREDIT_UNKNOWN','Cannot attribute the exact credit to the original settled lock')
+        require(int(latest['number'],16)-int(funding['blockNumber'],16)<=20_000,
+                'WITHDRAW_CREDIT_UNKNOWN','Original withdrawal history exceeds the supported scan range')
+        spends=self.rpc('eth_getLogs',{'address':self.contract,'fromBlock':funding['blockNumber'],
+                        'toBlock':latest['number'],'topics':[
+                            '0x'+keccak256(b'Withdrawn(address,address,address,uint256)').hex(),
+                            '0x'+abi_word(address_bytes(beneficiary)).hex(),'0x'+abi_word(address_bytes(ZERO)).hex()]})
+        require(spends==[],'WITHDRAW_CREDIT_UNKNOWN','Beneficiary has withdrawals in the original lock history')
+
+    def _withdrawal_retry_budget(self,sid,t,ref,beneficiary,original,*,refund):
+        self.adapter.check_chain(force=True)
+        data=calldata('withdrawAmount(address,address,uint256)',address_bytes(ZERO),
+                      address_bytes(beneficiary),atoms(t.amount_atoms))
+        cap=atoms(t.max_refund_fee_atoms if refund else t.max_claim_fee_atoms)//2
+        finalized=self.rpc('eth_getBlockByNumber','finalized',False)
+        latest=self.rpc('eth_getBlockByNumber','latest',False)
+        require(finalized and latest and int(finalized['number'],16)<=int(latest['number'],16),
+                'FINALITY_UNAVAILABLE','Withdrawal retry requires finalized chain state')
+        remaining=cap-self._retry_fee(original,original['txid'],finalized,beneficiary,data,cap)
+        require(remaining>0,'FEE_CAP','Finalized withdrawal exhausted its approved budget')
+        self._verify_retry_credit(sid,t,ref,beneficiary,finalized,latest,refund=refund)
+        nonce=int(self.rpc('eth_getTransactionCount',beneficiary,'pending'),16)
+        require(nonce>original['metadata']['nonce'] and all(
+                int(self.rpc('eth_getTransactionCount',beneficiary,block['number']),16)==nonce
+                for block in (finalized,latest)),'NONCE_HELD','Withdrawal signer has unresolved transactions')
+        return remaining,nonce,finalized,latest
+
+    def _require_withdrawal_snapshot(self,finalized,latest):
+        require(all(self.rpc('eth_getBlockByNumber',tag,False)['hash']==block['hash']
+                    for tag,block in (('latest',latest),('finalized',finalized))),
+                'CHAIN_CONFLICT','Chain view changed during withdrawal preparation')
+
+    def retry_withdrawal(self,sid,t,ref,key,failed_txid,*,refund,allow_new):
+        beneficiary=t.refund_payout if refund else t.payout
+        require(key['public']==beneficiary==self._account()[2],'SIGNER_SCOPE','Wrong withdrawal beneficiary')
+        ops=[op for op in self.journal.operations(sid,private=True)
+             if op['asset']==self.asset.id and op['kind']=='withdraw']
+        require(ops and ops[0]['txid']==failed_txid,'WITHDRAW_SCOPE','Name the original recorded withdrawal')
+        if len(ops)==2 and ops[1]['metadata'].get('retry_of')==failed_txid:
+            return ops[1]['txid']
+        require(allow_new and len(ops)==1,'WITHDRAW_SCOPE','No new retry is authorized for this withdrawal')
+        remaining,nonce,finalized,latest=self._withdrawal_retry_budget(sid,t,ref,beneficiary,ops[0],
+                                                                       refund=refund)
+        data=calldata('withdrawAmount(address,address,uint256)',address_bytes(ZERO),
+                      address_bytes(beneficiary),atoms(t.amount_atoms))
+        prepared=self._prepare(sid,'withdraw',key['handle'],self.contract,0,data,str(remaining),
+                               fixed_nonce=nonce)
+        self._require_withdrawal_snapshot(finalized,latest)
+        operation=digest('BTX/SWAPNET/WITHDRAW-RETRY/1',{'swap_id':sid,'failed_txid':failed_txid})
+        with self.journal.store.transaction() as db:
+            latest_ops=[op for op in self.journal.operations(sid,private=True)
+                        if op['asset']==self.asset.id and op['kind']=='withdraw']
+            if len(latest_ops)==2 and latest_ops[1]['metadata'].get('retry_of')==failed_txid:
+                return latest_ops[1]['txid']
+            require(latest_ops==ops,'WITHDRAW_SCOPE','Withdrawal journal changed during preparation')
+            require(self.journal.reserve_nonce(self.asset.id,beneficiary,operation,nonce,db=db)==nonce,
+                    'NONCE_HELD','Recorded withdrawal retry nonce differs')
+            oid=self.journal.prepare(sid,self.asset.id,'withdraw',prepared.txid,prepared.raw,
+                                     {**prepared.metadata,'fee_atoms':prepared.fee_atoms,
+                                      'retry_of':failed_txid,'retry_reference':ref},db=db)
+        self.journal.broadcast(oid,self)
+        return prepared.txid
+
     def replace(self,old,new_cap):
         self.adapter.check_chain();m=old['metadata'];cap=atoms(new_cap,positive=True)
         require(m['to']==self.contract and m['value']=='0','REPLACEMENT_SCOPE','Only contract recovery calls may be replaced')

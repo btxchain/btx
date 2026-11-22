@@ -567,6 +567,10 @@
             "swap_id": {
               "pattern": "^[0-9a-f]{64}$",
               "type": "string"
+            },
+            "failed_withdrawal_txid": {
+              "pattern": "^0x[0-9a-f]{64}$",
+              "type": "string"
             }
           },
           "required": [
