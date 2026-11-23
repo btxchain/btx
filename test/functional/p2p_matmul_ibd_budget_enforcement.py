@@ -39,10 +39,9 @@ class BTXMatMulIBDBudgetEnforcementTest(BitcoinTestFramework):
         attacker.sync_with_ping(timeout=20)
         attacker.send_message(msg_headers(headers=headers[2000:]))
         attacker.sync_with_ping(timeout=20)
-        # All headers must enter the index, but zero-credit best-header
-        # selection stays at the last header whose work is authenticated on
-        # sight (the pre-v4 prefix) instead of exposing height 2105 as the
-        # node's operational best header.
+        # All headers must enter the index. m_best_header follows most work
+        # (PreferMostWorkHeader in src/chain.h: download ranking, not fork
+        # choice), so it reaches 2105 while the active tip stays at genesis.
         attacker.wait_until(
             lambda: any(
                 tip["hash"] == node0.getblockhash(2105)
@@ -51,8 +50,7 @@ class BTXMatMulIBDBudgetEnforcementTest(BitcoinTestFramework):
             timeout=20,
             check_connected=False,
         )
-        operational_header_height = node1.getblockchaininfo()["headers"]
-        assert 0 < operational_header_height < 2105
+        assert_equal(node1.getblockchaininfo()["headers"], 2105)
         attacker.wait_until(
             lambda: attacker.last_message.get("getheaders") is not None,
             timeout=20,
