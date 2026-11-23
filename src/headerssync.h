@@ -143,6 +143,11 @@ public:
     /** Return the amount of work in the chain received during the PRESYNC phase. */
     arith_uint256 GetPresyncWork() const { return m_current_chain_work; }
 
+    /** Return the number of synthetic CBlockIndex entries held for MatMul
+     *  difficulty replay (presync and redownload windows together). Used by
+     *  tests to check per-peer memory. */
+    size_t GetSyntheticIndexEntries() const { return m_presync_index_window.size() + m_redownload_index_window.size(); }
+
     /** Construct a HeadersSyncState object representing a headers sync via this
      *  download-twice mechanism).
      *

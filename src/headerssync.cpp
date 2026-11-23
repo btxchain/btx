@@ -237,6 +237,13 @@ bool HeadersSyncState::ValidateAndStoreHeadersCommitments(const std::vector<CBlo
         m_redownload_chain_work = m_chain_start->nChainWork;
         m_redownload_last_index = const_cast<CBlockIndex*>(m_chain_start);
         m_redownload_index_window.clear();
+        // Presync is over and its window is never read again: redownload
+        // replays difficulty on its own window from m_chain_start. Both
+        // windows reach back to the active ASERT anchor, so keeping the
+        // presync one would hold two such windows per peer while the
+        // redownload window grows.
+        m_presync_last_index = nullptr;
+        m_presync_index_window.clear();
         m_download_state = State::REDOWNLOAD;
         LogDebug(
             BCLog::NET,
