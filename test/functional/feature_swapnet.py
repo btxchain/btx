@@ -4,6 +4,7 @@
 No simulated settlement is counted as real-chain settlement by this test.
 """
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_node import ErrorMatch
 from test_framework.util import assert_equal,assert_raises_rpc_error
 
 class SwapNetTest(BitcoinTestFramework):
@@ -29,5 +30,14 @@ class SwapNetTest(BitcoinTestFramework):
         self.wait_until(lambda:self.nodes[0].getswapbootstrapinfo()['admitted_peers']>=1)
         self.restart_node(1,['-modelbind=off','-swapnet=0'])
         assert_raises_rpc_error(-1,'disabled',self.nodes[1].getswapnetworkinfo)
+        # A SwapNet start that fails stops the node with an init error that names the reason and -swapnet=0.
+        self.stop_node(0);args=self.extra_args[0]
+        self.nodes[0].assert_start_raises_init_error(args+['-swapnetmode=bogus'],r'Error: SwapNet could not start \(unknown -swapnetmode\)\. No funds were authorized by startup\..*-swapnet=0',match=ErrorMatch.PARTIAL_REGEX)
+        key=self.nodes[0].chain_path/'swapnet'/'vault.key';saved=key.read_bytes()
+        key.write_bytes(b'short')
+        self.nodes[0].assert_start_raises_init_error(args,r'Error: SwapNet could not start \(.*VAULT_FORMAT.*\)\..*-swapnet=0',match=ErrorMatch.PARTIAL_REGEX)
+        self.start_node(0,args+['-swapnet=0']);assert_raises_rpc_error(-1,'disabled',self.nodes[0].getswapnetworkinfo)
+        self.stop_node(0);key.write_bytes(saved)
+        self.start_node(0,args);assert_equal(self.nodes[0].getswaphealth()['audit_head'],before)
 
 if __name__=='__main__':SwapNetTest(__file__).main()
