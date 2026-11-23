@@ -315,6 +315,31 @@ bool ModelStore::PutVerifiedPiece(const Digest48& artifact, uint32_t file_index,
     return true;
 }
 
+bool ModelStore::RepairLocalImportPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
+                                      Span<const unsigned char> bytes, const Digest48& expected_leaf,
+                                      std::string& err)
+{
+    if (ChunkLeaf(piece_index, bytes) != expected_leaf) {
+        err = "local repair piece does not match its index";
+        return false;
+    }
+    const fs::path path = ArtifactDir(m_root, artifact) / std::to_string(file_index).c_str() /
+                          (std::to_string(piece_index) + ".piece").c_str();
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(path, ec)) || ec ||
+        std::filesystem::file_size(path, ec) != bytes.size() || ec) {
+        err = "local repair requires an existing piece of the expected size";
+        return false;
+    }
+    const std::string_view contents{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+    fs::create_directories(m_root / "tmp");
+    if (!WriteBinaryFileAtomically(path, contents, m_root / "tmp")) {
+        err = "local repair piece write failed";
+        return false;
+    }
+    return true;
+}
+
 bool ModelStore::GetPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                             std::vector<unsigned char>& out, std::string& err) const
 {

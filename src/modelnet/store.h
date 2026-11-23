@@ -66,6 +66,10 @@ public:
     uint64_t QuotaBytes() const { return m_quota.max_bytes; }
     bool PutVerifiedPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                            Span<const unsigned char> bytes, const Digest48& expected_leaf, std::string& err);
+    /** Replace a same-sized damaged piece using bytes from a verified local import. */
+    bool RepairLocalImportPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
+                                Span<const unsigned char> bytes, const Digest48& expected_leaf,
+                                std::string& err);
     bool GetPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index,
                   std::vector<unsigned char>& out, std::string& err) const;
     bool HasPiece(const Digest48& artifact, uint32_t file_index, uint32_t piece_index) const;
