@@ -11,7 +11,8 @@ class JSONRPCRequest;
 namespace node { struct NodeContext; }
 namespace swapnet {
 void SetupArgs(ArgsManager& args);
-bool StartNode(node::NodeContext& node);
+/** Start SwapNet unless -swapnet=0. On failure, return false with a short reason in error; the reason is also logged. */
+bool StartNode(node::NodeContext& node, std::string& error);
 void StopNode();
 void PeerReady(PeerId peer);
 void PeerClosed(PeerId peer);

@@ -4647,9 +4647,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 #ifdef SWAPNET_WITH_WALLET
     swapnet::InstallWalletBridge();
 #endif
-    // SwapNet starts unless -swapnet=0. A start that fails stops the node;
-    // StartNode has already logged the reason. Startup authorizes no spend.
-    if (!swapnet::StartNode(node)) return false;
+    // SwapNet starts unless -swapnet=0. A start that fails stops the node with
+    // an init error that names the reason and -swapnet=0. Startup authorizes no spend.
+    if (std::string swapnet_error; !swapnet::StartNode(node, swapnet_error)) {
+        return InitError(Untranslated(strprintf("SwapNet could not start (%s). No funds were authorized by startup. "
+            "See debug.log, or start with -swapnet=0 to run the node without SwapNet (existing swaps then have no recovery worker).", swapnet_error)));
+    }
     SetRPCWarmupFinished();
     return true;
 }
