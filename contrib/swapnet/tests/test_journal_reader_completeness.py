@@ -84,7 +84,8 @@ def _configuration_app(book):
 
     app = SimpleNamespace(store=book.store, journal=book,
                           authority=Authority(book.store, book),
-                          drivers={ASSET: original}, configure_asset=configure)
+                          drivers={ASSET: original}, configure_asset=configure,
+                          clear_startup_error=None)
     return app, calls, original
 
 
