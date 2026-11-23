@@ -181,9 +181,10 @@ void SetupArgs(ArgsManager& args) {
     args.AddArg("-swapnetwallet=<name>", "Bind SwapNet to this already-loaded native wallet; otherwise require exactly one loaded wallet.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     args.AddArg("-swapnetowner=<rpcuser>", "Grant this authenticated RPC username owner-level SwapNet policy authority; repeatable. Cookie and local Qt console are owners.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
 }
-bool StartNode(node::NodeContext& node) {
+bool StartNode(node::NodeContext& node, std::string& error) {
     if (!node.args) {
-        LogPrintf("SwapNet: startup failed (node arguments unavailable). No funds were authorized by startup.\n");
+        error = "node arguments unavailable";
+        LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", error);
         return false;
     }
     auto& args=*node.args;
@@ -196,7 +197,8 @@ bool StartNode(node::NodeContext& node) {
         if (args.IsArgSet("-swapnetmode")) {
             const std::string mode = args.GetArg("-swapnetmode", "taker");
             if (mode!="observe" && mode!="taker" && mode!="maker" && mode!="recovery") {
-                LogPrintf("SwapNet: startup failed (unknown -swapnetmode). No funds were authorized by startup.\n");
+                error = "unknown -swapnetmode";
+                LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", error);
                 return false;
             }
             config.pushKV("market_startup_mode", mode);
@@ -225,14 +227,17 @@ bool StartNode(node::NodeContext& node) {
         LogPrintf("SwapNet: embedded runtime started; discovery enabled; no implicit spending authorization\n");return true;
     } catch (const UniValue& e) {
         btx::p2p::StopRuntime();
-        LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", e.write());
+        error = e.write();
+        LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", error);
         return false;
     } catch (const std::exception& e) {
         btx::p2p::StopRuntime();
-        LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", e.what());
+        error = e.what();
+        LogPrintf("SwapNet: startup failed (%s). No funds were authorized by startup.\n", error);
         return false;
     } catch (...) {
         btx::p2p::StopRuntime();
+        error = "inspect local dependency/wallet/state configuration";
         LogPrintf("SwapNet: startup failed; inspect local dependency/wallet/state configuration. No funds were authorized by startup.\n");
         return false;
     }
