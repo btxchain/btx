@@ -597,6 +597,116 @@ BOOST_AUTO_TEST_CASE(headers_sync_state_presync_survives_v4_bmx4c_and_half_life_
         static_cast<int64_t>(synthetic_chain_start.nHeight + static_cast<int>(HEADER_COUNT)));
 }
 
+BOOST_AUTO_TEST_CASE(headers_sync_state_frees_presync_window_on_redownload)
+{
+    if (!Params().GetConsensus().fMatMulPOW) return;
+
+    const CBlockHeader genesis_header{Params().GenesisBlock()};
+    CBlockIndex synthetic_chain_start{genesis_header};
+    const uint256 synthetic_chain_start_hash{genesis_header.GetHash()};
+    synthetic_chain_start.phashBlock = &synthetic_chain_start_hash;
+    synthetic_chain_start.nChainWork = arith_uint256{};
+    synthetic_chain_start.nHeight = 50'000;
+
+    Consensus::Params consensus = Params().GetConsensus();
+    consensus.fPowNoRetargeting = false;
+    consensus.fPowAllowMinDifficultyBlocks = false;
+    consensus.nFastMineHeight = 50'000;
+    consensus.nMatMulAsertHeight = 50'000;
+    consensus.nMatMulAsertRetuneHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
+    // The regtest v4, BMX4-C, DRLT and RC heights sit below this anchor, which
+    // ASERT treats as an invalid config and answers with the hardest target;
+    // the summed work would then overflow. Disable them so nBits are real.
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+    // No half-life re-anchor either, so the anchor stays at 50,000.
+    consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
+    BOOST_REQUIRE(ValidateMatMulAsertParams(consensus, synthetic_chain_start.nHeight + 1));
+
+    // More than the 180-entry synthetic window, so every entry back to the
+    // anchor is kept, as on mainnet.
+    static constexpr size_t HEADER_COUNT{400};
+    std::vector<CBlockHeader> headers;
+    headers.reserve(HEADER_COUNT);
+    std::list<CBlockIndex> synthetic_indices;
+    arith_uint256 chain_work{};
+
+    CBlockIndex* previous_index = &synthetic_chain_start;
+    uint256 prev_hash = synthetic_chain_start_hash;
+    uint32_t prev_time = synthetic_chain_start.GetBlockTime();
+    int32_t next_height = synthetic_chain_start.nHeight + 1;
+    for (size_t i = 0; i < HEADER_COUNT; ++i) {
+        CBlockHeader header;
+        header.nVersion = genesis_header.nVersion;
+        header.hashPrevBlock = prev_hash;
+        header.hashMerkleRoot = ArithToUint256(0x6789b);
+        // Target spacing keeps nBits, and so the summed work, realistic.
+        header.nTime = prev_time + static_cast<uint32_t>(consensus.nPowTargetSpacingNormal);
+        header.nBits = GetNextWorkRequired(previous_index, &header, consensus);
+        header.nNonce = static_cast<uint32_t>(i + 300);
+        header.nNonce64 = static_cast<uint64_t>(i + 300);
+        header.matmul_digest = genesis_header.matmul_digest;
+        header.matmul_dim = genesis_header.matmul_dim;
+        header.seed_a = genesis_header.seed_a;
+        header.seed_b = genesis_header.seed_b;
+
+        headers.push_back(header);
+        prev_hash = header.GetHash();
+        prev_time = header.nTime;
+        chain_work += GetBlockProof(CBlockIndex(header));
+
+        synthetic_indices.emplace_back(header);
+        CBlockIndex& synthesized = synthetic_indices.back();
+        synthesized.nHeight = next_height;
+        synthesized.pprev = previous_index;
+        previous_index = &synthesized;
+        ++next_height;
+    }
+
+    // The minimum work is reached with the last header, in both phases.
+    BOOST_REQUIRE(chain_work > arith_uint256{});
+    HeadersSyncState hss(/*id=*/0, consensus, &synthetic_chain_start, chain_work);
+
+    const std::vector<CBlockHeader> presync_first(headers.begin(), headers.end() - 1);
+    const std::vector<CBlockHeader> presync_last(headers.end() - 1, headers.end());
+    auto result = hss.ProcessNextHeaders(presync_first, /*full_headers_message=*/true);
+    BOOST_REQUIRE(result.success);
+    BOOST_REQUIRE(hss.GetState() == HeadersSyncState::State::PRESYNC);
+    BOOST_CHECK_EQUAL(hss.GetSyntheticIndexEntries(), HEADER_COUNT - 1);
+
+    // Reaching the minimum work switches to REDOWNLOAD; the presync window is
+    // not needed any more and must not stay allocated.
+    result = hss.ProcessNextHeaders(presync_last, /*full_headers_message=*/true);
+    BOOST_REQUIRE(result.success);
+    BOOST_CHECK(result.request_more);
+    BOOST_REQUIRE(hss.GetState() == HeadersSyncState::State::REDOWNLOAD);
+    BOOST_CHECK_EQUAL(hss.GetSyntheticIndexEntries(), 0U);
+
+    // While redownloading, only the redownload window is held.
+    static constexpr size_t REDOWNLOAD_FIRST{300};
+    const std::vector<CBlockHeader> redownload_first(headers.begin(), headers.begin() + REDOWNLOAD_FIRST);
+    const std::vector<CBlockHeader> redownload_rest(headers.begin() + REDOWNLOAD_FIRST, headers.end());
+    result = hss.ProcessNextHeaders(redownload_first, /*full_headers_message=*/true);
+    BOOST_REQUIRE(result.success);
+    BOOST_CHECK(result.request_more);
+    BOOST_CHECK(result.pow_validated_headers.empty());
+    BOOST_REQUIRE(hss.GetState() == HeadersSyncState::State::REDOWNLOAD);
+    BOOST_CHECK_EQUAL(hss.GetSyntheticIndexEntries(), REDOWNLOAD_FIRST);
+
+    // Redownload still validates every nBits and releases the whole chain.
+    result = hss.ProcessNextHeaders(redownload_rest, /*full_headers_message=*/false);
+    BOOST_CHECK(result.success);
+    BOOST_CHECK(!result.request_more);
+    BOOST_REQUIRE_EQUAL(result.pow_validated_headers.size(), HEADER_COUNT);
+    BOOST_CHECK(result.pow_validated_headers.front().GetHash() == headers.front().GetHash());
+    BOOST_CHECK(result.pow_validated_headers.back().GetHash() == headers.back().GetHash());
+    BOOST_CHECK(hss.GetState() == HeadersSyncState::State::FINAL);
+    BOOST_CHECK_EQUAL(hss.GetSyntheticIndexEntries(), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(headers_sync_state_rejects_invalid_matmul_schedule_nbits)
 {
     if (!Params().GetConsensus().fMatMulPOW) return;
