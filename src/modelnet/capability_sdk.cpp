@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <clientversion.h>
 #include <modelnet/capability_sdk.h>
 
 #include <util/fs.h>
@@ -301,7 +302,7 @@ std::string MapCapabilityCliVerb(const std::string& verb)
 std::string CapabilityCliUsage()
 {
     std::string u;
-    u += "btx-capability — owner-local BTX capability CLI (0.34.8-dev)\n";
+    u += "btx-capability — owner-local BTX capability CLI (" + FormatFullVersion() + ")\n";
     u += "Local resolve/plan/ensure/load only. Never public HTTP.\n";
     u += "Not a remote inference marketplace. automatic_spend_atoms stays 0.\n";
     u += "btx-open remains inspect-only; this binary does not install, spend, or run inference.\n";
@@ -589,7 +590,7 @@ int RunCapabilityCli(const std::vector<std::string>& args, std::string& out, std
             return 0;
         }
         if (a == "-version" || a == "--version") {
-            out = "btx-capability 0.34.8-dev\n";
+            out = "btx-capability " + FormatFullVersion() + "\n";
             return 0;
         }
         if (a == "--spend" || a == "-spend" || StartsWith(a, "--spend=") || StartsWith(a, "-spend=")) {

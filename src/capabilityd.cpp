@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <clientversion.h>
 #include <modelnet/capability.h>
 #include <util/fs.h>
 #include <util/translation.h>
@@ -28,7 +29,7 @@ static void OnSignal(int)
 static void Usage()
 {
     std::cerr <<
-        "btx-capabilityd — owner-local BTX capability service (0.34.8-dev)\n"
+        "btx-capabilityd — owner-local BTX capability service (" << FormatFullVersion() << ")\n"
         "\n"
         "Local resolve/plan/ensure/load lifecycle only. Not public HTTP.\n"
         "Not a remote inference marketplace. automatic_spend_atoms stays 0.\n"
@@ -57,7 +58,7 @@ int main(int argc, char* argv[])
             return 0;
         }
         if (a == "-version" || a == "--version") {
-            std::cout << "btx-capabilityd 0.34.8-dev\n";
+            std::cout << "btx-capabilityd " << FormatFullVersion() << "\n";
             return 0;
         }
         if (a.rfind("-modeldir=", 0) == 0) modeldir = fs::PathFromString(a.substr(std::string("-modeldir=").size()));

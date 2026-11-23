@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <clientversion.h>
 #include <modelnet/hcp.h>
 #include <util/fs.h>
 #include <util/translation.h>
@@ -33,7 +34,7 @@ int main(int argc, char* argv[])
         const std::string a = argv[i];
         if (a == "-help" || a == "--help") {
             std::cerr <<
-                "btx-hcpd — Hosted Control Plane gateway (0.34.8-dev)\n"
+                "btx-hcpd — Hosted Control Plane gateway (" << FormatFullVersion() << ")\n"
                 "Loopback HTTP only. Not consensus. Not a wallet proxy.\n"
                 "  -bind=127.0.0.1:port\n"
                 "  -walletless (default)\n"
@@ -45,7 +46,7 @@ int main(int argc, char* argv[])
             return 0;
         }
         if (a == "-version") {
-            std::cout << "btx-hcpd 0.34.8-dev HCP/1+CR11+CR12\n";
+            std::cout << "btx-hcpd " << FormatFullVersion() << " HCP/1+CR11+CR12\n";
             return 0;
         }
         if (a.rfind("-bind=", 0) == 0) bind = a.substr(6);
