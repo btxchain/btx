@@ -27,6 +27,10 @@ class SwapNetMarketTest(BitcoinTestFramework):
         assert_raises_rpc_error(-1,'INVITE_ENDPOINT',a.createswapinvite,{'endpoints':['127.0.0.1:8332'],'ttl':60})
         a.setswapmode({'mode':'maker'});assert_equal(a.getswapmode()['making_enabled'],True)
         a.setswapmode({'mode':'observe'});assert_equal(a.getswapmode()['existing_obligations_recovery_enabled'],True)
+        # btx-cli converts the request object: by position, by name, and from -stdin as contrib/swapnet/tools/btx_market.py sends it.
+        a.cli.setswapmode({'mode':'maker'});assert_equal(a.getswapmode()['mode'],'maker')
+        a.cli.setswapmode(request={'mode':'taker'});assert_equal(a.getswapmode()['mode'],'taker')
+        a.cli('-stdin',input='{"mode":"observe"}\n').setswapmode();assert_equal(a.getswapmode()['mode'],'observe')
         self.restart_node(0,['-modelbind=off','-swapnet=1','-swapnetmode=recovery'])
         assert_equal(self.nodes[0].getswapmode()['mode'],'recovery')
         assert_raises_rpc_error(-1,'MODE_LOCKED',self.nodes[0].setswapmode,{'mode':'maker'})
