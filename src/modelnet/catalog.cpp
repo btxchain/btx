@@ -926,6 +926,34 @@ bool ModelCatalog::ImportPath(const std::string& path, bool pin, CatalogEntry& o
             if (m.artifact_id != artifact_id) continue;
             if (!found || (found->incomplete && !m.incomplete)) found = &m;
         }
+        if (found && !found->incomplete && !m_active_artifacts.count(artifact_id)) {
+            for (uint32_t i = 0; i < cores.size(); ++i) {
+                PieceIndex staged_index, existing_index;
+                // Recovery here applies only to the existing, matching piece layout.
+                std::string index_error;
+                try {
+                    if (!m_store.LoadPieceIndex(staging, i, staged_index, index_error) ||
+                        !m_store.LoadPieceIndex(artifact_id, i, existing_index, index_error) ||
+                        staged_index.file_size != existing_index.file_size ||
+                        staged_index.pieces_root != existing_index.pieces_root ||
+                        staged_index.leaves != existing_index.leaves) continue;
+                } catch (const std::runtime_error&) {
+                    continue;
+                }
+
+                std::vector<unsigned char> existing;
+                std::vector<unsigned char> verified;
+                for (uint32_t piece = 0; piece < staged_index.leaves.size(); ++piece) {
+                    std::string read_error;
+                    if (!m_store.GetPiece(artifact_id, i, piece, existing, read_error) ||
+                        ChunkLeaf(piece, existing) == staged_index.leaves[piece]) continue;
+                    if (!m_store.GetPiece(staging, i, piece, verified, err)) return false;
+                    if (existing.size() != verified.size()) continue;
+                    if (!m_store.RepairLocalImportPiece(artifact_id, i, piece, verified,
+                                                       staged_index.leaves[piece], err)) return false;
+                }
+            }
+        }
         std::vector<CatalogEntry> dropped;
         if (found && !found->incomplete) {
             const Digest48 keep_model = found->model_id;
