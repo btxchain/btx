@@ -84,13 +84,17 @@ class ConfArgsTest(BitcoinTestFramework):
 
         self.log.debug('Verifying that disabling of the config file means garbage inside of it does ' \
             'not prevent the node from starting, and message about existing config file is logged')
-        ignored_file_message = [f'Data directory "{self.nodes[0].datadir_path}" contains a "bitcoin.conf" file which is explicitly ignored using -noconf.']
+        # -noconf looks for the default file name in the data directory, btx.conf
+        # (BITCOIN_CONF_FILENAME), while the test framework passes -conf=bitcoin.conf.
+        default_conf_path = self.nodes[0].datadir_path / 'btx.conf'
+        os.rename(conf_path, default_conf_path)
+        ignored_file_message = [f'Data directory "{self.nodes[0].datadir_path}" contains a "btx.conf" file which is explicitly ignored using -noconf.']
         with self.nodes[0].assert_debug_log(timeout=60, expected_msgs=ignored_file_message):
             self.start_node(0, extra_args=settings + ['-noconf'])
         self.stop_node(0)
 
         self.log.debug('Verifying no message appears when removing config file')
-        os.remove(conf_path)
+        os.remove(default_conf_path)
         with self.nodes[0].assert_debug_log(timeout=60, expected_msgs=[], unexpected_msgs=ignored_file_message):
             self.start_node(0, extra_args=settings + ['-noconf'])
         self.stop_node(0)
@@ -192,18 +196,22 @@ class ConfArgsTest(BitcoinTestFramework):
         env, default_datadir = util.get_temp_default_datadir(Path(self.options.tmpdir, "test_config_file_log"))
         default_datadir.mkdir(parents=True)
 
-        # Write a bitcoin.conf file in the default data directory containing a
+        # Write a btx.conf file in the default data directory containing a
         # datadir= line pointing at the node datadir.
         node = self.nodes[0]
         conf_text = node.bitcoinconf.read_text()
-        conf_path = default_datadir / "bitcoin.conf"
+        conf_path = default_datadir / "btx.conf"
         conf_path.write_text(f"datadir={node.datadir_path}\n{conf_text}")
+        # The node refuses a datadir with a legacy bitcoin.conf and no btx.conf
+        # (src/common/init.cpp), so give the node datadir a btx.conf too.
+        node_default_conf = node.datadir_path / "btx.conf"
+        node_default_conf.write_text(conf_text)
 
-        # Drop the node -datadir= argument during this test, because if it is
-        # specified it would take precedence over the datadir setting in the
-        # config file.
+        # Drop the node -datadir= and -conf= arguments during this test, because
+        # if they are specified they would take precedence over the datadir
+        # setting and the default config file.
         node_args = node.args
-        node.args = [arg for arg in node.args if not arg.startswith("-datadir=")]
+        node.args = [arg for arg in node.args if not arg.startswith(("-datadir=", "-conf="))]
 
         # Check that correct configuration file path is actually logged
         # (conf_path, not node.bitcoinconf)
@@ -213,6 +221,7 @@ class ConfArgsTest(BitcoinTestFramework):
 
         # Restore node arguments after the test
         node.args = node_args
+        node_default_conf.unlink()
 
     def test_invalid_command_line_options(self):
         self.nodes[0].assert_start_raises_init_error(
@@ -261,7 +270,8 @@ class ConfArgsTest(BitcoinTestFramework):
                 '-torpassword=secret-torpassword',
                 UNREACHABLE_PROXY_ARG,
             ])
-        self.stop_node(0)
+        # -rpcpassword on the command line draws an init warning on stderr (src/init.cpp).
+        self.stop_node(0, expected_stderr='Warning: -rpcpassword was given on the command line, which leaks the RPC password through process listings. Use cookie authentication, hashed -rpcauth, or put rpcpassword in the configuration file with restricted permissions.')
 
     def test_networkactive(self):
         self.log.info('Test -networkactive option')
@@ -405,10 +415,10 @@ class ConfArgsTest(BitcoinTestFramework):
             # Make sure -noconnect soft-disables -listen and -dnsseed.
             # Need to temporarily remove these settings from the config file in
             # order for the two log messages to appear
-            self.nodes[0].replace_in_config([("bind=", "#bind="), ("dnsseed=", "#dnsseed=")])
+            self.nodes[0].replace_in_config([("\nbind=", "\n#bind="), ("dnsseed=", "#dnsseed=")])
             with self.nodes[0].assert_debug_log(expected_msgs=[dnsseed_disabled, listen_disabled]):
                 self.restart_node(0, extra_args=[connect_arg])
-            self.nodes[0].replace_in_config([("#bind=", "bind="), ("#dnsseed=", "dnsseed=")])
+            self.nodes[0].replace_in_config([("\n#bind=", "\nbind="), ("#dnsseed=", "dnsseed=")])
 
             # Make sure -proxy and -noconnect warn about -dnsseed setting being
             # ignored, just like -proxy and -connect do.
@@ -417,21 +427,25 @@ class ConfArgsTest(BitcoinTestFramework):
         self.stop_node(0)
 
     def test_ignored_conf(self):
-        self.log.info('Test error is triggered when the datadir in use contains a bitcoin.conf file that would be ignored '
+        self.log.info('Test error is triggered when the datadir in use contains a btx.conf file that would be ignored '
                       'because a conflicting -conf file argument is passed.')
         node = self.nodes[0]
+        # The check looks for the default file name, btx.conf, in the datadir.
+        node_default_conf = node.datadir_path / "btx.conf"
+        node_default_conf.write_text(node.bitcoinconf.read_text())
         with tempfile.NamedTemporaryFile(dir=self.options.tmpdir, mode="wt", delete=False) as temp_conf:
             temp_conf.write(f"datadir={node.datadir_path}\n")
         node.assert_start_raises_init_error([f"-conf={temp_conf.name}"], re.escape(
-            f'Error: Data directory "{node.datadir_path}" contains a "bitcoin.conf" file which is ignored, because a '
+            f'Error: Data directory "{node.datadir_path}" contains a "btx.conf" file which is ignored, because a '
             f'different configuration file "{temp_conf.name}" from command line argument "-conf={temp_conf.name}" '
             f'is being used instead.') + r"[\s\S]*", match=ErrorMatch.FULL_REGEX)
 
         # Test that passing a redundant -conf command line argument pointing to
-        # the same bitcoin.conf that would be loaded anyway does not trigger an
+        # the same btx.conf that would be loaded anyway does not trigger an
         # error.
-        self.start_node(0, [f'-conf={node.datadir_path}/bitcoin.conf'])
+        self.start_node(0, [f'-conf={node_default_conf}'])
         self.stop_node(0)
+        node_default_conf.unlink()
 
     def test_ignored_default_conf(self):
         # Disable this test for windows currently because trying to override
@@ -439,31 +453,34 @@ class ConfArgsTest(BitcoinTestFramework):
         if platform.system() == "Windows":
             return
 
-        self.log.info('Test error is triggered when bitcoin.conf in the default data directory sets another datadir '
-                      'and it contains a different bitcoin.conf file that would be ignored')
+        self.log.info('Test error is triggered when btx.conf in the default data directory sets another datadir '
+                      'and it contains a different btx.conf file that would be ignored')
 
         # Create a temporary directory that will be treated as the default data
         # directory by bitcoind.
         env, default_datadir = util.get_temp_default_datadir(Path(self.options.tmpdir, "home"))
         default_datadir.mkdir(parents=True)
 
-        # Write a bitcoin.conf file in the default data directory containing a
+        # Write a btx.conf file in the default data directory containing a
         # datadir= line pointing at the node datadir. This will trigger a
         # startup error because the node datadir contains a different
-        # bitcoin.conf that would be ignored.
+        # btx.conf that would be ignored.
         node = self.nodes[0]
-        (default_datadir / "bitcoin.conf").write_text(f"datadir={node.datadir_path}\n")
+        (default_datadir / "btx.conf").write_text(f"datadir={node.datadir_path}\n")
+        node_default_conf = node.datadir_path / "btx.conf"
+        node_default_conf.write_text(node.bitcoinconf.read_text())
 
-        # Drop the node -datadir= argument during this test, because if it is
-        # specified it would take precedence over the datadir setting in the
-        # config file.
+        # Drop the node -datadir= and -conf= arguments during this test, because
+        # if they are specified they would take precedence over the datadir
+        # setting and the default config file.
         node_args = node.args
-        node.args = [arg for arg in node.args if not arg.startswith("-datadir=")]
+        node.args = [arg for arg in node.args if not arg.startswith(("-datadir=", "-conf="))]
         node.assert_start_raises_init_error([], re.escape(
-            f'Error: Data directory "{node.datadir_path}" contains a "bitcoin.conf" file which is ignored, because a '
-            f'different configuration file "{default_datadir}/bitcoin.conf" from data directory "{default_datadir}" '
+            f'Error: Data directory "{node.datadir_path}" contains a "btx.conf" file which is ignored, because a '
+            f'different configuration file "{default_datadir}/btx.conf" from data directory "{default_datadir}" '
             f'is being used instead.') + r"[\s\S]*", env=env, match=ErrorMatch.FULL_REGEX)
         node.args = node_args
+        node_default_conf.unlink()
 
     def test_acceptstalefeeestimates_arg_support(self):
         self.log.info("Test -acceptstalefeeestimates option support")
