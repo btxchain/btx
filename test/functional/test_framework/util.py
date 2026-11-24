@@ -535,15 +535,16 @@ def get_temp_default_datadir(temp_dir: pathlib.Path) -> tuple[dict, pathlib.Path
     """Return os-specific environment variables that can be set to make the
     GetDefaultDataDir() function return a datadir path under the provided
     temp_dir, as well as the complete path it would return."""
+    # BTX defaults (GetExclusiveDefaultDataDir in src/common/args.cpp).
     if platform.system() == "Windows":
-        env = dict(APPDATA=str(temp_dir))
-        datadir = temp_dir / "Bitcoin"
+        env = dict(LOCALAPPDATA=str(temp_dir))
+        datadir = temp_dir / "BTX"
     else:
         env = dict(HOME=str(temp_dir))
         if platform.system() == "Darwin":
-            datadir = temp_dir / "Library/Application Support/Bitcoin"
+            datadir = temp_dir / "Library/Application Support/BTX"
         else:
-            datadir = temp_dir / ".bitcoin"
+            datadir = temp_dir / ".btx"
     return env, datadir
 
 
