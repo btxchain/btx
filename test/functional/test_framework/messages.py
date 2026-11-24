@@ -2499,6 +2499,26 @@ class msg_swreceipt(msg_swapnet):
     __slots__ = ()
     msgtype = b"swreceipt"
 
+class msg_swcap(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swcap"
+
+class msg_swoget(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swoget"
+
+class msg_swopage(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swopage"
+
+class msg_swoffer(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"swoffer"
+
+class msg_sworeq(msg_swapnet):
+    __slots__ = ()
+    msgtype = b"sworeq"
+
 class TestFrameworkScript(unittest.TestCase):
     def test_ser_vector_preserves_order_and_alternate_serializer(self):
         calls = []
