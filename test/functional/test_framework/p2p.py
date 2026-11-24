@@ -76,8 +76,13 @@ from test_framework.messages import (
     msg_sendblkchnk,
     msg_sendheaders,
     msg_sendtxrcncl,
+    msg_swcap,
     msg_swget,
     msg_swhello,
+    msg_swoffer,
+    msg_swoget,
+    msg_swopage,
+    msg_sworeq,
     msg_swprov,
     msg_swquote,
     msg_swreceipt,
@@ -173,8 +178,13 @@ MESSAGEMAP = {
     b"sendblkchnk": msg_sendblkchnk,
     b"sendheaders": msg_sendheaders,
     b"sendtxrcncl": msg_sendtxrcncl,
+    b"swcap": msg_swcap,
     b"swget": msg_swget,
     b"swhello": msg_swhello,
+    b"swoffer": msg_swoffer,
+    b"swoget": msg_swoget,
+    b"swopage": msg_swopage,
+    b"sworeq": msg_sworeq,
     b"swprov": msg_swprov,
     b"swquote": msg_swquote,
     b"swreceipt": msg_swreceipt,
@@ -599,8 +609,13 @@ class P2PInterface(P2PConnection):
     def on_sendblkchnk(self, message): pass
     def on_sendheaders(self, message): pass
     def on_sendtxrcncl(self, message): pass
+    def on_swcap(self, message): pass
     def on_swget(self, message): pass
     def on_swhello(self, message): pass
+    def on_swoffer(self, message): pass
+    def on_swoget(self, message): pass
+    def on_swopage(self, message): pass
+    def on_sworeq(self, message): pass
     def on_swprov(self, message): pass
     def on_swquote(self, message): pass
     def on_swreceipt(self, message): pass
