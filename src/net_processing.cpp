@@ -15575,6 +15575,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         auto retry_delay{std::chrono::steady_clock::duration{
             MATMUL_BUDGET_DEFER_COOLDOWN}};
         bool progress_lane{false};
+        bool unfollowed_tip_child{false};
         if (matmul_admission.rc_profile) {
             LOCK(cs_main);
             progress_lane = IsAuthenticatedChainProgressCandidate(
@@ -15599,6 +15600,28 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     progress_lane = true;
                 }
             }
+            // From nMatMulPhase1HeaderNotMostWorkHeight a header whose body
+            // is not yet verified or attested cannot become m_best_header,
+            // so while a consensus node catches up its best header sits at
+            // the tip and no child of the tip is the followed tip-child
+            // above. Such a child is what extends the chain (a consensus node
+            // claims one per tip for ExactReplay). It keeps its budget lane;
+            // only its retry deadline changes (see the early release below).
+            // When m_best_header does lead, a competing child of the followed
+            // one keeps the 60s retry.
+            if (!progress_lane) {
+                const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+                const CBlockIndex* const best{m_chainman.m_best_header};
+                if (tip != nullptr &&
+                    block->hashPrevBlock == tip->GetBlockHash() &&
+                    (best == nullptr || best->nHeight <= tip->nHeight)) {
+                    const CBlockIndex* const bidx{
+                        m_chainman.m_blockman.LookupBlockIndex(hash)};
+                    unfollowed_tip_child =
+                        bidx != nullptr &&
+                        (bidx->nStatus & BLOCK_FAILED_MASK) == 0;
+                }
+            }
         }
         if (ConsumeMatMulVerificationBudgetForPeer(
                 peer->m_addr, node.nKeyedNetGroup,
@@ -15618,7 +15641,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             }
             return true;
         }
-        if (progress_lane) {
+        if (progress_lane || unfollowed_tip_child) {
             // End the lifecycle attempt before the body is retained below, as
             // the pending-cap path in AdmitMatMulBlockVerification does.
             // Ending it (MatMulBlockLifecycle::Retry with
@@ -15626,8 +15649,10 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             // 60s; done after StoreMatMulDeferredBody, it replaced the refill
             // delay computed here, so a followed-chain body whose window
             // refilled in seconds still waited a full minute. The caller's
-            // later release_admission_marker() is then a no-op. Competing-lane
-            // bodies keep the 60s retry.
+            // later release_admission_marker() is then a no-op. A child of
+            // the tip while no header leads (unfollowed_tip_child) gets the
+            // same refill deadline. Competing-lane bodies keep the 60s
+            // retry.
             release_admission_marker();
         }
         if (global_exhausted) {
