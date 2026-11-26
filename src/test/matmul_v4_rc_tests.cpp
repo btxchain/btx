@@ -205,10 +205,17 @@ rc::RCProductionProviderCapability MakeWinnerAuthorityCapability(
         rc::MakeRCProductionEpochIdentity(consensus, activation_height));
 }
 
+/** The declining providers below are registered side by side, and the
+ * alternate-provider registry rejects two providers with the same GEMM
+ * callback. Identical bodies can be folded to one address by an optimized
+ * linker (MSVC or lld-link /OPT:ICF), so each one stores its own mark. */
+volatile uint32_t g_declining_provider_mark{0};
+
 bool DecliningGemmS8S8(const std::vector<int8_t>& /*L*/, const std::vector<int8_t>& /*R*/,
                        uint32_t /*rows*/, uint32_t /*inner*/, uint32_t /*cols*/,
                        std::vector<int32_t>& out)
 {
+    g_declining_provider_mark = 1;
     out.clear();
     return false;
 }
@@ -218,6 +225,7 @@ bool DecliningGemmS8S8B(const std::vector<int8_t>& L,
                         uint32_t rows, uint32_t inner, uint32_t cols,
                         std::vector<int32_t>& out)
 {
+    g_declining_provider_mark = 2;
     return DecliningGemmS8S8(L, R, rows, inner, cols, out);
 }
 
@@ -226,6 +234,7 @@ bool DecliningGemmS8S8C(const std::vector<int8_t>& L,
                         uint32_t rows, uint32_t inner, uint32_t cols,
                         std::vector<int32_t>& out)
 {
+    g_declining_provider_mark = 3;
     return DecliningGemmS8S8(L, R, rows, inner, cols, out);
 }
 
@@ -234,6 +243,7 @@ bool DecliningGemmS8S8D(const std::vector<int8_t>& L,
                         uint32_t rows, uint32_t inner, uint32_t cols,
                         std::vector<int32_t>& out)
 {
+    g_declining_provider_mark = 4;
     return DecliningGemmS8S8(L, R, rows, inner, cols, out);
 }
 
@@ -3731,17 +3741,29 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_golden_diff_gate)
         rc::RecomputeResidentCurriculumReference(header, params, 0).GetHex(), kV1);
     BOOST_CHECK(rc::kRCThreeAxisScheduleEnabled);
 
-    // Prefer absolute path via env (set by CI) then relative tree roots.
+    // Prefer absolute path via env (set by CI), then the configured source
+    // tree, then relative tree roots.
     const char* env_script = std::getenv("BTX_RC_GOLDEN_GATE");
     std::vector<std::string> candidates;
     if (env_script && env_script[0] != '\0') {
         candidates.emplace_back(env_script);
     }
+#ifdef BTX_TEST_RC_GOLDEN_GATE
+    candidates.emplace_back(BTX_TEST_RC_GOLDEN_GATE);
+#endif
     candidates.insert(candidates.end(),
                       {"contrib/matmul-v4/rc-golden-gate.py",
                        "../contrib/matmul-v4/rc-golden-gate.py",
                        "../../contrib/matmul-v4/rc-golden-gate.py",
                        "../../../contrib/matmul-v4/rc-golden-gate.py"});
+
+    // The configured interpreter: a python.org install on Windows has no
+    // `python3` command.
+#ifdef BTX_TEST_PYTHON3
+    const std::string python{BTX_TEST_PYTHON3};
+#else
+    const std::string python{"python3"};
+#endif
 
     bool ran = false;
     int last_status = -1;
@@ -3750,8 +3772,13 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_golden_diff_gate)
         FILE* f = std::fopen(script.c_str(), "r");
         if (!f) continue;
         std::fclose(f);
-        const std::string cmd =
-            std::string("python3 ") + script + " --expect " + kV1;
+        std::string cmd =
+            "\"" + python + "\" \"" + script + "\" --expect " + kV1;
+#ifdef WIN32
+        // cmd.exe /c drops the first and the last quote of a command line
+        // that starts with one; wrap it so the quoted paths survive.
+        cmd = "\"" + cmd + "\"";
+#endif
         last_status = std::system(cmd.c_str());
         ran = true;
         break;
