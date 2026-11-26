@@ -101,6 +101,12 @@ class InitTest(BitcoinTestFramework):
             sigterm_node()
 
         check_clean_start()
+        # -checkblocks does not check the genesis block, so the perturbation
+        # window in blk*.dat must lie past it. The BTX regtest genesis block is
+        # larger than Bitcoin's, so the fixed bytes 150..350 used below for the
+        # other files would stay inside it; start right after its record
+        # (4-byte magic, 4-byte size, block) instead.
+        genesis_record_end = 8 + node.getblock(node.getblockhash(0), 1)["size"]
         self.stop_node(0)
 
         self.log.info("Test startup errors after removing certain essential files")
@@ -147,7 +153,7 @@ class InitTest(BitcoinTestFramework):
                     # Since the genesis block is not checked by -checkblocks, the
                     # perturbation window must be chosen such that a higher block
                     # in blk*.dat is affected.
-                    tf.seek(150)
+                    tf.seek(genesis_record_end if file_patt == 'blocks/blk*.dat' else 150)
                     tf.write(b"1" * 200)
 
             start_expecting_error(err_fragment)
