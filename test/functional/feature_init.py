@@ -233,7 +233,7 @@ class InitTest(BitcoinTestFramework):
             node.wait_until_stopped()
 
     def restart_node_with_fd_limit(self, limit):
-        """Restart node 1 with a given soft RLIMIT_NOFILE. Skips if the limit cannot be set."""
+        """Restart node 0 with a given soft RLIMIT_NOFILE. Skips if the limit cannot be set."""
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         try:
@@ -242,7 +242,7 @@ class InitTest(BitcoinTestFramework):
             self.log.info(f"Skipping rlimit test: cannot set soft limit (hard={hard})")
             return
         try:
-            self.restart_node(1)
+            self.restart_node(0)
             self.log.debug(f"Node started successfully with RLIM_INFINITY limit (soft={limit})")
         finally:
             resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
