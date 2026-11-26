@@ -256,6 +256,13 @@ class TestNode():
         if extra_args is None:
             extra_args = self.extra_args
 
+        # -modelbind and -modelnet exist only when this build ships btx-modeld.
+        # SwapNet tests pass them on every node. A Windows build without
+        # ModelNet rejects the process before RPC comes up.
+        helper = Path(self.binary).with_name("btx-modeld" + Path(self.binary).suffix)
+        if not helper.is_file():
+            extra_args = [arg for arg in extra_args if str(arg).split("=", 1)[0] not in ("-modelbind", "-modelnet", "-nomodelnet")]
+
         # A restart often passes the test's own argument list, which does not
         # include the defaults add_nodes applied. Height 100 stays deferred
         # under consensus mode until ExactReplay, so regtest nodes keep the

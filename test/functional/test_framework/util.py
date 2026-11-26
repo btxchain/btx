@@ -428,17 +428,30 @@ def rpc_url(datadir, i, chain, rpchost):
 ################
 
 
-def initialize_datadir(dirname, n, chain, disable_autoconnect=True):
+def build_has_modelnet(config) -> bool:
+    """True when this build ships btx-modeld and therefore registers -modelbind.
+
+    A build without ModelNet rejects -modelbind and -modelnet. Callers that
+    have no build config keep the historical pin.
+    """
+    try:
+        env = config["environment"]
+        return os.path.isfile(os.path.join(env["BUILDDIR"], "bin", "btx-modeld" + env.get("EXEEXT", "")))
+    except (AttributeError, KeyError, TypeError):
+        return True
+
+
+def initialize_datadir(dirname, n, chain, disable_autoconnect=True, config=None):
     datadir = get_datadir_path(dirname, n)
     if not os.path.isdir(datadir):
         os.makedirs(datadir)
-    write_config(os.path.join(datadir, "bitcoin.conf"), n=n, chain=chain, disable_autoconnect=disable_autoconnect)
+    write_config(os.path.join(datadir, "bitcoin.conf"), n=n, chain=chain, disable_autoconnect=disable_autoconnect, config=config)
     os.makedirs(os.path.join(datadir, 'stderr'), exist_ok=True)
     os.makedirs(os.path.join(datadir, 'stdout'), exist_ok=True)
     return datadir
 
 
-def write_config(config_path, *, n, chain, extra_config="", disable_autoconnect=True):
+def write_config(config_path, *, n, chain, extra_config="", disable_autoconnect=True, config=None):
     # Translate chain subdirectory name to config name
     if chain == 'testnet3':
         chain_name_conf_arg = 'testnet'
@@ -474,8 +487,10 @@ def write_config(config_path, *, n, chain, extra_config="", disable_autoconnect=
         # The node-owned btx-modeld listens on 0.0.0.0:29447 unless told
         # otherwise. One fixed port collides between the nodes of a test and
         # between parallel tests. Tests that need the PQ1 listener pass their
-        # own -modelbind=127.0.0.1:<port>.
-        f.write("modelbind=0\n")
+        # own -modelbind=127.0.0.1:<port>. A build without ModelNet does not
+        # register the option and refuses to start if the line is present.
+        if build_has_modelnet(config):
+            f.write("modelbind=0\n")
         f.write("shrinkdebugfile=0\n")
         f.write("deprecatedrpc=create_bdb\n")  # Required to run the tests
         # To improve SQLite wallet performance so that the tests don't timeout, use -unsafesqlitesync

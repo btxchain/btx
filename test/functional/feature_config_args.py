@@ -106,7 +106,7 @@ class ConfArgsTest(BitcoinTestFramework):
 
         # Check that startup fails if conf= is set in bitcoin.conf or in an included conf file
         bad_conf_file_path = self.nodes[0].datadir_path / "bitcoin_bad.conf"
-        util.write_config(bad_conf_file_path, n=0, chain='', extra_config='conf=some.conf\n')
+        util.write_config(bad_conf_file_path, n=0, chain='', extra_config='conf=some.conf\n', config=self.config)
         conf_in_config_file_err = 'Error: Error reading configuration file: conf cannot be set in the configuration file; use includeconf= if you want to include additional config files'
         self.nodes[0].assert_start_raises_init_error(
             extra_args=[f'-conf={bad_conf_file_path}'],
@@ -149,7 +149,7 @@ class ConfArgsTest(BitcoinTestFramework):
             self.nodes[0].assert_start_raises_init_error(expected_msg=f'Error: Config setting for -wallet only applied on {self.chain} network when in [{self.chain}] section.')
 
         main_conf_file_path = self.nodes[0].datadir_path / "bitcoin_main.conf"
-        util.write_config(main_conf_file_path, n=0, chain='', extra_config=f'includeconf={inc_conf_file_path}\n')
+        util.write_config(main_conf_file_path, n=0, chain='', extra_config=f'includeconf={inc_conf_file_path}\n', config=self.config)
 
         with open(inc_conf_file_path, 'w', encoding='utf-8') as conf:
             conf.write('nono\n')
@@ -486,9 +486,9 @@ class ConfArgsTest(BitcoinTestFramework):
         self.log.info("Test -acceptstalefeeestimates option support")
         conf_file = self.nodes[0].datadir_path / "bitcoin.conf"
         for chain, chain_name in {("main", ""), ("test", "testnet3"), ("signet", "signet"), ("testnet4", "testnet4")}:
-            util.write_config(conf_file, n=0, chain=chain_name, extra_config='acceptstalefeeestimates=1\n')
+            util.write_config(conf_file, n=0, chain=chain_name, extra_config='acceptstalefeeestimates=1\n', config=self.config)
             self.nodes[0].assert_start_raises_init_error(expected_msg=f'Error: acceptstalefeeestimates is not supported on {chain} chain.')
-        util.write_config(conf_file, n=0, chain="regtest")  # Reset to regtest
+        util.write_config(conf_file, n=0, chain="regtest", config=self.config)  # Reset to regtest
 
     def test_testnet3_deprecation_msg(self):
         self.log.info("Test testnet3 deprecation warning")

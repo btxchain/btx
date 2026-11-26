@@ -81,7 +81,7 @@ commands below. One-time setup on a fresh Windows machine can be done with:
 choco install llvm ninja -y
 ```
 
-Then configure, build, and package:
+Then configure, build, and package. If `nvcc` is on `PATH`, CMake turns the CUDA backend on and then stops because `BTX_CUDA_ARCHITECTURES` is empty. Pass `-DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF` for a CPU build, or set the architectures for a CUDA build:
 
 ```powershell
 cmake --preset windows-clangcl-static
@@ -130,7 +130,7 @@ Available features are listed in the [`vcpkg.json`](/vcpkg.json) file.
 
 ### 9. Antivirus Software
 
-To improve the build process performance, one might add the Bitcoin repository directory to the Microsoft Defender Antivirus exclusions.
+To improve the build process performance, one might add the Bitcoin repository directory to the Microsoft Defender Antivirus exclusions. A scanner can also quarantine `bitcoind.cpp.obj` as a miner. The link then fails with an undefined `main`, and the file has to be allowed before `btxd` will link.
 
 ## BTX on this tree
 

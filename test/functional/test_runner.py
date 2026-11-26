@@ -1230,7 +1230,9 @@ def run_tests(*, test_list, build_dir, tmpdir, jobs=1, enable_coverage=False, ar
                     combined_logs_args = [sys.executable, os.path.join(tests_dir, 'combine_logs.py'), testdir]
                     if BOLD[0]:
                         combined_logs_args += ['--color']
-                    combined_logs, _ = subprocess.Popen(combined_logs_args, text=True, stdout=subprocess.PIPE).communicate()
+                    combined_logs, _ = subprocess.Popen(
+                        combined_logs_args, text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
+                    ).communicate()
                     print("\n".join(deque(combined_logs.splitlines(), combined_logs_len)))
 
                 if failfast:
