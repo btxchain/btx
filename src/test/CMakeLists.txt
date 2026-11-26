@@ -2992,6 +2992,14 @@ if(Python3_EXECUTABLE)
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
   )
   set_property(TEST rc_golden_gate PROPERTY LABELS "rc;golden;matmul_v4")
+  # matmul_v4_rc_tests/rc_stage_h_golden_diff_gate runs the same script. Give it
+  # the configured interpreter and the script path, so it needs neither a
+  # `python3` on PATH nor the repository root as working directory. The path
+  # becomes a C string literal, so a Windows backslash must not reach it.
+  string(REPLACE "\\" "/" _btx_test_python3 "${Python3_EXECUTABLE}")
+  set_property(SOURCE matmul_v4_rc_tests.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+    "BTX_TEST_PYTHON3=\"${_btx_test_python3}\""
+    "BTX_TEST_RC_GOLDEN_GATE=\"${PROJECT_SOURCE_DIR}/contrib/matmul-v4/rc-golden-gate.py\"")
 endif()
 
 # Timing-variance checks are sensitive to host contention; run this suite
