@@ -8,7 +8,7 @@ from decimal import Decimal
 import re
 
 from test_framework.blocktools import COINBASE_MATURITY
-from test_framework.netutil import test_ipv6_local
+from test_framework.netutil import test_ipv6_local, test_ipv6_local_bind
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.authproxy import JSONRPCException
 from test_framework.util import (
@@ -151,6 +151,10 @@ class TestBitcoinCli(BitcoinTestFramework):
 
         self.log.info("Test port usage preferences")
         node_rpc_port = rpc_port(self.nodes[0].index)
+        # The node serves RPC on ::1 only where it can resolve ::1 for a bind.
+        rpc_on_ipv6 = have_ipv6 and test_ipv6_local_bind()
+        if have_ipv6 and not rpc_on_ipv6:
+            self.log.info("Skipping [::1] RPC connections: this host cannot bind ::1 with AI_ADDRCONFIG")
         # Prevent bitcoin-cli from using existing rpcport in conf
         conf_rpcport = "rpcport=" + str(node_rpc_port)
         self.nodes[0].replace_in_config([(conf_rpcport, "#" + conf_rpcport)])
@@ -160,12 +164,12 @@ class TestBitcoinCli(BitcoinTestFramework):
             assert_raises_process_error(1, "Could not connect to the server ::1:1", self.nodes[0].cli(f"-rpcconnect=[::1]:{node_rpc_port}", "-rpcport=1").echo)
 
         assert_equal(BLOCKS, self.nodes[0].cli("-rpcconnect=127.0.0.1:18999", f'-rpcport={node_rpc_port}').getblockcount())
-        if have_ipv6:
+        if rpc_on_ipv6:
             assert_equal(BLOCKS, self.nodes[0].cli("-rpcconnect=[::1]:18999", f'-rpcport={node_rpc_port}').getblockcount())
 
         # prefer rpcconnect port over default
         assert_equal(BLOCKS, self.nodes[0].cli(f"-rpcconnect=127.0.0.1:{node_rpc_port}").getblockcount())
-        if have_ipv6:
+        if rpc_on_ipv6:
             assert_equal(BLOCKS, self.nodes[0].cli(f"-rpcconnect=[::1]:{node_rpc_port}").getblockcount())
 
         # prefer rpcport over default

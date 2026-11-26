@@ -166,6 +166,20 @@ def test_ipv6_local():
         have_ipv6 = False
     return have_ipv6
 
+def test_ipv6_local_bind():
+    '''
+    Check that ::1 resolves for a passive bind the way the node resolves its
+    default RPC addresses (getaddrinfo with AI_ADDRCONFIG, src/httpserver.cpp).
+    On Linux this fails on a host with a non-loopback IPv4 address and IPv6
+    only on lo; the node then skips ::1, although test_ipv6_local() passes.
+    '''
+    try:
+        socket.getaddrinfo('::1', None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0,
+                           socket.AI_PASSIVE | socket.AI_ADDRCONFIG)
+    except socket.gaierror:
+        return False
+    return True
+
 def test_unix_socket():
     '''Return True if UNIX sockets are available on this platform.'''
     try:
