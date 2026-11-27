@@ -8,6 +8,7 @@
 #include <crypto/common.h>
 #include <modelnet/catalog.h>
 #include <modelnet/helper.h>
+#include <modelnet/safety.h>
 #include <modelnet/router.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
@@ -217,6 +218,72 @@ BOOST_AUTO_TEST_CASE(resolve_unsigned_announce_rejected)
     modelnet::NativeResponse nresp;
     BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
     BOOST_CHECK_EQUAL(nresp.status, 400);
+}
+
+// R29-02: the peer ext/search route must hide the same catalog rows that
+// PeerMayListModel hides, like ext/resolve does since #933. A local
+// searchmodels RPC ingests the whole catalog into the search index with no
+// peer filter; the ext/search route then returned held-back rows to any peer.
+BOOST_AUTO_TEST_CASE(search_http_hides_models_a_peer_may_not_list)
+{
+    const fs::path tmp = m_path_root / "search-peer-view";
+    modelnet::ModelCatalog cat{tmp, 8 << 20};
+    std::vector<unsigned char> st(10, 0);
+    WriteLE64(st.data(), 2);
+    st[8] = '{';
+    st[9] = '}';
+    auto import_dir = [&](const std::string& dir, const std::string& file,
+                          modelnet::CatalogEntry& out) {
+        const fs::path src = tmp / fs::PathFromString(dir);
+        fs::create_directories(src);
+        std::ofstream f(src / fs::PathFromString(file), std::ios::binary);
+        f.write(reinterpret_cast<const char*>(st.data()),
+                static_cast<std::streamsize>(st.size()));
+        f.close();
+        std::string ierr;
+        BOOST_REQUIRE_MESSAGE(cat.ImportPath(fs::PathToString(src), true, out, ierr), ierr);
+    };
+    modelnet::CatalogEntry shared, held;
+    import_dir("shared-src", "shared.safetensors", shared);
+    import_dir("held-back-src", "held.safetensors", held);
+    BOOST_REQUIRE(shared.model_id != held.model_id);
+    std::string err;
+    BOOST_REQUIRE(cat.Seed(shared.model_id, true, err));
+    // held is seeded but blocked by a safety advisory, so PeerMayListModel
+    // hides it while the seeded flag alone does not: this covers the query
+    // route (seeded-gated) as well as ext/search.
+    BOOST_REQUIRE(cat.Seed(held.model_id, true, err));
+    BOOST_REQUIRE(modelnet::GlobalSafety().LocalReport(
+        held.model_id.Hex(), modelnet::SAFETY_TARGET_MODEL,
+        modelnet::SAFETY_MALWARE, "operator", 1700000000, err));
+    BOOST_REQUIRE(modelnet::GlobalSafety().SubjectBlocked(held.model_id.Hex()));
+
+    {
+        UniValue req(UniValue::VOBJ);
+        req.pushKV("method", "searchmodels");
+        req.pushKV("params", UniValue(UniValue::VARR));
+        UniValue res;
+        std::string code;
+        BOOST_REQUIRE(modelnet::DispatchHelperRpc(cat, req, res, code, err));
+    }
+
+    modelnet::NativeRequest nreq;
+    nreq.method = "POST";
+    nreq.path = "/btx-model/2/ext/search";
+    nreq.body = "{}";
+    modelnet::NativeResponse nresp;
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_CHECK(nresp.body.find(shared.model_id.Hex()) != std::string::npos);
+    BOOST_CHECK(nresp.body.find(held.model_id.Hex()) == std::string::npos);
+    BOOST_CHECK(nresp.body.find(held.artifact_id.Hex()) == std::string::npos);
+
+    // The query route lists catalog model ids too and must apply the same
+    // filter; the seeded gate alone leaked the blocked model.
+    nreq.path = "/btx-model/2/query";
+    nreq.body = "{\"text\":\"\"}";
+    BOOST_REQUIRE(modelnet::HandleNativeRequest(cat, nreq, nresp));
+    BOOST_CHECK(nresp.body.find(shared.model_id.Hex()) != std::string::npos);
+    BOOST_CHECK(nresp.body.find(held.model_id.Hex()) == std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
