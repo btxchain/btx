@@ -15,6 +15,7 @@
 #include <netbase.h>
 #include <node/matmul_rc_admission.h>
 #include <node/matmul_trusted_attestations.h>
+#include <node/attested_utxo_snapshot_p2p.h>
 #include <node/block_chunk_transport.h>
 #include <node/miner.h>
 #include <node/transaction.h>
@@ -9833,6 +9834,69 @@ static std::unique_ptr<CNode> MakeOutboundConsensusPeer(NodeId id, int keyed)
         CAddress{}, strprintf("hdr-sync-%d", id),
         ConnectionType::OUTBOUND_FULL_RELAY,
         /*inbound_onion=*/false, /*network_key=*/0);
+}
+
+// An oversized utxomanifest must be rejected before its manifest is parsed.
+// The signatures vector would otherwise expand from a few MB of two-byte wire
+// entries to hundreds of MB in memory on the message-handler thread, before
+// any size or solicitation check runs. The guard makes the handler return in
+// microseconds; without it the deserialization dominates and takes far longer.
+BOOST_AUTO_TEST_CASE(utxomanifest_oversized_is_rejected_before_parse)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode peer{/*id=*/800,
+               /*sock=*/nullptr,
+               CAddress{PeermanTestService(0x1400007f), NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x14,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"utxomanifest-flooder",
+               ConnectionType::INBOUND,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(peer);
+    connman.FlushSendBuffer(peer);
+    struct FinalizeFlooder {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizeFlooder()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize_flooder{connman, peerman, peer};
+
+    // About 3,000,000 two-byte signature entries: roughly 6 MB on the wire,
+    // well over the 84-byte fixed header plus the manifest byte cap.
+    node::AttestedUTXOSnapshotManifestMsg msg;
+    msg.manifest.signatures.resize(3'000'000);
+    CSerializedNetMsg wire{NetMsg::Make(NetMsgType::UTXOMANIFEST, msg)};
+    BOOST_REQUIRE_GT(
+        wire.data.size(),
+        size_t{84} + node::ATTESTED_UTXO_SNAPSHOT_MAX_MANIFEST_BYTES);
+
+    peer.fPauseSend = false;
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, std::move(wire)));
+    peer.fPauseSend = false;
+    const auto start{std::chrono::steady_clock::now()};
+    (void)connman.ProcessMessagesOnce(peer);
+    const auto elapsed_ms{std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start)
+                              .count()};
+    BOOST_TEST_MESSAGE("utxomanifest handler elapsed_ms=" << elapsed_ms);
+
+    // The guard returns before expanding the signatures vector. A tolerant
+    // bound keeps this green on any machine while the unguarded deserialization
+    // of ~4M entries stays far above it.
+    BOOST_CHECK_LT(elapsed_ms, 300);
 }
 
 BOOST_AUTO_TEST_CASE(stale_tip_with_inflight_and_forty_peers_sends_getheaders)

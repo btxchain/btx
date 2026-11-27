@@ -21302,6 +21302,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     }
 
     if (msg_type == NetMsgType::UTXOMANIFEST) {
+        // A valid message is an 84-byte fixed header (two uint256, one int32,
+        // one uint64 and two uint32) plus a manifest bounded by
+        // ATTESTED_UTXO_SNAPSHOT_MAX_MANIFEST_BYTES, which is re-checked once
+        // the manifest is parsed. Reject an oversized message before parsing
+        // it: the manifest's signatures vector would otherwise expand to
+        // hundreds of MB in memory from a few MB of two-byte entries first.
+        static constexpr size_t UTXOMANIFEST_FIXED_HEADER_BYTES{84};
+        static_assert(UTXOMANIFEST_FIXED_HEADER_BYTES ==
+                          sizeof(uint256) + sizeof(int32_t) + sizeof(uint64_t) +
+                              2 * sizeof(uint32_t) + sizeof(uint256),
+                      "utxomanifest fixed header drifted from its fields");
+        if (vRecv.size() > UTXOMANIFEST_FIXED_HEADER_BYTES +
+                               node::ATTESTED_UTXO_SNAPSHOT_MAX_MANIFEST_BYTES) {
+            Misbehaving(*peer, "utxomanifest too large");
+            return;
+        }
         node::AttestedUTXOSnapshotManifestMsg msg;
         vRecv >> msg;
         if (!vRecv.empty()) {
