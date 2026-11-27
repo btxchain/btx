@@ -83,6 +83,25 @@ static void test_hello_with_full_queue() {
     assert(reply && reply->command == "swhello");
 }
 
+// The shared core budget serves every SwapNet peer and every outbound frame.
+// Frames a peer sends past its own rate must not spend it.
+static void test_flooding_peer_leaves_shared_budget() {
+    const std::string network(64, 'a');
+    btx::p2p::AuthoritativeCore().Start(network);
+    Transport transport(network);
+    for (PeerId id : {1, 2}) {
+        transport.PeerReady(id, 1000);
+        assert(transport.Receive(id, "swhello", "2:" + network, 1000));
+    }
+    while (transport.TakeOutbound()) {}
+    const std::string frame(Transport::MAX_FRAME, 'x');
+    // Four MiB of frames at one instant: peer 1's own rate admits one of them.
+    for (int n = 0; n < 64; ++n) transport.Receive(1, "swprov", frame, 1000);
+    assert(transport.GetStats().inbound == 1);
+    assert(transport.Receive(2, "swprov", frame, 1000));
+    assert(transport.Send(2, "swprov", frame));
+}
+
 int main() {
     const std::string network(64,'a');Transport t(network);
     assert(t.GetStats().enabled);t.PeerReady(1,1000);
@@ -114,5 +133,7 @@ int main() {
     test_paired_admission(false, true);
     test_paired_admission(true, true);
     test_hello_with_full_queue();
+    // Starts the process-wide core, which has no Stop(): keep it last.
+    test_flooding_peer_leaves_shared_budget();
     std::cout<<"transport: all assertions passed\n";
 }

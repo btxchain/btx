@@ -56,10 +56,6 @@ bool Transport::Receive(PeerId id,const std::string& command,const std::string& 
     auto fail=[this](){++m_rejected;return false;};
     auto it=m_peers.find(id);
     if (!m_enabled||it==m_peers.end()||!KnownCommand(command)||payload.empty()||payload.size()>MAX_FRAME)return fail();
-    if (btx::p2p::AuthoritativeCore().Running()) {
-        auto shared=m_shared_sessions.find(id);
-        if (shared==m_shared_sessions.end() || !btx::p2p::AuthoritativeCore().Charge(btx::p2p::Service::SwapNet,shared->second,payload.size(),false)) return fail();
-    }
     auto& p=it->second;
     // Clock rollback earns no credit. Charge before parsing or allocating a queue slot.
     const auto elapsed=std::max<std::int64_t>(0,now-p.last_ms);
@@ -67,6 +63,11 @@ bool Transport::Receive(PeerId id,const std::string& command,const std::string& 
     p.last_ms=std::max(now,p.last_ms);
     const double cost=1.0+static_cast<double>(payload.size())/8192.0;
     if (p.tokens<cost) return fail();
+    // The shared budget serves every peer: spend it only within this peer's rate.
+    if (btx::p2p::AuthoritativeCore().Running()) {
+        auto shared=m_shared_sessions.find(id);
+        if (shared==m_shared_sessions.end() || !btx::p2p::AuthoritativeCore().Charge(btx::p2p::Service::SwapNet,shared->second,payload.size(),false)) return fail();
+    }
     p.tokens-=cost;
     if (command=="swhello") {
         if (p.admitted||payload!="2:"+m_network)return fail();
