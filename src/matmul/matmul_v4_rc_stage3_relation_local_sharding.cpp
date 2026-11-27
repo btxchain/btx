@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_relation_local_sharding.h>
 
+#include <compat/wide128.h>
 #include <hash.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_air.h>
 #include <matmul/matmul_v4_rc_stage3_episode_air.h>
@@ -221,14 +222,14 @@ bool CheckedCost(
     RelationLocalCostModelV1& cost,
     const std::vector<RelationLocalShardV1>& shards)
 {
-    __uint128_t cells = 0;
-    __uint128_t openings = 0;
+    btx::U128 cells = 0;
+    btx::U128 openings = 0;
     for (const auto& shard : shards) {
         cells +=
-            __uint128_t{shard.global_columns.size()} *
+            btx::U128{shard.global_columns.size()} *
             cost.trace_rows;
         openings +=
-            __uint128_t{
+            btx::U128{
                 shard.global_columns.size() + 1} *
             kRelationLocalShardQueriesV1 * 2 *
             kRelationLocalFp3BytesV1;

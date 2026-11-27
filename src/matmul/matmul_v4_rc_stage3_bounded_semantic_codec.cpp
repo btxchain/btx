@@ -5,6 +5,7 @@
 #include <matmul/matmul_v4_rc_stage3_bounded_semantic_codec.h>
 
 #include <hash.h>
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <primitives/block.h>
 #include <tinyformat.h>
@@ -135,12 +136,21 @@ static_assert(
         RCStage3BoundedCoupledSemanticComposition>() ==
         9);
 
+template <typename T>
+inline constexpr size_t kAggregateFieldCount = AggregateFieldCount<T>();
+
+// Resolve this probe before entering the deeply nested Reader/Writer walk.
+template <>
+inline constexpr size_t kAggregateFieldCount<Fri3AlgMultiRowBatchProof> =
+    AggregateFieldCount<Fri3AlgMultiRowBatchProof>();
+static_assert(kAggregateFieldCount<Fri3AlgMultiRowBatchProof> == 17);
+
 template <typename T, typename F>
 bool VisitAggregate(T& value, F&& field)
 {
     constexpr size_t n =
-        AggregateFieldCount<
-            std::remove_cvref_t<T>>();
+        kAggregateFieldCount<
+            std::remove_cvref_t<T>>;
     static_assert(
         n != 32 ||
             !AggregateInitializable<
