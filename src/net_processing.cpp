@@ -22018,11 +22018,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 "Ignoring mmattest over source verify budget count=%u "
                 "peer=%d netgroup=%u\n",
                 count, pfrom.GetId(), pfrom.nKeyedNetGroup);
-            peer->m_matmul_protocol_ignored += 1;
-            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
-                    peer->m_matmul_protocol_ignored)) {
-                BanHammeringPeer(pfrom, *peer, "aggressive mmattest");
-            }
+            // The source verify budget is shared across a keyed netgroup, so a
+            // miss here can be caused by another peer in the same netgroup.
+            // It must not feed this peer's hammer-ban counter, which is what
+            // the per-peer bucket above is for; otherwise one source could get
+            // an honest co-netgroup attestor banned.
             return;
         }
         peer->m_matmul_protocol_ignored = 0;
@@ -22410,11 +22410,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                      "Ignoring mmattestpq over source verify budget count=%u "
                      "peer=%d netgroup=%u\n",
                      count, pfrom.GetId(), pfrom.nKeyedNetGroup);
-            peer->m_matmul_protocol_ignored += 1;
-            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
-                    peer->m_matmul_protocol_ignored)) {
-                BanHammeringPeer(pfrom, *peer, "aggressive mmattestpq");
-            }
+            // Shared per-netgroup budget: a miss must not ban this peer. See
+            // the MMATTEST handler above.
             return;
         }
         peer->m_matmul_protocol_ignored = 0;
@@ -22628,11 +22625,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 "Ignoring mmatrefute over source verify budget count=%u "
                 "peer=%d netgroup=%u\n",
                 count, pfrom.GetId(), pfrom.nKeyedNetGroup);
-            peer->m_matmul_protocol_ignored += 1;
-            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
-                    peer->m_matmul_protocol_ignored)) {
-                BanHammeringPeer(pfrom, *peer, "aggressive mmatrefute");
-            }
+            // Shared per-netgroup budget: a miss must not ban this peer. See
+            // the MMATTEST handler above.
             return;
         }
         for (uint64_t i = 0; i < count; ++i) {
