@@ -80,17 +80,48 @@ consteval bool AggregateInitializable(
     };
 }
 
-template <typename T, size_t N = 0>
+// Count fields without a recursive consteval. MSVC rejects the recursive
+// form with C1202 once the aggregate is deeper than a handful of fields.
+// The cap stays 32, matching the previous N == 32 stop.
+template <typename T>
 consteval size_t AggregateFieldCount()
 {
-    if constexpr (
-        N == 32 ||
-        !AggregateInitializable<T>(
-            std::make_index_sequence<N + 1>{})) {
-        return N;
-    } else {
-        return AggregateFieldCount<T, N + 1>();
-    }
+#define BTX_AGG_FIELD_STEP(N) \
+    if constexpr (!AggregateInitializable<T>(std::make_index_sequence<(N)>{})) return (N) - 1; else
+    BTX_AGG_FIELD_STEP(1)
+    BTX_AGG_FIELD_STEP(2)
+    BTX_AGG_FIELD_STEP(3)
+    BTX_AGG_FIELD_STEP(4)
+    BTX_AGG_FIELD_STEP(5)
+    BTX_AGG_FIELD_STEP(6)
+    BTX_AGG_FIELD_STEP(7)
+    BTX_AGG_FIELD_STEP(8)
+    BTX_AGG_FIELD_STEP(9)
+    BTX_AGG_FIELD_STEP(10)
+    BTX_AGG_FIELD_STEP(11)
+    BTX_AGG_FIELD_STEP(12)
+    BTX_AGG_FIELD_STEP(13)
+    BTX_AGG_FIELD_STEP(14)
+    BTX_AGG_FIELD_STEP(15)
+    BTX_AGG_FIELD_STEP(16)
+    BTX_AGG_FIELD_STEP(17)
+    BTX_AGG_FIELD_STEP(18)
+    BTX_AGG_FIELD_STEP(19)
+    BTX_AGG_FIELD_STEP(20)
+    BTX_AGG_FIELD_STEP(21)
+    BTX_AGG_FIELD_STEP(22)
+    BTX_AGG_FIELD_STEP(23)
+    BTX_AGG_FIELD_STEP(24)
+    BTX_AGG_FIELD_STEP(25)
+    BTX_AGG_FIELD_STEP(26)
+    BTX_AGG_FIELD_STEP(27)
+    BTX_AGG_FIELD_STEP(28)
+    BTX_AGG_FIELD_STEP(29)
+    BTX_AGG_FIELD_STEP(30)
+    BTX_AGG_FIELD_STEP(31)
+    BTX_AGG_FIELD_STEP(32)
+#undef BTX_AGG_FIELD_STEP
+    return 32;
 }
 
 // Wire-order tripwires for the two complete inventories. Adding, removing or

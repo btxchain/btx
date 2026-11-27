@@ -25,6 +25,10 @@
 #include <sys/sysctl.h>
 #endif
 
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <immintrin.h>
+#endif
+
 #if defined(ENABLE_SSE41) && (defined(__x86_64__) || defined(__amd64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86))
 namespace sha256_sse4
 {
@@ -587,6 +591,12 @@ bool AVXEnabled()
     uint32_t a, d;
     __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
     return (a & 6) == 6;
+}
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+/** Check whether the OS has enabled AVX registers. */
+bool AVXEnabled()
+{
+    return (_xgetbv(0) & 6) == 6;
 }
 #endif
 #endif // DISABLE_OPTIMIZED_SHA256
