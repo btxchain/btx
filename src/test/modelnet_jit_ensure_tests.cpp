@@ -1113,6 +1113,11 @@ BOOST_AUTO_TEST_CASE(remaining_capability_rpc_surface)
     }
 }
 
+// POSIX only: the case points TMPDIR elsewhere with setenv, checks group and
+// other permission bits, and creates a directory symlink. Windows has no
+// setenv, finds its temp directory through TMP/TEMP, and needs a privilege for
+// symlinks; EnsurePrivateDir takes its own Windows path there.
+#ifndef _WIN32
 BOOST_AUTO_TEST_CASE(ensure_staging_dir_is_private)
 {
     BOOST_TEST_MESSAGE("The fixed staging directory under the temp directory must be private to this user");
@@ -1151,6 +1156,7 @@ BOOST_AUTO_TEST_CASE(ensure_staging_dir_is_private)
         ::unsetenv("TMPDIR");
     }
 }
+#endif // !_WIN32
 
 // Plans and the host budget used to carry over from earlier cases and suites
 // in the same run: capability_plans_and_locks_are_bounded failed when an
