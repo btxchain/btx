@@ -4111,7 +4111,30 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             return true;
         }
         q.scope = SearchScope::LOCAL;
-        const auto hits = g_search_idx.Search(q, ConnNowMs());
+        auto hits = g_search_idx.Search(q, ConnNowMs());
+        // IngestCatalogIntoSearch adds every local catalog row to the index
+        // with no peer filter. A peer may only see the rows PeerMayListModel
+        // allows, as the availability and ext/resolve routes already enforce.
+        // Published signed records (not local_catalog) are unaffected.
+        {
+            UniValue listed;
+            cat.List(listed);
+            std::set<std::string> listable;
+            if (listed.exists("models")) {
+                for (const auto& m : listed["models"].getValues()) {
+                    if (PeerMayListModel(cat, m) && m.exists("model_id") &&
+                        m["model_id"].isStr()) {
+                        listable.insert(m["model_id"].get_str());
+                    }
+                }
+            }
+            hits.erase(std::remove_if(hits.begin(), hits.end(),
+                           [&](const SearchHit& h) {
+                               return h.rec.local_catalog &&
+                                      !listable.count(h.rec.model_id.Hex());
+                           }),
+                       hits.end());
+        }
         UniValue o = SearchResponseJson(qid.empty() ? NewSearchQueryId() : qid, "local", hits,
                                          static_cast<int>(hits.size()) >= q.limit);
         o.pushKV("ttl_remaining", std::max(0, ttl - 1));
@@ -4207,12 +4230,24 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
         UniValue ids(UniValue::VARR);
         UniValue listed;
         cat.List(listed);
+        // A peer may only confirm or list models PeerMayListModel allows, as
+        // ext/search, availability and ext/resolve enforce. The seeded flag
+        // alone misses blocked, not-admitted and held-back models.
+        std::set<std::string> listable;
+        if (listed.exists("models")) {
+            for (const auto& m : listed["models"].getValues()) {
+                if (PeerMayListModel(cat, m) && m.exists("model_id") &&
+                    m["model_id"].isStr()) {
+                    listable.insert(m["model_id"].get_str());
+                }
+            }
+        }
         std::string qerr;
         if (body.exists("root") && body["root"].isStr()) {
             Digest48 id;
             if (Digest48::FromHex(body["root"].get_str(), id, qerr)) {
                 CatalogEntry e;
-                if (cat.Find(id, e) && e.seeded) ids.push_back(e.model_id.Hex());
+                if (cat.Find(id, e) && listable.count(e.model_id.Hex())) ids.push_back(e.model_id.Hex());
                 std::lock_guard<std::mutex> lock(g_ext_mu);
                 for (const auto& h : RecordsFor(cat).LookupExact(id, static_cast<int64_t>(std::time(nullptr)))) {
                     ids.push_back(h.record_id.Hex());
@@ -4225,7 +4260,8 @@ bool HandleNativeRequest(ModelCatalog& cat, const NativeRequest& req, NativeResp
             if (listed.exists("models")) {
                 for (const auto& m : listed["models"].getValues()) {
                     if (static_cast<int>(ids.size()) >= limit) break;
-                    if (!m.exists("seeded") || !m["seeded"].get_bool()) continue;
+                    if (!m.exists("model_id") || !m["model_id"].isStr() ||
+                        !listable.count(m["model_id"].get_str())) continue;
                     const std::string hay = ToLower(m.write());
                     if (hay.find(q) != std::string::npos) ids.push_back(m["model_id"].get_str());
                 }
