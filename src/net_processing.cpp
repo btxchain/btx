@@ -11569,6 +11569,11 @@ bool PeerManagerImpl::TryLowWorkHeadersSync(
                          "skipping low-work headers presync restart from peer=%d "
                          "(address already failed; backoff not elapsed)\n",
                          pfrom.GetId());
+            } else if (!HeadersSyncState::PresyncSlotAvailable()) {
+                LogDebug(BCLog::NET,
+                         "skipping low-work headers presync from peer=%d "
+                         "(eight presync windows already open)\n",
+                         pfrom.GetId());
             } else {
             // Note: we could advance to the last header in this set that is
             // known to us, rather than starting at the first header (which we

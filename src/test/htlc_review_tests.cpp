@@ -181,7 +181,7 @@ BOOST_AUTO_TEST_CASE(review_claim_preimage_length_matrix)
             BuildP2MRRefundLeaf(1000, PQAlgorithm::ML_DSA_44, sender.GetPubKey()));
         Spend s{t.spk};
         const Bytes sig = s.SignLeaf(claimer, t.claim_leaf);
-        ScriptError err;
+        ScriptError err{SCRIPT_ERR_OK};
         const bool ok = s.Verify({sig, preimage, t.claim_leaf, t.claim_control}, err);
         BOOST_TEST_MESSAGE("preimage len " << len << " -> " << ScriptErrorString(err));
         if (len == 32) {
@@ -210,7 +210,7 @@ BOOST_AUTO_TEST_CASE(review_claim_wrong_preimage_and_wrong_key)
         BuildP2MRHTLCSha256Leaf(Sha256Bytes(preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey()),
         BuildP2MRRefundLeaf(1000, PQAlgorithm::ML_DSA_44, sender.GetPubKey()));
     Spend s{t.spk};
-    ScriptError err;
+    ScriptError err{SCRIPT_ERR_OK};
 
     // Wrong 32-byte preimage.
     BOOST_CHECK(!s.Verify({s.SignLeaf(claimer, t.claim_leaf), Bytes(32, 0x12), t.claim_leaf, t.claim_control}, err));
@@ -248,7 +248,7 @@ BOOST_AUTO_TEST_CASE(review_branch_confusion)
         BuildP2MRHTLCSha256Leaf(Sha256Bytes(preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey()),
         BuildP2MRRefundLeaf(1000, PQAlgorithm::ML_DSA_44, sender.GetPubKey()));
     Spend s{t.spk, /*locktime=*/2000};
-    ScriptError err;
+    ScriptError err{SCRIPT_ERR_OK};
     const Bytes csig = s.SignLeaf(claimer, t.claim_leaf);
     const Bytes rsig = s.SignLeaf(sender, t.refund_leaf);
 
@@ -283,7 +283,7 @@ BOOST_AUTO_TEST_CASE(review_annex_does_not_bypass_size_check)
         BuildP2MRHTLCSha256Leaf(Sha256Bytes(preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey()),
         BuildP2MRRefundLeaf(1000, PQAlgorithm::ML_DSA_44, sender.GetPubKey()));
     Spend s{t.spk};
-    ScriptError err;
+    ScriptError err{SCRIPT_ERR_OK};
     const Bytes annex{ANNEX_TAG, 0x00};
     BOOST_CHECK(!s.Verify({s.SignLeaf(claimer, t.claim_leaf), preimage, t.claim_leaf, t.claim_control, annex}, err));
     BOOST_TEST_MESSAGE("annex + 33-byte preimage -> " << ScriptErrorString(err));
@@ -333,7 +333,7 @@ BOOST_AUTO_TEST_CASE(review_legacy_leaves_reject_non32_preimage_under_flag)
                                 c.name << ": leaf script should be satisfied, got " << ScriptErrorString(e2));
         }
         // (b) Post-activation block flags, including the 32-byte flag: rejected.
-        ScriptError err;
+        ScriptError err{SCRIPT_ERR_OK};
         BOOST_CHECK_MESSAGE(!s.Verify({sig, c.preimage, t.claim_leaf, t.claim_control}, err),
                             c.name << ": matching non-32 preimage must be consensus-invalid, got " << ScriptErrorString(err));
         BOOST_CHECK_EQUAL(err, SCRIPT_ERR_P2MR_HTLC_PREIMAGE_SIZE);
@@ -358,7 +358,7 @@ BOOST_AUTO_TEST_CASE(review_refund_locktime_boundaries)
         Spend s{t.spk, locktime, sequence};
         return s.Verify({s.SignLeaf(sender, t.refund_leaf), t.refund_leaf, t.refund_control}, err);
     };
-    ScriptError err;
+    ScriptError err{SCRIPT_ERR_OK};
     BOOST_CHECK(!try_refund(L - 1, CTxIn::MAX_SEQUENCE_NONFINAL, err));
     BOOST_CHECK_EQUAL(err, SCRIPT_ERR_UNSATISFIED_LOCKTIME);
     BOOST_CHECK(try_refund(L, CTxIn::MAX_SEQUENCE_NONFINAL, err));
@@ -406,7 +406,7 @@ BOOST_AUTO_TEST_CASE(review_slhdsa_claim)
     BOOST_CHECK(ParseP2MRHTLCSha256Leaf(t.claim_leaf, h, algo, pk));
     BOOST_CHECK(algo == PQAlgorithm::SLH_DSA_128S);
     Spend s{t.spk};
-    ScriptError err;
+    ScriptError err{SCRIPT_ERR_OK};
     BOOST_CHECK(s.Verify({s.SignLeaf(claimer, t.claim_leaf), preimage, t.claim_leaf, t.claim_control}, err));
     BOOST_CHECK(!s.Verify({s.SignLeaf(claimer, t.claim_leaf), Bytes(31, 0x61), t.claim_leaf, t.claim_control}, err));
 }

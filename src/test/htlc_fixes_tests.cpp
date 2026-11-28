@@ -227,7 +227,7 @@ BOOST_AUTO_TEST_CASE(fix_f1_legacy_preimage_length_matches_v03415)
             : BuildP2MRHTLCTxLeaf(Hash160Bytes(c.preimage), PQAlgorithm::ML_DSA_44, claimer.GetPubKey());
         BOOST_CHECK(P2MRClaimLeafPinsPreimageLength(leaf));
         const HtlcTree t = MakeTree(leaf, refund_leaf);
-        ScriptError err;
+        ScriptError err{SCRIPT_ERR_OK};
         BOOST_CHECK_MESSAGE(VerifyClaim(t, claimer, c.preimage, PRE_ACTIVATION_BLOCK_FLAGS, err),
                             c.name << ": pre-activation flags must accept, got " << ScriptErrorString(err));
         BOOST_CHECK_MESSAGE(!VerifyClaim(t, claimer, c.preimage, activated_flags, err),
@@ -239,7 +239,7 @@ BOOST_AUTO_TEST_CASE(fix_f1_legacy_preimage_length_matches_v03415)
     const Bytes good(32, 0x46);
     const HtlcTree legacy32 = MakeTree(
         BuildP2MRHTLCSha256LegacyLeaf(Sha256Bytes(good), PQAlgorithm::ML_DSA_44, claimer.GetPubKey()), refund_leaf);
-    ScriptError err;
+    ScriptError err{SCRIPT_ERR_OK};
     BOOST_CHECK(VerifyClaim(legacy32, claimer, good, PRE_ACTIVATION_BLOCK_FLAGS, err));
     BOOST_CHECK(VerifyClaim(legacy32, claimer, good, activated_flags, err));
 

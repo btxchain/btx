@@ -10,6 +10,7 @@
 #include <util/vector.h>
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 #include <optional>
 
@@ -55,6 +56,21 @@ bool IsRepresentableBlockIndexHeight(int64_t height)
 // re-calculate parameters if we compress further)
 static_assert(sizeof(CompressedHeader) == 160);
 
+namespace {
+std::atomic<int> g_active_header_presyncs{0};
+constexpr int kMaxConcurrentHeaderPresyncs{8};
+} // namespace
+
+bool HeadersSyncState::PresyncSlotAvailable()
+{
+    return g_active_header_presyncs.load(std::memory_order_relaxed) < kMaxConcurrentHeaderPresyncs;
+}
+
+HeadersSyncState::~HeadersSyncState()
+{
+    g_active_header_presyncs.fetch_sub(1, std::memory_order_relaxed);
+}
+
 HeadersSyncState::HeadersSyncState(NodeId id, const Consensus::Params& consensus_params,
         const CBlockIndex* chain_start, const arith_uint256& minimum_required_work) :
     m_commit_offset(FastRandomContext().randrange<unsigned>(HEADER_COMMITMENT_PERIOD)),
@@ -67,6 +83,7 @@ HeadersSyncState::HeadersSyncState(NodeId id, const Consensus::Params& consensus
     m_presync_last_index(const_cast<CBlockIndex*>(chain_start)),
     m_redownload_last_index(const_cast<CBlockIndex*>(chain_start))
 {
+    g_active_header_presyncs.fetch_add(1, std::memory_order_relaxed);
     // Estimate the number of blocks that could possibly exist on the peer's
     // chain *right now* using 6 blocks/second (fastest blockrate given the MTP
     // rule) times the number of seconds from the last allowed block until

@@ -40,9 +40,10 @@ Best practices:
 - Keep the mining reward wallet backed up with descriptors, not just the SQLite wallet file.
 - Prefer `btxd` / `btx-cli` in automation and service files.
 - For production-scale mining, use `getblocktemplate` / `submitblock` and external workers. The scripts here are mainly for solo mining and operator automation.
-- For first-run or fleet installs from a GitHub release, prefer
-  `contrib/faststart/btx-agent-setup.py --preset miner` so the binary install,
-  assumeutxo bootstrap, and mining-oriented config land together.
+- For a first-run install of the v0.34.17 prerelease, extract the release
+  archive and use the scripts in this directory. `--preset miner` stops on
+  that prerelease: the preset requires `snapshot_manifest`, and v0.34.17 does
+  not publish one.
 - The official per-platform release archives now already include the helpers in
   this directory, so a direct archive extraction still leaves the mining
   supervisor scripts available under `contrib/mining/`.
@@ -111,7 +112,11 @@ Best practices:
 
 Quick start:
 
-For a new release-based installation, the complete verified install,
+The command below is for a release whose manifest includes `snapshot_manifest`.
+The v0.34.17 prerelease does not publish one, so `--preset miner` stops there.
+Extract that archive and use the scripts in this directory instead.
+
+For a release that does publish `snapshot_manifest`, the verified install,
 AssumeUTXO bootstrap, mining-wallet provisioning, and supervisor handoff is one
 command:
 

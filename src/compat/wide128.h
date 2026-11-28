@@ -157,6 +157,16 @@ public:
     explicit constexpr operator int64_t() const { return static_cast<int64_t>(lo); }
     explicit constexpr operator uint32_t() const { return static_cast<uint32_t>(lo); }
     explicit constexpr operator int32_t() const { return static_cast<int32_t>(lo); }
+    // GCC's native __int128 converts to double. MSVC has no native 128-bit
+    // type, so the test printers need the same conversion here.
+    explicit operator double() const
+    {
+        const bool neg = *this < 0;
+        const Unsigned128 u = Magnitude(neg ? -*this : *this);
+        const double d = static_cast<double>(u.hi) * 18446744073709551616.0 +
+                         static_cast<double>(u.lo);
+        return neg ? -d : d;
+    }
     // Same bits as static_cast<unsigned __int128>(signed __int128). MSVC needs
     // this for the matmul accumulator reduction; GCC keeps the native type.
     explicit constexpr operator Unsigned128() const

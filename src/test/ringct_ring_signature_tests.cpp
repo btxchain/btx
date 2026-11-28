@@ -500,23 +500,23 @@ BOOST_AUTO_TEST_CASE(known_answer_vectors_for_deterministic_derivations)
     BOOST_REQUIRE(DeriveInputNullifierForTest(nf,
                                        Span<const unsigned char>{spending_key.data(), spending_key.size()},
                                        ring_member));
-    BOOST_CHECK_EQUAL(nf, uint256{"2e282e9e614f5f9f77c45582a9d528039c4d61f6b126eb16a6cbef07cd17c57f"});
+    BOOST_CHECK_EQUAL(nf, uint256::FromHex("2e282e9e614f5f9f77c45582a9d528039c4d61f6b126eb16a6cbef07cd17c57f").value());
 
-    FastRandomContext rng_a{uint256{"00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa"}};
-    FastRandomContext rng_b{uint256{"55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb"}};
+    FastRandomContext rng_a{uint256::FromHex("00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa00aa").value()};
+    FastRandomContext rng_b{uint256::FromHex("55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb55bb").value()};
     const lattice::PolyVec blind_a = lattice::SampleSmallVec(rng_a, lattice::MODULE_RANK, /*eta=*/2);
     const lattice::PolyVec blind_b = lattice::SampleSmallVec(rng_b, lattice::MODULE_RANK, /*eta=*/2);
     const Commitment in0 = Commit(/*value=*/13, blind_a);
     const Commitment in1 = Commit(/*value=*/21, blind_b);
     const Commitment out0 = Commit(/*value=*/31, blind_a);
     const std::vector<Nullifier> input_nullifiers{
-        uint256{"0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100"},
-        uint256{"00112233445566778899aabbccddeeff0f0e0d0c0b0a09080706050403020100"},
+        uint256::FromHex("0f0e0d0c0b0a09080706050403020100ffeeddccbbaa99887766554433221100").value(),
+        uint256::FromHex("00112233445566778899aabbccddeeff0f0e0d0c0b0a09080706050403020100").value(),
     };
     const uint256 tx_binding_hash =
         uint256::FromHex("1234567890abcdef00112233445566778899aabbccddeeff1122334455667788").value();
     const uint256 msg_hash = RingSignatureMessageHash({in0, in1}, {out0}, /*fee=*/3, input_nullifiers, tx_binding_hash);
-    BOOST_CHECK_EQUAL(msg_hash, uint256{"11d9cac523f007a94904f74314f9e3ed89da86b0d8300bcb78bf1511ad3dc448"});
+    BOOST_CHECK_EQUAL(msg_hash, uint256::FromHex("11d9cac523f007a94904f74314f9e3ed89da86b0d8300bcb78bf1511ad3dc448").value());
 }
 
 BOOST_AUTO_TEST_CASE(duplicate_key_images_are_rejected)
@@ -735,7 +735,7 @@ BOOST_AUTO_TEST_CASE(deterministic_ring_signature_known_answer_vector)
     const uint256 hash_b = SerializeRingSignatureHash(sig_b);
     BOOST_CHECK_EQUAL(hash_a, hash_b);
     // R6-306: Frozen ring signature KAT — pinned hash detects silent changes.
-    BOOST_CHECK_EQUAL(hash_a, uint256{"7b4fd90250f9d9ac64450475d4c74e7982cef9b0ad18dceedc11c6a4a226a197"});
+    BOOST_CHECK_EQUAL(hash_a, uint256::FromHex("7b4fd90250f9d9ac64450475d4c74e7982cef9b0ad18dceedc11c6a4a226a197").value());
 }
 
 BOOST_AUTO_TEST_CASE(hedged_entropy_changes_signature_but_verifies)

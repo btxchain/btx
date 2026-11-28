@@ -25,6 +25,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <vector>
 
@@ -211,7 +212,7 @@ BOOST_AUTO_TEST_CASE(alg_hash_external_matrix_invertible_and_m4_mds)
     // equal popcount; every determinant must be nonzero.
     for (uint32_t rows = 1; rows < 16; ++rows) {
         for (uint32_t cols = 1; cols < 16; ++cols) {
-            if (__builtin_popcount(rows) != __builtin_popcount(cols)) continue;
+            if (std::popcount(rows) != std::popcount(cols)) continue;
             std::vector<std::vector<Fp>> sub;
             for (int i = 0; i < 4; ++i) {
                 if (!(rows & (1u << i))) continue;

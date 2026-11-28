@@ -9676,6 +9676,18 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     if (!pblock) {
         std::shared_ptr<CBlock> pblockNew = std::make_shared<CBlock>();
         if (!m_blockman.ReadBlock(*pblockNew, *pindexNew)) {
+            // HAVE_DATA with no file position means the body was never stored.
+            // Aborting the process here is what killed a trusted-mode restart.
+            // The block is not connected. Clearing the data bit makes the next
+            // candidate scan treat the index as header-only so the body can be
+            // requested again. A real file that fails to read is still fatal.
+            if (pindexNew->GetBlockPos().IsNull()) {
+                pindexNew->nStatus &= ~BLOCK_HAVE_DATA;
+                m_blockman.m_dirty_blockindex.insert(pindexNew);
+                setBlockIndexCandidates.erase(pindexNew);
+                return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                                   ": block data is not on disk");
+            }
             return FatalError(m_chainman.GetNotifications(), state, _("Failed to read block."));
         }
         pthisBlock = pblockNew;
@@ -17984,7 +17996,17 @@ void ChainstateManager::CheckBlockIndex()
                         // Parked branches, armed losing-tip extensions, and
                         // trusted-mirror gate refusals are not candidates
                         // (FindMostWorkChain / TryAddBlockIndexCandidate).
-                        if (!c->m_chainman.IsOnParkedReorgBranch(pindex) &&
+                        // A header-only index, or one whose chain-tx count was
+                        // never set, is not a candidate either: TryAdd refuses
+                        // it until the body arrives. The tip and a snapshot
+                        // base are the same exemptions TryAdd uses.
+                        const bool connectable_body{
+                            ((pindex->nStatus & BLOCK_HAVE_DATA) != 0) &&
+                            pindex->HaveNumChainTxs()};
+                        const bool body_exempt{
+                            pindex == c->m_chain.Tip() || pindex == c->SnapshotBase()};
+                        if ((connectable_body || body_exempt) &&
+                            !c->m_chainman.IsOnParkedReorgBranch(pindex) &&
                             !c->m_chainman.ShouldDeferLosingTipExtension(pindex) &&
                             TrustedMirrorShouldConsiderMostWorkCandidate(c->m_chainman, c->m_chain.Tip(), pindex) &&
                             (c == &ActiveChainstate() || snap_base->GetAncestor(pindex->nHeight) == pindex)) {

@@ -116,7 +116,11 @@ struct CompressedHeader {
 
 class HeadersSyncState {
 public:
-    ~HeadersSyncState() = default;
+    ~HeadersSyncState();
+
+    /** True when fewer than eight low-work header presync windows are open.
+     *  A ninth peer waits. The difficulty checks are unchanged. */
+    static bool PresyncSlotAvailable();
 
     enum class State {
         /** PRESYNC means the peer has not yet demonstrated their chain has

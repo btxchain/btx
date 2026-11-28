@@ -11158,8 +11158,17 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                 return false;
             }
             const UniValue& o = Arg(0);
+            auto forget_named_observation = [&]() {
+                if (!o.exists("release_id") || !o["release_id"].isStr()) return;
+                const std::string named = o["release_id"].get_str();
+                if (!named.empty()) g_chain_obs.erase(named);
+            };
             if (!(o.exists("confirmed_known") && o["confirmed_known"].isTrue()) ||
                 !o.exists("funding_source") || o["funding_source"].get_str() != "CHAIN_OBSERVATION") {
+                // A later scan that no longer sees the funding must drop the
+                // stored local observation. Leaving it kept a reorged or spent
+                // funding visible after it left the active chain.
+                forget_named_observation();
                 result.pushKV("accepted", false);
                 result.pushKV("note", "remote unsigned funding claims are not ingested as confirmed");
                 return true;
@@ -11169,6 +11178,7 @@ bool DispatchHelperRpc(ModelCatalog& cat, const UniValue& request, UniValue& res
                                         : 0;
             if (claimed <= 0) {
                 // A scan that matched nothing is not a known zero.
+                forget_named_observation();
                 result.pushKV("accepted", false);
                 result.pushKV("note", "confirmed funding of zero is not ingested");
                 return true;
