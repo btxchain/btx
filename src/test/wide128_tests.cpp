@@ -204,6 +204,36 @@ BOOST_AUTO_TEST_CASE(portable_signed_matches_native_full_width)
 }
 #endif
 
+BOOST_AUTO_TEST_CASE(portable_full_width_known_answers)
+{
+    using Unsigned = btx::wide_detail::Unsigned128;
+    using Signed = btx::wide_detail::Signed128;
+    const auto words = [](uint64_t high, uint64_t low) {
+        Unsigned value{low};
+        value.hi = high;
+        return value;
+    };
+
+    // Fixed answers keep these checks active on compilers without native int128.
+    const auto below_boundary = words(1, UINT64_MAX);
+    const auto boundary = words(2, 0);
+    BOOST_CHECK(below_boundary + Unsigned{1} == boundary);
+    BOOST_CHECK(boundary - Unsigned{1} == below_boundary);
+    BOOST_CHECK((Unsigned{3} << 65) == words(6, 0));
+
+    // The numerator is seven times the full-width divisor plus two.
+    const auto numerator = words(14, 37);
+    const auto divisor = words(2, 5);
+    BOOST_CHECK((numerator >> 65) == Unsigned{7});
+    BOOST_CHECK(numerator / divisor == Unsigned{7});
+    BOOST_CHECK(numerator % divisor == Unsigned{2});
+
+    const Signed negative = -Signed{numerator};
+    BOOST_CHECK((negative >> 65) == Signed{-8});
+    BOOST_CHECK(negative / Signed{divisor} == Signed{-7});
+    BOOST_CHECK(negative % Signed{divisor} == Signed{-2});
+}
+
 BOOST_AUTO_TEST_CASE(overflow_helpers_match_wrapping_add)
 {
     const uint64_t pairs[][2] = {{0, 0}, {1, 1}, {0xffffffffffffffffull, 1}, {5, 3}, {3, 5}};
