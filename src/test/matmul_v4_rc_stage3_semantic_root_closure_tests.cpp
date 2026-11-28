@@ -142,10 +142,28 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(manifest.endpoints.size(), 52U);
     BOOST_CHECK_EQUAL(
         manifest.exact_program_endpoints, 14U);
+    // CellAudit marks a local relation cell and a same-trace CTL alias on
+    // the same 28 required endpoints. That census was committed with this
+    // test; the old 22 and 21 pins did not match it. The counts are not a
+    // completeness claim. Semantic completion, recursive consumption, and
+    // production authority are checked below and stay incomplete.
     BOOST_CHECK_EQUAL(
-        manifest.relation_proof_cell_endpoints, 22U);
+        manifest.relation_proof_cell_endpoints, 28U);
     BOOST_CHECK_EQUAL(
-        manifest.same_trace_ctl_value_endpoints, 21U);
+        manifest.same_trace_ctl_value_endpoints, 28U);
+    {
+        uint32_t air = 0;
+        uint32_t alias = 0;
+        for (const auto& cell :
+             rc::CurrentRCStage3RelationEndpointCellAudit()) {
+            air += cell.relation_air_cell ? 1U : 0U;
+            alias += cell.same_trace_ctl_alias ? 1U : 0U;
+        }
+        BOOST_CHECK_EQUAL(
+            manifest.relation_proof_cell_endpoints, air);
+        BOOST_CHECK_EQUAL(
+            manifest.same_trace_ctl_value_endpoints, alias);
+    }
     BOOST_CHECK_EQUAL(
         manifest.semantic_complete_endpoints, 2U);
     BOOST_CHECK_EQUAL(
