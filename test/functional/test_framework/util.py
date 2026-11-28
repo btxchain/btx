@@ -364,8 +364,9 @@ def util_xor(data, key, *, offset):
 MAX_NODES = 12
 # Don't assign p2p, rpc or tor ports lower than this
 PORT_MIN = int(os.getenv('TEST_RUNNER_PORT_MIN', default=11000))
-# The number of ports to "reserve" for p2p, rpc and tor, each
-PORT_RANGE = 5000
+# The number of ports to "reserve" for p2p, rpc and tor, each. When
+# test_runner.py picks PORT_MIN, all three stay in 19445-32767.
+PORT_RANGE = 4400
 
 
 class PortSeed:

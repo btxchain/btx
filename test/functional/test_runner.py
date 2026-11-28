@@ -1015,10 +1015,18 @@ def main():
     tmpdir_prefix = "test_runner_₿_🏃_{}_" .format(datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
     tmpdir = tempfile.mkdtemp(prefix=tmpdir_prefix, dir=args.tmpdirprefix)
 
-    # Avoid collisions with long-lived local nodes by defaulting each runner to
-    # a unique high port range unless the caller already set TEST_RUNNER_PORT_MIN.
+    # Pick a pid-based port minimum unless the caller already set
+    # TEST_RUNNER_PORT_MIN. Nodes bind p2p_port() and rpc_port(), and a node
+    # started without -bind also binds tor_port(); together they take the
+    # 3 * PORT_RANGE ports above that minimum, so keep them in 19445-32767.
+    # That is above the mainnet, shieldedv2dev and regtest default ports and
+    # the fixed hcpd ports of the ModelNet tests (18780-18832), and below
+    # 32768, where the Linux ephemeral range starts (49152 on macOS and
+    # Windows). A port in the ephemeral range can already be the local end of
+    # a loopback connection, and the node then fails to bind it ("Unable to
+    # bind", "Unable to start HTTP server").
     if "TEST_RUNNER_PORT_MIN" not in os.environ:
-        dynamic_port_min = 20_000 + ((os.getpid() * 97) % 25_000)
+        dynamic_port_min = 19_445 + ((os.getpid() * 97) % 125)
         os.environ["TEST_RUNNER_PORT_MIN"] = str(dynamic_port_min)
         logging.debug("Assigned TEST_RUNNER_PORT_MIN=%s", dynamic_port_min)
 
