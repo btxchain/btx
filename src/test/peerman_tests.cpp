@@ -9835,6 +9835,233 @@ static std::unique_ptr<CNode> MakeOutboundConsensusPeer(NodeId id, int keyed)
         /*inbound_onion=*/false, /*network_key=*/0);
 }
 
+// A per-netgroup attestation verify budget is shared by every peer in the
+// netgroup. When several peers in one keyed netgroup drain it, an honest peer
+// in the same netgroup must not be banned for the misses its neighbours caused.
+BOOST_AUTO_TEST_CASE(mmattest_shared_netgroup_budget_miss_spares_honest_peer)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    // Mock time is frozen for the whole case so no token bucket refills: the
+    // drained per-netgroup budget stays drained while the honest peer sends.
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    peerman.SetBestBlock(tip->nHeight,
+                         std::chrono::seconds{tip->GetBlockTime()});
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    ActivateRcAtTip(consensus, *tip);
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    // Every peer below shares this keyed netgroup, so they all draw on one
+    // per-netgroup attestation verify budget.
+    const uint64_t shared_netgroup{0x99};
+
+    // The honest peer gets a public (documentation-range) address so a wrong
+    // penalty is a real 24h Ban(), not just a local disconnect.
+    CNode honest{/*id=*/500,
+                 /*sock=*/nullptr,
+                 CAddress{PeermanPublicService(), NODE_NETWORK},
+                 /*nKeyedNetGroupIn=*/shared_netgroup,
+                 /*nLocalHostNonceIn=*/0,
+                 CAddress{},
+                 /*addrNameIn=*/"honest-attestor",
+                 ConnectionType::INBOUND,
+                 /*inbound_onion=*/false,
+                 /*network_key=*/0};
+    BOOST_REQUIRE(!honest.addr.IsLocal());
+    connman.Handshake(honest, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(honest);
+    connman.FlushSendBuffer(honest);
+    struct FinalizeHonest {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        BanMan* banman;
+        CNode& node;
+        ~FinalizeHonest()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+            if (banman) banman->Unban(node.addr);
+        }
+    } finalize_honest{connman, peerman, m_node.banman.get(), honest};
+
+    // Drain the per-netgroup verify budget (burst 256) with peers in the same
+    // netgroup. Each peer's own attestation bucket (burst 64) admits four
+    // count-16 messages, so six peers over-drain the shared 256 well past zero.
+    // The filler attestations are never valid; they are skipped after the
+    // budget is already spent, so they draw the budget without a disconnect.
+    const std::vector<matmul::trusted::ExactReplayAttestation> filler(16);
+    for (int a = 0; a < 6; ++a) {
+        CNode drainer{/*id=*/600 + a,
+                      /*sock=*/nullptr,
+                      CAddress{PeermanTestService(0x0a00007f + a),
+                               NODE_NETWORK},
+                      /*nKeyedNetGroupIn=*/shared_netgroup,
+                      /*nLocalHostNonceIn=*/0,
+                      CAddress{},
+                      /*addrNameIn=*/strprintf("netgroup-drainer-%d", a),
+                      ConnectionType::INBOUND,
+                      /*inbound_onion=*/false,
+                      /*network_key=*/0};
+        connman.Handshake(drainer, /*successfully_connected=*/true, services,
+                          services, PROTOCOL_VERSION, /*relay_txs=*/true);
+        connman.AddTestNode(drainer);
+        connman.FlushSendBuffer(drainer);
+        for (int m = 0; m < 4; ++m) {
+            drainer.fPauseSend = false;
+            BOOST_REQUIRE(connman.ReceiveMsgFrom(
+                drainer, NetMsg::Make(NetMsgType::MMATTEST, filler)));
+            drainer.fPauseSend = false;
+            (void)connman.ProcessMessagesOnce(drainer);
+            connman.FlushSendBuffer(drainer);
+        }
+        peerman.FinalizeNode(drainer);
+        connman.RemoveTestNode(drainer);
+    }
+
+    // The honest peer sends well-formed, correctly signed attestations at a
+    // rate its own bucket (burst 64) easily affords. Each one still misses the
+    // drained per-netgroup budget.
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    statement.block_hash = MineTipChild(m_node, *tip, /*extra_time=*/0).GetHash();
+    statement.block_height = tip->nHeight + 1;
+    statement.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    const auto attestation{matmul::trusted::SignStatement(statement, signer)};
+    BOOST_REQUIRE(attestation.has_value());
+    const std::vector<matmul::trusted::ExactReplayAttestation> honest_msg{
+        *attestation};
+    for (int i = 0; i < node::matmul_trusted::GETMMATTEST_HAMMER_BAN_AFTER;
+         ++i) {
+        honest.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            honest, NetMsg::Make(NetMsgType::MMATTEST, honest_msg)));
+        honest.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(honest);
+        connman.FlushSendBuffer(honest);
+    }
+
+    // The honest peer carried none of the blame for the shared budget.
+    BOOST_CHECK(!honest.fDisconnect);
+    BOOST_REQUIRE(m_node.banman);
+    BOOST_CHECK(!m_node.banman->IsBanned(honest.addr));
+
+    // The same shared per-netgroup budget serves MMATTEST, MMATTESTPQ and
+    // MMATREFUTE, and one per-peer ban counter is shared across them. An honest
+    // MMATREFUTE sender in the same drained netgroup must be spared too. The
+    // filler refutations never reach deserialization: the handler returns at
+    // the drained-budget check first.
+    CNode honest_refute{/*id=*/700,
+                        /*sock=*/nullptr,
+                        CAddress{LookupNumeric("203.0.113.9",
+                                               Params().GetDefaultPort()),
+                                 NODE_NETWORK},
+                        /*nKeyedNetGroupIn=*/shared_netgroup,
+                        /*nLocalHostNonceIn=*/0,
+                        CAddress{},
+                        /*addrNameIn=*/"honest-refuter",
+                        ConnectionType::INBOUND,
+                        /*inbound_onion=*/false,
+                        /*network_key=*/0};
+    BOOST_REQUIRE(!honest_refute.addr.IsLocal());
+    connman.Handshake(honest_refute, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(honest_refute);
+    connman.FlushSendBuffer(honest_refute);
+    struct FinalizeRefuter {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        BanMan* banman;
+        CNode& node;
+        ~FinalizeRefuter()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+            if (banman) banman->Unban(node.addr);
+        }
+    } finalize_refuter{connman, peerman, m_node.banman.get(), honest_refute};
+
+    const std::vector<matmul::trusted::ExactReplayRefutation> refute_filler(1);
+    for (int i = 0; i < node::matmul_trusted::GETMMATTEST_HAMMER_BAN_AFTER;
+         ++i) {
+        honest_refute.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            honest_refute, NetMsg::Make(NetMsgType::MMATREFUTE, refute_filler)));
+        honest_refute.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(honest_refute);
+        connman.FlushSendBuffer(honest_refute);
+    }
+    BOOST_CHECK(!honest_refute.fDisconnect);
+    BOOST_CHECK(!m_node.banman->IsBanned(honest_refute.addr));
+
+    // MMATTESTPQ draws on the same drained budget. Its handler reads only the
+    // count and the sender's own bucket before the shared budget, so these
+    // fillers return at the budget miss without being deserialized.
+    CNode honest_pq{/*id=*/701,
+                    /*sock=*/nullptr,
+                    CAddress{LookupNumeric("203.0.113.10",
+                                           Params().GetDefaultPort()),
+                             NODE_NETWORK},
+                    /*nKeyedNetGroupIn=*/shared_netgroup,
+                    /*nLocalHostNonceIn=*/0,
+                    CAddress{},
+                    /*addrNameIn=*/"honest-pq-attestor",
+                    ConnectionType::INBOUND,
+                    /*inbound_onion=*/false,
+                    /*network_key=*/0};
+    BOOST_REQUIRE(!honest_pq.addr.IsLocal());
+    connman.Handshake(honest_pq, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(honest_pq);
+    connman.FlushSendBuffer(honest_pq);
+    FinalizeRefuter finalize_pq{connman, peerman, m_node.banman.get(),
+                                honest_pq};
+
+    const std::vector<matmul::trusted::ExactReplayPqAttestation> pq_filler(1);
+    for (int i = 0; i < node::matmul_trusted::GETMMATTEST_HAMMER_BAN_AFTER;
+         ++i) {
+        honest_pq.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            honest_pq, NetMsg::Make(NetMsgType::MMATTESTPQ, pq_filler)));
+        honest_pq.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(honest_pq);
+        connman.FlushSendBuffer(honest_pq);
+    }
+    BOOST_CHECK(!honest_pq.fDisconnect);
+    BOOST_CHECK(!m_node.banman->IsBanned(honest_pq.addr));
+}
+
 BOOST_AUTO_TEST_CASE(stale_tip_with_inflight_and_forty_peers_sends_getheaders)
 {
     // Live shape: tip stale >24h, nSyncStarted != 0, inflight non-empty,
