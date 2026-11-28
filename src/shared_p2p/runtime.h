@@ -42,11 +42,11 @@ inline std::mutex& RuntimeMutex(){static std::mutex m;return m;}
 inline std::unique_ptr<Broker>& RuntimeBroker(){static std::unique_ptr<Broker> b;return b;}
 inline std::string& RuntimeEndpoint(){static std::string s;return s;}
 inline std::string Endpoint(){std::lock_guard<std::mutex> l(RuntimeMutex());return RuntimeEndpoint();}
-inline void StartRuntimeUnleased(const std::string& network,const std::string& directory,const std::string& random_token) {
+inline void StartRuntimeUnleased(const std::string& network,const std::filesystem::path& directory,const std::string& random_token) {
     std::lock_guard<std::mutex> l(RuntimeMutex());if(RuntimeBroker())return;
     AuthoritativeCore().Start(network,directory);
 #ifndef _WIN32
-    const auto endpoint=(std::filesystem::path(directory)/"model-control.sock").string();
+    const auto endpoint=(directory/"model-control.sock").string();
     const auto token_path=endpoint+".token";
     // Parent directory is owner-private. Never follow a pre-existing key link.
     if(std::filesystem::is_symlink(token_path))throw std::runtime_error("unsafe broker token path");
@@ -71,7 +71,7 @@ inline void StartRuntimeUnleased(const std::string& network,const std::string& d
     (void)random_token; // ModelNet helper spawning is unavailable in upstream Windows profile.
 #endif
 }
-inline void StartRuntime(const std::string& network,const std::string& directory,const std::string& random_token) {
+inline void StartRuntime(const std::string& network,const std::filesystem::path& directory,const std::string& random_token) {
 #ifndef _WIN32
     const bool acquired=AcquireRuntimeLease(directory);
     try { StartRuntimeUnleased(network,directory,random_token); }

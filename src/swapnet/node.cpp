@@ -210,7 +210,7 @@ bool StartNode(node::NodeContext& node, std::string& error) {
         config.pushKV("client_version",FormatFullVersion());
         config.pushKV("datadir",fs::PathToString(args.GetDataDirNet()));config.pushKV("wallet",args.GetArg("-swapnetwallet",""));
         try {
-            btx::p2p::StartRuntime(genesis, fs::PathToString(args.GetDataDirNet() / "shared-p2p"), GetRandHash().GetHex());
+            btx::p2p::StartRuntime(genesis, args.GetDataDirNet() / "shared-p2p", GetRandHash().GetHex());
         } catch (const std::exception& e) {
             LogPrintf("SwapNet: shared control plane did not start (%s). Peer discovery continues. No funds were authorized by startup.\n", e.what());
         }
