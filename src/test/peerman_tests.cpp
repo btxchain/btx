@@ -10024,6 +10024,42 @@ BOOST_AUTO_TEST_CASE(mmattest_shared_netgroup_budget_miss_spares_honest_peer)
     }
     BOOST_CHECK(!honest_refute.fDisconnect);
     BOOST_CHECK(!m_node.banman->IsBanned(honest_refute.addr));
+
+    // MMATTESTPQ draws on the same drained budget. Its handler reads only the
+    // count and the sender's own bucket before the shared budget, so these
+    // fillers return at the budget miss without being deserialized.
+    CNode honest_pq{/*id=*/701,
+                    /*sock=*/nullptr,
+                    CAddress{LookupNumeric("203.0.113.10",
+                                           Params().GetDefaultPort()),
+                             NODE_NETWORK},
+                    /*nKeyedNetGroupIn=*/shared_netgroup,
+                    /*nLocalHostNonceIn=*/0,
+                    CAddress{},
+                    /*addrNameIn=*/"honest-pq-attestor",
+                    ConnectionType::INBOUND,
+                    /*inbound_onion=*/false,
+                    /*network_key=*/0};
+    BOOST_REQUIRE(!honest_pq.addr.IsLocal());
+    connman.Handshake(honest_pq, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(honest_pq);
+    connman.FlushSendBuffer(honest_pq);
+    FinalizeRefuter finalize_pq{connman, peerman, m_node.banman.get(),
+                                honest_pq};
+
+    const std::vector<matmul::trusted::ExactReplayPqAttestation> pq_filler(1);
+    for (int i = 0; i < node::matmul_trusted::GETMMATTEST_HAMMER_BAN_AFTER;
+         ++i) {
+        honest_pq.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            honest_pq, NetMsg::Make(NetMsgType::MMATTESTPQ, pq_filler)));
+        honest_pq.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(honest_pq);
+        connman.FlushSendBuffer(honest_pq);
+    }
+    BOOST_CHECK(!honest_pq.fDisconnect);
+    BOOST_CHECK(!m_node.banman->IsBanned(honest_pq.addr));
 }
 
 BOOST_AUTO_TEST_CASE(stale_tip_with_inflight_and_forty_peers_sends_getheaders)
