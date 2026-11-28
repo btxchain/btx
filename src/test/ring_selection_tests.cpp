@@ -438,11 +438,16 @@ BOOST_AUTO_TEST_CASE(select_ring_positions_with_exclusions_avoids_overlap_when_p
     for (const uint64_t pos : second.positions) {
         if (first_set.count(pos) != 0) overlap_positions.insert(pos);
     }
-    BOOST_CHECK(overlap_positions.size() <= 1U);
-    if (!overlap_positions.empty()) {
-        // If the first ring already contains the second spend's real position,
-        // that single overlap is unavoidable.
-        BOOST_CHECK_EQUAL(*overlap_positions.begin(), real_position + 1);
+    if (first_set.count(real_position + 1) == 0) {
+        // Every decoy of the second ring avoids the first ring.
+        BOOST_CHECK(overlap_positions.empty());
+    } else {
+        // The first ring already holds the second spend's real position, so
+        // that overlap is unavoidable. The real position is then in the
+        // exclusion list, and SelectRingPositionsWithExclusions adds one decoy
+        // from that list, so the real position is not the only overlap.
+        BOOST_CHECK_EQUAL(overlap_positions.size(), 2U);
+        BOOST_CHECK(overlap_positions.count(real_position + 1) != 0);
     }
 }
 
