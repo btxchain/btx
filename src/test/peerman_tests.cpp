@@ -8793,6 +8793,18 @@ BOOST_AUTO_TEST_CASE(followed_tip_child_progress_lane_scales_with_catchup_backlo
         source.fPauseSend = false;
         (void)connman.ProcessMessagesOnce(source);
         connman.FlushSendBuffer(source);
+        // The ticket queues header-first ExactReplay on the tip-child lane.
+        // Send the body once that verdict is in, so it connects on arrival.
+        // A body that arrives before that verdict can be retained for a retry
+        // that only the mmrecover worker runs; this fixture does not start it.
+        const uint256 hash{block.GetHash()};
+        BOOST_REQUIRE(PeermanWaitFor([&] {
+            LOCK(::cs_main);
+            const CBlockIndex* index{
+                m_node.chainman->m_blockman.LookupBlockIndex(hash)};
+            return index != nullptr &&
+                   (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+        }));
         source.fPauseSend = false;
         BOOST_REQUIRE(connman.ReceiveMsgFrom(
             source, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(block))));
@@ -8801,21 +8813,32 @@ BOOST_AUTO_TEST_CASE(followed_tip_child_progress_lane_scales_with_catchup_backlo
         connman.FlushSendBuffer(source);
     };
 
-    send_body(lead[0]);
-    send_body(lead[1]);
-
     const uint256 first_hash{lead[0].GetHash()};
     const uint256 second_hash{lead[1].GetHash()};
-    BOOST_REQUIRE(PeermanWaitFor([&] {
-        LOCK(::cs_main);
-        const CBlockIndex* a{
-            m_node.chainman->m_blockman.LookupBlockIndex(first_hash)};
-        const CBlockIndex* b{
-            m_node.chainman->m_blockman.LookupBlockIndex(second_hash)};
-        return a != nullptr && b != nullptr &&
-               m_node.chainman->ActiveChain().Contains(a) &&
-               m_node.chainman->ActiveChain().Contains(b);
-    }));
+    // Deliver the bodies one at a time: the second body is the tip-child
+    // only once the first is active. A body verified on the
+    // async worker is released only after it is active (the worker ends its
+    // lifecycle after ProcessNewBlock, and BlockConnected runs on the
+    // scheduler thread), so wait for the release too before the next step.
+    const auto wait_connected_and_released = [&](const uint256& hash) {
+        return PeermanWaitFor([&] {
+            {
+                LOCK(::cs_main);
+                const CBlockIndex* index{
+                    m_node.chainman->m_blockman.LookupBlockIndex(hash)};
+                if (index == nullptr ||
+                    !m_node.chainman->ActiveChain().Contains(index)) {
+                    return false;
+                }
+            }
+            m_node.validation_signals->SyncWithValidationInterfaceQueue();
+            return !peerman.HasMatMulRetainedBodyForTest(hash);
+        });
+    };
+    send_body(lead[0]);
+    BOOST_REQUIRE(wait_connected_and_released(first_hash));
+    send_body(lead[1]);
+    BOOST_REQUIRE(wait_connected_and_released(second_hash));
     BOOST_CHECK(!peerman.HasMatMulRetainedBodyForTest(first_hash));
     BOOST_CHECK(!peerman.HasMatMulRetainedBodyForTest(second_hash));
     BOOST_CHECK(!source.fDisconnect);
