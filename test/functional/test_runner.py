@@ -14,6 +14,7 @@ For a description of arguments recognized by test scripts, see
 
 import argparse
 import atexit
+import codecs
 from collections import deque
 import configparser
 import csv
@@ -43,11 +44,11 @@ MIN_NO_CLEANUP_SPACE = 12 * 1024 * 1024 * 1024
 DEFAULT, BOLD, GREEN, RED = ("", ""), ("", ""), ("", ""), ("", "")
 try:
     # Make sure python thinks it can write unicode to its stdout
-    "\u2713".encode("utf_8").decode(sys.stdout.encoding)
+    "✓✖○".encode(sys.stdout.encoding)
     TICK = "✓ "
     CROSS = "✖ "
     CIRCLE = "○ "
-except UnicodeDecodeError:
+except UnicodeEncodeError:
     TICK = "P "
     CROSS = "x "
     CIRCLE = "o "
@@ -959,6 +960,11 @@ def _resolve_configfile(explicit_configfile) -> str:
 
 
 def main():
+    # Keep the pipe encoding while escaping characters it cannot represent.
+    if (not sys.stdout.isatty() and codecs.lookup(sys.stdout.encoding).name != "utf-8"
+            and sys.stdout.errors in ("strict", "surrogateescape")):
+        sys.stdout.reconfigure(errors="backslashreplace")
+
     # Parse arguments and pass through unrecognised args
     parser = argparse.ArgumentParser(add_help=False,
                                      usage='%(prog)s [test_runner.py options] [script options] [scripts]',
@@ -1232,6 +1238,7 @@ def run_tests(*, test_list, build_dir, tmpdir, jobs=1, enable_coverage=False, ar
                         combined_logs_args += ['--color']
                     combined_logs, _ = subprocess.Popen(
                         combined_logs_args, text=True, encoding="utf-8", errors="replace", stdout=subprocess.PIPE,
+                        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
                     ).communicate()
                     print("\n".join(deque(combined_logs.splitlines(), combined_logs_len)))
 
